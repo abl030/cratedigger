@@ -38,9 +38,14 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          extract_usernames,
                          rejection_backfill_override)
 from lib import transitions
-from lib.import_dispatch import (DispatchOutcome, _build_download_info,
+from lib.import_dispatch import (DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                                 DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  dispatch_import_core)
+from lib.import_evidence import (
+    CandidateEvidenceActionResult,
+    ensure_candidate_evidence_for_action,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -1149,37 +1154,63 @@ def _process_beets_validation(
     bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
     bv_result.download_folder = current_path
     bv_result.source_dirs = _source_dirs_for_album(album_data)
+    candidate_evidence_result: CandidateEvidenceActionResult | None = None
 
     if bv_result.valid:
         dl_pre = _build_download_info(album_data)
         db = (ctx.pipeline_db_source._get_db()
               if ctx.pipeline_db_source is not None else None)
-        preimport = run_preimport_gates(
-            path=current_path,
-            mb_release_id=album_data.mb_release_id or "",
-            label=f"{album_data.artist} - {album_data.title}",
-            download_filetype=dl_pre.filetype or "",
-            download_min_bitrate_bps=dl_pre.bitrate,
-            download_is_vbr=dl_pre.is_vbr,
-            cfg=ctx.cfg,
-            db=db,
-            request_id=album_data.db_request_id,
-            usernames=usernames_pre,
-        )
-        album_data.download_spectral = preimport.download_spectral
-        album_data.current_spectral = preimport.existing_spectral
-        album_data.current_min_bitrate = preimport.existing_min_bitrate
-        if not preimport.valid:
-            bv_result.valid = False
-            bv_result.scenario = preimport.scenario
-            bv_result.detail = preimport.detail
-            if preimport.corrupt_files:
-                bv_result.corrupt_files = preimport.corrupt_files
-            # Carry bad-audio-hash gate match through to download_log via
-            # ValidationResult JSONB (plan 2026-04-29-005 / U5).
-            if preimport.matched_bad_hash_id is not None:
-                bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
-                bv_result.matched_bad_track_path = preimport.matched_bad_track_path
+        candidate_evidence_available = False
+        if import_job_id is not None and db is not None:
+            candidate_result = ensure_candidate_evidence_for_action(
+                db,
+                source_path=current_path,
+                import_job_id=import_job_id,
+            )
+            candidate_evidence_result = candidate_result
+            candidate_evidence_available = candidate_result.available
+            if not candidate_evidence_available:
+                reason = (
+                    candidate_result.provenance.fallback_reason
+                    or candidate_result.provenance.candidate_status
+                    or "missing"
+                )
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Candidate quality evidence unavailable at import "
+                        f"time: {reason}"
+                    ),
+                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                )
+
+        if not candidate_evidence_available:
+            preimport = run_preimport_gates(
+                path=current_path,
+                mb_release_id=album_data.mb_release_id or "",
+                label=f"{album_data.artist} - {album_data.title}",
+                download_filetype=dl_pre.filetype or "",
+                download_min_bitrate_bps=dl_pre.bitrate,
+                download_is_vbr=dl_pre.is_vbr,
+                cfg=ctx.cfg,
+                db=db,
+                request_id=album_data.db_request_id,
+                usernames=usernames_pre,
+            )
+            album_data.download_spectral = preimport.download_spectral
+            album_data.current_spectral = preimport.existing_spectral
+            album_data.current_min_bitrate = preimport.existing_min_bitrate
+            if not preimport.valid:
+                bv_result.valid = False
+                bv_result.scenario = preimport.scenario
+                bv_result.detail = preimport.detail
+                if preimport.corrupt_files:
+                    bv_result.corrupt_files = preimport.corrupt_files
+                # Carry bad-audio-hash gate match through to download_log via
+                # ValidationResult JSONB (plan 2026-04-29-005 / U5).
+                if preimport.matched_bad_hash_id is not None:
+                    bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
+                    bv_result.matched_bad_track_path = preimport.matched_bad_track_path
 
     if bv_result.valid:
         return _handle_valid_result(
@@ -1188,6 +1219,7 @@ def _process_beets_validation(
             staged_album,
             ctx,
             import_job_id=import_job_id,
+            prevalidated_candidate_result=candidate_evidence_result,
         )
     return _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
@@ -1318,6 +1350,7 @@ def _handle_valid_result(
     ctx: CratediggerContext,
     *,
     import_job_id: int | None = None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1503,6 +1536,7 @@ def _handle_valid_result(
                 cooled_down_users=ctx.cooled_down_users,
                 source_dirs=_source_dirs_for_album(album_data),
                 candidate_import_job_id=import_job_id,
+                prevalidated_candidate_result=prevalidated_candidate_result,
             )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)

@@ -33,16 +33,16 @@ console.log('renderImportQueueItems() shows ready next row and preview detail');
     id: 77,
     job_type: 'force_import',
     status: 'queued',
-    preview_status: 'would_import',
+    preview_status: 'evidence_ready',
     artist_name: 'Broadcast',
     album_title: 'Tender Buttons',
-    preview_message: 'Preview would import: import',
+    preview_message: 'Evidence ready for final check: import',
     preview_result: { stage_chain: ['stage2_import:import'] },
   }]);
   assertContains(html, 'Tender Buttons', 'album title rendered');
   assertContains(html, 'Broadcast', 'artist name rendered');
   assertContains(html, 'next check', 'first ready row is marked next check');
-  assertContains(html, 'preview: would_import', 'preview state rendered');
+  assertContains(html, 'preview: evidence_ready', 'preview state rendered');
   assertContains(html, 'stage2_import:import', 'stage chain rendered');
 }
 

@@ -9,13 +9,21 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import msgspec
+
+from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 from lib.quality import (
     ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
     ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     DownloadInfo,
+    ImportResult,
+    QualityEvidenceActionPayload,
+    VerifiedLosslessProof,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
@@ -28,6 +36,27 @@ from lib.quality_evidence import snapshot_audio_files
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
+    beets = MagicMock()
+    beets.__enter__.return_value = beets
+    beets.__exit__.return_value = None
+    beets.get_album_info.return_value = (
+        AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=min_bitrate,
+            avg_bitrate_kbps=min_bitrate,
+            median_bitrate_kbps=min_bitrate,
+            is_cbr=False,
+            album_path=album_path,
+            format="MP3",
+        )
+        if album_path is not None
+        else None
+    )
+    return patch("lib.beets_db.BeetsDB", return_value=beets)
 
 
 class TestDispatchCoreOrchestration(unittest.TestCase):
@@ -141,9 +170,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         log_id = db.log_download(request_id=42, outcome="rejected")
 
         tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
         try:
             with open(f"{tmpdir}/01.flac", "wb") as handle:
                 handle.write(b"audio")
+            with open(f"{current_dir}/01.mp3", "wb") as handle:
+                handle.write(b"current")
             files = snapshot_audio_files(tmpdir)
             db.upsert_album_quality_evidence(make_album_quality_evidence(
                 owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
@@ -171,6 +203,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             db.upsert_album_quality_evidence(make_album_quality_evidence(
                 owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
                 owner_id=42,
+                files=snapshot_audio_files(current_dir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=116,
                     avg_bitrate_kbps=131,
@@ -195,30 +228,476 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 verified_lossless_target="opus 128",
             )
             with patch_dispatch_externals() as ext:
-                result = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    force=True,
-                    target_format="opus 128",
-                    verified_lossless_target="opus 128",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="baduser"),
-                    distance=0.99,
-                    scenario="force_import",
-                    files=[MagicMock(username="baduser", filename="01.flac")],
-                    cfg=cfg,
-                    requeue_on_failure=False,
-                    candidate_download_log_id=log_id,
-                )
+                with _patch_beets_album(current_dir, min_bitrate=116):
+                    result = dispatch_import_core(
+                        path=tmpdir,
+                        mb_release_id="mbid-123",
+                        request_id=42,
+                        label="Test Artist - Test Album",
+                        force=True,
+                        target_format="opus 128",
+                        verified_lossless_target="opus 128",
+                        beets_harness_path=cfg.beets_harness_path,
+                        db=db,  # type: ignore[arg-type]
+                        dl_info=DownloadInfo(username="baduser"),
+                        distance=0.99,
+                        scenario="force_import",
+                        files=[MagicMock(username="baduser", filename="01.flac")],
+                        cfg=cfg,
+                        requeue_on_failure=False,
+                        candidate_download_log_id=log_id,
+                    )
 
             self.assertFalse(result.success)
             ext.run.assert_not_called()
             self.assertEqual(db.download_logs[-1].outcome, "rejected")
             denylisted = [entry.username for entry in db.denylist]
             self.assertIn("baduser", denylisted)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
+
+    def test_persisted_candidate_evidence_imports_via_evidence_action_file(self):
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"audio")
+            with open(f"{current_dir}/01.mp3", "wb") as handle:
+                handle.write(b"current")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+            )
+            import_job_id = job.id
+            files = snapshot_audio_files(tmpdir)
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=import_job_id,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                files=snapshot_audio_files(current_dir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=128,
+                    median_bitrate_kbps=128,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 128",
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+            )
+            ir = make_import_result(decision="import", new_min_bitrate=245)
+            decoded_payload: dict[str, QualityEvidenceActionPayload] = {}
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 _patch_beets_album(current_dir, min_bitrate=128):
+                def run_side_effect(cmd, *_args, **_kwargs):
+                    idx = cmd.index("--quality-evidence-action-file")
+                    with open(cmd[idx + 1], "rb") as handle:
+                        decoded_payload["payload"] = msgspec.json.decode(
+                            handle.read(),
+                            type=QualityEvidenceActionPayload,
+                        )
+                    return MagicMock(returncode=0, stdout="", stderr="")
+
+                ext.run.side_effect = run_side_effect
+                result = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1", filename="01.mp3")],
+                    cfg=cfg,
+                    candidate_import_job_id=import_job_id,
+                )
+
+            self.assertTrue(result.success)
+            cmd = ext.run.call_args[0][0]
+            self.assertIn("--quality-evidence-action-file", cmd)
+            self.assertNotIn("--preview-import-result-file", cmd)
+            payload = decoded_payload["payload"]
+            self.assertEqual(payload.candidate.owner.owner_id, import_job_id)
+            assert payload.current is not None
+            self.assertEqual(payload.current.owner.owner_id, 42)
+            self.assertIs(payload.decision["imported"], True)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
+
+    def test_legacy_successful_lossy_import_clears_old_verified_lossless_proof(self):
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            verified_lossless=False,
+        ))
+        proof = VerifiedLosslessProof(
+            proof_origin="candidate_import",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=116,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                verified_lossless=True,
+            ),
+            verified_lossless_proof=proof,
+            storage_format="Opus",
+        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"audio")
+            with _patch_beets_album(tmpdir, min_bitrate=245):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    mb_release_id="mbid-123",
+                    quality_ranks=None,
+                    source_candidate=None,
+                    import_result=ImportResult(
+                        decision="import",
+                        new_measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=245,
+                            avg_bitrate_kbps=256,
+                            median_bitrate_kbps=252,
+                            format="MP3 V0",
+                            verified_lossless=False,
+                        ),
+                    ),
+                )
+
+        loaded = db.load_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+        ).owner)
+        assert loaded is not None
+        self.assertFalse(loaded.measurement.verified_lossless)
+        self.assertIsNone(loaded.verified_lossless_proof)
+
+    def test_persisted_candidate_evidence_imports_when_no_current_album(self):
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+            )
+            ir = make_import_result(decision="import", new_min_bitrate=245)
+            decoded_payload: dict[str, QualityEvidenceActionPayload] = {}
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 _patch_beets_album(None):
+                def run_side_effect(cmd, *_args, **_kwargs):
+                    idx = cmd.index("--quality-evidence-action-file")
+                    with open(cmd[idx + 1], "rb") as handle:
+                        decoded_payload["payload"] = msgspec.json.decode(
+                            handle.read(),
+                            type=QualityEvidenceActionPayload,
+                        )
+                    return MagicMock(returncode=0, stdout="", stderr="")
+
+                ext.run.side_effect = run_side_effect
+                result = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1", filename="01.mp3")],
+                    cfg=cfg,
+                    candidate_import_job_id=job.id,
+                )
+
+            self.assertTrue(result.success)
+            payload = decoded_payload["payload"]
+            self.assertIsNone(payload.current)
+            self.assertEqual(payload.provenance.current_status, "missing")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_persisted_candidate_evidence_backfills_stale_current_before_decision(self):
+        from lib.import_dispatch import dispatch_import_core
+        from lib.quality_evidence import request_current_owner
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"candidate")
+            with open(f"{current_dir}/01.mp3", "wb") as handle:
+                handle.write(b"current")
+            old_current_files = snapshot_audio_files(current_dir)
+            with open(f"{current_dir}/01.mp3", "ab") as handle:
+                handle.write(b" changed")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                files=old_current_files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=128,
+                    median_bitrate_kbps=128,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 128",
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+            )
+            with patch_dispatch_externals() as ext, \
+                 _patch_beets_album(current_dir, min_bitrate=320):
+                result = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1", filename="01.mp3")],
+                    cfg=cfg,
+                    requeue_on_failure=False,
+                    candidate_import_job_id=job.id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertIn("Rejected by persisted quality evidence", result.message)
+            ext.run.assert_not_called()
+            refreshed = db.load_album_quality_evidence(request_current_owner(42))
+            assert refreshed is not None
+            self.assertEqual(refreshed.measurement.min_bitrate_kbps, 320)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
+
+    def test_persisted_candidate_evidence_fails_when_current_album_has_no_files(self):
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"candidate")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+            )
+            with patch_dispatch_externals() as ext, \
+                 _patch_beets_album(current_dir, min_bitrate=320):
+                result = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1", filename="01.mp3")],
+                    cfg=cfg,
+                    requeue_on_failure=False,
+                    candidate_import_job_id=job.id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertIn("Current quality evidence unavailable", result.message)
+            ext.run.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
+
+    def test_persisted_candidate_evidence_fails_closed_on_current_error(self):
+        from lib.import_dispatch import dispatch_import_core
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+            )
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+            )
+            with patch_dispatch_externals() as ext, \
+                 _patch_beets_album(tmpdir, min_bitrate=128), \
+                 patch(
+                     "lib.import_dispatch.ensure_current_evidence_for_action",
+                     side_effect=RuntimeError("beets unavailable"),
+                 ):
+                result = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(username="user1"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1", filename="01.mp3")],
+                    cfg=cfg,
+                    candidate_import_job_id=job.id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertIn("Current quality evidence unavailable", result.message)
+            ext.run.assert_not_called()
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

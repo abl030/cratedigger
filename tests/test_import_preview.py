@@ -399,6 +399,69 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_source_change_during_preview_does_not_persist_candidate_evidence(self):
+        db = self._db()
+        job = db.enqueue_import_job(
+            "manual_import",
+            request_id=42,
+            dedupe_key="manual:42:/tmp/source",
+            payload={"failed_path": "/tmp/source"},
+            preview_enabled=True,
+        )
+        source = self._source_dir()
+
+        def run_preview(*args, **kwargs):
+            with open(os.path.join(source, "01.mp3"), "ab") as handle:
+                handle.write(b"changed")
+            return SimpleNamespace(
+                import_result=ImportResult(
+                    decision="import",
+                    new_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=245,
+                        avg_bitrate_kbps=245,
+                        median_bitrate_kbps=245,
+                        format="mp3 v0",
+                    ),
+                )
+            )
+
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="mp3",
+                           min_bitrate_bps=245000,
+                           is_vbr=True,
+                       )), \
+                 patch("lib.import_preview.run_preimport_gates",
+                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.run_import_one",
+                       side_effect=run_preview):
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                    force=False,
+                    import_job_id=job.id,
+                    persist_candidate_evidence=True,
+                )
+
+            self.assertEqual(preview.verdict, "uncertain")
+            self.assertEqual(preview.decision, "source_changed_during_preview")
+            self.assertIsNone(db.load_album_quality_evidence(
+                AlbumQualityEvidenceOwner(
+                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                    owner_id=job.id,
+                )
+            ))
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_preimport_reject_is_confident_without_denylist_side_effects(self):
         db = self._db()
         source = self._source_dir()

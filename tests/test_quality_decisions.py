@@ -53,6 +53,7 @@ from lib.quality import (
     DECISION_LOSSLESS_SOURCE_LOCKED,
     is_opus_copy_safe_for_lossless_delete,
     OPUS_DELETE_SKIP_REASON_SPECTRAL,
+    evidence_decision_name,
     full_pipeline_decision_from_evidence,
 )
 
@@ -1188,6 +1189,32 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             DECISION_LOSSLESS_SOURCE_LOCKED,
         )
 
+    def test_evidence_decision_name_uses_stage1_reject_not_final_status(self):
+        candidate = self._evidence(
+            owner_type="download_log_candidate",
+            owner_id=91,
+            min_bitrate=320,
+            avg_bitrate=320,
+            fmt="MP3",
+            is_cbr=True,
+            spectral_grade="suspect",
+            spectral_bitrate=96,
+        )
+        current = self._evidence(
+            owner_type="request_current",
+            owner_id=42,
+            min_bitrate=245,
+            avg_bitrate=245,
+            fmt="MP3",
+            spectral_grade="genuine",
+            spectral_bitrate=128,
+        )
+        result = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(result["stage1_spectral"], "reject")
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertEqual(evidence_decision_name(result), "spectral_reject")
+
 
 class TestPreimportAudioGate(unittest.TestCase):
     """Pure decision tests for the preimport audio-integrity gate (issue #91).
@@ -2275,6 +2302,9 @@ class TestDispatchAction(unittest.TestCase):
         ("lossless_source_locked",
          dict(mark_done=False, record_rejection=True, denylist=True,
               requeue=True, cleanup=True)),
+        ("spectral_reject",
+         dict(mark_done=False, record_rejection=True, denylist=True,
+              requeue=False, cleanup=True)),
         ("conversion_failed", dict(record_rejection=True, denylist=False)),
         ("import_failed", dict(record_rejection=True)),
         ("target_conversion_failed", dict(record_rejection=True, denylist=False)),

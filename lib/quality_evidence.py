@@ -322,6 +322,7 @@ def evidence_from_album_info(
     owner: AlbumQualityEvidenceOwner,
     album_info: Any,
     request_row: dict[str, Any] | None = None,
+    verified_lossless_proof: VerifiedLosslessProof | None = None,
     measured_at: datetime | None = None,
 ) -> EvidenceBuildResult:
     """Build current evidence from Beets ``AlbumInfo``-shaped data."""
@@ -333,7 +334,9 @@ def evidence_from_album_info(
         return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
-    proof = legacy_verified_lossless_proof_from_request(request_row)
+    proof = verified_lossless_proof or legacy_verified_lossless_proof_from_request(
+        request_row
+    )
     verified_lossless = proof is not None
     spectral_grade = None
     spectral_bitrate = None
@@ -419,12 +422,23 @@ def backfill_current_evidence_from_album_info(
     *,
     request_id: int,
     album_info: Any,
+    verified_lossless_proof: VerifiedLosslessProof | None = None,
+    preserve_existing_verified_lossless_proof: bool = True,
 ) -> EvidenceBuildResult:
     request_row = db.get_request(request_id)
+    if verified_lossless_proof is None and preserve_existing_verified_lossless_proof:
+        existing = db.load_album_quality_evidence(request_current_owner(request_id))
+        if (
+            existing is not None
+            and existing.measurement.verified_lossless
+            and existing.verified_lossless_proof is not None
+        ):
+            verified_lossless_proof = existing.verified_lossless_proof
     result = evidence_from_album_info(
         owner=request_current_owner(request_id),
         album_info=album_info,
         request_row=request_row,
+        verified_lossless_proof=verified_lossless_proof,
     )
     if result.evidence is not None:
         db.upsert_album_quality_evidence(result.evidence)
@@ -478,6 +492,8 @@ def load_or_backfill_current_evidence(
     request_id: int,
     mb_release_id: str,
     quality_ranks: Any = None,
+    preloaded_evidence: AlbumQualityEvidence | None = None,
+    preloaded: bool = False,
 ) -> EvidenceBuildResult:
     """Load current Beets evidence, backfilling when absent or incomplete."""
 
@@ -485,7 +501,11 @@ def load_or_backfill_current_evidence(
     from lib.quality import QualityRankConfig
 
     owner = request_current_owner(request_id)
-    existing = db.load_album_quality_evidence(owner)
+    existing = (
+        preloaded_evidence
+        if preloaded
+        else db.load_album_quality_evidence(owner)
+    )
     if existing is not None:
         errors = existing.policy_incomplete_reasons()
         if not errors:

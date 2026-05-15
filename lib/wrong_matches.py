@@ -85,6 +85,12 @@ def _validation_result_dict(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def validation_failed_path(raw: Any) -> str | None:
+    data = _validation_result_dict(raw)
+    failed_path = data.get("failed_path")
+    return failed_path if isinstance(failed_path, str) and failed_path else None
+
+
 def _path_candidates(*paths: str | None) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -108,9 +114,7 @@ def _wrong_match_entry_parts(
         return None, None, None
     request_id_raw = entry.get("request_id")
     request_id = request_id_raw if isinstance(request_id_raw, int) else None
-    vr = _validation_result_dict(entry.get("validation_result"))
-    raw_failed_path = vr.get("failed_path")
-    raw_path = raw_failed_path if isinstance(raw_failed_path, str) else None
+    raw_path = validation_failed_path(entry.get("validation_result"))
     return entry, request_id, raw_path
 
 

@@ -30,7 +30,10 @@ from lib.quality_evidence import (
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
+    QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QualityRankConfig,
+    classify_full_pipeline_decision,
+    classify_quality_import_stages,
     compute_effective_override_bitrate,
     full_pipeline_decision,
     quality_gate_decision,
@@ -152,67 +155,6 @@ def _stage_chain_from_simulation(simulation: dict[str, Any]) -> list[str]:
     return chain
 
 
-_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
-    "import",
-    "preflight_existing",
-    "transcode_upgrade",
-    "transcode_first",
-    "provisional_lossless_upgrade",
-})
-_REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
-    "downgrade",
-    "transcode_downgrade",
-    "suspect_lossless_downgrade",
-    "suspect_lossless_probe_missing",
-    "lossless_source_locked",
-})
-_QUALITY_GATE_REQUEUE_DECISIONS: frozenset[str] = frozenset({
-    "requeue_upgrade",
-    "requeue_lossless",
-})
-
-
-def _classify_import_stages(
-    stage2: object,
-    stage3: object,
-    *,
-    imported: bool,
-) -> tuple[str, bool, str | None]:
-    stage2_decision = str(stage2) if isinstance(stage2, str) else None
-    stage3_decision = str(stage3) if isinstance(stage3, str) else None
-
-    if stage2_decision in _REJECT_STAGE_DECISIONS:
-        return "confident_reject", True, stage2_decision
-
-    if stage2_decision in _IMPORT_STAGE_DECISIONS or imported:
-        reason = (
-            stage3_decision
-            if stage3_decision in _QUALITY_GATE_REQUEUE_DECISIONS
-            else stage2_decision or stage3_decision or "import"
-        )
-        return "would_import", False, reason
-
-    if stage3_decision in _QUALITY_GATE_REQUEUE_DECISIONS:
-        return "uncertain", False, stage3_decision
-
-    return "uncertain", False, stage2_decision or stage3_decision or "unknown"
-
-
-def _classify_simulation(simulation: dict[str, Any]) -> tuple[str, bool, str | None]:
-    if simulation.get("preimport_nested") == "reject_nested":
-        return "confident_reject", True, "nested_layout"
-    if simulation.get("preimport_audio") == "reject_corrupt":
-        return "confident_reject", True, "audio_corrupt"
-    if (simulation.get("stage1_spectral") == "reject"
-            and not simulation.get("stage2_import")):
-        return "confident_reject", True, "spectral_reject"
-    return _classify_import_stages(
-        simulation.get("stage2_import"),
-        simulation.get("stage3_quality_gate"),
-        imported=bool(simulation.get("imported")),
-    )
-
-
 def preview_import_from_values(
     values: ImportPreviewValues,
     *,
@@ -252,7 +194,7 @@ def preview_import_from_values(
         supported_lossless_source=values.supported_lossless_source,
         cfg=cfg,
     )
-    verdict, cleanup_eligible, reason = _classify_simulation(simulation)
+    verdict, cleanup_eligible, reason = classify_full_pipeline_decision(simulation)
     return _preview_result(
         mode="values",
         verdict=verdict,
@@ -299,10 +241,10 @@ def _classify_import_result(
             chain.append(f"stage3_quality_gate:{gate}")
     if decision in ("conversion_failed", "target_conversion_failed"):
         return "uncertain", False, decision, chain
-    verdict, cleanup_eligible, reason = _classify_import_stages(
+    verdict, cleanup_eligible, reason = classify_quality_import_stages(
         decision,
         gate if decision in ("import", "preflight_existing") else None,
-        imported=decision in _IMPORT_STAGE_DECISIONS,
+        imported=decision in QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     )
     return verdict, cleanup_eligible, reason, chain
 
@@ -583,6 +525,8 @@ def preview_import_from_path(
 def preview_import_from_download_log(
     db: Any,
     download_log_id: int,
+    *,
+    persist_candidate_evidence: bool = False,
 ) -> ImportPreviewResult:
     """Preview the failed source referenced by one download_log row."""
     entry = db.get_download_log_entry(download_log_id)
@@ -632,4 +576,5 @@ def preview_import_from_download_log(
         force=True,
         source_username=entry.get("soulseek_username"),
         download_log_id=download_log_id,
+        persist_candidate_evidence=persist_candidate_evidence,
     )

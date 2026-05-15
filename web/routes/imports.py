@@ -3,6 +3,8 @@
 import json
 import os
 import shutil
+from typing import Literal
+
 import msgspec
 
 from lib.manual_import import (
@@ -692,12 +694,14 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
             remaining -= len(chunk)
 
 
-def _delete_wrong_match_row(pdb, log_id: int) -> str:
+WrongMatchDeleteResult = Literal["deleted", "skipped", "missing", "error"]
+
+
+def _delete_wrong_match_row(pdb, log_id: int) -> WrongMatchDeleteResult:
     """Shared helper: delete files for one wrong-match entry and clear its path.
 
-    Returns ``"deleted"``, ``"skipped"``, or ``"missing"``. Cleanup decisions
-    are recomputed at action time; stored triage/preview verdicts are audit
-    only.
+    Cleanup decisions are recomputed at action time; stored triage/preview
+    verdicts are audit only.
     """
     entry = pdb.get_download_log_entry(log_id)
     if not entry:

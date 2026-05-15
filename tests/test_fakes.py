@@ -1605,7 +1605,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             message="Preview would import",
         )
         assert importable is not None
-        self.assertEqual(importable.preview_status, "would_import")
+        self.assertEqual(importable.preview_status, "evidence_ready")
         self.assertEqual(importable.preview_result, {"verdict": "would_import"})
         self.assertIsNotNone(importable.importable_at)
 

@@ -9,9 +9,13 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from lib.import_dispatch import DispatchOutcome
+from lib.config import CratediggerConfig
+from lib.import_dispatch import (
+    DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+    DispatchOutcome,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -24,9 +28,18 @@ from lib.import_queue import (
     manual_import_payload,
 )
 from lib.import_preview import ImportPreviewResult
-from lib.quality import ImportResult, AudioQualityMeasurement
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AudioQualityMeasurement,
+    ImportResult,
+)
+from lib.quality_evidence import snapshot_audio_files
+from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
@@ -35,36 +48,127 @@ from tests.helpers import (
 
 
 class TestWrongMatchCleanupDecision(unittest.TestCase):
-    def test_decision_recomputes_from_download_log_preview(self):
+    def _patch_beets_album(self, album_path: str | None, *, min_bitrate: int):
+        from lib.beets_db import AlbumInfo
+
+        beets = MagicMock()
+        beets.__enter__.return_value = beets
+        beets.__exit__.return_value = None
+        beets.get_album_info.return_value = (
+            None
+            if album_path is None
+            else AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=min_bitrate,
+                median_bitrate_kbps=min_bitrate,
+                is_cbr=False,
+                album_path=album_path,
+                format="MP3",
+            )
+        )
+        return patch("lib.beets_db.BeetsDB", return_value=beets)
+
+    def _seed_cleanup_evidence(
+        self,
+        db: FakePipelineDB,
+        *,
+        source_path: str,
+        candidate_min: int,
+        current_min: int,
+    ) -> int:
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+        ))
+        log_id = db.log_download(
+            42,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "failed_path": source_path,
+            },
+        )
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=candidate_min,
+                avg_bitrate_kbps=candidate_min,
+                median_bitrate_kbps=candidate_min,
+                format="MP3",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        ))
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=current_min,
+                avg_bitrate_kbps=current_min,
+                median_bitrate_kbps=current_min,
+                format="MP3",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        ))
+        return log_id
+
+    def test_decision_reuses_download_log_evidence_without_preview(self):
         from lib.wrong_match_cleanup_decision import (
             CLEANUP_DECISION_PROVENANCE,
             decide_wrong_match_cleanup,
         )
 
-        db = object()
-        preview = ImportPreviewResult(
-            mode="download_log",
-            verdict="confident_reject",
-            confident_reject=True,
-            cleanup_eligible=True,
-            reason="fresh reject",
-            download_log_id=7,
-        )
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            log_id = self._seed_cleanup_evidence(
+                db,
+                source_path=source,
+                candidate_min=128,
+                current_min=245,
+            )
 
-        with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=preview,
-        ) as recompute:
-            decision = decide_wrong_match_cleanup(db, 7)
+            with self._patch_beets_album(source, min_bitrate=245):
+                decision = decide_wrong_match_cleanup(
+                    db,
+                    log_id,
+                    cfg=CratediggerConfig(),
+                )
 
-        recompute.assert_called_once_with(db, 7)
         self.assertTrue(decision.delete_allowed)
         self.assertFalse(decision.uncertain)
         self.assertEqual(decision.provenance, CLEANUP_DECISION_PROVENANCE)
+        self.assertEqual(decision.preview_decision, "downgrade")
 
-    def test_decision_blocks_uncertain_fresh_preview(self):
+    def test_decision_blocks_uncertain_when_preview_cannot_build_evidence(self):
         from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
 
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+        ))
+        log_id = db.log_download(
+            42,
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance",
+                "failed_path": "/tmp/missing-evidence",
+            },
+        )
         preview = ImportPreviewResult(
             mode="download_log",
             verdict="uncertain",
@@ -74,42 +178,307 @@ class TestWrongMatchCleanupDecision(unittest.TestCase):
             download_log_id=7,
         )
 
-        with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=preview,
-        ):
-            decision = decide_wrong_match_cleanup(object(), 7)
+        decision = decide_wrong_match_cleanup(
+            db,
+            log_id,
+            preview_builder=lambda _db, _log_id: preview,
+            cfg=CratediggerConfig(),
+        )
 
         self.assertFalse(decision.delete_allowed)
         self.assertTrue(decision.uncertain)
-        self.assertEqual(decision.skip_reason, "fresh evidence unavailable")
+        self.assertIn("fresh evidence unavailable", decision.skip_reason)
 
-    def test_decision_blocks_confident_reject_when_cleanup_ineligible(self):
+    def test_cleanup_preview_must_publish_evidence_before_cleanup_decision(self):
         from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
 
-        preview = ImportPreviewResult(
-            mode="download_log",
-            verdict="confident_reject",
-            confident_reject=True,
-            cleanup_eligible=False,
-            reason="quality_reject_keep_source",
-            download_log_id=7,
-        )
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-123",
+                status="manual",
+            ))
+            log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={
+                    "scenario": "high_distance",
+                    "failed_path": source,
+                },
+            )
+            preview = ImportPreviewResult(
+                mode="download_log",
+                verdict="would_import",
+                would_import=True,
+                decision="import",
+                reason="import",
+                source_path=source,
+                import_result=ImportResult(
+                    decision="import",
+                    new_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=245,
+                        avg_bitrate_kbps=256,
+                        median_bitrate_kbps=252,
+                        format="MP3 V0",
+                        spectral_grade="genuine",
+                    ),
+                ),
+            )
 
-        with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=preview,
-        ):
-            decision = decide_wrong_match_cleanup(object(), 7)
+            with patch(
+                "lib.quality_evidence.persist_candidate_evidence_from_import_result",
+                side_effect=AssertionError(
+                    "cleanup decision must rely on preview's guarded persistence"
+                ),
+            ) as persist:
+                decision = decide_wrong_match_cleanup(
+                    db,
+                    log_id,
+                    preview_builder=lambda _db, _log_id: preview,
+                    cfg=CratediggerConfig(),
+                )
+
+        persist.assert_not_called()
+        self.assertFalse(decision.delete_allowed)
+        self.assertTrue(decision.uncertain)
+        self.assertEqual(decision.verdict, "uncertain")
+
+    def test_decision_blocks_importable_candidate_even_with_old_reject_row(self):
+        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            log_id = self._seed_cleanup_evidence(
+                db,
+                source_path=source,
+                candidate_min=245,
+                current_min=128,
+            )
+
+            with self._patch_beets_album(source, min_bitrate=128):
+                decision = decide_wrong_match_cleanup(
+                    db,
+                    log_id,
+                    cfg=CratediggerConfig(),
+                )
 
         self.assertFalse(decision.delete_allowed)
         self.assertFalse(decision.uncertain)
-        self.assertTrue(decision.confident_reject)
+        self.assertFalse(decision.confident_reject)
         self.assertFalse(decision.cleanup_eligible)
-        self.assertEqual(decision.skip_reason, "quality_reject_keep_source")
+        self.assertEqual(decision.preview_decision, "import")
+
+    def test_no_current_album_does_not_use_stale_current_evidence_for_delete(self):
+        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            log_id = self._seed_cleanup_evidence(
+                db,
+                source_path=source,
+                candidate_min=128,
+                current_min=320,
+            )
+
+            with self._patch_beets_album(None, min_bitrate=320):
+                decision = decide_wrong_match_cleanup(
+                    db,
+                    log_id,
+                    cfg=CratediggerConfig(),
+                )
+
+        self.assertFalse(decision.delete_allowed)
+        self.assertFalse(decision.uncertain)
+        self.assertEqual(decision.verdict, "would_import")
+        self.assertEqual(decision.preview_decision, "import")
+
+
+class TestAutomationEvidenceReuse(unittest.TestCase):
+    def test_previewed_automation_job_skips_preimport_gates(self):
+        from lib.download import _process_beets_validation
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="downloading",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+            preview_enabled=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            cfg = CratediggerConfig(
+                beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                beets_distance_threshold=0.15,
+                beets_staging_dir=os.path.join(tmpdir, "staging"),
+                slskd_download_dir=tmpdir,
+                pipeline_db_enabled=True,
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            album_data = make_grab_list_entry(
+                album_id=42,
+                artist="Artist",
+                title="Album",
+                mb_release_id="mbid-123",
+                db_source="request",
+                db_request_id=42,
+            )
+            staged_album = StagedAlbum(current_path=tmpdir, request_id=42)
+
+            with patch("lib.beets.beets_validate", return_value=ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )), \
+                 patch(
+                     "lib.preimport.run_preimport_gates",
+                     side_effect=AssertionError(
+                         "valid preview evidence must skip preimport gates"),
+                 ) as gates, \
+                 patch(
+                     "lib.download._handle_valid_result",
+                     return_value=DispatchOutcome(True, "imported"),
+                 ) as handle_valid:
+                result = _process_beets_validation(
+                    album_data,
+                    staged_album,
+                    ctx,
+                    import_job_id=job.id,
+                )
+
+        assert result is not None
+        self.assertTrue(result.success)
+        gates.assert_not_called()
+        handle_valid.assert_called_once()
+        self.assertEqual(handle_valid.call_args.kwargs["import_job_id"], job.id)
+
+    def test_stale_previewed_automation_evidence_fails_before_preimport(self):
+        from lib.download import _process_beets_validation
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="downloading",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+            preview_enabled=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track = os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track, "wb") as handle:
+                handle.write(b"audio")
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            with open(track, "ab") as handle:
+                handle.write(b" changed")
+            cfg = CratediggerConfig(
+                beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                beets_distance_threshold=0.15,
+                beets_staging_dir=os.path.join(tmpdir, "staging"),
+                slskd_download_dir=tmpdir,
+                pipeline_db_enabled=True,
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            album_data = make_grab_list_entry(
+                album_id=42,
+                artist="Artist",
+                title="Album",
+                mb_release_id="mbid-123",
+                db_source="request",
+                db_request_id=42,
+            )
+            staged_album = StagedAlbum(current_path=tmpdir, request_id=42)
+
+            with patch("lib.beets.beets_validate", return_value=ValidationResult(
+                valid=True,
+                distance=0.05,
+                scenario="strong_match",
+            )), \
+                 patch("lib.preimport.run_preimport_gates") as gates, \
+                 patch("lib.download._handle_valid_result") as handle_valid:
+                result = _process_beets_validation(
+                    album_data,
+                    staged_album,
+                    ctx,
+                    import_job_id=job.id,
+                )
+
+        assert result is not None
+        self.assertFalse(result.success)
+        self.assertIn("Candidate quality evidence unavailable", result.message)
+        gates.assert_not_called()
+        handle_valid.assert_not_called()
 
 
 class TestImporterWorker(unittest.TestCase):
+    def _patch_beets_album(self, album_path: str, *, min_bitrate: int):
+        from lib.beets_db import AlbumInfo
+
+        beets = MagicMock()
+        beets.__enter__.return_value = beets
+        beets.__exit__.return_value = None
+        beets.get_album_info.return_value = AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=min_bitrate,
+            avg_bitrate_kbps=min_bitrate,
+            median_bitrate_kbps=min_bitrate,
+            is_cbr=False,
+            album_path=album_path,
+            format="MP3",
+        )
+        return patch("lib.beets_db.BeetsDB", return_value=beets)
+
     def _mark_importable(
         self,
         db: FakePipelineDB,
@@ -167,6 +536,51 @@ class TestImporterWorker(unittest.TestCase):
             reason=reason,
             download_log_id=log_id,
         )
+
+    def _seed_cleanup_reject_evidence(
+        self,
+        db: FakePipelineDB,
+        *,
+        log_id: int,
+        source_path: str,
+        request_id: int = 42,
+    ) -> None:
+        if request_id not in db._requests:  # type: ignore[attr-defined]
+            db.seed_request(make_request_row(
+                id=request_id,
+                mb_release_id="mbid-123",
+                status="manual",
+            ))
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="MP3",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        ))
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=request_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=245,
+                median_bitrate_kbps=245,
+                format="MP3",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        ))
 
     def test_force_import_job_calls_existing_dispatch_and_completes(self):
         from scripts import importer
@@ -372,6 +786,11 @@ class TestImporterWorker(unittest.TestCase):
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
             log_id = self._log_wrong_match(db, failed_path=source)
+            self._seed_cleanup_reject_evidence(
+                db,
+                log_id=log_id,
+                source_path=source,
+            )
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -390,10 +809,7 @@ class TestImporterWorker(unittest.TestCase):
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "Pre-import gate rejected"),
-            ), patch(
-                "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-                return_value=self._cleanup_preview(log_id),
-            ) as preview:
+            ), self._patch_beets_album(source, min_bitrate=245):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
@@ -401,7 +817,6 @@ class TestImporterWorker(unittest.TestCase):
             self.assertFalse(os.path.exists(source))
             self.assertEqual(db.get_wrong_matches(), [])
             result = self._result(updated)
-            preview.assert_called_once_with(db, log_id)
             self.assertEqual(result["cleanup"]["success"], True)
             self.assertEqual(result["cleanup"]["cleared_rows"], 1)
             self.assertEqual(
@@ -419,6 +834,11 @@ class TestImporterWorker(unittest.TestCase):
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-123",
+                status="manual",
+            ))
             log_id = self._log_wrong_match(db, failed_path=source)
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -446,15 +866,7 @@ class TestImporterWorker(unittest.TestCase):
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "Pre-import gate rejected"),
-            ), patch(
-                "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-                return_value=self._cleanup_preview(
-                    log_id,
-                    verdict="uncertain",
-                    cleanup_eligible=False,
-                    reason="fresh evidence unavailable",
-                ),
-            ) as preview:
+            ):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
@@ -462,7 +874,6 @@ class TestImporterWorker(unittest.TestCase):
             self.assertTrue(os.path.isdir(source))
             self.assertEqual(len(db.get_wrong_matches()), 1)
             result = self._result(updated)
-            preview.assert_called_once_with(db, log_id)
             self.assertEqual(result["cleanup"]["success"], False)
             self.assertTrue(result["cleanup"]["skipped"])
             self.assertEqual(
@@ -476,13 +887,127 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_failed_force_import_with_stale_candidate_evidence_skips_cleanup(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            self._mark_importable(db, job)
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(
+                    False,
+                    "Candidate quality evidence unavailable at import time: stale",
+                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                ),
+            ), patch(
+                "lib.wrong_match_cleanup_decision.decide_wrong_match_cleanup",
+            ) as decision, patch(
+                "lib.wrong_matches.cleanup_wrong_match_source",
+            ) as cleanup:
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertTrue(os.path.isdir(source))
+            decision.assert_not_called()
+            cleanup.assert_not_called()
+            result = self._result(updated)
+            self.assertEqual(
+                result["cleanup"]["reason"],
+                "candidate_evidence_unavailable",
+            )
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_disabled_force_failure_uses_cleanup_decision(self):
+        from scripts import importer
+        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=False,
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            cleanup_decision = WrongMatchCleanupDecision(
+                download_log_id=log_id,
+                delete_allowed=False,
+                uncertain=True,
+                provenance="album_quality_evidence",
+                verdict="uncertain",
+                confident_reject=False,
+                cleanup_eligible=False,
+                reason="legacy preview disabled",
+            )
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(
+                    False,
+                    "Candidate quality evidence unavailable at import time: missing",
+                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                ),
+            ), patch(
+                "lib.wrong_match_cleanup_decision.decide_wrong_match_cleanup",
+                return_value=cleanup_decision,
+            ) as decision:
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            decision.assert_called_once_with(db, log_id)
+            self.assertTrue(os.path.isdir(source))
+            result = self._result(updated)
+            self.assertEqual(result["cleanup"]["reason"], "legacy preview disabled")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_failed_force_import_job_clears_newer_duplicate_rejection(self):
         from scripts import importer
 
         db = FakePipelineDB()
         source = tempfile.mkdtemp()
         try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
             log_id = self._log_wrong_match(db, failed_path=source, username="old")
+            self._seed_cleanup_reject_evidence(
+                db,
+                log_id=log_id,
+                source_path=source,
+            )
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -513,10 +1038,7 @@ class TestImporterWorker(unittest.TestCase):
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 side_effect=reject_again,
-            ), patch(
-                "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-                return_value=self._cleanup_preview(log_id),
-            ):
+            ), self._patch_beets_album(source, min_bitrate=245):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
@@ -648,6 +1170,76 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(claimed.preview_status, "would_import")
         self.assertEqual(claimed.preview_message, "Preview gate disabled")
 
+    def test_preview_disabled_force_job_uses_legacy_dispatch_without_evidence_ids(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+            preview_enabled=False,
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+        self.assertEqual(claimed.id, job.id)
+
+        with patch(
+            "lib.import_dispatch.dispatch_import_from_db",
+            return_value=DispatchOutcome(True, "imported"),
+        ) as dispatch:
+            importer.process_claimed_job(cast(Any, db), claimed)
+
+        dispatch.assert_called_once_with(
+            db,
+            request_id=42,
+            failed_path="/tmp/failed",
+            force=True,
+            outcome_label=IMPORT_JOB_FORCE,
+            source_username="alice",
+            source_dirs=None,
+            import_job_id=None,
+            download_log_id=None,
+        )
+
+    def test_preview_disabled_manual_job_uses_legacy_dispatch_without_evidence_ids(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=False,
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+        self.assertEqual(claimed.id, job.id)
+
+        with patch(
+            "lib.import_dispatch.dispatch_import_from_db",
+            return_value=DispatchOutcome(True, "imported"),
+        ) as dispatch:
+            importer.process_claimed_job(cast(Any, db), claimed)
+
+        dispatch.assert_called_once_with(
+            db,
+            request_id=42,
+            failed_path="/tmp/manual",
+            force=False,
+            outcome_label=IMPORT_JOB_MANUAL,
+            source_username=None,
+            source_dirs=None,
+            import_job_id=None,
+            download_log_id=None,
+        )
+
     def test_importer_does_not_claim_job_waiting_for_preview(self):
         from scripts import importer
 
@@ -661,6 +1253,34 @@ class TestImporterWorker(unittest.TestCase):
         )
 
         self.assertIsNone(importer.run_once(cast(Any, db), worker_id="worker"))
+
+    def test_importer_skips_preview_disabled_automation_when_preview_enabled(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+            preview_enabled=False,
+        )
+        self.assertEqual(job.preview_status, "would_import")
+
+        with (
+            patch.dict(os.environ, {IMPORT_JOB_PREVIEW_ENABLED_ENV: "1"}),
+            patch("scripts.importer.execute_import_job") as execute,
+        ):
+            processed = importer.run_once(cast(Any, db), worker_id="worker")
+
+        self.assertIsNone(processed)
+        execute.assert_not_called()
+        requeued = db.get_import_job(job.id)
+        assert requeued is not None
+        self.assertEqual(requeued.status, "queued")
+        self.assertEqual(requeued.preview_status, "would_import")
+        self.assertEqual(requeued.preview_message, "Preview gate disabled")
+        self.assertIsNotNone(requeued.importable_at)
 
     def test_automation_job_reconstructs_active_state_and_uses_processing_path(self):
         from scripts import importer
@@ -737,13 +1357,14 @@ class TestImporterWorker(unittest.TestCase):
         with patch(
             "lib.download._run_completed_processing",
             return_value=DispatchOutcome(True, "Imported by dispatch"),
-        ):
+        ) as processing:
             updated = importer.process_claimed_job(
                 cast(Any, db),
                 claimed,
                 ctx=object(),
             )
 
+        self.assertIsNone(processing.call_args.kwargs["import_job_id"])
         assert updated is not None
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "Imported by dispatch")
@@ -887,6 +1508,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         verdict: str,
         *,
         reason: str | None = None,
+        source_path: str | None = None,
     ) -> ImportPreviewResult:
         return ImportPreviewResult(
             mode="path",
@@ -897,36 +1519,70 @@ class TestImportPreviewWorker(unittest.TestCase):
             decision=reason,
             reason=reason,
             stage_chain=[f"preview:{reason or verdict}"],
+            source_path=source_path,
         )
+
+    def _seed_job_candidate_evidence(
+        self,
+        db: FakePipelineDB,
+        job_id: int,
+        source_path: str,
+    ) -> None:
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job_id,
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3 V0",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+        ))
 
     def test_force_job_preview_would_import_marks_importable(self):
         from scripts import import_preview_worker
 
-        db = FakePipelineDB()
-        db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            dedupe_key=force_import_dedupe_key(7),
-            payload=force_import_payload(
-                download_log_id=7,
-                failed_path="/tmp/failed",
-                source_username="alice",
-            ),
-            preview_enabled=True,
-        )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
-        assert claimed is not None
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(7),
+                payload=force_import_payload(
+                    download_log_id=7,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_job_candidate_evidence(db, claimed.id, source)
 
-        with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
-            return_value=self._preview("would_import", reason="import"),
-        ) as preview:
-            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                return_value=self._preview(
+                    "would_import",
+                    reason="import",
+                    source_path=source,
+                ),
+            ) as preview:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
 
         preview.assert_called_once_with(
             db,
             request_id=42,
-            path="/tmp/failed",
+            path=source,
             force=True,
             source_username="alice",
             download_log_id=7,
@@ -935,7 +1591,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
-        self.assertEqual(updated.preview_status, "would_import")
+        self.assertEqual(updated.preview_status, "evidence_ready")
         assert updated.preview_result is not None
         self.assertEqual(updated.preview_result["verdict"], "would_import")
         self.assertIsNotNone(updated.importable_at)
@@ -943,27 +1599,38 @@ class TestImportPreviewWorker(unittest.TestCase):
     def test_manual_job_preview_uses_non_force_semantics(self):
         from scripts import import_preview_worker
 
-        db = FakePipelineDB()
-        db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
-            request_id=42,
-            dedupe_key=manual_import_dedupe_key(42, "/tmp/manual"),
-            payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
-        )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
-        assert claimed is not None
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key=manual_import_dedupe_key(42, source),
+                payload=manual_import_payload(failed_path=source),
+                preview_enabled=True,
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            self._seed_job_candidate_evidence(db, claimed.id, source)
 
-        with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
-            return_value=self._preview("would_import", reason="import"),
-        ) as preview:
-            updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                return_value=self._preview(
+                    "would_import",
+                    reason="import",
+                    source_path=source,
+                ),
+            ) as preview:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                )
 
         preview.assert_called_once_with(
             db,
             request_id=42,
-            path="/tmp/manual",
+            path=source,
             force=False,
             source_username=None,
             download_log_id=None,
@@ -971,12 +1638,14 @@ class TestImportPreviewWorker(unittest.TestCase):
             persist_candidate_evidence=True,
         )
         assert updated is not None
-        self.assertEqual(updated.preview_status, "would_import")
+        self.assertEqual(updated.preview_status, "evidence_ready")
 
     def test_automation_job_preview_uses_active_download_current_path(self):
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
@@ -1002,10 +1671,15 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
+            self._seed_job_candidate_evidence(db, claimed.id, staged)
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
-                return_value=self._preview("would_import", reason="import"),
+                return_value=self._preview(
+                    "would_import",
+                    reason="import",
+                    source_path=staged,
+                ),
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(db, claimed)
 
@@ -1020,12 +1694,14 @@ class TestImportPreviewWorker(unittest.TestCase):
                 persist_candidate_evidence=True,
             )
             assert updated is not None
-            self.assertEqual(updated.preview_status, "would_import")
+            self.assertEqual(updated.preview_status, "evidence_ready")
 
-    def test_automation_preview_reject_blocks_reenqueue_loop(self):
+    def test_automation_preview_reject_with_evidence_marks_ready_for_dispatch(self):
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
@@ -1051,12 +1727,14 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
+            self._seed_job_candidate_evidence(db, claimed.id, staged)
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
                 return_value=self._preview(
                     "confident_reject",
                     reason="spectral_reject",
+                    source_path=staged,
                 ),
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
@@ -1066,15 +1744,19 @@ class TestImportPreviewWorker(unittest.TestCase):
 
             assert updated is not None
             self.assertEqual(updated.status, "queued")
-            self.assertEqual(updated.preview_status, "confident_reject")
-            self.assertEqual(updated.preview_error, "spectral_reject")
+            self.assertEqual(updated.preview_status, "evidence_ready")
+            self.assertIsNone(updated.preview_error)
             self.assertIsNotNone(db.get_active_import_job_for_request(42))
-            self.assertIsNone(db.claim_next_import_job(worker_id="importer"))
+            claimed_for_import = db.claim_next_import_job(worker_id="importer")
+            assert claimed_for_import is not None
+            self.assertEqual(claimed_for_import.id, updated.id)
 
     def test_run_once_requeues_legacy_disabled_automation_job_for_preview(self):
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
@@ -1100,12 +1782,17 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             self.assertEqual(job.preview_status, "would_import")
             self.assertEqual(job.preview_message, "Preview gate disabled")
+            self._seed_job_candidate_evidence(db, job.id, staged)
 
             with (
                 patch.dict(os.environ, {IMPORT_JOB_PREVIEW_ENABLED_ENV: "1"}),
                 patch(
                     "scripts.import_preview_worker.preview_import_from_path",
-                    return_value=self._preview("would_import", reason="import"),
+                    return_value=self._preview(
+                        "would_import",
+                        reason="import",
+                        source_path=staged,
+                    ),
                 ) as preview,
             ):
                 updated = import_preview_worker.run_once(
@@ -1125,70 +1812,78 @@ class TestImportPreviewWorker(unittest.TestCase):
             )
             assert updated is not None
             self.assertEqual(updated.status, "queued")
-            self.assertEqual(updated.preview_status, "would_import")
+            self.assertEqual(updated.preview_status, "evidence_ready")
             self.assertEqual(updated.preview_attempts, 1)
             self.assertNotEqual(updated.preview_message, "Preview gate disabled")
 
     def test_run_once_heartbeats_while_preview_is_running(self):
         from scripts import import_preview_worker
 
-        db = FakePipelineDB()
-        setattr(db, "dsn", "postgresql://fake")
-        db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            dedupe_key=force_import_dedupe_key(7),
-            payload=force_import_payload(
-                download_log_id=7,
-                failed_path="/tmp/failed",
-                source_username="alice",
-            ),
-            preview_enabled=True,
-        )
-        initial_claim = db.claim_next_import_preview_job(worker_id="peek")
-        assert initial_claim is not None
-        assert initial_claim.preview_heartbeat_at is not None
-        db.requeue_stale_import_preview_jobs(
-            older_than=timedelta(seconds=-1),
-            message="test reset",
-        )
-        heartbeat_seen = threading.Event()
-
-        def preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
-            baseline = db.get_import_job(initial_claim.id)
-            assert baseline is not None
-            baseline_heartbeat = baseline.preview_heartbeat_at
-            assert baseline_heartbeat is not None
-            deadline = time.monotonic() + 0.5
-            while time.monotonic() < deadline:
-                current = db.get_import_job(initial_claim.id)
-                assert current is not None
-                if (
-                    current.preview_heartbeat_at is not None
-                    and current.preview_heartbeat_at > baseline_heartbeat
-                ):
-                    heartbeat_seen.set()
-                    break
-                time.sleep(0.005)
-            return self._preview("would_import", reason="import")
-
-        with (
-            patch("scripts.import_preview_worker.PipelineDB",
-                  side_effect=lambda dsn: db),
-            patch(
-                "scripts.import_preview_worker.preview_import_from_path",
-                side_effect=preview,
-            ),
-        ):
-            updated = import_preview_worker.run_once(
-                cast(Any, db),
-                worker_id="preview",
-                heartbeat_interval=0.01,
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            setattr(db, "dsn", "postgresql://fake")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(7),
+                payload=force_import_payload(
+                    download_log_id=7,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
             )
+            initial_claim = db.claim_next_import_preview_job(worker_id="peek")
+            assert initial_claim is not None
+            assert initial_claim.preview_heartbeat_at is not None
+            self._seed_job_candidate_evidence(db, initial_claim.id, source)
+            db.requeue_stale_import_preview_jobs(
+                older_than=timedelta(seconds=-1),
+                message="test reset",
+            )
+            heartbeat_seen = threading.Event()
 
-        assert updated is not None
-        self.assertEqual(updated.preview_status, "would_import")
-        self.assertTrue(heartbeat_seen.is_set())
+            def preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
+                baseline = db.get_import_job(initial_claim.id)
+                assert baseline is not None
+                baseline_heartbeat = baseline.preview_heartbeat_at
+                assert baseline_heartbeat is not None
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline:
+                    current = db.get_import_job(initial_claim.id)
+                    assert current is not None
+                    if (
+                        current.preview_heartbeat_at is not None
+                        and current.preview_heartbeat_at > baseline_heartbeat
+                    ):
+                        heartbeat_seen.set()
+                        break
+                    time.sleep(0.005)
+                return self._preview(
+                    "would_import",
+                    reason="import",
+                    source_path=source,
+                )
+
+            with (
+                patch("scripts.import_preview_worker.PipelineDB",
+                      side_effect=lambda dsn: db),
+                patch(
+                    "scripts.import_preview_worker.preview_import_from_path",
+                    side_effect=preview,
+                ),
+            ):
+                updated = import_preview_worker.run_once(
+                    cast(Any, db),
+                    worker_id="preview",
+                    heartbeat_interval=0.01,
+                )
+
+            assert updated is not None
+            self.assertEqual(updated.preview_status, "evidence_ready")
+            self.assertTrue(heartbeat_seen.is_set())
 
     def test_preview_recovery_loop_requeues_abandoned_running_rows(self):
         from scripts import import_preview_worker
@@ -1271,7 +1966,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.preview_status, "confident_reject")
+        self.assertEqual(updated.preview_status, "uncertain")
         self.assertEqual(updated.preview_error, "spectral_reject")
         self.assertEqual(db.get_denylisted_users(42), [])
 

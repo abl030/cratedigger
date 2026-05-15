@@ -12,6 +12,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 # Bootstrap ephemeral PostgreSQL if available
@@ -511,6 +512,225 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(claimed.id, job.id)
         self.assertEqual(claimed.status, "running")
 
+    def test_requeue_disabled_automation_preview_jobs_handles_would_import(self):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+            automation_import_dedupe_key,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=self.req_id,
+            dedupe_key=automation_import_dedupe_key(self.req_id),
+            payload={},
+            preview_enabled=False,
+        )
+        self.assertEqual(job.preview_status, "would_import")
+        self.assertEqual(job.preview_message, IMPORT_JOB_PREVIEW_DISABLED_MESSAGE)
+
+        requeued = self.db.requeue_disabled_automation_preview_jobs()
+
+        self.assertEqual([item.id for item in requeued], [job.id])
+        self.assertEqual(requeued[0].preview_status, "waiting")
+        self.assertIsNone(requeued[0].preview_message)
+        self.assertIsNone(requeued[0].preview_result)
+        self.assertIsNone(requeued[0].importable_at)
+
+    def test_requeue_disabled_automation_preview_jobs_handles_evidence_ready_legacy(self):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+            automation_import_dedupe_key,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=self.req_id,
+            dedupe_key=automation_import_dedupe_key(self.req_id),
+            payload={},
+            preview_enabled=False,
+        )
+        self.db._execute(
+            """
+            UPDATE import_jobs
+            SET preview_status = 'evidence_ready'
+            WHERE id = %s
+            """,
+            (job.id,),
+        )
+
+        requeued = self.db.requeue_disabled_automation_preview_jobs()
+
+        self.assertEqual([item.id for item in requeued], [job.id])
+        self.assertEqual(requeued[0].preview_status, "waiting")
+        self.assertIsNone(requeued[0].preview_message)
+        self.assertIsNone(requeued[0].preview_result)
+        self.assertIsNone(requeued[0].importable_at)
+
+    def test_migration_018_resets_legacy_would_import_without_evidence(self):
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_dedupe_key
+        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE
+
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'would_import', '{"verdict": "would_import"}'::jsonb,
+                'Queued before async preview gate', NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                automation_import_dedupe_key(self.req_id),
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        legacy_job_id = row["id"]
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'would_import', NULL, NULL, NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:null-message-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        null_message_job_id = row["id"]
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'evidence_ready', '{"verdict": "would_import"}'::jsonb,
+                'Evidence ready but row missing', NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:evidence-ready-without-evidence-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        evidence_ready_without_evidence_id = row["id"]
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'evidence_ready', '{"verdict": "would_import"}'::jsonb,
+                'Evidence already captured', NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:with-evidence-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        with_evidence_job_id = row["id"]
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=with_evidence_job_id,
+        ))
+        disabled = self.db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=self.req_id,
+            dedupe_key="automation:preview-disabled-migration",
+            payload={},
+            preview_enabled=False,
+        )
+
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations"
+            / "018_neutral_import_job_preview_ready.sql"
+        )
+        migration_sql = migration.read_text(encoding="utf-8")
+        reconciliation_sql = migration_sql[migration_sql.index("UPDATE import_jobs"):]
+        self.db._execute(reconciliation_sql)
+
+        cur = self.db._execute(
+            """
+            SELECT id, preview_status, preview_result, preview_message,
+                   importable_at
+            FROM import_jobs
+            WHERE id IN (%s, %s, %s, %s, %s)
+            ORDER BY id
+            """,
+            (
+                legacy_job_id,
+                null_message_job_id,
+                evidence_ready_without_evidence_id,
+                with_evidence_job_id,
+                disabled.id,
+            ),
+        )
+        rows = {row["id"]: row for row in cur.fetchall()}
+        self.assertEqual(rows[legacy_job_id]["preview_status"], "waiting")
+        self.assertIsNone(rows[legacy_job_id]["preview_result"])
+        self.assertIsNone(rows[legacy_job_id]["preview_message"])
+        self.assertIsNone(rows[legacy_job_id]["importable_at"])
+        self.assertEqual(rows[null_message_job_id]["preview_status"], "waiting")
+        self.assertIsNone(rows[null_message_job_id]["preview_result"])
+        self.assertIsNone(rows[null_message_job_id]["preview_message"])
+        self.assertIsNone(rows[null_message_job_id]["importable_at"])
+        self.assertEqual(
+            rows[evidence_ready_without_evidence_id]["preview_status"],
+            "waiting",
+        )
+        self.assertIsNone(
+            rows[evidence_ready_without_evidence_id]["preview_result"]
+        )
+        self.assertIsNone(
+            rows[evidence_ready_without_evidence_id]["preview_message"]
+        )
+        self.assertIsNone(
+            rows[evidence_ready_without_evidence_id]["importable_at"]
+        )
+        self.assertEqual(rows[with_evidence_job_id]["preview_status"], "evidence_ready")
+        self.assertEqual(
+            rows[with_evidence_job_id]["preview_message"],
+            "Evidence already captured",
+        )
+        self.assertIsNotNone(rows[with_evidence_job_id]["importable_at"])
+        self.assertEqual(rows[disabled.id]["preview_status"], "would_import")
+        self.assertEqual(
+            rows[disabled.id]["preview_message"],
+            "Preview gate disabled",
+        )
+        self.assertIsNotNone(rows[disabled.id]["importable_at"])
+
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
         from lib import pipeline_db
@@ -653,7 +873,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         timeline = self.db.list_import_job_timeline(limit=10)
 
         self.assertEqual([job.id for job in timeline[:2]], [importable.id, waiting.id])
-        self.assertEqual(timeline[0].preview_status, "would_import")
+        self.assertEqual(timeline[0].preview_status, "evidence_ready")
 
     def test_import_job_timeline_excludes_terminal_jobs(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
@@ -734,7 +954,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         assert marked is not None
         assert marked.preview_result is not None
         self.assertEqual(marked.status, "queued")
-        self.assertEqual(marked.preview_status, "would_import")
+        self.assertEqual(marked.preview_status, "evidence_ready")
         self.assertEqual(marked.preview_result["verdict"], "would_import")
         self.assertEqual(marked.preview_message, "Preview would import")
         self.assertIsNotNone(marked.preview_completed_at)
@@ -1194,7 +1414,7 @@ class TestGetSearchHistoryPage(unittest.TestCase):
                 self.req_id, query=f"q{i}", outcome="no_match",
             )
         full = self.db.get_search_history(self.req_id)
-        return [int(r["id"]) for r in full]  # newest-first
+        return [int(cast(Any, r["id"])) for r in full]  # newest-first
 
     def test_first_page_clamps_to_limit_and_seeds_next_before_id(self):
         ids_desc = self._seed(75)
@@ -1204,7 +1424,7 @@ class TestGetSearchHistoryPage(unittest.TestCase):
         self.assertEqual(len(page.rows), 50)
         # Newest 50 rows in DESC order.
         self.assertEqual(
-            [int(r["id"]) for r in page.rows], ids_desc[:50],
+            [int(cast(Any, r["id"])) for r in page.rows], ids_desc[:50],
         )
         # next_before_id seeds the next page from the 51st row's id.
         self.assertEqual(page.next_before_id, ids_desc[50])
@@ -1223,10 +1443,10 @@ class TestGetSearchHistoryPage(unittest.TestCase):
         self.assertEqual(len(second.rows), 25)
         # Second page rows are older-or-equal to the cursor and
         # id-monotonic descending.
-        page_ids = [int(r["id"]) for r in second.rows]
+        page_ids = [int(cast(Any, r["id"])) for r in second.rows]
         self.assertEqual(page_ids, ids_desc[50:75])
         # No id appears in both pages (no boundary overlap).
-        first_ids = {int(r["id"]) for r in first.rows}
+        first_ids = {int(cast(Any, r["id"])) for r in first.rows}
         self.assertFalse(first_ids.intersection(page_ids))
         self.assertIsNone(second.next_before_id)
 
@@ -1499,6 +1719,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
                 MAX(seen_count)::int AS max_seen
             FROM peer_dir_observations
         """).fetchone()
+        assert stored is not None
         self.assertEqual(stored["rows"], 3)
         self.assertEqual(stored["total_seen"], 4)
         self.assertEqual(stored["max_seen"], 2)
@@ -4357,6 +4578,8 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         self.assertIsInstance(
             active.plan.metadata_snapshot, SearchPlanMetadataSnapshot)
         self.assertIsInstance(active.plan.provenance, SearchPlanProvenance)
+        assert active.plan.metadata_snapshot is not None
+        assert active.plan.provenance is not None
         self.assertEqual(active.plan.metadata_snapshot.year, 2024)
         self.assertEqual(
             active.plan.provenance.values["dropped_low_entropy_tokens"],
@@ -4495,6 +4718,8 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         from lib.pipeline_db import SearchPlanItemProvenance
         self.assertIsInstance(
             active.items[0].provenance, SearchPlanItemProvenance)
+        assert active.items[0].provenance is not None
+        assert active.items[1].provenance is not None
         self.assertEqual(active.items[0].provenance.values["repeat_index"], 1)
         self.assertEqual(active.items[1].strategy, "track1")
         self.assertEqual(

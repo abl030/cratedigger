@@ -2587,12 +2587,29 @@ class TestWrongMatchTriageMeasurementRoundTrip(unittest.TestCase):
         """Covers AE1: post-rejection triage path → row read returns the
         four candidate-evidence keys with values."""
         from lib.wrong_match_triage import triage_wrong_match
+        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._seed_wrong_match(source)
+            preview = self._measured_preview(source)
+            decision = WrongMatchCleanupDecision(
+                download_log_id=log_id,
+                delete_allowed=False,
+                uncertain=False,
+                provenance="album_quality_evidence",
+                verdict="would_import",
+                confident_reject=False,
+                cleanup_eligible=False,
+                preview_decision=preview.decision,
+                reason=preview.reason,
+                request_id=1,
+                source_path=source,
+                stage_chain=tuple(preview.stage_chain),
+                import_result=preview.import_result,
+            )
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=self._measured_preview(source),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=decision,
             ):
                 triage_wrong_match(db, log_id)
 
@@ -4186,7 +4203,9 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         assert active is not None
         self.assertNotEqual(active.plan.id, old_id)
         self.assertEqual(db.search_plans[old_id].status, "superseded")
-        self.assertEqual(active.plan.metadata_snapshot.track_count, 2)
+        metadata_snapshot = active.plan.metadata_snapshot
+        assert metadata_snapshot is not None
+        self.assertEqual(metadata_snapshot.track_count, 2)
 
     def test_old_generator_rows_supersede_to_current_with_cursor_reset(self):
         from lib.pipeline_db import SearchPlanItemInput

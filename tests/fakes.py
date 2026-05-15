@@ -31,7 +31,9 @@ if TYPE_CHECKING:
 from lib.import_queue import (
     ImportJob,
     IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
     IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+    IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
     import_preview_enabled_from_env,
@@ -879,7 +881,10 @@ class FakePipelineDB:
         def sort_key(row: dict[str, Any]) -> tuple[int, datetime, datetime, int]:
             status = row.get("status")
             preview_status = row.get("preview_status")
-            if status == "queued" and preview_status == "would_import":
+            if (
+                status == "queued"
+                and preview_status in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ):
                 bucket = 0
             elif status == "running":
                 bucket = 1
@@ -903,11 +908,18 @@ class FakePipelineDB:
         self,
         *,
         worker_id: str | None = None,
+        exclude_preview_disabled_automation: bool = False,
     ) -> ImportJob | None:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
-            and row.get("preview_status") == "would_import"
+            and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            and not (
+                exclude_preview_disabled_automation
+                and row.get("job_type") == IMPORT_JOB_AUTOMATION
+                and row.get("preview_message") == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
+                and row.get("preview_result") is None
+            )
         ]
         queued.sort(key=lambda row: (
             _as_datetime(row.get("importable_at")),
@@ -1050,7 +1062,7 @@ class FakePipelineDB:
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("job_type") == IMPORT_JOB_AUTOMATION
-            and row.get("preview_status") == IMPORT_JOB_PREVIEW_WOULD_IMPORT
+            and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
             and row.get("preview_message") == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
             and row.get("preview_result") is None
         ]
@@ -1124,7 +1136,7 @@ class FakePipelineDB:
                 and row.get("preview_status") in ("waiting", "running")
             ):
                 now = _utcnow()
-                row["preview_status"] = "would_import"
+                row["preview_status"] = IMPORT_JOB_PREVIEW_EVIDENCE_READY
                 row["preview_result"] = copy.deepcopy(preview_result or {})
                 row["preview_message"] = message
                 row["preview_error"] = None

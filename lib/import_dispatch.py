@@ -11,9 +11,12 @@ import os
 import shutil
 import subprocess as sp
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
+
+import msgspec
 
 from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
@@ -21,7 +24,10 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          AlbumQualityEvidence,
                          AlbumQualityEvidenceDecisionFacts,
+                         QualityEvidenceActionPayload,
+                         QualityEvidenceActionProvenance,
                          dispatch_action, compute_effective_override_bitrate,
+                         evidence_decision_name,
                          extract_usernames, is_comparable_lossless_source_probe,
                          full_pipeline_decision_from_evidence,
                          narrow_override_on_downgrade,
@@ -30,9 +36,14 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     legacy_current_lossless_v0_probe_from_request,
-    load_candidate_evidence_for_source,
-    load_or_backfill_current_evidence,
     lossless_source_v0_probe_from_metric,
+    verified_lossless_proof_from_import_result,
+)
+from lib.import_evidence import (
+    CandidateEvidenceActionResult,
+    CURRENT_STATUS_MISSING,
+    ensure_candidate_evidence_for_action,
+    ensure_current_evidence_for_action,
 )
 from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
@@ -46,6 +57,7 @@ if TYPE_CHECKING:
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 logger = logging.getLogger("cratedigger")
+DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE = "candidate_evidence_unavailable"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -166,6 +178,7 @@ class DispatchOutcome:
     success: bool
     message: str
     deferred: bool = False
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,21 +200,101 @@ class EvidenceImportGate:
     candidate: AlbumQualityEvidence | None = None
     candidate_status: str | None = None
     candidate_reason: str | None = None
+    current_status: str | None = None
+    current_reason: str | None = None
+    current_fail_closed: bool = False
+    snapshot_guard: str | None = None
 
 
 def _import_allowed_by_evidence_pipeline(result: dict[str, object]) -> bool:
     return bool(result.get("imported"))
 
 
-def _evidence_decision_name(result: dict[str, object]) -> str:
-    stage2 = result.get("stage2_import")
-    if isinstance(stage2, str) and stage2:
-        return stage2
-    stage3 = result.get("stage3_quality_gate")
-    if isinstance(stage3, str) and stage3:
-        return stage3
-    final_status = result.get("final_status")
-    return str(final_status or "quality_reject")
+def _current_evidence_allows_action(gate: EvidenceImportGate) -> bool:
+    """Current evidence may be absent only when Beets has no current album."""
+
+    return not gate.current_fail_closed
+
+
+def _download_info_from_candidate_evidence(
+    candidate: AlbumQualityEvidence,
+    *,
+    username: str | None,
+) -> DownloadInfo:
+    """Build the force/manual audit info without remeasuring the candidate."""
+
+    measurement = candidate.measurement
+    bitrate = (
+        measurement.min_bitrate_kbps * 1000
+        if measurement.min_bitrate_kbps is not None
+        else None
+    )
+    return DownloadInfo(
+        username=username,
+        filetype=(
+            candidate.storage_format
+            or measurement.format
+            or candidate.container
+            or candidate.codec
+        ),
+        bitrate=bitrate,
+        is_vbr=not measurement.is_cbr,
+        download_spectral=SpectralMeasurement.from_parts(
+            measurement.spectral_grade,
+            measurement.spectral_bitrate_kbps,
+        ),
+        v0_probe=lossless_source_v0_probe_from_metric(candidate.v0_metric),
+    )
+
+
+def _write_quality_evidence_action_file(
+    *,
+    candidate: AlbumQualityEvidence,
+    current: AlbumQualityEvidence | None,
+    decision: dict[str, object],
+    target_format: str | None,
+    verified_lossless_target: str,
+    gate: EvidenceImportGate,
+) -> str:
+    """Write the action-time evidence payload consumed by import_one.py."""
+
+    payload = QualityEvidenceActionPayload(
+        candidate=candidate,
+        current=current,
+        decision=decision,
+        decision_name=evidence_decision_name(decision),
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target or None,
+        provenance=QualityEvidenceActionProvenance(
+            candidate_status=gate.candidate_status,
+            current_status=gate.current_status,
+            snapshot_status=gate.snapshot_guard,
+            fallback_reason=gate.candidate_reason,
+        ),
+    )
+    handle = tempfile.NamedTemporaryFile(
+        prefix="cratedigger-quality-evidence-action-",
+        suffix=".json",
+        delete=False,
+    )
+    try:
+        handle.write(msgspec.json.encode(payload))
+        return handle.name
+    finally:
+        handle.close()
+
+
+def _remove_quality_evidence_action_file(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.debug(
+            "Failed to remove quality evidence action file %s",
+            path,
+            exc_info=True,
+        )
 
 
 def import_one_script_from_harness(beets_harness_path: str) -> str:
@@ -223,6 +316,7 @@ def build_import_one_command(
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
+    quality_evidence_action_file: str | None = None,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     cmd = [
@@ -247,6 +341,8 @@ def build_import_one_command(
         cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
     if quality_rank_config_json:
         cmd.extend(["--quality-rank-config", quality_rank_config_json])
+    if quality_evidence_action_file:
+        cmd.extend(["--quality-evidence-action-file", quality_evidence_action_file])
     if existing_v0_probe is not None:
         if existing_v0_probe.min_bitrate_kbps is not None:
             cmd.extend([
@@ -280,6 +376,7 @@ def run_import_one(
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
+    quality_evidence_action_file: str | None = None,
     timeout: int = 1800,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
@@ -296,6 +393,7 @@ def run_import_one(
         verified_lossless_target=verified_lossless_target,
         quality_rank_config_json=quality_rank_config_json,
         existing_v0_probe=existing_v0_probe,
+        quality_evidence_action_file=quality_evidence_action_file,
     )
     result = sp.run(
         cmd,
@@ -352,39 +450,81 @@ def _load_evidence_import_gate(
     quality_ranks: "QualityRankConfig | None",
     candidate_import_job_id: int | None,
     candidate_download_log_id: int | None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
 ) -> EvidenceImportGate:
     """Load persisted evidence for import-time quality authority."""
 
+    if candidate_import_job_id is None and candidate_download_log_id is None:
+        return EvidenceImportGate()
+
+    candidate_result = prevalidated_candidate_result
+    if candidate_result is None:
+        candidate_result = ensure_candidate_evidence_for_action(
+            db,
+            source_path=path,
+            import_job_id=candidate_import_job_id,
+            download_log_id=candidate_download_log_id,
+        )
+    if not candidate_result.available:
+        return EvidenceImportGate(
+            candidate=None,
+            candidate_status=candidate_result.provenance.candidate_status,
+            candidate_reason=candidate_result.provenance.fallback_reason,
+            snapshot_guard=candidate_result.provenance.snapshot_guard,
+        )
+
     try:
-        current_result = load_or_backfill_current_evidence(
+        from lib.beets_db import BeetsDB
+        from lib.quality import QualityRankConfig
+
+        cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
+        with BeetsDB() as beets:
+            album_info = beets.get_album_info(mb_release_id, cfg)
+        if album_info is None:
+            return EvidenceImportGate(
+                current=None,
+                candidate=candidate_result.evidence,
+                candidate_status=candidate_result.provenance.candidate_status,
+                candidate_reason=candidate_result.provenance.fallback_reason,
+                current_status=CURRENT_STATUS_MISSING,
+                current_reason="album not in beets",
+                current_fail_closed=False,
+                snapshot_guard=candidate_result.provenance.snapshot_guard,
+            )
+        current_result = ensure_current_evidence_for_action(
             db,
             request_id=request_id,
             mb_release_id=mb_release_id,
             quality_ranks=quality_ranks,
+            current_album_path=album_info.album_path,
+            album_info=album_info,
         )
-        current = current_result.evidence if current_result.available else None
-    except Exception:
+    except Exception as exc:
         logger.debug(
             "Failed to load/backfill current quality evidence for request %s",
             request_id,
             exc_info=True,
         )
-        current = None
+        return EvidenceImportGate(
+            current=None,
+            candidate=candidate_result.evidence,
+            candidate_status=candidate_result.provenance.candidate_status,
+            candidate_reason=candidate_result.provenance.fallback_reason,
+            current_status="failed",
+            current_reason=f"{type(exc).__name__}: {exc}",
+            current_fail_closed=True,
+            snapshot_guard=candidate_result.provenance.snapshot_guard,
+        )
 
-    if candidate_import_job_id is None and candidate_download_log_id is None:
-        return EvidenceImportGate(current=current)
-
-    candidate_result = load_candidate_evidence_for_source(
-        db,
-        source_path=path,
-        import_job_id=candidate_import_job_id,
-        download_log_id=candidate_download_log_id,
-    )
     return EvidenceImportGate(
-        current=current,
+        current=current_result.evidence if current_result.available else None,
         candidate=candidate_result.evidence,
-        candidate_status=candidate_result.status,
-        candidate_reason=candidate_result.reason,
+        candidate_status=candidate_result.provenance.candidate_status,
+        candidate_reason=candidate_result.provenance.fallback_reason,
+        current_status=current_result.provenance.current_status,
+        current_reason=current_result.provenance.fallback_reason,
+        current_fail_closed=current_result.provenance.fail_closed,
+        snapshot_guard=candidate_result.provenance.snapshot_guard,
     )
 
 
@@ -394,6 +534,8 @@ def _refresh_current_evidence_after_import(
     request_id: int,
     mb_release_id: str,
     quality_ranks: "QualityRankConfig | None",
+    source_candidate: AlbumQualityEvidence | None = None,
+    import_result: ImportResult | None = None,
 ) -> None:
     """Persist current evidence from the just-imported Beets album."""
 
@@ -405,10 +547,29 @@ def _refresh_current_evidence_after_import(
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return
+    decision = import_result.decision if import_result is not None else None
+    verified_lossless_proof = None
+    if decision != "preflight_existing":
+        verified_lossless_proof = (
+            source_candidate.verified_lossless_proof
+            if (
+                source_candidate is not None
+                and source_candidate.measurement.verified_lossless
+            )
+            else (
+                verified_lossless_proof_from_import_result(import_result)
+                if import_result is not None
+                else None
+            )
+        )
     backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
         album_info=album_info,
+        verified_lossless_proof=verified_lossless_proof,
+        preserve_existing_verified_lossless_proof=(
+            import_result is None or decision == "preflight_existing"
+        ),
     )
 
 
@@ -931,6 +1092,7 @@ def dispatch_import_core(
     source_dirs: list[str] | None = None,
     candidate_import_job_id: int | None = None,
     candidate_download_log_id: int | None = None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -1037,6 +1199,7 @@ def dispatch_import_core(
                 deferred=True,
             )
 
+        quality_evidence_action_file: str | None = None
         try:
             try:
                 request_row = db.get_request(request_id)
@@ -1055,6 +1218,7 @@ def dispatch_import_core(
                 quality_ranks=cfg.quality_ranks if cfg is not None else None,
                 candidate_import_job_id=candidate_import_job_id,
                 candidate_download_log_id=candidate_download_log_id,
+                prevalidated_candidate_result=prevalidated_candidate_result,
             )
             existing_v0_probe = lossless_source_v0_probe_from_metric(
                 evidence_gate.current.v0_metric
@@ -1082,6 +1246,18 @@ def dispatch_import_core(
                         "Candidate quality evidence unavailable at import "
                         f"time: {reason or 'missing'}"
                     ),
+                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                )
+            if evidence_gate.candidate is not None and not _current_evidence_allows_action(
+                evidence_gate
+            ):
+                reason = evidence_gate.current_reason or evidence_gate.current_status
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Current quality evidence unavailable at import "
+                        f"time: {reason or 'missing'}"
+                    ),
                 )
 
             if evidence_gate.candidate is not None:
@@ -1103,7 +1279,7 @@ def dispatch_import_core(
                     cfg=cfg.quality_ranks if cfg is not None else None,
                 )
                 if not _import_allowed_by_evidence_pipeline(evidence_decision):
-                    decision = _evidence_decision_name(evidence_decision)
+                    decision = evidence_decision_name(evidence_decision)
                     detail = (
                         "import-time persisted evidence rejected candidate "
                         f"(decision={decision})"
@@ -1140,6 +1316,14 @@ def dispatch_import_core(
                         source_path_cleanup_scenario=scenario,
                         cooled_down_users=cooled_down_users,
                     )
+                quality_evidence_action_file = _write_quality_evidence_action_file(
+                    candidate=evidence_gate.candidate,
+                    current=evidence_gate.current,
+                    decision=evidence_decision,
+                    target_format=target_format,
+                    verified_lossless_target=verified_lossless_target,
+                    gate=evidence_gate,
+                )
             # Mark the subprocess as launching on the auto-import path
             # so the resume guard can distinguish "never started" from
             # "may have written to beets" if this process crashes
@@ -1183,7 +1367,10 @@ def dispatch_import_core(
                     cfg.quality_ranks.to_json() if cfg is not None else None
                 ),
                 existing_v0_probe=existing_v0_probe,
+                quality_evidence_action_file=quality_evidence_action_file,
             )
+            _remove_quality_evidence_action_file(quality_evidence_action_file)
+            quality_evidence_action_file = None
             for line in run.stderr.strip().split("\n"):
                 if line.strip():
                     logger.info(f"  [import] {line}")
@@ -1255,6 +1442,8 @@ def dispatch_import_core(
                             quality_ranks=(
                                 cfg.quality_ranks if cfg is not None else None
                             ),
+                            source_candidate=evidence_gate.candidate,
+                            import_result=ir,
                         )
                     except Exception:
                         logger.exception(
@@ -1550,6 +1739,8 @@ def dispatch_import_core(
                 ).to_json(),
                 staged_path=path)
             outcome_message = "Unhandled exception"
+        finally:
+            _remove_quality_evidence_action_file(quality_evidence_action_file)
 
     return DispatchOutcome(success=outcome_success, message=outcome_message)
 
@@ -1655,6 +1846,55 @@ def _dispatch_import_from_db_locked(
         )]
 
     label = f"{req.get('artist_name', '')} - {req.get('album_title', '')}"
+
+    if import_job_id is not None or download_log_id is not None:
+        candidate_result = ensure_candidate_evidence_for_action(
+            db,
+            source_path=failed_path,
+            import_job_id=import_job_id,
+            download_log_id=download_log_id,
+        )
+        if not candidate_result.available or candidate_result.evidence is None:
+            reason = (
+                candidate_result.provenance.fallback_reason
+                or candidate_result.provenance.candidate_status
+                or "missing"
+            )
+            return DispatchOutcome(
+                success=False,
+                message=(
+                    "Candidate quality evidence unavailable at import "
+                    f"time: {reason}"
+                ),
+                code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+            )
+        dl_info = _download_info_from_candidate_evidence(
+            candidate_result.evidence,
+            username=source_username,
+        )
+        return dispatch_import_core(
+            path=failed_path,
+            mb_release_id=mbid,
+            request_id=request_id,
+            label=label,
+            force=force,
+            override_min_bitrate=None,
+            target_format=req.get("target_format"),
+            verified_lossless_target=cfg.verified_lossless_target,
+            beets_harness_path=cfg.beets_harness_path,
+            db=db,
+            dl_info=dl_info,
+            distance=0.0,
+            scenario="force_import" if force else "manual_import",
+            files=files,
+            cfg=cfg,
+            outcome_label=outcome_label,
+            requeue_on_failure=False,
+            source_dirs=source_dirs,
+            candidate_import_job_id=import_job_id,
+            candidate_download_log_id=download_log_id,
+            prevalidated_candidate_result=candidate_result,
+        )
 
     # --- Shared pre-import gates (audio + spectral) ---
     # Force only skips the beets distance check (--force in import_one.py);

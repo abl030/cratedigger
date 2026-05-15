@@ -31,6 +31,7 @@ from lib.import_queue import (
     ImportJob,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+    IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
     import_preview_enabled_from_env,
@@ -1073,6 +1074,7 @@ class PipelineDB:
             WHERE status IN ('queued', 'running')
             ORDER BY
               CASE
+                WHEN status = 'queued' AND preview_status = 'evidence_ready' THEN 0
                 WHEN status = 'queued' AND preview_status = 'would_import' THEN 0
                 WHEN status = 'running' THEN 1
                 WHEN status = 'queued' AND preview_status = 'running' THEN 2
@@ -1092,13 +1094,20 @@ class PipelineDB:
         self,
         *,
         worker_id: str | None = None,
+        exclude_preview_disabled_automation: bool = False,
     ) -> ImportJob | None:
         cur = self._execute("""
             WITH next_job AS (
                 SELECT id
                 FROM import_jobs
                 WHERE status = 'queued'
-                  AND preview_status = 'would_import'
+                  AND preview_status IN ('evidence_ready', 'would_import')
+                  AND NOT (
+                    %s
+                    AND job_type = %s
+                    AND preview_message = %s
+                    AND preview_result IS NULL
+                  )
                 ORDER BY importable_at ASC NULLS LAST, created_at ASC, id ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -1113,7 +1122,12 @@ class PipelineDB:
             FROM next_job
             WHERE import_jobs.id = next_job.id
             RETURNING import_jobs.*
-        """, (worker_id,))
+        """, (
+            exclude_preview_disabled_automation,
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+            worker_id,
+        ))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
 
@@ -1258,7 +1272,7 @@ class PipelineDB:
                 FROM import_jobs
                 WHERE status = 'queued'
                   AND job_type = %s
-                  AND preview_status = %s
+                  AND preview_status IN (%s, %s)
                   AND preview_message = %s
                   AND preview_result IS NULL
                 ORDER BY created_at ASC, id ASC
@@ -1282,6 +1296,7 @@ class PipelineDB:
             RETURNING import_jobs.*
         """, (
             IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_PREVIEW_EVIDENCE_READY,
             IMPORT_JOB_PREVIEW_WOULD_IMPORT,
             IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
             limit,
@@ -1340,7 +1355,7 @@ class PipelineDB:
     ) -> ImportJob | None:
         cur = self._execute("""
             UPDATE import_jobs
-            SET preview_status = 'would_import',
+            SET preview_status = 'evidence_ready',
                 preview_result = %s,
                 preview_message = %s,
                 preview_error = NULL,
@@ -1735,133 +1750,133 @@ class PipelineDB:
         v0 = evidence.v0_metric
         proof = evidence.verified_lossless_proof
         m = evidence.measurement
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
-            with self.conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            ) as cur:
-                cur.execute(
-                    """
-                    INSERT INTO album_quality_evidence (
-                        owner_type, owner_id, measured_at, codec, container,
-                        storage_format, target_format, min_bitrate_kbps,
-                        avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
-                        spectral_grade, spectral_bitrate_kbps,
-                        verified_lossless, was_converted_from,
-                        v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
-                        v0_median_bitrate_kbps, v0_source_lineage,
-                        v0_source_provenance, v0_proof_provenance,
-                        verified_lossless_proof_origin,
-                        verified_lossless_source, verified_lossless_classifier,
-                        verified_lossless_detail, updated_at
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        NOW()
-                    )
-                    ON CONFLICT (owner_type, owner_id)
-                    DO UPDATE SET
-                        measured_at = EXCLUDED.measured_at,
-                        codec = EXCLUDED.codec,
-                        container = EXCLUDED.container,
-                        storage_format = EXCLUDED.storage_format,
-                        target_format = EXCLUDED.target_format,
-                        min_bitrate_kbps = EXCLUDED.min_bitrate_kbps,
-                        avg_bitrate_kbps = EXCLUDED.avg_bitrate_kbps,
-                        median_bitrate_kbps = EXCLUDED.median_bitrate_kbps,
-                        format = EXCLUDED.format,
-                        is_cbr = EXCLUDED.is_cbr,
-                        spectral_grade = EXCLUDED.spectral_grade,
-                        spectral_bitrate_kbps = EXCLUDED.spectral_bitrate_kbps,
-                        verified_lossless = EXCLUDED.verified_lossless,
-                        was_converted_from = EXCLUDED.was_converted_from,
-                        v0_min_bitrate_kbps = EXCLUDED.v0_min_bitrate_kbps,
-                        v0_avg_bitrate_kbps = EXCLUDED.v0_avg_bitrate_kbps,
-                        v0_median_bitrate_kbps = EXCLUDED.v0_median_bitrate_kbps,
-                        v0_source_lineage = EXCLUDED.v0_source_lineage,
-                        v0_source_provenance = EXCLUDED.v0_source_provenance,
-                        v0_proof_provenance = EXCLUDED.v0_proof_provenance,
-                        verified_lossless_proof_origin =
-                            EXCLUDED.verified_lossless_proof_origin,
-                        verified_lossless_source =
-                            EXCLUDED.verified_lossless_source,
-                        verified_lossless_classifier =
-                            EXCLUDED.verified_lossless_classifier,
-                        verified_lossless_detail =
-                            EXCLUDED.verified_lossless_detail,
-                        updated_at = NOW()
-                    RETURNING id
-                    """,
-                    (
-                        evidence.owner.owner_type,
-                        evidence.owner.owner_id,
-                        evidence.measured_at,
-                        evidence.codec,
-                        evidence.container,
-                        evidence.storage_format,
-                        evidence.target_format,
-                        m.min_bitrate_kbps,
-                        m.avg_bitrate_kbps,
-                        m.median_bitrate_kbps,
-                        m.format,
-                        m.is_cbr,
-                        m.spectral_grade,
-                        m.spectral_bitrate_kbps,
-                        m.verified_lossless,
-                        m.was_converted_from,
-                        v0.min_bitrate_kbps if v0 else None,
-                        v0.avg_bitrate_kbps if v0 else None,
-                        v0.median_bitrate_kbps if v0 else None,
-                        v0.source_lineage if v0 else None,
-                        v0.source_provenance if v0 else None,
-                        v0.proof_provenance if v0 else None,
-                        proof.proof_origin if proof else None,
-                        proof.source if proof else None,
-                        proof.classifier if proof else None,
-                        proof.detail if proof else None,
-                    ),
+        file_rows = [
+            {
+                "ordinal": ordinal,
+                "relative_path": file.relative_path,
+                "size_bytes": file.size_bytes,
+                "mtime_ns": file.mtime_ns,
+                "extension": file.extension,
+                "container": file.container,
+                "codec": file.codec,
+            }
+            for ordinal, file in enumerate(evidence.files)
+        ]
+        self._execute(
+            """
+            WITH upserted AS (
+                INSERT INTO album_quality_evidence (
+                    owner_type, owner_id, measured_at, codec, container,
+                    storage_format, target_format, min_bitrate_kbps,
+                    avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
+                    spectral_grade, spectral_bitrate_kbps,
+                    verified_lossless, was_converted_from,
+                    v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                    v0_median_bitrate_kbps, v0_source_lineage,
+                    v0_source_provenance, v0_proof_provenance,
+                    verified_lossless_proof_origin,
+                    verified_lossless_source, verified_lossless_classifier,
+                    verified_lossless_detail, updated_at
                 )
-                row = cur.fetchone()
-                assert row is not None
-                evidence_id = int(row["id"])
-                cur.execute(
-                    "DELETE FROM album_quality_evidence_files "
-                    "WHERE evidence_id = %s",
-                    (evidence_id,),
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    NOW()
                 )
-                file_rows = [
-                    (
-                        evidence_id,
-                        ordinal,
-                        file.relative_path,
-                        file.size_bytes,
-                        file.mtime_ns,
-                        file.extension,
-                        file.container,
-                        file.codec,
-                    )
-                    for ordinal, file in enumerate(evidence.files)
-                ]
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
-                    INSERT INTO album_quality_evidence_files (
-                        evidence_id, ordinal, relative_path, size_bytes,
-                        mtime_ns, extension, container, codec
-                    )
-                    VALUES %s
-                    """,
-                    file_rows,
+                ON CONFLICT (owner_type, owner_id)
+                DO UPDATE SET
+                    measured_at = EXCLUDED.measured_at,
+                    codec = EXCLUDED.codec,
+                    container = EXCLUDED.container,
+                    storage_format = EXCLUDED.storage_format,
+                    target_format = EXCLUDED.target_format,
+                    min_bitrate_kbps = EXCLUDED.min_bitrate_kbps,
+                    avg_bitrate_kbps = EXCLUDED.avg_bitrate_kbps,
+                    median_bitrate_kbps = EXCLUDED.median_bitrate_kbps,
+                    format = EXCLUDED.format,
+                    is_cbr = EXCLUDED.is_cbr,
+                    spectral_grade = EXCLUDED.spectral_grade,
+                    spectral_bitrate_kbps = EXCLUDED.spectral_bitrate_kbps,
+                    verified_lossless = EXCLUDED.verified_lossless,
+                    was_converted_from = EXCLUDED.was_converted_from,
+                    v0_min_bitrate_kbps = EXCLUDED.v0_min_bitrate_kbps,
+                    v0_avg_bitrate_kbps = EXCLUDED.v0_avg_bitrate_kbps,
+                    v0_median_bitrate_kbps = EXCLUDED.v0_median_bitrate_kbps,
+                    v0_source_lineage = EXCLUDED.v0_source_lineage,
+                    v0_source_provenance = EXCLUDED.v0_source_provenance,
+                    v0_proof_provenance = EXCLUDED.v0_proof_provenance,
+                    verified_lossless_proof_origin =
+                        EXCLUDED.verified_lossless_proof_origin,
+                    verified_lossless_source =
+                        EXCLUDED.verified_lossless_source,
+                    verified_lossless_classifier =
+                        EXCLUDED.verified_lossless_classifier,
+                    verified_lossless_detail =
+                        EXCLUDED.verified_lossless_detail,
+                    updated_at = NOW()
+                RETURNING id
+            ),
+            deleted AS (
+                DELETE FROM album_quality_evidence_files
+                WHERE evidence_id = (SELECT id FROM upserted)
+                RETURNING 1
+            ),
+            delete_complete AS (
+                SELECT COUNT(*) AS ignored FROM deleted
+            ),
+            file_rows AS (
+                SELECT *
+                FROM jsonb_to_recordset(%s::jsonb) AS row(
+                    ordinal INTEGER,
+                    relative_path TEXT,
+                    size_bytes BIGINT,
+                    mtime_ns BIGINT,
+                    extension TEXT,
+                    container TEXT,
+                    codec TEXT
                 )
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
+            )
+            INSERT INTO album_quality_evidence_files (
+                evidence_id, ordinal, relative_path, size_bytes, mtime_ns,
+                extension, container, codec
+            )
+            SELECT upserted.id, file_rows.ordinal, file_rows.relative_path,
+                   file_rows.size_bytes, file_rows.mtime_ns,
+                   file_rows.extension, file_rows.container, file_rows.codec
+            FROM upserted
+            CROSS JOIN delete_complete
+            CROSS JOIN file_rows
+            """,
+            (
+                evidence.owner.owner_type,
+                evidence.owner.owner_id,
+                evidence.measured_at,
+                evidence.codec,
+                evidence.container,
+                evidence.storage_format,
+                evidence.target_format,
+                m.min_bitrate_kbps,
+                m.avg_bitrate_kbps,
+                m.median_bitrate_kbps,
+                m.format,
+                m.is_cbr,
+                m.spectral_grade,
+                m.spectral_bitrate_kbps,
+                m.verified_lossless,
+                m.was_converted_from,
+                v0.min_bitrate_kbps if v0 else None,
+                v0.avg_bitrate_kbps if v0 else None,
+                v0.median_bitrate_kbps if v0 else None,
+                v0.source_lineage if v0 else None,
+                v0.source_provenance if v0 else None,
+                v0.proof_provenance if v0 else None,
+                proof.proof_origin if proof else None,
+                proof.source if proof else None,
+                proof.classifier if proof else None,
+                proof.detail if proof else None,
+                json.dumps(file_rows),
+            ),
+        )
 
     def load_album_quality_evidence(
         self,

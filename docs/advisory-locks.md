@@ -14,8 +14,9 @@ returns true).
 Async import preview workers do not take the importer singleton lock because
 they must not mutate beets or source folders. They claim `import_jobs` preview
 work through row-level `FOR UPDATE SKIP LOCKED` semantics, persist preview
-audit state, and mark only `would_import` jobs as importable for the serial
-worker.
+audit state, and mark jobs `evidence_ready` for the serial worker's final
+action-time evidence check. Legacy `would_import` rows remain claimable only as
+queue compatibility.
 
 Outstanding follow-up: after the preview-gated queue has run in production,
 inventory IMPORT/RELEASE lock call sites and remove any lock whose only

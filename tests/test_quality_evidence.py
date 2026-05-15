@@ -15,6 +15,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
     V0ProbeEvidence,
+    VerifiedLosslessProof,
 )
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
@@ -22,7 +23,7 @@ from lib.quality_evidence import (
     request_current_owner,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_album_quality_evidence, make_request_row
 
 
 class TestQualityEvidenceConstruction(unittest.TestCase):
@@ -122,6 +123,130 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             loaded.owner.owner_type,
             ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
         )
+
+    def test_current_backfill_uses_final_beets_facts_with_carried_source_proof(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        proof = VerifiedLosslessProof(
+            proof_origin="import_result",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+            verified_lossless_proof=proof,
+        )
+
+        self.assertTrue(result.available)
+        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.format, "Opus")
+        self.assertEqual(loaded.measurement.min_bitrate_kbps, 121)
+        self.assertTrue(loaded.measurement.verified_lossless)
+        self.assertEqual(loaded.verified_lossless_proof, proof)
+
+    def test_later_lossy_backfill_preserves_existing_true_source_proof(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        proof = VerifiedLosslessProof(
+            proof_origin="candidate_import",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=116,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                verified_lossless=True,
+            ),
+            verified_lossless_proof=proof,
+            storage_format="Opus",
+        ))
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=112,
+                avg_bitrate_kbps=124,
+                median_bitrate_kbps=123,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.min_bitrate_kbps, 112)
+        self.assertTrue(loaded.measurement.verified_lossless)
+        self.assertEqual(loaded.verified_lossless_proof, proof)
+
+    def test_post_import_lossy_backfill_clears_existing_true_source_proof(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        proof = VerifiedLosslessProof(
+            proof_origin="candidate_import",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=116,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                verified_lossless=True,
+            ),
+            verified_lossless_proof=proof,
+            storage_format="Opus",
+        ))
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                is_cbr=False,
+                album_path=self.root,
+                format="MP3",
+            ),
+            preserve_existing_verified_lossless_proof=False,
+        )
+
+        self.assertTrue(result.available)
+        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        assert loaded is not None
+        self.assertFalse(loaded.measurement.verified_lossless)
+        self.assertIsNone(loaded.verified_lossless_proof)
 
     def test_current_backfill_seeds_spectral_and_neutral_v0_values(self):
         db = FakePipelineDB()

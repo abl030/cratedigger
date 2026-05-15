@@ -9,6 +9,10 @@ import msgspec
 from lib.import_preview import ImportPreviewResult, preview_import_from_download_log
 from lib.import_queue import force_import_dedupe_key
 from lib.util import resolve_failed_path
+from lib.wrong_match_cleanup_decision import (
+    WrongMatchCleanupDecision,
+    decide_wrong_match_cleanup,
+)
 from lib.wrong_matches import cleanup_wrong_match_source, dismiss_wrong_match_source
 
 
@@ -102,30 +106,45 @@ def _persist_triage_measurement(
     )
 
 
-_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
-    "import",
-    "preflight_existing",
-    "transcode_upgrade",
-    "transcode_first",
-})
-_IMPORT_STAGE_CHAIN_ENTRIES: frozenset[str] = frozenset(
-    f"stage2_import:{decision}" for decision in _IMPORT_STAGE_DECISIONS
-)
+def _preview_for_triage(db: Any, download_log_id: int) -> ImportPreviewResult:
+    return preview_import_from_download_log(
+        db,
+        download_log_id,
+        persist_candidate_evidence=True,
+    )
 
 
-def _preview_has_import_stage(preview: ImportPreviewResult) -> bool:
-    if preview.would_import:
-        return True
-    if preview.decision in _IMPORT_STAGE_DECISIONS:
-        return True
-    return any(stage in _IMPORT_STAGE_CHAIN_ENTRIES for stage in preview.stage_chain)
+def _preview_from_cleanup_decision(
+    decision: WrongMatchCleanupDecision,
+) -> ImportPreviewResult:
+    return ImportPreviewResult(
+        mode="download_log",
+        verdict=decision.verdict,
+        would_import=decision.verdict == "would_import",
+        confident_reject=decision.confident_reject,
+        uncertain=decision.uncertain,
+        cleanup_eligible=decision.cleanup_eligible,
+        decision=decision.preview_decision,
+        reason=decision.reason,
+        detail=decision.detail,
+        stage_chain=decision.stage_chain,
+        request_id=decision.request_id,
+        download_log_id=decision.download_log_id,
+        source_path=decision.source_path,
+        import_result=decision.import_result,
+    )
 
 
 def triage_wrong_match(db: Any, download_log_id: int) -> WrongMatchTriageResult:
-    """Preview one wrong-match row and clean only explicit safe rejects."""
-    preview = preview_import_from_download_log(db, download_log_id)
+    """Analyze one wrong-match row and clean only explicit safe rejects."""
+    decision = decide_wrong_match_cleanup(
+        db,
+        download_log_id,
+        preview_builder=_preview_for_triage,
+    )
+    preview = _preview_from_cleanup_decision(decision)
 
-    if _preview_has_import_stage(preview):
+    if decision.verdict == "would_import" and not decision.uncertain:
         return _persist_triage_audit(db, WrongMatchTriageResult(
             download_log_id=download_log_id,
             action="kept_would_import",
@@ -134,11 +153,11 @@ def triage_wrong_match(db: Any, download_log_id: int) -> WrongMatchTriageResult:
             preview=preview,
         ))
 
-    if preview.confident_reject and preview.cleanup_eligible:
+    if decision.delete_allowed:
         cleanup = cleanup_wrong_match_source(
             db,
             download_log_id,
-            failed_path_hint=preview.source_path,
+            failed_path_hint=decision.source_path,
         )
         return _persist_triage_audit(db, WrongMatchTriageResult(
             download_log_id=download_log_id,
@@ -149,11 +168,11 @@ def triage_wrong_match(db: Any, download_log_id: int) -> WrongMatchTriageResult:
             cleanup=cleanup.to_dict(),
         ))
 
-    if preview.decision == "path_missing":
+    if decision.preview_decision == "path_missing":
         dismissal = dismiss_wrong_match_source(
             db,
             download_log_id,
-            failed_path_hint=preview.source_path,
+            failed_path_hint=decision.source_path,
         )
         return _persist_triage_audit(db, WrongMatchTriageResult(
             download_log_id=download_log_id,
@@ -162,15 +181,6 @@ def triage_wrong_match(db: Any, download_log_id: int) -> WrongMatchTriageResult:
             reason=preview.reason,
             preview=preview,
             cleanup=dismissal.to_dict(),
-        ))
-
-    if preview.would_import:
-        return _persist_triage_audit(db, WrongMatchTriageResult(
-            download_log_id=download_log_id,
-            action="kept_would_import",
-            success=True,
-            reason=preview.reason,
-            preview=preview,
         ))
 
     return _persist_triage_audit(db, WrongMatchTriageResult(

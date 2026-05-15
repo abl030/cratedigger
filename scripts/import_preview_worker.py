@@ -18,6 +18,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.import_preview import ImportPreviewResult, preview_import_from_path
+from lib.import_evidence import ensure_candidate_evidence_for_action
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -34,6 +35,7 @@ LEGACY_DISABLED_REQUEUE_LIMIT = 100
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(hours=1)
+PREVIEW_FAILURE_STATUS = "uncertain"
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -44,12 +46,34 @@ def _preview_reason(result: ImportPreviewResult) -> str:
     return result.reason or result.decision or result.verdict
 
 
-def _failure_preview_status(result: ImportPreviewResult) -> str:
-    if result.confident_reject:
-        return "confident_reject"
-    if result.uncertain:
-        return "uncertain"
-    return "error"
+def _download_log_id_from_job(job: ImportJob) -> int | None:
+    payload = job.payload or {}
+    download_log_id = payload.get("download_log_id")
+    return download_log_id if isinstance(download_log_id, int) else None
+
+
+def _candidate_evidence_ready_for_job(
+    db: Any,
+    job: ImportJob,
+    result: ImportPreviewResult,
+) -> tuple[bool, str]:
+    source_path = result.source_path
+    if not source_path:
+        return False, "preview_source_path_missing"
+    candidate = ensure_candidate_evidence_for_action(
+        db,
+        source_path=source_path,
+        import_job_id=job.id,
+        download_log_id=_download_log_id_from_job(job),
+    )
+    if candidate.available and candidate.evidence is not None:
+        return True, "ready"
+    return (
+        False,
+        candidate.provenance.fallback_reason
+        or candidate.provenance.candidate_status
+        or "candidate_evidence_unavailable",
+    )
 
 
 def _state_from_raw(raw: Any) -> ActiveDownloadState:
@@ -222,25 +246,30 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         )
 
     preview_payload = _preview_result_dict(result)
-    if result.would_import:
+    evidence_ready, evidence_reason = _candidate_evidence_ready_for_job(
+        db,
+        job,
+        result,
+    )
+    if evidence_ready:
         return db.mark_import_job_preview_importable(
             job.id,
             preview_result=preview_payload,
-            message=f"Preview would import: {_preview_reason(result)}",
+            message=f"Evidence ready for final check: {_preview_reason(result)}",
         )
 
-    reason = _preview_reason(result)
+    reason = _preview_reason(result) or evidence_reason
     if job.job_type == IMPORT_JOB_AUTOMATION:
         return _mark_automation_preview_blocked(
             db,
             job,
-            preview_status=_failure_preview_status(result),
+            preview_status=PREVIEW_FAILURE_STATUS,
             reason=reason,
             preview_payload=preview_payload,
         )
     return db.mark_import_job_preview_failed(
         job.id,
-        preview_status=_failure_preview_status(result),
+        preview_status=PREVIEW_FAILURE_STATUS,
         error=reason,
         preview_result=preview_payload,
         message=f"Preview failed: {reason}",

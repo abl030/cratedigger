@@ -531,7 +531,7 @@ behavioral authority, but should land in the same PR if it stays small.
 - Run integration slices before PR review:
   - `tests.test_integration_slices`
 - Run full checks before merge:
-  - `python3 -m unittest discover tests -v`
+  - `nix-shell --run "python3 -m unittest discover tests -v"`
   - JS sweep for `tests/test_js_*.mjs`
   - `pyright` on touched Python paths, then broader pyright if existing noise is
     not blocking.

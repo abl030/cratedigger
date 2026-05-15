@@ -101,11 +101,14 @@ Key fields:
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
 - `preview_status TEXT` — async readiness/audit stage: `waiting`, `running`,
-  `would_import`, `confident_reject`, `uncertain`, or `error`. The legacy
-  `would_import` token is queue readiness only. It is not import authority, and
-  workers must recompute the mutating decision from fresh evidence at import
-  time. New jobs use `waiting` only when the async preview gate is enabled;
-  preview-disabled or raw/default inserts are `would_import` immediately with
+  `evidence_ready`, legacy `would_import`, `confident_reject`, `uncertain`, or
+  `error`. `evidence_ready` means candidate evidence exists for the final
+  action-time check; it is not import authority. The legacy `would_import`
+  token remains claimable for preview-disabled compatibility and old rows only.
+  Workers must recompute the mutating decision from fresh current evidence plus
+  snapshot-valid candidate evidence at import time. New jobs use `waiting` only
+  when the async preview gate is enabled; preview-disabled or raw/default
+  inserts are `would_import` immediately with
   `preview_message='Preview gate disabled'`.
 - `preview_result JSONB`, `preview_message`, `preview_error` — durable
   no-mutation preview audit visible in Recents and CLI output. Stored verdicts
@@ -114,9 +117,9 @@ Key fields:
 - `preview_attempts`, `preview_worker_id`, `preview_started_at`,
   `preview_heartbeat_at`, `preview_completed_at` — async preview claim and
   recovery metadata.
-- `importable_at TIMESTAMPTZ` — set when preview returns `would_import`, or at
-  enqueue time when the preview gate is disabled; the serial importer claims
-  only queued jobs with this importable preview state.
+- `importable_at TIMESTAMPTZ` — set when preview produces `evidence_ready`, or
+  at enqueue time when the preview gate is disabled; the serial importer claims
+  queued jobs with `evidence_ready` and legacy `would_import`.
 
 On importer startup, any pre-existing `running` job is treated as abandoned
 state from a previous worker process, reset to `queued`, and retried
@@ -133,9 +136,14 @@ stay serial, without letting preview decisions become later mutation authority.
 
 The preview gate is opt-in at deployment time. When disabled, no preview worker
 is required for compatibility: `PipelineDB.enqueue_import_job()` and the schema
-defaults both make jobs importable immediately. Legacy completed/failed rows
-from before async previews are also normalized to `would_import` so historical
+defaults both make jobs importable immediately as legacy `would_import` rows
+with `preview_message='Preview gate disabled'`. Legacy completed/failed rows
+from before async previews may also carry `would_import` so historical
 terminal import history does not look like active preview backlog.
+Rollback to pre-018 code requires queue reconciliation first: stop import
+workers and reset queued or running `evidence_ready` rows to queued `waiting`
+rows so old preview code recomputes them. Do not bulk-convert them to
+`would_import`; that would restore preview-decision authority.
 The Recents Queue endpoint lists only active `queued`/`running` jobs; terminal
 `completed`/`failed` rows remain durable audit history and must not be rendered
 as live queue work.

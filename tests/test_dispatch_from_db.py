@@ -10,7 +10,20 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
-from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
+from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AudioQualityMeasurement,
+)
+from lib.quality_evidence import snapshot_audio_files
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_import_result,
+    make_request_row,
+    patch_dispatch_externals,
+)
 from tests.fakes import FakePipelineDB
 
 
@@ -172,6 +185,239 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             "Force import may bypass distance only; a stale preview "
             "ImportResult must not be passed to import_one as decision authority.",
         )
+
+    def test_force_import_with_valid_candidate_evidence_skips_preimport_measurement(self):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Son Ambulance",
+            album_title="Someone Else's Deja Vu",
+        ))
+        download_log_id = db.log_download(
+            42,
+            outcome="rejected",
+            validation_result={"failed_path": ""},
+        )
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            files = snapshot_audio_files(tmpdir)
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=download_log_id,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=128,
+                    median_bitrate_kbps=128,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 128",
+            ))
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
+                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
+                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
+                 patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                    source_username="alice",
+                    download_log_id=download_log_id,
+                )
+
+            self.assertTrue(result.success)
+            repair.assert_not_called()
+            inspect.assert_not_called()
+            gates.assert_not_called()
+            cmd = ext.run.call_args[0][0]
+            self.assertIn("--quality-evidence-action-file", cmd)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_manual_import_with_valid_candidate_evidence_skips_preimport_measurement(self):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Son Ambulance",
+            album_title="Someone Else's Deja Vu",
+        ))
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+            )
+            import_job_id = job.id
+            files = snapshot_audio_files(tmpdir)
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=import_job_id,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=128,
+                    median_bitrate_kbps=128,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 128",
+            ))
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch._check_quality_gate_core"), \
+                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
+                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
+                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
+                 patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=False,
+                    source_username="alice",
+                    import_job_id=import_job_id,
+                    outcome_label="manual_import",
+                )
+
+            self.assertTrue(result.success)
+            repair.assert_not_called()
+            inspect.assert_not_called()
+            gates.assert_not_called()
+            cmd = ext.run.call_args[0][0]
+            self.assertIn("--quality-evidence-action-file", cmd)
+            self.assertNotIn("--force", cmd)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_force_import_with_stale_candidate_evidence_fails_before_preimport(self):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Son Ambulance",
+            album_title="Someone Else's Deja Vu",
+        ))
+        download_log_id = db.log_download(
+            42,
+            outcome="rejected",
+            validation_result={"failed_path": ""},
+        )
+        tmpdir = tempfile.mkdtemp()
+        try:
+            track = os.path.join(tmpdir, "01.mp3")
+            with open(track, "wb") as handle:
+                handle.write(b"audio")
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=download_log_id,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            with open(track, "ab") as handle:
+                handle.write(b" changed")
+
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
+                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
+                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
+                 patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                    source_username="alice",
+                    download_log_id=download_log_id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertIn("Candidate quality evidence unavailable", result.message)
+            repair.assert_not_called()
+            inspect.assert_not_called()
+            gates.assert_not_called()
+            ext.run.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     # --- Seam: preserve-source flag (issue #111) ---
 

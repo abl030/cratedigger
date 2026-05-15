@@ -1797,6 +1797,15 @@ class PostflightInfo(msgspec.Struct):
     duplicate_remove_guard: Optional[DuplicateRemoveGuardInfo] = None
 
 
+class QualityEvidenceActionProvenance(msgspec.Struct, frozen=True):
+    """Provenance for action-time quality evidence acquisition."""
+
+    candidate_status: str | None = None
+    current_status: str | None = None
+    snapshot_status: str | None = None
+    fallback_reason: str | None = None
+
+
 class ImportResult(msgspec.Struct):
     """Structured result emitted by import_one.py as JSON.
 
@@ -1832,6 +1841,9 @@ class ImportResult(msgspec.Struct):
     preview: bool = False              # True for no-mutation import preview
     v0_probe: Optional[V0ProbeEvidence] = None
     existing_v0_probe: Optional[V0ProbeEvidence] = None
+    quality_evidence_provenance: QualityEvidenceActionProvenance = msgspec.field(
+        default_factory=QualityEvidenceActionProvenance
+    )
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
@@ -2681,6 +2693,8 @@ def dispatch_action(decision: str) -> DispatchAction:
     elif decision == "transcode_downgrade":
         return DispatchAction(record_rejection=True, denylist=True, requeue=True,
                               cleanup=True)
+    elif decision == "spectral_reject":
+        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "duplicate_remove_guard_failed":
         return DispatchAction(record_rejection=True, denylist=True, requeue=False,
                               cleanup=False)
@@ -4011,6 +4025,122 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     target_format: str | None = None
     converted_count: int | None = None
     post_conversion_min_bitrate: int | None = None
+
+
+class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
+    """Action-time payload that authorizes import mutation from evidence.
+
+    This payload is generated for a specific import action. It is not a stored
+    preview verdict: the candidate/current evidence and decision reflect the
+    action-time reducer inputs and output that allowed mutation.
+    """
+
+    candidate: AlbumQualityEvidence
+    current: AlbumQualityEvidence | None = None
+    decision: dict[str, Any] = msgspec.field(default_factory=dict)
+    decision_name: str | None = None
+    target_format: str | None = None
+    verified_lossless_target: str | None = None
+    provenance: QualityEvidenceActionProvenance = msgspec.field(
+        default_factory=QualityEvidenceActionProvenance
+    )
+
+
+def evidence_decision_name(
+    result: dict[str, object],
+    *,
+    default: str = "quality_reject",
+) -> str:
+    """Return the dispatch decision represented by a quality decision dict."""
+
+    for key in ("stage2_import", "stage3_quality_gate"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            return value
+    if result.get("preimport_nested") == "reject_nested":
+        return "nested_layout"
+    if result.get("preimport_audio") == "reject_corrupt":
+        return "audio_corrupt"
+    if (
+        result.get("stage1_spectral") == "reject"
+        and not result.get("stage2_import")
+    ):
+        return "spectral_reject"
+    return default
+
+
+QUALITY_DECISION_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
+    "import",
+    "preflight_existing",
+    "transcode_upgrade",
+    "transcode_first",
+    "provisional_lossless_upgrade",
+})
+QUALITY_DECISION_REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
+    "downgrade",
+    "transcode_downgrade",
+    "suspect_lossless_downgrade",
+    "suspect_lossless_probe_missing",
+    "lossless_source_locked",
+})
+QUALITY_DECISION_REQUEUE_DECISIONS: frozenset[str] = frozenset({
+    "requeue_upgrade",
+    "requeue_lossless",
+})
+
+
+def classify_quality_import_stages(
+    stage2: object,
+    stage3: object,
+    *,
+    imported: bool,
+) -> tuple[str, bool, str | None]:
+    """Classify import-stage outcomes for preview/audit cleanup policy.
+
+    Returns ``(verdict, cleanup_eligible, reason)``. ``cleanup_eligible`` means
+    the rejection is safe to use for source-folder cleanup; import/requeue
+    outcomes are never cleanup-eligible.
+    """
+
+    stage2_decision = str(stage2) if isinstance(stage2, str) else None
+    stage3_decision = str(stage3) if isinstance(stage3, str) else None
+
+    if stage2_decision in QUALITY_DECISION_REJECT_STAGE_DECISIONS:
+        return "confident_reject", True, stage2_decision
+
+    if stage2_decision in QUALITY_DECISION_IMPORT_STAGE_DECISIONS or imported:
+        reason = (
+            stage3_decision
+            if stage3_decision in QUALITY_DECISION_REQUEUE_DECISIONS
+            else stage2_decision or stage3_decision or "import"
+        )
+        return "would_import", False, reason
+
+    if stage3_decision in QUALITY_DECISION_REQUEUE_DECISIONS:
+        return "uncertain", False, stage3_decision
+
+    return "uncertain", False, stage2_decision or stage3_decision or "unknown"
+
+
+def classify_full_pipeline_decision(
+    decision: dict[str, object],
+) -> tuple[str, bool, str | None]:
+    """Classify a full pipeline decision dict for preview/cleanup display."""
+
+    if decision.get("preimport_nested") == "reject_nested":
+        return "confident_reject", True, "nested_layout"
+    if decision.get("preimport_audio") == "reject_corrupt":
+        return "confident_reject", True, "audio_corrupt"
+    if (
+        decision.get("stage1_spectral") == "reject"
+        and not decision.get("stage2_import")
+    ):
+        return "confident_reject", True, "spectral_reject"
+    return classify_quality_import_stages(
+        decision.get("stage2_import"),
+        decision.get("stage3_quality_gate"),
+        imported=bool(decision.get("imported")),
+    )
 
 
 def _require_evidence_ready(

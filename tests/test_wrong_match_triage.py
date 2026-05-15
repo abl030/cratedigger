@@ -19,8 +19,41 @@ from lib.wrong_match_triage import (
     triage_wrong_match,
     triage_wrong_matches,
 )
+from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+
+
+def _cleanup_decision_from_preview(
+    download_log_id: int,
+    preview: ImportPreviewResult,
+    *,
+    request_id: int = 1,
+    source_path: str | None = None,
+    verdict: str | None = None,
+    delete_allowed: bool | None = None,
+) -> WrongMatchCleanupDecision:
+    resolved_verdict = verdict or preview.verdict
+    confident_reject = resolved_verdict == "confident_reject"
+    cleanup_eligible = preview.cleanup_eligible if confident_reject else False
+    if delete_allowed is None:
+        delete_allowed = confident_reject and cleanup_eligible
+    return WrongMatchCleanupDecision(
+        download_log_id=download_log_id,
+        delete_allowed=delete_allowed,
+        uncertain=resolved_verdict == "uncertain",
+        provenance="album_quality_evidence",
+        verdict=resolved_verdict,
+        confident_reject=confident_reject,
+        cleanup_eligible=cleanup_eligible,
+        preview_decision=preview.decision,
+        reason=preview.reason,
+        detail=preview.detail,
+        request_id=request_id,
+        source_path=preview.source_path or source_path,
+        stage_chain=tuple(preview.stage_chain),
+        import_result=preview.import_result,
+    )
 
 
 class TestWrongMatchTriage(unittest.TestCase):
@@ -47,18 +80,19 @@ class TestWrongMatchTriage(unittest.TestCase):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db, log_id = self._db_with_wrong_match(source)
+            preview = ImportPreviewResult(
+                mode="download_log",
+                verdict="confident_reject",
+                confident_reject=True,
+                cleanup_eligible=True,
+                decision="downgrade",
+                reason="downgrade",
+                source_path=source,
+            )
 
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=ImportPreviewResult(
-                    mode="download_log",
-                    verdict="confident_reject",
-                    confident_reject=True,
-                    cleanup_eligible=True,
-                    decision="downgrade",
-                    reason="downgrade",
-                    source_path=source,
-                ),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 result = triage_wrong_match(db, log_id)
 
@@ -83,17 +117,18 @@ class TestWrongMatchTriage(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._db_with_wrong_match(source)
+            preview = ImportPreviewResult(
+                mode="download_log",
+                verdict="would_import",
+                would_import=True,
+                decision="import",
+                reason="import",
+                source_path=source,
+            )
 
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=ImportPreviewResult(
-                    mode="download_log",
-                    verdict="would_import",
-                    would_import=True,
-                    decision="import",
-                    reason="import",
-                    source_path=source,
-                ),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 result = triage_wrong_match(db, log_id)
 
@@ -112,28 +147,65 @@ class TestWrongMatchTriage(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_triage_uses_single_cleanup_decision_as_authority(self):
+        source = tempfile.mkdtemp()
+        try:
+            db, log_id = self._db_with_wrong_match(source)
+            decision = WrongMatchCleanupDecision(
+                download_log_id=log_id,
+                delete_allowed=False,
+                uncertain=False,
+                provenance="album_quality_evidence",
+                verdict="would_import",
+                confident_reject=False,
+                cleanup_eligible=False,
+                preview_decision="import",
+                reason="import",
+                request_id=1,
+                source_path=source,
+                stage_chain=("stage2_import:import",),
+            )
+
+            with patch(
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=decision,
+            ) as decide, patch(
+                "lib.wrong_match_triage.preview_import_from_download_log",
+                side_effect=AssertionError(
+                    "triage must not recompute preview after cleanup decision"
+                ),
+            ) as preview:
+                result = triage_wrong_match(db, log_id)
+
+            decide.assert_called_once()
+            preview.assert_not_called()
+            self.assertEqual(result.action, "kept_would_import")
+            self.assertTrue(os.path.isdir(source))
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_import_stage_requeue_preview_leaves_candidate_visible(self):
         source = tempfile.mkdtemp()
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db, log_id = self._db_with_wrong_match(source)
+            preview = ImportPreviewResult(
+                mode="download_log",
+                verdict="would_import",
+                would_import=True,
+                decision="import",
+                reason="requeue_upgrade",
+                source_path=source,
+                stage_chain=[
+                    "stage2_import:import",
+                    "stage3_quality_gate:requeue_upgrade",
+                ],
+            )
 
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=ImportPreviewResult(
-                    mode="download_log",
-                    verdict="confident_reject",
-                    confident_reject=True,
-                    cleanup_eligible=True,
-                    decision="import",
-                    reason="requeue_upgrade",
-                    source_path=source,
-                    stage_chain=[
-                        "stage2_import:import",
-                        "stage3_quality_gate:requeue_upgrade",
-                    ],
-                ),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 result = triage_wrong_match(db, log_id)
 
@@ -148,7 +220,7 @@ class TestWrongMatchTriage(unittest.TestCase):
             audit = vr["wrong_match_triage"]
             assert isinstance(audit, dict)
             self.assertEqual(audit["action"], "kept_would_import")
-            self.assertEqual(audit["preview_verdict"], "confident_reject")
+            self.assertEqual(audit["preview_verdict"], "would_import")
             self.assertEqual(audit["preview_decision"], "import")
             self.assertEqual(audit["reason"], "requeue_upgrade")
             self.assertIn("failed_path", vr)
@@ -159,17 +231,18 @@ class TestWrongMatchTriage(unittest.TestCase):
         source = tempfile.mkdtemp()
         shutil.rmtree(source)
         db, log_id = self._db_with_wrong_match(source)
+        preview = ImportPreviewResult(
+            mode="download_log",
+            verdict="uncertain",
+            uncertain=True,
+            decision="path_missing",
+            reason="path_missing",
+            source_path=source,
+        )
 
         with patch(
-            "lib.wrong_match_triage.preview_import_from_download_log",
-            return_value=ImportPreviewResult(
-                mode="download_log",
-                verdict="uncertain",
-                uncertain=True,
-                decision="path_missing",
-                reason="path_missing",
-                source_path=source,
-            ),
+            "lib.wrong_match_triage.decide_wrong_match_cleanup",
+            return_value=_cleanup_decision_from_preview(log_id, preview),
         ):
             result = triage_wrong_match(db, log_id)
 
@@ -395,9 +468,10 @@ class TestTriageMeasurementPersistence(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._seed(source)
+            preview = self._measured_preview(source)
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=self._measured_preview(source),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 triage_wrong_match(db, log_id)
 
@@ -424,18 +498,19 @@ class TestTriageMeasurementPersistence(unittest.TestCase):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db, log_id = self._seed(source)
+            preview = ImportPreviewResult(
+                mode="download_log",
+                verdict="confident_reject",
+                confident_reject=True,
+                cleanup_eligible=True,
+                decision="nested_layout",
+                reason="nested_layout",
+                source_path=source,
+                import_result=None,
+            )
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=ImportPreviewResult(
-                    mode="download_log",
-                    verdict="confident_reject",
-                    confident_reject=True,
-                    cleanup_eligible=True,
-                    decision="nested_layout",
-                    reason="nested_layout",
-                    source_path=source,
-                    import_result=None,
-                ),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 triage_wrong_match(db, log_id)
 
@@ -458,14 +533,15 @@ class TestTriageMeasurementPersistence(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._seed(source)
+            preview = self._measured_preview(
+                source,
+                spectral_grade="marginal",
+                spectral_bitrate_kbps=800,
+                v0_probe_avg_kbps=None,
+            )
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=self._measured_preview(
-                    source,
-                    spectral_grade="marginal",
-                    spectral_bitrate_kbps=800,
-                    v0_probe_avg_kbps=None,
-                ),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 triage_wrong_match(db, log_id)
 
@@ -482,14 +558,15 @@ class TestTriageMeasurementPersistence(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._seed(source)
+            preview = self._measured_preview(
+                source,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                v0_probe_avg_kbps=240,
+            )
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=self._measured_preview(
-                    source,
-                    spectral_grade=None,
-                    spectral_bitrate_kbps=None,
-                    v0_probe_avg_kbps=240,
-                ),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 triage_wrong_match(db, log_id)
 
@@ -506,21 +583,22 @@ class TestTriageMeasurementPersistence(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._seed(source)
-            with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=ImportPreviewResult(
-                    mode="download_log",
-                    verdict="would_import",
-                    would_import=True,
+            preview = ImportPreviewResult(
+                mode="download_log",
+                verdict="would_import",
+                would_import=True,
+                decision="import",
+                reason="import",
+                source_path=source,
+                import_result=ImportResult(
                     decision="import",
-                    reason="import",
-                    source_path=source,
-                    import_result=ImportResult(
-                        decision="import",
-                        new_measurement=None,
-                        v0_probe=None,
-                    ),
+                    new_measurement=None,
+                    v0_probe=None,
                 ),
+            )
+            with patch(
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ):
                 triage_wrong_match(db, log_id)
 
@@ -566,9 +644,10 @@ class TestTriageMeasurementPersistence(unittest.TestCase):
         source = tempfile.mkdtemp()
         try:
             db, log_id = self._seed(source)
+            preview = self._measured_preview(source)
             with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=self._measured_preview(source),
+                "lib.wrong_match_triage.decide_wrong_match_cleanup",
+                return_value=_cleanup_decision_from_preview(log_id, preview),
             ), patch.object(
                 db,
                 "update_download_log_measurement",

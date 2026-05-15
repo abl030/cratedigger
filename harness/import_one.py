@@ -34,6 +34,8 @@ import time
 from dataclasses import dataclass
 from typing import NoReturn
 
+import msgspec
+
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -48,11 +50,13 @@ _bootstrap_import_paths()
 from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
-from lib.util import beets_subprocess_env
+from lib.util import beets_subprocess_env, repair_mp3_headers
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DuplicateRemoveCandidate,
                          DuplicateRemoveGuardInfo, ImportResult,
                          PostflightInfo, QualityRankConfig,
+                         QualityEvidenceActionPayload,
+                         QualityEvidenceActionProvenance,
                          MeasuredImportDecisionInput,
                          ProvisionalLosslessDecisionInput,
                          ProvisionalLosslessDecisionResult,
@@ -62,6 +66,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          SPECTRAL_TRANSCODE_GRADES,
                          build_existing_quality_measurement,
                          comparison_format_hint, determine_verified_lossless,
+                         evidence_decision_name,
                          measured_import_decision,
                          provisional_lossless_decision, transcode_detection,
                          v0_probe_overrides_spectral)
@@ -731,7 +736,9 @@ def _remove_lossless_files(folder: str) -> None:
 
 def convert_lossless(album_path: str, spec: ConversionSpec,
                      dry_run: bool = False,
-                     keep_source: bool = False) -> tuple[int, int, str | None]:
+                     keep_source: bool = False,
+                     lossless_files: list[str] | None = None
+                     ) -> tuple[int, int, str | None]:
     """Convert all lossless files using the given ConversionSpec.
 
     Single conversion function — replaces both convert_lossless_to_v0()
@@ -747,8 +754,10 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
     the same path as the source (ALAC .m4a → AAC .m4a), conversion runs through
     a temporary file first so the source is not silently skipped.
     """
-    lossless_files = sorted(
-        f for f in os.listdir(album_path) if _is_lossless_file(f, album_path))
+    if lossless_files is None:
+        lossless_files = _lossless_filenames(album_path)
+    else:
+        lossless_files = sorted(lossless_files)
     if not lossless_files:
         return 0, 0, None
 
@@ -1076,6 +1085,294 @@ def _record_bad_extension_warnings(
     return bad_ext_files
 
 
+def _load_quality_evidence_action_file(
+    path: str,
+) -> QualityEvidenceActionPayload:
+    with open(path, "rb") as f:
+        return msgspec.json.decode(f.read(), type=QualityEvidenceActionPayload)
+
+
+def _evidence_action_decision_name(
+    payload: QualityEvidenceActionPayload,
+) -> str:
+    if payload.decision_name:
+        return payload.decision_name
+    return evidence_decision_name(
+        payload.decision,
+        default="quality_evidence_action_failed",
+    )
+
+
+def _evidence_action_allows_import(
+    payload: QualityEvidenceActionPayload,
+) -> bool:
+    decision_name = _evidence_action_decision_name(payload)
+    stage2 = payload.decision.get("stage2_import")
+    action_name = stage2 if isinstance(stage2, str) and stage2 else decision_name
+    if action_name not in {
+        "import",
+        "transcode_upgrade",
+        "transcode_first",
+        "provisional_lossless_upgrade",
+    }:
+        return False
+    return payload.decision.get("imported") is True
+
+
+def _validate_quality_evidence_action_snapshot(
+    work_path: str,
+    payload: QualityEvidenceActionPayload,
+) -> None:
+    from lib.quality_evidence import audio_snapshot_matches
+
+    if not audio_snapshot_matches(work_path, payload.candidate.files):
+        raise ValueError(
+            "quality evidence action snapshot mismatch; refusing to mutate"
+        )
+
+
+def _materialize_quality_evidence_action(
+    *,
+    work_path: str,
+    payload: QualityEvidenceActionPayload,
+    r: ImportResult,
+) -> bool:
+    """Prepare files for Beets without recomputing quality evidence."""
+    target_format = payload.target_format
+    target_final_format = payload.decision.get("target_final_format")
+    if not isinstance(target_final_format, str) or not target_final_format:
+        target_final_format = None
+    keep_lossless = target_format in ("flac", "lossless")
+    lossless_files = _lossless_filenames(work_path)
+
+    if not lossless_files:
+        r.final_format = payload.candidate.measurement.format
+        return False
+
+    original_ext = None
+    if keep_lossless:
+        has_non_flac = any(
+            not f.lower().endswith(".flac") for f in lossless_files)
+        if has_non_flac:
+            _log("[EVIDENCE] Normalizing non-FLAC lossless for Beets import")
+            stage_start = time.monotonic()
+            try:
+                converted, failed, original_ext = convert_lossless(
+                    work_path, FLAC_SPEC, lossless_files=lossless_files)
+            finally:
+                _log_timing("evidence_lossless_normalization", stage_start)
+            r.conversion.converted = converted
+            r.conversion.failed = failed
+            if failed > 0:
+                raise RuntimeError(f"{failed} FLAC normalizations failed")
+            if converted > 0:
+                r.conversion.was_converted = True
+                r.conversion.original_filetype = original_ext
+                r.conversion.target_filetype = "flac"
+        r.final_format = "flac"
+        return False
+
+    target_spec = (
+        parse_verified_lossless_target(target_final_format)
+        if target_final_format else V0_SPEC
+    )
+    _log(f"[EVIDENCE] Materializing lossless source → {target_spec.label}")
+    stage_start = time.monotonic()
+    try:
+        converted, failed, original_ext = convert_lossless(
+            work_path,
+            target_spec,
+            keep_source=True,
+            lossless_files=lossless_files,
+        )
+    finally:
+        _log_timing("evidence_materialization", stage_start)
+    r.conversion.converted = converted
+    r.conversion.failed = failed
+    if failed > 0:
+        raise RuntimeError(f"{failed} {target_spec.label} conversions failed")
+    _remove_lossless_files(work_path)
+    if converted > 0:
+        r.conversion.was_converted = True
+        r.conversion.original_filetype = original_ext or "flac"
+        r.conversion.target_filetype = target_spec.extension
+    r.final_format = target_spec.label
+    return _evidence_action_decision_name(payload) in {
+        "transcode_upgrade",
+        "transcode_first",
+    }
+
+
+def _cleanup_staged_dir(work_path: str) -> None:
+    if not os.path.isdir(work_path):
+        return
+    stage_start = time.monotonic()
+    for root, dirs, files in os.walk(work_path, topdown=False):
+        for f in files:
+            os.remove(os.path.join(root, f))
+        for d in dirs:
+            try:
+                os.rmdir(os.path.join(root, d))
+            except OSError:
+                pass
+    try:
+        os.rmdir(work_path)
+    except OSError:
+        pass
+    parent = os.path.dirname(work_path)
+    try:
+        os.rmdir(parent)
+    except OSError:
+        pass
+    _log_timing("cleanup_staged_dir", stage_start)
+
+
+def _run_quality_evidence_authorized_import(
+    *,
+    args: argparse.Namespace,
+    beets: BeetsDB,
+    mbid: str,
+    request_id: int | None,
+    already_in_beets: bool,
+) -> NoReturn:
+    action_file = args.quality_evidence_action_file
+    assert action_file is not None
+    r = ImportResult()
+    r.already_in_beets = already_in_beets
+    global _current_result  # noqa: PLW0603
+    _current_result = r
+
+    try:
+        payload = _load_quality_evidence_action_file(action_file)
+        r.decision = _evidence_action_decision_name(payload)
+        r.new_measurement = payload.candidate.measurement
+        r.existing_measurement = (
+            payload.current.measurement if payload.current is not None else None
+        )
+        r.quality_evidence_provenance = QualityEvidenceActionProvenance(
+            candidate_status=payload.provenance.candidate_status,
+            current_status=payload.provenance.current_status,
+            snapshot_status=payload.provenance.snapshot_status,
+            fallback_reason=payload.provenance.fallback_reason,
+        )
+        from lib.quality_evidence import lossless_source_v0_probe_from_metric
+        r.v0_probe = lossless_source_v0_probe_from_metric(
+            payload.candidate.v0_metric)
+        r.existing_v0_probe = lossless_source_v0_probe_from_metric(
+            payload.current.v0_metric
+            if payload.current is not None else None)
+
+        if not _evidence_action_allows_import(payload):
+            r.exit_code = 5
+            r.decision = "quality_evidence_action_failed"
+            r.error = "quality evidence action decision does not allow import"
+            _emit_and_exit(r)
+
+        _validate_quality_evidence_action_snapshot(args.path, payload)
+        stage_start = time.monotonic()
+        repair_mp3_headers(args.path)
+        _log_timing("evidence_mp3_repair", stage_start)
+        quality_is_transcode = _materialize_quality_evidence_action(
+            work_path=args.path,
+            payload=payload,
+            r=r,
+        )
+    except Exception as exc:
+        r.exit_code = 5
+        r.decision = "quality_evidence_action_failed"
+        r.error = str(exc)
+        _log(f"[ERROR] {r.error}")
+        _emit_and_exit(r)
+
+    _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
+    stage_start = time.monotonic()
+    import_outcome = run_import(args.path, mbid)
+    _log_timing("beets_import", stage_start)
+    rc = import_outcome.exit_code
+    beets_lines = import_outcome.beets_lines
+    r.beets_log = beets_lines
+
+    if rc != 0:
+        r.exit_code = rc
+        if import_outcome.duplicate_remove_guard is not None:
+            r.decision = "duplicate_remove_guard_failed"
+            r.postflight.duplicate_remove_guard = (
+                import_outcome.duplicate_remove_guard)
+            r.error = import_outcome.duplicate_remove_guard.message
+        else:
+            r.decision = "mbid_missing" if rc == 4 else "import_failed"
+            r.error = next(
+                (line for line in reversed(beets_lines) if line.strip()),
+                f"Harness returned rc={rc}",
+            )
+        _log(f"[ERROR] Import failed (rc={rc})")
+        _emit_and_exit(r)
+
+    stage_start = time.monotonic()
+    post_import_ids = beets.get_all_album_ids_for_release(mbid)
+    if not post_import_ids:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Post-import: MBID {mbid} NOT in beets DB after "
+                   "import — the harness reported success but no row "
+                   "survives.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+    if len(post_import_ids) != 1:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Post-import: release {mbid} has multiple beets album "
+                   f"rows {post_import_ids}. Beets duplicate replacement "
+                   "must be atomic; Cratedigger no longer performs "
+                   "post-import stale-row cleanup.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+    imported_album_id = post_import_ids[0]
+
+    pf_info = beets.get_album_info(mbid, _rank_cfg)
+    if not pf_info:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = f"Post-flight: MBID {mbid} NOT in beets DB after import"
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+
+    if pf_info.album_id != imported_album_id:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = (f"Post-flight resolved to beets_id={pf_info.album_id} "
+                   f"but the only release row was {imported_album_id}; "
+                   "beets is in an inconsistent state.")
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+
+    r.postflight = PostflightInfo(beets_id=pf_info.album_id,
+                                  track_count=pf_info.track_count,
+                                  imported_path=pf_info.album_path)
+    album_path = pf_info.album_path
+    _log(f"[POST-FLIGHT OK] mbid={mbid}, beets_id={pf_info.album_id}, "
+         f"tracks={pf_info.track_count}, path={album_path}")
+    _record_bad_extension_warnings(beets, mbid, r)
+    fix_library_modes(album_path)
+    _log_timing("postflight_verification", stage_start)
+
+    _cleanup_staged_dir(args.path)
+
+    if request_id:
+        stage_start = time.monotonic()
+        update_pipeline_db(request_id, "imported", imported_path=album_path)
+        _log_timing("pipeline_db_update", stage_start)
+
+    beets.close()
+    r.exit_code = final_exit_decision(quality_is_transcode)
+    _log("[OK] Evidence-authorized import complete")
+    _emit_and_exit(r)
+
+
 def main():
     global _import_total_start  # noqa: PLW0603
     _import_total_start = time.monotonic()
@@ -1102,6 +1399,9 @@ def main():
                              "lib.import_dispatch.dispatch_import_core so the "
                              "harness's rank classification matches the caller's "
                              "runtime config. Missing/empty falls back to defaults.")
+    parser.add_argument("--quality-evidence-action-file", default=None,
+                        help="Action-time quality evidence payload authorizing "
+                             "mutation without candidate remeasurement.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -1180,6 +1480,15 @@ def main():
             _log(f"[ERROR] {r.error}")
         beets.close()
         _emit_and_exit(r)
+
+    if args.quality_evidence_action_file and not args.dry_run:
+        _run_quality_evidence_authorized_import(
+            args=args,
+            beets=beets,
+            mbid=mbid,
+            request_id=request_id,
+            already_in_beets=already_in_beets,
+        )
 
     work_path = args.path
     if args.dry_run:
@@ -1725,26 +2034,7 @@ def main():
     _log_timing("postflight_verification", stage_start)
 
     # --- Cleanup staged dir ---
-    if os.path.isdir(work_path):
-        stage_start = time.monotonic()
-        for root, dirs, files in os.walk(work_path, topdown=False):
-            for f in files:
-                os.remove(os.path.join(root, f))
-            for d in dirs:
-                try:
-                    os.rmdir(os.path.join(root, d))
-                except OSError:
-                    pass
-        try:
-            os.rmdir(work_path)
-        except OSError:
-            pass
-        parent = os.path.dirname(work_path)
-        try:
-            os.rmdir(parent)
-        except OSError:
-            pass
-        _log_timing("cleanup_staged_dir", stage_start)
+    _cleanup_staged_dir(work_path)
 
     # --- Pipeline DB: imported ---
     if request_id:

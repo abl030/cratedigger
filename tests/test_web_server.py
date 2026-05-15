@@ -5980,17 +5980,17 @@ class TestWrongMatchesContract(unittest.TestCase):
         # filtering. Individual tests override this to exercise missing-file
         # and mixed-existence cases. Also stub rmtree so delete tests don't
         # touch the real filesystem.
-        cleanup_preview_patch = patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            side_effect=lambda _db, lid: self._allowed_cleanup_preview(lid),
+        cleanup_decision_patch = patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            side_effect=lambda _db, lid: self._allowed_cleanup_decision(lid),
         )
         resolve_patch = patch("web.routes.imports.resolve_failed_path",
                               side_effect=lambda p: p if p else None)
         rmtree_patch = patch("web.routes.imports.shutil.rmtree")
-        self.mock_cleanup_preview = cleanup_preview_patch.start()
+        self.mock_cleanup_decision = cleanup_decision_patch.start()
         self.mock_resolve_failed_path = resolve_patch.start()
         self.mock_rmtree = rmtree_patch.start()
-        self.addCleanup(cleanup_preview_patch.stop)
+        self.addCleanup(cleanup_decision_patch.stop)
         self.addCleanup(resolve_patch.stop)
         self.addCleanup(rmtree_patch.stop)
 
@@ -6089,25 +6089,33 @@ class TestWrongMatchesContract(unittest.TestCase):
             deduped=deduped,
         )
 
-    def _uncertain_cleanup_preview(self, log_id: int) -> ImportPreviewResult:
-        return ImportPreviewResult(
-            mode="download_log",
-            verdict="uncertain",
+    def _uncertain_cleanup_decision(self, log_id: int):
+        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
+
+        return WrongMatchCleanupDecision(
+            download_log_id=log_id,
+            delete_allowed=False,
             uncertain=True,
+            provenance="album_quality_evidence",
+            verdict="uncertain",
+            confident_reject=False,
             cleanup_eligible=False,
             reason="fresh evidence unavailable",
-            download_log_id=log_id,
         )
 
-    def _allowed_cleanup_preview(self, log_id: int) -> ImportPreviewResult:
-        return ImportPreviewResult(
-            mode="download_log",
+    def _allowed_cleanup_decision(self, log_id: int):
+        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
+
+        return WrongMatchCleanupDecision(
+            download_log_id=log_id,
+            delete_allowed=True,
+            uncertain=False,
+            provenance="album_quality_evidence",
             verdict="confident_reject",
             confident_reject=True,
             cleanup_eligible=True,
-            decision="spectral_reject",
+            preview_decision="spectral_reject",
             reason="fresh cleanup-safe reject",
-            download_log_id=log_id,
         )
 
     def _entry_with_poisoned_cleanup_triage(
@@ -6691,8 +6699,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.mock_db.get_download_log_entry.return_value = entry
 
         with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=self._uncertain_cleanup_preview(42),
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(42),
         ) as preview:
             status, _data = self._post(
                 "/api/wrong-matches/delete",
@@ -6802,8 +6810,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         )
 
         with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            side_effect=lambda _db, lid: self._uncertain_cleanup_preview(lid),
+            "web.routes.imports.decide_wrong_match_cleanup",
+            side_effect=lambda _db, lid: self._uncertain_cleanup_decision(lid),
         ) as preview:
             status, data = self._post(
                 "/api/wrong-matches/delete-group",
@@ -6876,8 +6884,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         )
 
         with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=self._uncertain_cleanup_preview(100),
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(100),
         ) as preview:
             status, data = self._post(
                 "/api/wrong-matches/delete-transparent-non-flac",
@@ -6955,8 +6963,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         )
 
         with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=self._uncertain_cleanup_preview(101),
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(101),
         ) as preview:
             status, data = self._post(
                 "/api/wrong-matches/delete-lossless-opus",
@@ -7301,8 +7309,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.mock_db.enqueue_import_job.return_value = self._job(900, 42, 100, "/fi/a")
 
         with patch(
-            "lib.wrong_match_cleanup_decision.preview_import_from_download_log",
-            return_value=self._uncertain_cleanup_preview(102),
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(102),
         ) as preview:
             status, data = self._post("/api/wrong-matches/converge", {
                 "request_id": 42,
