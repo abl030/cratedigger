@@ -99,8 +99,6 @@ def _first_state_username(state: ActiveDownloadState) -> str | None:
 
 
 def derive_canonical_import_folder(
-    db: Any,
-    job: ImportJob,
     row: dict[str, Any],
     state: ActiveDownloadState,
 ) -> str:
@@ -112,7 +110,6 @@ def derive_canonical_import_folder(
     snapshot against the current source location before deciding whether
     to skip measurement.
     """
-    del db, job  # parameters reserved for future per-job overrides
     from lib.config import read_runtime_config
     from lib.download import (
         _canonical_import_folder_path,
@@ -135,7 +132,6 @@ def _materialize_automation_preview_path(
     """Ensure automation preview has the same stable folder importer uses."""
     from lib.config import read_runtime_config
     from lib.download import (
-        _canonical_import_folder_path,
         _materialize_processing_dir,
         reconstruct_grab_list_entry,
     )
@@ -143,21 +139,16 @@ def _materialize_automation_preview_path(
 
     cfg = read_runtime_config()
     entry = reconstruct_grab_list_entry(row, state)
+    canonical_path = derive_canonical_import_folder(row, state)
     if entry.import_folder is None:
-        entry.import_folder = _canonical_import_folder_path(
-            entry,
-            cfg.slskd_download_dir,
-        )
+        entry.import_folder = canonical_path
     ctx = cast(Any, SimpleNamespace(
         cfg=cfg,
         pipeline_db_source=SimpleNamespace(_get_db=lambda: db),
     ))
     staged_album = StagedAlbum.from_entry(
         entry,
-        default_path=_canonical_import_folder_path(
-            entry,
-            cfg.slskd_download_dir,
-        ),
+        default_path=canonical_path,
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
     if materialized is not True:
@@ -195,7 +186,7 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
         except ValueError:
             return None
         try:
-            return derive_canonical_import_folder(db, job, row, state)
+            return derive_canonical_import_folder(row, state)
         except Exception:
             logger.debug(
                 "front-gate path derivation failed for job %s; "

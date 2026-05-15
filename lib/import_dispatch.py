@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 logger = logging.getLogger("cratedigger")
-DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE = "candidate_evidence_unavailable"
 # U2: when the importer claim arrives without valid candidate evidence
 # (missing row, stale snapshot, incomplete), dispatch flips the row back to
 # the preview lane via ``PipelineDB.requeue_import_job_for_preview`` and
@@ -202,9 +201,16 @@ def _requeue_import_job_to_preview(
     ``ensure_candidate_evidence_for_action`` reports the candidate row is
     missing, stale, or incomplete.
 
-    The requeue happens inside the dispatch advisory-lock region so the
-    evidence check + state flip is atomic against the importer claim. If
-    the requeue UPDATE itself raises (DB transient), we swallow and
+    Lock context differs by caller. The force/manual call site holds the
+    per-request IMPORT advisory lock; the automation call site holds the
+    RELEASE lock. Either way the evidence-check + state-flip pair sits
+    inside whatever lock the caller already has, which is sufficient for
+    importer-vs-importer atomicity (only one importer worker drains the
+    queue serially) — concurrent preview-worker claims of a still-running
+    job are prevented by the importer's own ``status='running'``
+    invariant, not by this lock.
+
+    If the requeue UPDATE itself raises (DB transient), we swallow and
     return ``DISPATCH_CODE_REQUEUE_FAILED`` — the job stays in
     ``running`` for ``requeue_running_import_jobs`` on next importer
     boot to recover.
@@ -224,7 +230,7 @@ def _requeue_import_job_to_preview(
             code=DISPATCH_CODE_REQUEUE_FAILED,
         )
     try:
-        db.requeue_import_job_for_preview(import_job_id, reason=reason)
+        updated = db.requeue_import_job_for_preview(import_job_id, reason=reason)
     except Exception as exc:  # noqa: BLE001 — swallow + log for retry
         logger.exception(
             "Failed to requeue import_job %s for preview", import_job_id
@@ -232,6 +238,21 @@ def _requeue_import_job_to_preview(
         return DispatchOutcome(
             success=False,
             message=f"Requeue to preview failed: {type(exc).__name__}: {exc}",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+    if updated is None:
+        # Row was not in ``status='running'`` when the UPDATE fired — either
+        # already requeued by a concurrent worker, terminal, or never existed.
+        # Conflating this with a successful requeue would hide drift; report
+        # as a requeue failure so startup recovery handles whatever state the
+        # job is actually in.
+        logger.warning(
+            "Requeue for import_job %s matched zero rows; job may already be "
+            "requeued or terminal", import_job_id
+        )
+        return DispatchOutcome(
+            success=False,
+            message=detail + " (requeue UPDATE matched zero rows)",
             code=DISPATCH_CODE_REQUEUE_FAILED,
         )
     return DispatchOutcome(
@@ -1834,11 +1855,19 @@ def dispatch_import_from_db(
 ) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
-    Runs the same pre-import gates (audio integrity + spectral transcode
-    detection) as the auto path via ``lib.preimport.run_preimport_gates``
-    — only the beets *distance* check is skipped when ``force=True``.
-    All other quality checks (downgrade prevention, quality gate, meelo scan,
-    denylist) run identically to auto-import.
+    Requires pre-recorded candidate evidence: the caller supplies either
+    ``import_job_id`` or ``download_log_id`` (or both), and dispatch loads
+    the candidate ``AlbumQualityEvidence`` via
+    ``ensure_candidate_evidence_for_action``. The preview worker is the
+    only producer of candidate measurements; dispatch never invokes
+    ``run_preimport_gates`` itself. When evidence is missing or stale, the
+    job is requeued back to the preview lane via
+    ``_requeue_import_job_to_preview`` (returning
+    ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
+    on the preview worker's next claim. Quality decisions (downgrade
+    prevention, quality gate, meelo scan, denylist) still run identically
+    to auto-import — only the beets *distance* check is skipped when
+    ``force=True``.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force/manual imports
@@ -1855,9 +1884,15 @@ def dispatch_import_from_db(
         request_id: Album request ID
         failed_path: Path to the files on disk
         force: Pass --force to import_one.py (bypass distance check)
-        outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
-        source_username: Original Soulseek username for force-import audit/denylist flows
-        source_dirs: Original remote source directories for wrong-match forensics
+        outcome_label: download_log outcome label for successful imports
+        source_username: Soulseek peer who supplied the source files
+        source_dirs: Remote directories the source was downloaded from
+        import_job_id: Import-job row this dispatch belongs to. Required
+            in production (the importer always supplies it); ``None`` is
+            a developer-error precondition error.
+        download_log_id: Originating download_log row for Wrong Matches
+            force-imports; scopes candidate-evidence lookup to that
+            owner. Optional but typically supplied for force-imports.
     """
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 

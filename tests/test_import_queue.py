@@ -944,11 +944,17 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_force_import_requeue_failed_leaves_job_running(self):
-        """U2: when dispatch returns DISPATCH_CODE_REQUEUE_FAILED (its
-        requeue UPDATE itself raised), the importer must not write
-        terminal failure — the job stays 'running' so
-        requeue_running_import_jobs on next worker boot recovers it."""
+    def test_force_import_requeue_failed_marks_job_failed(self):
+        """REL-001: when dispatch returns DISPATCH_CODE_REQUEUE_FAILED (its
+        requeue UPDATE itself raised), the importer must mark the job
+        terminally failed rather than leaving it running. Leaving the job
+        running would let `requeue_running_import_jobs` on next worker boot
+        reclaim it — but the importer's claim query still matches
+        preview_status='evidence_ready', so it would re-claim, hit the same
+        requeue condition, fail again, and spin forever. Failing terminally
+        surfaces the issue to ops; the operator re-triggers once the DB
+        problem is resolved.
+        """
         from scripts import importer
         from lib.import_dispatch import DISPATCH_CODE_REQUEUE_FAILED
 
@@ -971,7 +977,6 @@ class TestImporterWorker(unittest.TestCase):
             self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
-            claimed_attempts = claimed.attempts
 
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
@@ -987,15 +992,16 @@ class TestImporterWorker(unittest.TestCase):
             ) as cleanup:
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
+            # No wrong-match cleanup runs on the requeue-failed path (the
+            # situation is a DB issue, not a quality decision).
             decision.assert_not_called()
             cleanup.assert_not_called()
             row = next(r for r in db._import_jobs if r["id"] == job.id)
-            # Stuck in running for startup recovery (requeue_running_import_jobs).
-            self.assertEqual(row["status"], "running")
-            self.assertEqual(row["attempts"], claimed_attempts)
+            self.assertEqual(row["status"], "failed")
+            self.assertIn("requeue", row["message"])
             self.assertTrue(os.path.isdir(source))
-            if updated is not None:
-                self.assertNotEqual(updated.status, "failed")
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
         finally:
             shutil.rmtree(source, ignore_errors=True)
 

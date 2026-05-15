@@ -21,6 +21,11 @@ IMPORT_JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
 IMPORT_JOB_PREVIEW_WAITING = "waiting"
 IMPORT_JOB_PREVIEW_RUNNING = "running"
 IMPORT_JOB_PREVIEW_EVIDENCE_READY = "evidence_ready"
+# Historical: new jobs are never written with this status after the
+# importer-never-measures refactor (migration 018 swept legacy rows). Kept in
+# IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES so any pre-deploy rows that still
+# carry it can be claimed by the importer and drained. Do not remove until
+# a follow-up cleanup confirms zero rows remain.
 IMPORT_JOB_PREVIEW_WOULD_IMPORT = "would_import"
 IMPORT_JOB_PREVIEW_CONFIDENT_REJECT = "confident_reject"
 IMPORT_JOB_PREVIEW_UNCERTAIN = "uncertain"

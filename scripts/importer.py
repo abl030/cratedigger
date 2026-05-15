@@ -16,7 +16,6 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.import_dispatch import (
-    DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
@@ -58,10 +57,6 @@ def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | N
     return download_log_id, failed_path if isinstance(failed_path, str) else None
 
 
-def _candidate_evidence_unavailable(outcome: DispatchOutcome) -> bool:
-    return outcome.code == DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE
-
-
 def _cleanup_failed_force_import(
     db: PipelineDB,
     job: ImportJob,
@@ -73,14 +68,6 @@ def _cleanup_failed_force_import(
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
-    if _candidate_evidence_unavailable(outcome):
-        return {
-            "success": False,
-            "skipped": True,
-            "download_log_id": download_log_id,
-            "failed_path_hint": failed_path_hint,
-            "reason": "candidate_evidence_unavailable",
-        }
     try:
         from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
         from lib.wrong_matches import cleanup_wrong_match_source
@@ -320,16 +307,24 @@ def process_claimed_job(
         )
         return None
     if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
-        # Recoverable: leave the job in 'running' so the next worker boot's
-        # requeue_running_import_jobs sweep resets it. No terminal status.
-        logger.warning(
+        # The requeue UPDATE itself failed (DB transient). Mark the job
+        # terminally failed so it surfaces to ops rather than leaving it in
+        # 'running' for startup recovery, which would just re-claim and hit
+        # the same condition (REL-001). The operator can re-trigger the
+        # import once the underlying DB issue is resolved.
+        logger.error(
             "Import job %s (request %s) requeue to preview failed; "
-            "leaving job in running for startup recovery: %s",
+            "marking job failed (operator must investigate): %s",
             job.id,
             job.request_id,
             outcome.message,
         )
-        return None
+        return db.mark_import_job_failed(
+            job.id,
+            error=outcome.message,
+            message=f"requeue-to-preview failed: {outcome.message}",
+            result=result,
+        )
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:
         result["cleanup"] = cleanup

@@ -10,6 +10,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
+from lib.import_evidence import (
+    ActionEvidenceProvenance,
+    CandidateEvidenceActionResult,
+)
 from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 from lib.quality import (
     ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
@@ -631,8 +635,74 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             self.assertEqual(result.code, DISPATCH_CODE_REQUEUE_FAILED)
             ext.run.assert_not_called()
             row = next(r for r in db._import_jobs if r["id"] == job.id)
-            # Importer left the job in running for startup recovery.
+            # Dispatch returned the failure code without flipping the row;
+            # the importer is responsible for marking the row failed based
+            # on the outcome code (see test_force_import_requeue_failed_marks_job_failed
+            # in tests/test_import_queue.py).
             self.assertEqual(row["status"], "running")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_force_import_requeue_zero_rows_returns_failed_outcome(self):
+        """When db.requeue_import_job_for_preview returns None (the UPDATE
+        matched zero rows because the job is no longer in 'running' — a
+        concurrent worker requeued it or it's terminal), dispatch must
+        NOT report success. Conflating the no-op with a successful
+        requeue would silently hide that the job state is now indeterminate.
+        Dispatch returns DISPATCH_CODE_REQUEUE_FAILED so the importer
+        marks the job failed.
+        """
+        from lib.import_dispatch import (
+            DISPATCH_CODE_REQUEUE_FAILED,
+            dispatch_import_from_db,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-zero",
+            status="manual",
+            artist_name="The Bug Tester",
+            album_title="Zero Rows Affected",
+        ))
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                dedupe_key="manual:zero-rows",
+            )
+
+            with patch.object(
+                db, "requeue_import_job_for_preview", return_value=None,
+            ), patch_dispatch_externals() as ext, patch(
+                "lib.import_dispatch.ensure_candidate_evidence_for_action",
+                return_value=CandidateEvidenceActionResult(
+                    evidence=None,
+                    provenance=ActionEvidenceProvenance(
+                        candidate_status="missing",
+                        fallback_reason="row missing",
+                        fail_closed=True,
+                    ),
+                ),
+            ):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                    source_username="alice",
+                    import_job_id=job.id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.code, DISPATCH_CODE_REQUEUE_FAILED)
+            self.assertIn("zero rows", result.message)
+            ext.run.assert_not_called()
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

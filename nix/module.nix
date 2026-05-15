@@ -926,6 +926,11 @@ in {
       after = ["cratedigger-db-migrate.service"];
       requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
+      # Same rationale as cratedigger-importer below: avoid killing in-flight
+      # measurement on deploy. Stale-job recovery via requeue_stale_import_preview_jobs
+      # exists, but skipping the kill in the first place is cheaper and the
+      # established pattern for long-lived workers.
+      restartIfChanged = false;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = {
         Type = "simple";
