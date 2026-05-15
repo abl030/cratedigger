@@ -145,7 +145,6 @@ class TestFakePipelineDB(unittest.TestCase):
             "manual_import",
             request_id=42,
             payload={"failed_path": "/tmp/candidate"},
-            preview_enabled=False,
         )
 
         db.upsert_album_quality_evidence(make_album_quality_evidence(
@@ -1420,14 +1419,12 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:42",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         duplicate = db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=42,
             dedupe_key="manual:42",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertEqual(first.id, duplicate.id)
         self.assertTrue(duplicate.deduped)
@@ -1469,7 +1466,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:42",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertNotEqual(first.id, later.id)
         failed = db.mark_import_job_failed(
@@ -1489,7 +1485,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:requeue-fake",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         db.mark_import_job_preview_importable(
             job.id,
@@ -1534,7 +1529,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:requeue-fake-idem",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         # Not yet claimed by importer (preview_status='waiting', status='queued').
         result = db.requeue_import_job_for_preview(
@@ -1543,28 +1537,26 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_import_job_queue_defaults_to_importable_without_preview_gate(self):
+    def test_import_job_queue_defaults_to_preview_waiting(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
         db = FakePipelineDB()
-        with patch.dict("os.environ", {}, clear=True):
-            queued = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=42,
-                dedupe_key="manual:preview-disabled",
-                payload=manual_import_payload(failed_path="/tmp/manual"),
-            )
+        queued = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:fresh",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
 
-        self.assertEqual(queued.preview_status, "would_import")
-        self.assertEqual(queued.preview_message, "Preview gate disabled")
-        self.assertIsNotNone(queued.preview_completed_at)
-        self.assertIsNotNone(queued.importable_at)
-        self.assertIsNone(db.claim_next_import_preview_job(worker_id="preview"))
-
-        claimed = db.claim_next_import_job(worker_id="fake-worker")
+        self.assertEqual(queued.preview_status, "waiting")
+        self.assertIsNone(queued.preview_message)
+        self.assertIsNone(queued.preview_completed_at)
+        self.assertIsNone(queued.importable_at)
+        # Preview worker can claim it; importer cannot.
+        self.assertIsNone(db.claim_next_import_job(worker_id="importer"))
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
         self.assertEqual(claimed.id, queued.id)
-        self.assertEqual(claimed.status, "running")
 
     def test_abandon_auto_import_request_guards_state_and_logs(self):
         db = FakePipelineDB()
@@ -1650,7 +1642,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:preview",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertEqual(queued.preview_status, "waiting")
 
@@ -1677,7 +1668,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=43,
             dedupe_key="manual:preview-reject",
             payload=manual_import_payload(failed_path="/tmp/reject"),
-            preview_enabled=True,
         )
         failed = db.mark_import_job_preview_failed(
             rejected.id,
@@ -2433,7 +2423,6 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
             request_id=request_id,
             dedupe_key=dedupe_key,
             payload=manual_import_payload(failed_path="/tmp/x"),
-            preview_enabled=False,
         )
 
     def test_returns_none_when_no_jobs(self):

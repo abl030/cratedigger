@@ -96,9 +96,8 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('writeShellScriptBin "cratedigger-import-preview-worker"', text)
         self.assertIn("${src}/scripts/import_preview_worker.py", text)
         self.assertIn("systemd.services.cratedigger-import-preview-worker", text)
-        self.assertIn("cfg.importer.enable && cfg.importer.preview.enable", text)
-        self.assertIn("preview.enable = mkOption", text)
-        self.assertIn("CRATEDIGGER_IMPORT_PREVIEW_ENABLE", text)
+        # Preview is mandatory: service gated only on importer.enable.
+        self.assertIn("mkIf cfg.importer.enable", text)
         self.assertIn("previewWorkers", text)
         self.assertIn("default = 2", text)
         self.assertIn("cfg.importer.previewWorkers >= 1", text)

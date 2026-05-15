@@ -25,9 +25,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
-    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
     ImportJob,
-    import_preview_enabled_from_env,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
@@ -60,15 +58,6 @@ def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | N
     return download_log_id, failed_path if isinstance(failed_path, str) else None
 
 
-def _job_uses_preview_disabled_legacy_path(job: ImportJob) -> bool:
-    """Preview-disabled jobs have no persisted candidate evidence to consume."""
-
-    return (
-        job.preview_message == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-        and not job.preview_result
-    )
-
-
 def _candidate_evidence_unavailable(outcome: DispatchOutcome) -> bool:
     return outcome.code == DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE
 
@@ -84,10 +73,7 @@ def _cleanup_failed_force_import(
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
-    if (
-        _candidate_evidence_unavailable(outcome)
-        and not _job_uses_preview_disabled_legacy_path(job)
-    ):
+    if _candidate_evidence_unavailable(outcome):
         return {
             "success": False,
             "skipped": True,
@@ -185,7 +171,6 @@ def execute_import_job(
         source_username = payload.get("source_username")
         source_dirs = payload.get("source_dirs")
         download_log_id = payload.get("download_log_id")
-        use_legacy_path = _job_uses_preview_disabled_legacy_path(job)
         return dispatch_import_from_db(
             db,
             request_id=job.request_id,
@@ -202,10 +187,10 @@ def execute_import_job(
                 if isinstance(source_dirs, list)
                 else None
             ),
-            import_job_id=None if use_legacy_path else job.id,
+            import_job_id=job.id,
             download_log_id=(
                 int(download_log_id)
-                if isinstance(download_log_id, int) and not use_legacy_path
+                if isinstance(download_log_id, int)
                 else None
             ),
         )
@@ -268,9 +253,7 @@ def execute_automation_import_job(
             state,
             db,
             runtime_ctx,
-            import_job_id=(
-                None if _job_uses_preview_disabled_legacy_path(job) else job.id
-            ),
+            import_job_id=job.id,
         )
     finally:
         if created_ctx:
@@ -364,10 +347,7 @@ def run_once(
     worker_id: str,
     ctx: Any = None,
 ) -> ImportJob | None:
-    job = db.claim_next_import_job(
-        worker_id=worker_id,
-        exclude_preview_disabled_automation=import_preview_enabled_from_env(),
-    )
+    job = db.claim_next_import_job(worker_id=worker_id)
     if job is None:
         return None
     logger.info("Claimed import job %s (%s)", job.id, job.job_type)

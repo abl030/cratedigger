@@ -458,7 +458,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:1",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -487,86 +486,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             message="missing",
         )
         self.assertIsNone(missing)
-
-    def test_enqueue_defaults_to_importable_when_preview_env_absent(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-
-        with patch.dict(os.environ, {}, clear=True):
-            job = self.db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=self.req_id,
-                dedupe_key="manual:preview-disabled",
-                payload=manual_import_payload(failed_path="/tmp/manual"),
-            )
-
-        self.assertEqual(job.preview_status, "would_import")
-        self.assertEqual(job.preview_message, "Preview gate disabled")
-        self.assertIsNotNone(job.preview_completed_at)
-        self.assertIsNotNone(job.importable_at)
-        self.assertIsNone(
-            self.db.claim_next_import_preview_job(worker_id="preview-worker")
-        )
-
-        claimed = self.db.claim_next_import_job(worker_id="test-worker")
-        assert claimed is not None
-        self.assertEqual(claimed.id, job.id)
-        self.assertEqual(claimed.status, "running")
-
-    def test_requeue_disabled_automation_preview_jobs_handles_would_import(self):
-        from lib.import_queue import (
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
-            automation_import_dedupe_key,
-        )
-
-        job = self.db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=self.req_id,
-            dedupe_key=automation_import_dedupe_key(self.req_id),
-            payload={},
-            preview_enabled=False,
-        )
-        self.assertEqual(job.preview_status, "would_import")
-        self.assertEqual(job.preview_message, IMPORT_JOB_PREVIEW_DISABLED_MESSAGE)
-
-        requeued = self.db.requeue_disabled_automation_preview_jobs()
-
-        self.assertEqual([item.id for item in requeued], [job.id])
-        self.assertEqual(requeued[0].preview_status, "waiting")
-        self.assertIsNone(requeued[0].preview_message)
-        self.assertIsNone(requeued[0].preview_result)
-        self.assertIsNone(requeued[0].importable_at)
-
-    def test_requeue_disabled_automation_preview_jobs_handles_evidence_ready_legacy(self):
-        from lib.import_queue import (
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
-            automation_import_dedupe_key,
-        )
-
-        job = self.db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=self.req_id,
-            dedupe_key=automation_import_dedupe_key(self.req_id),
-            payload={},
-            preview_enabled=False,
-        )
-        self.db._execute(
-            """
-            UPDATE import_jobs
-            SET preview_status = 'evidence_ready'
-            WHERE id = %s
-            """,
-            (job.id,),
-        )
-
-        requeued = self.db.requeue_disabled_automation_preview_jobs()
-
-        self.assertEqual([item.id for item in requeued], [job.id])
-        self.assertEqual(requeued[0].preview_status, "waiting")
-        self.assertIsNone(requeued[0].preview_message)
-        self.assertIsNone(requeued[0].preview_result)
-        self.assertIsNone(requeued[0].importable_at)
 
     def test_migration_018_resets_legacy_would_import_without_evidence(self):
         from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_dedupe_key
@@ -663,13 +582,30 @@ class TestImportJobQueueAPI(unittest.TestCase):
             owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
             owner_id=with_evidence_job_id,
         ))
-        disabled = self.db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=self.req_id,
-            dedupe_key="automation:preview-disabled-migration",
-            payload={},
-            preview_enabled=False,
+        # Legacy disabled-preview row shape (mode deleted in U3); insert
+        # directly to assert migration 018 leaves these untouched.
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at,
+                preview_completed_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'would_import', NULL, 'Preview gate disabled', NOW(), NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:preview-disabled-migration",
+            ),
         )
+        row = cur.fetchone()
+        assert row is not None
+        disabled_job_id = row["id"]
 
         migration = (
             Path(__file__).resolve().parents[1]
@@ -693,7 +629,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
                 null_message_job_id,
                 evidence_ready_without_evidence_id,
                 with_evidence_job_id,
-                disabled.id,
+                disabled_job_id,
             ),
         )
         rows = {row["id"]: row for row in cur.fetchall()}
@@ -724,12 +660,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
             "Evidence already captured",
         )
         self.assertIsNotNone(rows[with_evidence_job_id]["importable_at"])
-        self.assertEqual(rows[disabled.id]["preview_status"], "would_import")
+        self.assertEqual(rows[disabled_job_id]["preview_status"], "would_import")
         self.assertEqual(
-            rows[disabled.id]["preview_message"],
+            rows[disabled_job_id]["preview_message"],
             "Preview gate disabled",
         )
-        self.assertIsNotNone(rows[disabled.id]["importable_at"])
+        self.assertIsNotNone(rows[disabled_job_id]["importable_at"])
 
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
@@ -740,7 +676,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:claim-once",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -764,7 +699,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:stale",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -799,7 +733,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:restart-retry",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -833,7 +766,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-gate",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
 
@@ -855,14 +787,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:timeline-waiting",
             payload=manual_import_payload(failed_path="/tmp/waiting"),
-            preview_enabled=True,
         )
         importable = self.db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=self.req_id,
             dedupe_key="manual:timeline-importable",
             payload=manual_import_payload(failed_path="/tmp/importable"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -883,7 +813,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:timeline-active",
             payload=manual_import_payload(failed_path="/tmp/active"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -925,7 +854,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
@@ -968,7 +896,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-reject",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
 
         failed = self.db.mark_import_job_preview_failed(
@@ -998,7 +925,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-claim-once",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
@@ -1035,7 +961,6 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:requeue-for-preview",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1125,7 +1050,6 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:unrelated",
             payload=manual_import_payload(failed_path="/tmp/other"),
-            preview_enabled=True,
         )
 
         self.db.requeue_import_job_for_preview(claimed.id, reason="x")
@@ -2755,7 +2679,6 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             "manual_import",
             request_id=self.req_id,
             payload={"failed_path": "/tmp/candidate"},
-            preview_enabled=False,
         )
         evidence = make_album_quality_evidence(
             owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
@@ -4566,7 +4489,6 @@ class TestActiveImportJobForRequest(unittest.TestCase):
             request_id=request_id,
             dedupe_key=dedupe_key,
             payload=manual_import_payload(failed_path="/tmp/x"),
-            preview_enabled=False,
         )
 
     def test_returns_none_when_no_jobs(self):

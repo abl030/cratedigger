@@ -29,7 +29,6 @@ from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
     ImportJob,
-    import_preview_enabled_from_env,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.quality import ActiveDownloadState, AlbumQualityEvidence
@@ -40,7 +39,6 @@ from lib.quality_evidence import (
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
-LEGACY_DISABLED_REQUEUE_LIMIT = 100
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(hours=1)
@@ -501,16 +499,6 @@ def run_once(
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
 ) -> ImportJob | None:
-    if import_preview_enabled_from_env():
-        requeued = db.requeue_disabled_automation_preview_jobs(
-            limit=LEGACY_DISABLED_REQUEUE_LIMIT,
-        )
-        if requeued:
-            logger.info(
-                "Requeued %s legacy disabled automation preview job(s)",
-                len(requeued),
-            )
-
     job = db.claim_next_import_preview_job(worker_id=worker_id)
     if job is None:
         return None

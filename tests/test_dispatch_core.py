@@ -275,7 +275,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
             )
             import_job_id = job.id
             files = snapshot_audio_files(tmpdir)
@@ -431,7 +430,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
             )
             db.upsert_album_quality_evidence(make_album_quality_evidence(
                 owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
@@ -512,7 +510,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
             )
             db.upsert_album_quality_evidence(make_album_quality_evidence(
                 owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
@@ -592,7 +589,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
             )
             db.upsert_album_quality_evidence(make_album_quality_evidence(
                 owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
@@ -653,7 +649,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
             )
             db.upsert_album_quality_evidence(make_album_quality_evidence(
                 owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,

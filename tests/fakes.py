@@ -30,13 +30,9 @@ if TYPE_CHECKING:
 
 from lib.import_queue import (
     ImportJob,
-    IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
-    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
-    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
-    import_preview_enabled_from_env,
     validate_job_type,
     validate_preview_failure_status,
     validate_payload,
@@ -757,15 +753,9 @@ class FakePipelineDB:
         dedupe_key: str | None = None,
         payload: dict[str, Any] | None = None,
         message: str | None = None,
-        preview_enabled: bool | None = None,
     ) -> ImportJob:
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
-        preview_enabled = (
-            import_preview_enabled_from_env()
-            if preview_enabled is None
-            else preview_enabled
-        )
         if dedupe_key is not None:
             existing = self.get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
@@ -773,7 +763,6 @@ class FakePipelineDB:
 
         self._next_import_job_id += 1
         now = _utcnow()
-        preview_completed_at = None if preview_enabled else now
         row: dict[str, Any] = {
             "id": self._next_import_job_id,
             "job_type": job_type,
@@ -791,22 +780,16 @@ class FakePipelineDB:
             "started_at": None,
             "heartbeat_at": None,
             "completed_at": None,
-            "preview_status": (
-                IMPORT_JOB_PREVIEW_WAITING
-                if preview_enabled
-                else IMPORT_JOB_PREVIEW_WOULD_IMPORT
-            ),
+            "preview_status": IMPORT_JOB_PREVIEW_WAITING,
             "preview_result": None,
-            "preview_message": (
-                None if preview_enabled else IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-            ),
+            "preview_message": None,
             "preview_error": None,
             "preview_attempts": 0,
             "preview_worker_id": None,
             "preview_started_at": None,
             "preview_heartbeat_at": None,
-            "preview_completed_at": preview_completed_at,
-            "importable_at": None if preview_enabled else now,
+            "preview_completed_at": None,
+            "importable_at": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
@@ -908,18 +891,11 @@ class FakePipelineDB:
         self,
         *,
         worker_id: str | None = None,
-        exclude_preview_disabled_automation: bool = False,
     ) -> ImportJob | None:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            and not (
-                exclude_preview_disabled_automation
-                and row.get("job_type") == IMPORT_JOB_AUTOMATION
-                and row.get("preview_message") == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-                and row.get("preview_result") is None
-            )
         ]
         queued.sort(key=lambda row: (
             _as_datetime(row.get("importable_at")),
@@ -1079,37 +1055,6 @@ class FakePipelineDB:
                 row["updated_at"] = now
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
-
-    def requeue_disabled_automation_preview_jobs(
-        self,
-        *,
-        limit: int = 100,
-    ) -> list[ImportJob]:
-        disabled = [
-            row for row in self._import_jobs
-            if row.get("status") == "queued"
-            and row.get("job_type") == IMPORT_JOB_AUTOMATION
-            and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            and row.get("preview_message") == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-            and row.get("preview_result") is None
-        ]
-        disabled.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
-        updated_jobs = []
-        for row in disabled[:limit]:
-            now = _utcnow()
-            row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
-            row["preview_result"] = None
-            row["preview_message"] = None
-            row["preview_error"] = None
-            row["preview_attempts"] = 0
-            row["preview_worker_id"] = None
-            row["preview_started_at"] = None
-            row["preview_heartbeat_at"] = None
-            row["preview_completed_at"] = None
-            row["importable_at"] = None
-            row["updated_at"] = now
-            updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
-        return updated_jobs
 
     def claim_next_import_preview_job(
         self,

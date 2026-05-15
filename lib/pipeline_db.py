@@ -29,12 +29,7 @@ import msgspec
 
 from lib.import_queue import (
     ImportJob,
-    IMPORT_JOB_AUTOMATION,
-    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
-    IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
-    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
-    import_preview_enabled_from_env,
     validate_preview_failure_status,
     validate_job_type,
     validate_payload,
@@ -919,24 +914,10 @@ class PipelineDB:
         dedupe_key: str | None = None,
         payload: dict[str, Any] | None = None,
         message: str | None = None,
-        preview_enabled: bool | None = None,
     ) -> ImportJob:
         """Create an import job or return the active job with the same key."""
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
-        preview_enabled = (
-            import_preview_enabled_from_env()
-            if preview_enabled is None
-            else preview_enabled
-        )
-        preview_status = (
-            IMPORT_JOB_PREVIEW_WAITING
-            if preview_enabled
-            else IMPORT_JOB_PREVIEW_WOULD_IMPORT
-        )
-        preview_message = None if preview_enabled else IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-        preview_completed_at = None if preview_enabled else datetime.now(timezone.utc)
-        importable_at = None if preview_enabled else preview_completed_at
         cur = self._execute("""
             WITH inserted AS (
                 INSERT INTO import_jobs (
@@ -944,7 +925,7 @@ class PipelineDB:
                     preview_status, preview_message, preview_completed_at,
                     importable_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
                 ON CONFLICT (dedupe_key)
                     WHERE dedupe_key IS NOT NULL
                       AND status IN ('queued', 'running')
@@ -968,10 +949,7 @@ class PipelineDB:
             dedupe_key,
             psycopg2.extras.Json(payload),
             message,
-            preview_status,
-            preview_message,
-            preview_completed_at,
-            importable_at,
+            IMPORT_JOB_PREVIEW_WAITING,
             dedupe_key,
             dedupe_key,
         ))
@@ -1094,7 +1072,6 @@ class PipelineDB:
         self,
         *,
         worker_id: str | None = None,
-        exclude_preview_disabled_automation: bool = False,
     ) -> ImportJob | None:
         cur = self._execute("""
             WITH next_job AS (
@@ -1102,12 +1079,6 @@ class PipelineDB:
                 FROM import_jobs
                 WHERE status = 'queued'
                   AND preview_status IN ('evidence_ready', 'would_import')
-                  AND NOT (
-                    %s
-                    AND job_type = %s
-                    AND preview_message = %s
-                    AND preview_result IS NULL
-                  )
                 ORDER BY importable_at ASC NULLS LAST, created_at ASC, id ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -1122,12 +1093,7 @@ class PipelineDB:
             FROM next_job
             WHERE import_jobs.id = next_job.id
             RETURNING import_jobs.*
-        """, (
-            exclude_preview_disabled_automation,
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
-            worker_id,
-        ))
+        """, (worker_id,))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
 
@@ -1305,50 +1271,6 @@ class PipelineDB:
         """, (reason, job_id))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
-
-    def requeue_disabled_automation_preview_jobs(
-        self,
-        *,
-        limit: int = 100,
-    ) -> list[ImportJob]:
-        """Move legacy automation jobs into the async preview lane."""
-        cur = self._execute("""
-            WITH disabled AS (
-                SELECT id
-                FROM import_jobs
-                WHERE status = 'queued'
-                  AND job_type = %s
-                  AND preview_status IN (%s, %s)
-                  AND preview_message = %s
-                  AND preview_result IS NULL
-                ORDER BY created_at ASC, id ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT %s
-            )
-            UPDATE import_jobs
-            SET preview_status = %s,
-                preview_result = NULL,
-                preview_message = NULL,
-                preview_error = NULL,
-                preview_attempts = 0,
-                preview_worker_id = NULL,
-                preview_started_at = NULL,
-                preview_heartbeat_at = NULL,
-                preview_completed_at = NULL,
-                importable_at = NULL,
-                updated_at = NOW()
-            FROM disabled
-            WHERE import_jobs.id = disabled.id
-            RETURNING import_jobs.*
-        """, (
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_PREVIEW_EVIDENCE_READY,
-            IMPORT_JOB_PREVIEW_WOULD_IMPORT,
-            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
-            limit,
-            IMPORT_JOB_PREVIEW_WAITING,
-        ))
-        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
     def claim_next_import_preview_job(
         self,

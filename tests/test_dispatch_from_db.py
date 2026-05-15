@@ -287,7 +287,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
             )
             import_job_id = job.id
             files = snapshot_audio_files(tmpdir)
@@ -377,7 +376,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
                 dedupe_key="manual:requeue-stale",
             )
             db.mark_import_job_preview_importable(
@@ -465,7 +463,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
                 dedupe_key="manual:requeue-missing",
             )
             db.mark_import_job_preview_importable(
@@ -535,7 +532,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
-                preview_enabled=True,
                 dedupe_key="manual:requeue-fail",
             )
             db.mark_import_job_preview_importable(

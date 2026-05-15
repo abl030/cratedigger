@@ -5091,7 +5091,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     failed_path=source,
                     source_username="alice",
                 ),
-                preview_enabled=True,
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
@@ -5173,7 +5172,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 request_id=42,
                 dedupe_key=automation_import_dedupe_key(42),
                 payload={},
-                preview_enabled=True,
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
@@ -5275,7 +5273,6 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                 request_id=42,
                 dedupe_key="manual:slice",
                 payload=manual_import_payload(failed_path=source),
-                preview_enabled=True,
             )
             # Step 1: simulate an importer-importable state without evidence
             # (the lossy real-world starting point: preview marked ready in a

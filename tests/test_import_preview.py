@@ -291,7 +291,6 @@ class TestImportPreviewPath(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:42:/tmp/source",
             payload={"failed_path": "/tmp/source"},
-            preview_enabled=True,
         )
         source = self._source_dir()
         try:
@@ -406,7 +405,6 @@ class TestImportPreviewPath(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:42:/tmp/source",
             payload={"failed_path": "/tmp/source"},
-            preview_enabled=True,
         )
         source = self._source_dir()
 
