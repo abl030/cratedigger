@@ -774,6 +774,12 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
     extension: str
     container: str
     codec: str | None = None
+    # decode_ok is per-file evidence that the measurement helper produces:
+    # True if ffmpeg returned rc=0 against this file's audio stream, False
+    # otherwise. Migration 019 default is TRUE so legacy rows decoded into
+    # this Struct shape are non-corrupt by default — the decision function
+    # only rejects when at least one file's ``decode_ok`` is False.
+    decode_ok: bool = True
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
@@ -858,6 +864,17 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     target_format: str | None = None
     v0_metric: AlbumQualityV0Metric | None = None
     verified_lossless_proof: VerifiedLosslessProof | None = None
+    # U1 (migration 019) preview-evidence facts. The pure decision function
+    # ``preimport_decide`` reads these as typed facts — never derives them
+    # from snapshot files. SQL defaults (FALSE, 'flat', 0, '') keep legacy
+    # rows decoding into a safe shape that the decision function rejects
+    # only when explicit reject-shaped facts are present.
+    audio_corrupt: bool = False
+    folder_layout: str = "flat"
+    audio_file_count: int = 0
+    filetype_band: str = ""
+    matched_bad_audio_hash_id: int | None = None
+    matched_bad_audio_hash_path: str | None = None
 
     def sorted_for_storage(self) -> "AlbumQualityEvidence":
         return AlbumQualityEvidence(
@@ -871,14 +888,36 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             target_format=self.target_format,
             v0_metric=self.v0_metric,
             verified_lossless_proof=self.verified_lossless_proof,
+            audio_corrupt=self.audio_corrupt,
+            folder_layout=self.folder_layout,
+            audio_file_count=self.audio_file_count,
+            filetype_band=self.filetype_band,
+            matched_bad_audio_hash_id=self.matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=self.matched_bad_audio_hash_path,
         )
 
     def storage_validation_errors(self) -> list[str]:
         errors = self.owner.validation_errors()
         if self.measured_at is None:
             errors.append("measured_at is required")
-        if not self.files:
+        # Empty snapshot is a storable fact ONLY when audio_file_count=0
+        # (the explicit empty-inventory signal). When a fileset is present
+        # but ``files`` is empty, the evidence row is incomplete.
+        if not self.files and self.audio_file_count != 0:
             errors.append("at least one snapshot file is required")
+        if self.folder_layout not in ("flat", "nested"):
+            errors.append(
+                f"folder_layout must be 'flat' or 'nested': {self.folder_layout!r}"
+            )
+        if not isinstance(self.audio_file_count, int) or self.audio_file_count < 0:
+            errors.append("audio_file_count must be >= 0")
+        if (self.matched_bad_audio_hash_id is None) != (
+            self.matched_bad_audio_hash_path is None
+        ):
+            errors.append(
+                "matched_bad_audio_hash_id and matched_bad_audio_hash_path "
+                "must be set together or both NULL"
+            )
         relative_paths: set[str] = set()
         for file in self.files:
             errors.extend(file.validation_errors())

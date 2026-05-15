@@ -159,6 +159,86 @@ class TestFakePipelineDB(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.owner.owner_type, "import_job_candidate")
 
+    def test_album_quality_evidence_preview_facts_mirror_pipeline_db(self):
+        """U1: FakePipelineDB round-trips new preview-evidence facts the same
+        way real PipelineDB does — every new field on AlbumQualityEvidence and
+        the per-file decode_ok flag survives upsert/load.
+        """
+        import msgspec
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01 - Track.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                    decode_ok=False,
+                ),
+            ],
+        )
+        evidence = msgspec.structs.replace(
+            evidence,
+            audio_corrupt=True,
+            folder_layout="nested",
+            audio_file_count=1,
+            filetype_band="mp3",
+            matched_bad_audio_hash_id=99,
+            matched_bad_audio_hash_path="01 - Track.mp3",
+        )
+
+        db.upsert_album_quality_evidence(evidence)
+        loaded = db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+            )
+        )
+        assert loaded is not None
+        self.assertTrue(loaded.audio_corrupt)
+        self.assertEqual(loaded.folder_layout, "nested")
+        self.assertEqual(loaded.audio_file_count, 1)
+        self.assertEqual(loaded.filetype_band, "mp3")
+        self.assertEqual(loaded.matched_bad_audio_hash_id, 99)
+        self.assertEqual(loaded.matched_bad_audio_hash_path, "01 - Track.mp3")
+        self.assertFalse(loaded.files[0].decode_ok)
+
+    def test_album_quality_evidence_empty_fileset_accepts_zero_count_on_fake(self):
+        """U1 AE4: empty fileset with audio_file_count=0 is storable on fake too."""
+        import msgspec
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            files=[],
+        )
+        # default audio_file_count is 0 — explicit for clarity.
+        evidence = msgspec.structs.replace(evidence, audio_file_count=0)
+        db.upsert_album_quality_evidence(evidence)
+        loaded = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+        ))
+        assert loaded is not None
+        self.assertEqual(loaded.audio_file_count, 0)
+        self.assertEqual(loaded.files, [])
+
     def test_record_attempt_updates_retry_metadata(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))

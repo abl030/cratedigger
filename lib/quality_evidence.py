@@ -98,6 +98,51 @@ def request_current_owner(request_id: int) -> AlbumQualityEvidenceOwner:
     )
 
 
+_LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
+_LOSSY_CONTAINERS = {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
+
+
+def derive_folder_layout(files: list[AlbumQualityEvidenceFile]) -> str:
+    """Return 'nested' if any snapshot file lives in a subdirectory.
+
+    Pure helper used by U1's evidence-construction sites. ``relative_path``
+    is always a relative POSIX-shaped path; a forward slash anywhere in it
+    indicates a multi-disc / nested layout that the decision function
+    rejects in U6.
+    """
+
+    for file in files:
+        if "/" in file.relative_path:
+            return "nested"
+    return "flat"
+
+
+def derive_filetype_band(files: list[AlbumQualityEvidenceFile]) -> str:
+    """Classify a snapshot fileset into a coarse filetype band.
+
+    Returns one of ``""`` (empty fileset), ``"flac"``, ``"mp3"``,
+    ``"mixed_lossless"``, ``"mixed_lossy"``, or ``"mixed"`` (lossy + lossless
+    combined). Container is the discriminator — codec is too noisy.
+    """
+
+    if not files:
+        return ""
+    containers = {file.container.lower() for file in files if file.container}
+    if not containers:
+        return ""
+    if len(containers) == 1:
+        return next(iter(containers))
+    lossless_hits = containers & _LOSSLESS_CONTAINERS
+    lossy_hits = containers & _LOSSY_CONTAINERS
+    if lossless_hits and lossy_hits:
+        return "mixed"
+    if lossless_hits:
+        return "mixed_lossless"
+    if lossy_hits:
+        return "mixed_lossy"
+    return "mixed"
+
+
 def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
     """Build sorted active snapshot rows for audio files under ``root``."""
 
@@ -334,6 +379,7 @@ def evidence_from_import_result(
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
     measurement = import_result.new_measurement
     proof = verified_lossless_proof_from_import_result(import_result)
+    audio_corrupt = any(not file.decode_ok for file in files)
     evidence = AlbumQualityEvidence(
         owner=owner,
         measurement=measurement,
@@ -345,6 +391,10 @@ def evidence_from_import_result(
         target_format=target_format,
         v0_metric=neutral_v0_metric_from_probe(import_result.v0_probe),
         verified_lossless_proof=proof,
+        audio_corrupt=audio_corrupt,
+        folder_layout=derive_folder_layout(files),
+        audio_file_count=len(files),
+        filetype_band=derive_filetype_band(files),
     )
     errors = evidence.storage_validation_errors()
     if errors:
@@ -400,6 +450,10 @@ def evidence_from_album_info(
         storage_format=measurement.format,
         v0_metric=legacy_current_v0_metric_from_request(request_row),
         verified_lossless_proof=proof,
+        audio_corrupt=any(not file.decode_ok for file in files),
+        folder_layout=derive_folder_layout(files),
+        audio_file_count=len(files),
+        filetype_band=derive_filetype_band(files),
     )
     errors = evidence.storage_validation_errors()
     if errors:
@@ -448,6 +502,14 @@ def persist_candidate_evidence_from_import_result(
                 target_format=result.evidence.target_format,
                 v0_metric=result.evidence.v0_metric,
                 verified_lossless_proof=result.evidence.verified_lossless_proof,
+                audio_corrupt=result.evidence.audio_corrupt,
+                folder_layout=result.evidence.folder_layout,
+                audio_file_count=result.evidence.audio_file_count,
+                filetype_band=result.evidence.filetype_band,
+                matched_bad_audio_hash_id=result.evidence.matched_bad_audio_hash_id,
+                matched_bad_audio_hash_path=(
+                    result.evidence.matched_bad_audio_hash_path
+                ),
             ))
     return result
 

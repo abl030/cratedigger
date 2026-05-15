@@ -1727,6 +1727,7 @@ class PipelineDB:
                 "extension": file.extension,
                 "container": file.container,
                 "codec": file.codec,
+                "decode_ok": file.decode_ok,
             }
             for ordinal, file in enumerate(evidence.files)
         ]
@@ -1744,11 +1745,16 @@ class PipelineDB:
                     v0_source_provenance, v0_proof_provenance,
                     verified_lossless_proof_origin,
                     verified_lossless_source, verified_lossless_classifier,
-                    verified_lossless_detail, updated_at
+                    verified_lossless_detail,
+                    audio_corrupt, folder_layout, audio_file_count,
+                    filetype_band, matched_bad_audio_hash_id,
+                    matched_bad_audio_hash_path,
+                    updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
                     NOW()
                 )
                 ON CONFLICT (owner_type, owner_id)
@@ -1781,6 +1787,13 @@ class PipelineDB:
                         EXCLUDED.verified_lossless_classifier,
                     verified_lossless_detail =
                         EXCLUDED.verified_lossless_detail,
+                    audio_corrupt = EXCLUDED.audio_corrupt,
+                    folder_layout = EXCLUDED.folder_layout,
+                    audio_file_count = EXCLUDED.audio_file_count,
+                    filetype_band = EXCLUDED.filetype_band,
+                    matched_bad_audio_hash_id = EXCLUDED.matched_bad_audio_hash_id,
+                    matched_bad_audio_hash_path =
+                        EXCLUDED.matched_bad_audio_hash_path,
                     updated_at = NOW()
                 RETURNING id
             ),
@@ -1801,16 +1814,18 @@ class PipelineDB:
                     mtime_ns BIGINT,
                     extension TEXT,
                     container TEXT,
-                    codec TEXT
+                    codec TEXT,
+                    decode_ok BOOLEAN
                 )
             )
             INSERT INTO album_quality_evidence_files (
                 evidence_id, ordinal, relative_path, size_bytes, mtime_ns,
-                extension, container, codec
+                extension, container, codec, decode_ok
             )
             SELECT upserted.id, file_rows.ordinal, file_rows.relative_path,
                    file_rows.size_bytes, file_rows.mtime_ns,
-                   file_rows.extension, file_rows.container, file_rows.codec
+                   file_rows.extension, file_rows.container, file_rows.codec,
+                   COALESCE(file_rows.decode_ok, TRUE)
             FROM upserted
             CROSS JOIN delete_complete
             CROSS JOIN file_rows
@@ -1842,6 +1857,12 @@ class PipelineDB:
                 proof.source if proof else None,
                 proof.classifier if proof else None,
                 proof.detail if proof else None,
+                evidence.audio_corrupt,
+                evidence.folder_layout,
+                evidence.audio_file_count,
+                evidence.filetype_band,
+                evidence.matched_bad_audio_hash_id,
+                evidence.matched_bad_audio_hash_path,
                 json.dumps(file_rows),
             ),
         )
@@ -1869,7 +1890,7 @@ class PipelineDB:
         files_cur = self._execute(
             """
             SELECT relative_path, size_bytes, mtime_ns, extension, container,
-                   codec
+                   codec, decode_ok
             FROM album_quality_evidence_files
             WHERE evidence_id = %s
             ORDER BY relative_path
@@ -1932,6 +1953,7 @@ class PipelineDB:
                     extension=file["extension"],
                     container=file["container"],
                     codec=file.get("codec"),
+                    decode_ok=bool(file["decode_ok"]) if "decode_ok" in file else True,
                 )
                 for file in file_rows
             ],
@@ -1941,6 +1963,16 @@ class PipelineDB:
             target_format=row.get("target_format"),
             v0_metric=v0_metric,
             verified_lossless_proof=proof,
+            audio_corrupt=bool(row.get("audio_corrupt", False)),
+            folder_layout=row.get("folder_layout") or "flat",
+            audio_file_count=int(row.get("audio_file_count") or 0),
+            filetype_band=row.get("filetype_band") or "",
+            matched_bad_audio_hash_id=(
+                int(row["matched_bad_audio_hash_id"])
+                if row.get("matched_bad_audio_hash_id") is not None
+                else None
+            ),
+            matched_bad_audio_hash_path=row.get("matched_bad_audio_hash_path"),
         )
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
