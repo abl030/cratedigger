@@ -173,6 +173,157 @@ class TestSpectralImportDecision(unittest.TestCase):
 
 
 # ============================================================================
+# preimport_decide — U3
+# ============================================================================
+
+class TestPreimportDecide(unittest.TestCase):
+    """preimport_decide: pure mapping from PreimportMeasurement → PreimportDecision.
+
+    Decision order mirrors run_preimport_gates today: audio_corrupt first, then
+    bad_audio_hash, then nested_layout, then empty_fileset, then spectral. Each
+    row in CASES is one subTest. The decision function consumes only the typed
+    measurement Struct + cfg + (optional) existing evidence — no DB writes, no
+    denylists, no filesystem side effects.
+    """
+
+    def _measurement(self, **overrides: Any):
+        """Build a clean PreimportMeasurement with overrides applied."""
+        from lib.preimport import PreimportMeasurement
+        from lib.quality import SpectralMeasurement
+
+        defaults: dict[str, Any] = dict(
+            corrupt_files=[],
+            audio_corrupt=False,
+            matched_bad_hash_id=None,
+            matched_bad_track_path=None,
+            download_spectral=None,
+            existing_spectral=None,
+            existing_min_bitrate=None,
+            folder_layout="flat",
+            audio_file_count=12,
+            filetype_band="mp3",
+            min_bitrate_kbps=320,
+            is_vbr=False,
+        )
+        defaults.update(overrides)
+        # Spectral measurement helpers may produce None (use as-is).
+        ds = defaults.get("download_spectral")
+        if isinstance(ds, tuple):
+            grade, kbps = ds
+            defaults["download_spectral"] = (
+                SpectralMeasurement.from_parts(grade, kbps))
+        es = defaults.get("existing_spectral")
+        if isinstance(es, tuple):
+            grade, kbps = es
+            defaults["existing_spectral"] = (
+                SpectralMeasurement.from_parts(grade, kbps))
+        return PreimportMeasurement(**defaults)
+
+    def _cfg(self):
+        from lib.quality import QualityRankConfig
+        return QualityRankConfig.defaults()
+
+    def test_clean_candidate_accepts(self):
+        from lib.quality import preimport_decide
+        m = self._measurement()
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "accept")
+        self.assertIsNone(result.reason)
+
+    def test_audio_corrupt_rejects(self):
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            audio_corrupt=True,
+            corrupt_files=["track01.mp3"],
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "reject")
+        self.assertEqual(result.reason, "audio_corrupt")
+
+    def test_bad_audio_hash_rejects(self):
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            matched_bad_hash_id=42,
+            matched_bad_track_path="/Incoming/auto-import/Album/01.mp3",
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "reject")
+        self.assertEqual(result.reason, "bad_audio_hash")
+        self.assertIn("42", result.detail or "")
+
+    def test_nested_layout_rejects(self):
+        from lib.quality import preimport_decide
+        m = self._measurement(folder_layout="nested")
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "reject")
+        self.assertEqual(result.reason, "nested_layout")
+
+    def test_empty_fileset_rejects(self):
+        from lib.quality import preimport_decide
+        m = self._measurement(audio_file_count=0)
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "reject")
+        self.assertEqual(result.reason, "empty_fileset")
+
+    def test_spectral_reject_no_upgrade(self):
+        """likely_transcode + no improvement over existing → reject."""
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            download_spectral=("likely_transcode", 128),
+            existing_spectral=("genuine", 320),
+            existing_min_bitrate=320,
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "reject")
+        self.assertEqual(result.reason, "spectral_reject")
+        self.assertIn("128", result.detail or "")
+
+    def test_spectral_upgrade_accepts(self):
+        """suspect grade BUT bitrate improves on existing → accept."""
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            download_spectral=("suspect", 256),
+            existing_spectral=("likely_transcode", 96),
+            existing_min_bitrate=96,
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "accept")
+
+    def test_spectral_import_no_exist_accepts(self):
+        """existing_spectral=None + suspect grade → accept (mirrors import_no_exist)."""
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            download_spectral=("suspect", 128),
+            existing_spectral=None,
+            existing_min_bitrate=None,
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "accept")
+
+    def test_genuine_spectral_accepts(self):
+        """Even with existing on disk, genuine spectral always accepts."""
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            download_spectral=("genuine", 320),
+            existing_spectral=("genuine", 320),
+            existing_min_bitrate=320,
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "accept")
+
+    def test_decision_function_has_no_side_effect_imports(self):
+        """preimport_decide is pure: no db, denylist, filesystem references."""
+        import inspect
+        from lib import quality
+        src = inspect.getsource(quality.preimport_decide)
+        forbidden = ("db.", "add_denylist", "update_spectral_state",
+                     "log_download", "subprocess", "os.path", "open(")
+        for bad in forbidden:
+            self.assertNotIn(bad, src,
+                             f"preimport_decide must not contain {bad!r}")
+
+
+# ============================================================================
 # import_quality_decision
 # ============================================================================
 

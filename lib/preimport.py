@@ -22,7 +22,9 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+import msgspec
 
 from lib.audio_hash import AudioHashError, hash_audio_content
 
@@ -31,7 +33,8 @@ from lib.audio_hash import AudioHashError, hash_audio_content
 # wav/alac albums don't trip a per-track warning every validation cycle.
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
-from lib.quality import (SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement,
+from lib.quality import (SPECTRAL_TRANSCODE_GRADES, PreimportDecision,
+                         SpectralMeasurement, preimport_decide,
                          spectral_import_decision)
 from lib.util import repair_mp3_headers, validate_audio
 
@@ -65,6 +68,12 @@ class PreImportGateResult:
 
     The spectral fields are populated whenever a spectral analysis ran
     (regardless of pass/reject) so callers can persist them to download_log.
+
+    NOTE (U3): ``valid`` and ``scenario`` are derived fields kept ONLY for
+    backward compatibility with existing callers (``lib.import_preview``,
+    ``lib.download``). New code SHOULD call ``measure_preimport_state`` +
+    ``lib.quality.preimport_decide`` directly and never read these fields.
+    U6/U7 deletes the legacy bridge.
     """
     valid: bool = True
     scenario: str | None = None      # "audio_corrupt" | "spectral_reject" | "bad_audio_hash"
@@ -78,6 +87,33 @@ class PreImportGateResult:
     # ``ValidationResult`` written to ``download_log.validation_result``.
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
+
+
+class PreimportMeasurement(msgspec.Struct, frozen=True):
+    """Facts gathered by ``measure_preimport_state``. No decision fields.
+
+    The pure decision function ``lib.quality.preimport_decide`` consumes this
+    typed Struct + the runtime ``QualityRankConfig`` + optional existing-album
+    evidence and returns a ``PreimportDecision``. The measurement helper has
+    no opinion on accept/reject — it only reports what is on disk.
+
+    Fields map 1:1 onto the new ``AlbumQualityEvidence`` columns added in U1
+    (``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
+    ``filetype_band``, ``matched_bad_audio_hash_*``) so U5/U6 can wire the
+    measurement directly into evidence persistence.
+    """
+    corrupt_files: list[str] = msgspec.field(default_factory=list)
+    audio_corrupt: bool = False
+    matched_bad_hash_id: int | None = None
+    matched_bad_track_path: str | None = None
+    download_spectral: SpectralMeasurement | None = None
+    existing_spectral: SpectralMeasurement | None = None
+    existing_min_bitrate: int | None = None
+    folder_layout: Literal["flat", "nested"] = "flat"
+    audio_file_count: int = 0
+    filetype_band: str = ""
+    min_bitrate_kbps: int | None = None
+    is_vbr: bool | None = None
 
 
 AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
@@ -354,6 +390,285 @@ def _check_bad_audio_hashes(
     return None
 
 
+def _filetype_band(download_filetype: str) -> str:
+    """Lowercase, comma-joined filetype band for the measurement Struct.
+
+    Mirrors the existing ``LocalFileInspection.filetype`` shape. Used both by
+    the auto path (which gets filetype from slskd) and the measurement helper
+    when no caller-supplied filetype is available.
+    """
+    return (download_filetype or "").lower()
+
+
+def measure_preimport_state(
+    *,
+    path: str,
+    mb_release_id: str,
+    label: str,
+    download_filetype: str,
+    download_min_bitrate_bps: int | None,
+    download_is_vbr: bool | None,
+    cfg: "CratediggerConfig",
+    db: "PipelineDB | None" = None,
+    request_id: int | None = None,
+    propagate_download_to_existing: bool = True,
+    precomputed_inspection: "LocalFileInspection | None" = None,
+) -> PreimportMeasurement:
+    """Collect pre-import measurement facts. Returns ``PreimportMeasurement``.
+
+    This is the pure measurement helper introduced in U3. It has NO decision
+    fields, no denylist writes, no requeue decisions. It DOES persist on-disk
+    spectral state to ``album_requests`` via ``_persist_spectral_state`` when
+    a DB is wired — that propagation is part of "we measured this candidate"
+    and must fire whether or not the downstream decision is accept or reject
+    (issue #90).
+
+    The companion pure decision function ``lib.quality.preimport_decide``
+    consumes the returned Struct to decide accept/reject. U5/U6 will move
+    every caller off the legacy ``run_preimport_gates`` shim.
+
+    Args:
+        path: Filesystem path containing the files to validate.
+        mb_release_id: MusicBrainz release ID — used to find the existing
+            album in beets for spectral comparison.
+        label: "Artist - Title" string, for log output only.
+        download_filetype: Comma-separated filetypes ("mp3", "flac", ...).
+        download_min_bitrate_bps: Caller-supplied container min bitrate (bps).
+        download_is_vbr: Caller-supplied VBR hint.
+        cfg: Runtime CratediggerConfig.
+        db: Pipeline DB — pass to enable spectral state persistence + bad-hash
+            lookup + persisted-spectral fallback.
+        request_id: Required when ``db`` is supplied.
+
+    Returns:
+        PreimportMeasurement with all gate facts populated. Audio-corrupt and
+        bad-hash matches short-circuit the spectral steps to avoid wasting
+        cycles, but the returned Struct still has the corresponding flag set.
+    """
+    # --- MP3 header repair (unconditional) ---
+    # mp3val runs regardless of audio_check_mode: deployments with
+    # audio_check=off still want fixable MP3 header issues cleaned up before
+    # spectral analysis and the import subprocess. Matches the auto path's
+    # original behavior pre-refactor.
+    try:
+        repair_mp3_headers(path)
+    except Exception:
+        logger.debug("repair_mp3_headers failed", exc_info=True)
+
+    filetype_band = _filetype_band(download_filetype)
+
+    # --- Audio integrity gate ---
+    corrupt_files: list[str] = []
+    audio_corrupt = False
+    if cfg.audio_check_mode != "off":
+        audio_result = validate_audio(path, cfg.audio_check_mode)
+        if not audio_result.valid:
+            audio_corrupt = True
+            corrupt_files = [name for name, _ in audio_result.failed_files]
+            logger.warning(
+                f"AUDIO CORRUPT: {label} "
+                f"({len(corrupt_files)} files failed ffmpeg decode)")
+            return PreimportMeasurement(
+                corrupt_files=corrupt_files,
+                audio_corrupt=audio_corrupt,
+                folder_layout="flat",
+                audio_file_count=0,
+                filetype_band=filetype_band,
+                min_bitrate_kbps=(
+                    download_min_bitrate_bps // 1000
+                    if download_min_bitrate_bps
+                    and download_min_bitrate_bps >= 1000 else
+                    download_min_bitrate_bps
+                ),
+                is_vbr=download_is_vbr,
+            )
+
+    # --- Bad-audio-hash gate (plan 2026-04-29-005 / U5) ---
+    # Hash candidate tracks and compare against the curator-reported
+    # ``bad_audio_hashes`` table. Sits AFTER MP3 header repair, AFTER
+    # audio-integrity, BEFORE spectral (cheaper to reject early on a known
+    # match than run sox).
+    matched_bad_hash_id: int | None = None
+    matched_bad_track_path: str | None = None
+    if db is not None:
+        try:
+            any_bad = db.has_any_bad_audio_hashes()
+        except Exception:
+            logger.warning(
+                "bad-hash gate: has_any_bad_audio_hashes probe failed, skipping",
+                exc_info=True)
+            any_bad = False
+        if any_bad:
+            audio_files = _iter_audio_files(path)
+            match = _check_bad_audio_hashes(audio_files, db)
+            if match is not None:
+                matched_bad_hash_id = match.bad_hash_id
+                matched_bad_track_path = match.track_path
+                logger.warning(
+                    f"BAD HASH MATCH: {label} "
+                    f"hash_id={match.bad_hash_id} track={match.track_path}")
+                return PreimportMeasurement(
+                    corrupt_files=[],
+                    audio_corrupt=False,
+                    matched_bad_hash_id=matched_bad_hash_id,
+                    matched_bad_track_path=matched_bad_track_path,
+                    folder_layout="flat",
+                    audio_file_count=0,
+                    filetype_band=filetype_band,
+                    min_bitrate_kbps=(
+                        download_min_bitrate_bps // 1000
+                        if download_min_bitrate_bps
+                        and download_min_bitrate_bps >= 1000 else
+                        download_min_bitrate_bps
+                    ),
+                    is_vbr=download_is_vbr,
+                )
+
+    # --- Resolve VBR / min_bitrate / avg bitrate / layout via filesystem inspection ---
+    # ``precomputed_inspection`` lets the force/manual path (which already
+    # inspected to decide the nested-layout gate) avoid a second mutagen
+    # walk. Auto path passes None and does the walk here.
+    inspection: LocalFileInspection | None = None
+    avg_bitrate_bps: int | None = None
+    if "mp3" in filetype_band and "flac" not in filetype_band:
+        inspection = (precomputed_inspection if precomputed_inspection is not None
+                      else inspect_local_files(path))
+        if download_is_vbr is None and inspection.is_vbr is not None:
+            download_is_vbr = inspection.is_vbr
+        if download_min_bitrate_bps is None:
+            download_min_bitrate_bps = inspection.min_bitrate_bps
+        avg_bitrate_bps = inspection.avg_bitrate_bps
+    elif precomputed_inspection is not None:
+        # Non-MP3 paths with a precomputed inspection — capture layout / count
+        # without redoing the bitrate walk.
+        inspection = precomputed_inspection
+
+    # Folder layout + file count: walk the filesystem once when not already
+    # known. ``_iter_audio_files`` mirrors the gate's directory walk so
+    # downstream gates and the importer see the same set.
+    if inspection is not None and (
+        inspection.has_nested_audio or inspection.filetype
+    ):
+        audio_files_for_count = _iter_audio_files(path)
+        audio_file_count = len(audio_files_for_count)
+        folder_layout: Literal["flat", "nested"] = (
+            "nested" if inspection.has_nested_audio else "flat")
+    else:
+        audio_files_for_count = _iter_audio_files(path)
+        audio_file_count = len(audio_files_for_count)
+        # Layout: any audio file outside ``path`` (i.e. in a subdirectory) is
+        # nested. Otherwise flat. Cheap derivation from the walk we already did.
+        folder_layout = "flat"
+        for p in audio_files_for_count:
+            if str(p.parent) != path:
+                folder_layout = "nested"
+                break
+
+    # Min bitrate in kbps for the measurement Struct (bps→kbps, only for
+    # values that look like bps).
+    if download_min_bitrate_bps is not None and download_min_bitrate_bps >= 1000:
+        min_bitrate_kbps = download_min_bitrate_bps // 1000
+    else:
+        min_bitrate_kbps = download_min_bitrate_bps
+
+    # --- Spectral gate ---
+    # Threshold: cfg.quality_ranks.mp3_vbr.excellent — same V0 boundary
+    # transcode_detection() uses.
+    avg_bitrate_kbps = (avg_bitrate_bps // 1000) if avg_bitrate_bps else None
+    download_spectral: SpectralMeasurement | None = None
+    existing_spectral: SpectralMeasurement | None = None
+    existing_min_bitrate: int | None = None
+
+    if _needs_spectral_check(
+        download_filetype, download_is_vbr,
+        avg_bitrate_kbps=avg_bitrate_kbps,
+        vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
+    ):
+        try:
+            dl_sp = spectral_analyze(path, trim_seconds=30)
+            dl_grade = dl_sp.grade
+            dl_cliff_bitrate = dl_sp.estimated_bitrate_kbps
+            dl_suspect_pct = dl_sp.suspect_pct
+            cliff_count = sum(
+                1 for track in getattr(dl_sp, "tracks", [])
+                if getattr(track, "cliff_detected", False)
+            )
+            download_spectral = SpectralMeasurement.from_parts(
+                dl_grade, dl_cliff_bitrate)
+            logger.info(
+                f"SPECTRAL: {label} grade={dl_grade}, "
+                f"estimated_bitrate={dl_cliff_bitrate}kbps, "
+                f"suspect={dl_suspect_pct:.0f}%, cliffs={cliff_count}")
+        except Exception:
+            logger.exception(f"SPECTRAL: failed for {label}")
+            download_spectral = None
+
+        if download_spectral is not None and mb_release_id:
+            existing_min_bitrate, existing_spectral = _analyze_existing(
+                mb_release_id, cfg)
+
+        # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
+        beets_knows_album = existing_min_bitrate is not None
+        if (download_spectral is not None
+                and beets_knows_album
+                and existing_spectral is None
+                and db is not None and request_id is not None):
+            try:
+                req = db.get_request(request_id)
+                if req:
+                    stored_grade = req.get("current_spectral_grade")
+                    stored_bitrate = req.get("current_spectral_bitrate")
+                    if stored_grade in SPECTRAL_TRANSCODE_GRADES:
+                        stored = SpectralMeasurement.from_parts(
+                            stored_grade, stored_bitrate)
+                        if stored is not None:
+                            existing_spectral = stored
+                            logger.info(
+                                f"SPECTRAL: {label} using persisted "
+                                f"current_spectral (grade={stored.grade}, "
+                                f"bitrate={stored.bitrate_kbps}kbps) — BeetsDB "
+                                "lookup returned no spectral measurement")
+            except Exception:
+                logger.debug("failed to read persisted spectral state",
+                             exc_info=True)
+
+    # --- Persist spectral state to DB (issue #90 propagation) ---
+    # This MUST fire on every measurement where spectral was collected,
+    # regardless of whether the downstream decision accepts or rejects. The
+    # next attempt needs accurate ``album_requests.current_spectral_*`` to
+    # make a sound comparison. Persists AFTER the existing_spectral snapshot
+    # used by the decision is taken — propagation can't poison the comparison
+    # because the decision runs in ``preimport_decide`` on the *returned*
+    # Struct, which carries the pre-propagation values.
+    if download_spectral is not None and db is not None and request_id is not None:
+        try:
+            _persist_spectral_state(
+                db=db, request_id=request_id,
+                download_spectral=download_spectral,
+                existing_spectral=existing_spectral,
+                existing_min_bitrate=existing_min_bitrate,
+                label=label,
+                propagate_download_to_existing=propagate_download_to_existing,
+            )
+        except Exception:
+            logger.exception("failed to persist spectral state")
+
+    return PreimportMeasurement(
+        corrupt_files=corrupt_files,
+        audio_corrupt=audio_corrupt,
+        matched_bad_hash_id=matched_bad_hash_id,
+        matched_bad_track_path=matched_bad_track_path,
+        download_spectral=download_spectral,
+        existing_spectral=existing_spectral,
+        existing_min_bitrate=existing_min_bitrate,
+        folder_layout=folder_layout,
+        audio_file_count=audio_file_count,
+        filetype_band=filetype_band,
+        min_bitrate_kbps=min_bitrate_kbps,
+        is_vbr=download_is_vbr,
+    )
+
+
 def run_preimport_gates(
     *,
     path: str,
@@ -369,300 +684,209 @@ def run_preimport_gates(
     propagate_download_to_existing: bool = True,
     precomputed_inspection: "LocalFileInspection | None" = None,
 ) -> PreImportGateResult:
-    """Run shared pre-import gates: audio integrity, then spectral transcode detection.
+    """Legacy compatibility shim — delegates to measure_preimport_state + preimport_decide.
 
-    Side effects when ``db`` and ``request_id`` are supplied:
-      * Updates ``album_requests.current_spectral_{grade,bitrate}`` via
-        ``update_spectral_state``.
-      * On spectral reject, adds a ``source_denylist`` entry for every
-        username in ``usernames`` with a ``spectral: Xkbps <= existing Ykbps``
-        reason.
+    U3 introduced ``measure_preimport_state`` (facts only) and
+    ``lib.quality.preimport_decide`` (pure decision). This shim keeps existing
+    callers (``lib.import_preview``, ``lib.download``, force/manual paths)
+    working unchanged: it runs the new pipeline and synthesises the legacy
+    ``PreImportGateResult`` shape (``valid`` + ``scenario`` + ``detail``)
+    that those callers still read. The side effects that previously lived
+    inline — denylisting on bad-hash and spectral-reject — also stay here so
+    behavior is identical to pre-U3.
 
-    The caller owns:
-      * Writing ``download_log`` (the result carries scenario/detail to fold
-        into the log).
-      * Filesystem moves (auto path moves files to ``failed_imports/`` on
-        reject; force/manual paths leave them where they are).
-      * Requeue decisions (auto path requeues on reject; force/manual do not).
-
-    Args:
-        path: Filesystem path containing the files to validate.
-        mb_release_id: MusicBrainz release ID — used to find the existing
-            album in beets for spectral comparison.
-        label: "Artist - Title" string, for log output only.
-        download_filetype: Comma-separated filetypes (e.g. "mp3", "flac",
-            "mp3, flac"). Controls whether spectral check runs.
-        download_min_bitrate_bps: Minimum container bitrate across download
-            files, in bps (or kbps if < 1000). Normalized internally.
-        download_is_vbr: True when any file in the download reports VBR.
-            Spectral check is skipped for VBR MP3s.
-        cfg: Runtime CratediggerConfig (for ``audio_check_mode`` and
-            ``quality_ranks``).
-        db: Pipeline DB — pass to enable denylist + spectral state side effects.
-        request_id: Required when ``db`` is supplied.
-        usernames: Soulseek users to denylist on spectral reject.
-
-    Returns:
-        PreImportGateResult with ``valid`` and populated spectral fields.
+    U5 / U6 will migrate every caller off this shim onto
+    ``measure_preimport_state`` + ``preimport_decide`` and the importer-side
+    rejection-finalize helper, after which this function can be deleted.
     """
-    result = PreImportGateResult()
-
-    # --- MP3 header repair (unconditional) ---
-    # mp3val runs regardless of audio_check_mode: deployments with
-    # audio_check=off still want fixable MP3 header issues cleaned up before
-    # spectral analysis and the import subprocess. Matches the auto path's
-    # original behavior pre-refactor.
-    try:
-        repair_mp3_headers(path)
-    except Exception:
-        logger.debug("repair_mp3_headers failed", exc_info=True)
-
-    # --- Audio integrity gate ---
-    if cfg.audio_check_mode != "off":
-        audio_result = validate_audio(path, cfg.audio_check_mode)
-        if not audio_result.valid:
-            result.valid = False
-            result.scenario = "audio_corrupt"
-            result.detail = audio_result.error
-            result.corrupt_files = [
-                name for name, _ in audio_result.failed_files]
-            logger.warning(
-                f"AUDIO CORRUPT: {label} "
-                f"({len(result.corrupt_files)} files failed ffmpeg decode)")
-            return result
-
-    # --- Bad-audio-hash gate (plan 2026-04-29-005 / U5) ---
-    # Hash candidate tracks and compare against the curator-reported
-    # ``bad_audio_hashes`` table. Sits AFTER MP3 header repair (so post-repair
-    # bytes match what the F1 ban-source flow stored) and AFTER audio-integrity
-    # (so we don't waste cycles hashing undecodable files), BEFORE spectral
-    # (cheaper to reject early on a known match than run sox).
-    #
-    # Empty-table fast-path: ``has_any_bad_audio_hashes`` is a ``LIMIT 1`` probe
-    # with a primary-key index — sub-millisecond on the empty path. Per the plan
-    # we can cache it with a 60s TTL on ``CratediggerContext``, but ``ctx`` is
-    # not currently plumbed into ``run_preimport_gates`` and adding it would
-    # cascade through every caller (auto, force, manual). The DB call is cheap
-    # enough that the direct call wins on simplicity. Revisit if profiling
-    # shows pressure.
-    if db is not None:
-        try:
-            any_bad = db.has_any_bad_audio_hashes()
-        except Exception:
-            logger.warning(
-                "bad-hash gate: has_any_bad_audio_hashes probe failed, skipping",
-                exc_info=True)
-            any_bad = False
-        if any_bad:
-            audio_files = _iter_audio_files(path)
-            match = _check_bad_audio_hashes(audio_files, db)
-            if match is not None:
-                result.valid = False
-                result.scenario = "bad_audio_hash"
-                result.detail = (
-                    f"matched bad audio hash {match.bad_hash_id} on "
-                    f"track {match.track_path}")
-                result.matched_bad_hash_id = match.bad_hash_id
-                result.matched_bad_track_path = match.track_path
-                logger.warning(
-                    f"BAD HASH MATCH: {label} "
-                    f"hash_id={match.bad_hash_id} track={match.track_path}")
-                if request_id is not None and usernames:
-                    for username in usernames:
-                        try:
-                            db.add_denylist(
-                                request_id, username,
-                                f"matched bad hash {match.bad_hash_id}")
-                        except Exception:
-                            logger.exception(
-                                "Failed to denylist %s for request %s "
-                                "(bad-hash match)", username, request_id)
-                    logger.info(
-                        f"  Denylisted {usernames} for request {request_id}")
-                return result
-
-    # --- Resolve VBR status and avg bitrate via filesystem inspection ---
-    # Callers supply VBR/min_bitrate from different sources:
-    #   * Auto path → slskd metadata (usually populated, but None on resumed
-    #     downloads rebuilt from ActiveDownloadState).
-    #   * Force/manual path → mutagen on the local files (can be None on
-    #     broken headers).
-    # Neither source provides an average bitrate, which the VBR threshold
-    # gate (issue #93) needs to tell genuine V0 (~245kbps avg) apart from a
-    # VBR transcode masquerading as V0 (~180kbps avg). Always inspect MP3
-    # downloads so we have avg data; a mutagen walk on a 12-track album is
-    # ~100ms and far cheaper than the spectral analysis it might save.
-    #
-    # Asymmetry note: slskd's ``is_vbr`` wins over inspection (only fills
-    # when the caller passed None). This preserves uploader intent — slskd
-    # reports what the uploader tagged the file as, and overriding that
-    # with mutagen's readout on potentially-repaired headers could flip a
-    # genuine CBR to VBR or vice versa. The force/manual path passes
-    # inspection's ``is_vbr`` as ``download_is_vbr`` directly, so neither
-    # source is lost.
-    #
-    # ``precomputed_inspection`` lets the force/manual path (which already
-    # inspected to decide the nested-layout gate) avoid a second mutagen
-    # walk. Auto path passes None and does the walk here.
-    avg_bitrate_bps: int | None = None
-    filetype_lower = (download_filetype or "").lower()
-    if "mp3" in filetype_lower and "flac" not in filetype_lower:
-        inspection = (precomputed_inspection if precomputed_inspection is not None
-                      else inspect_local_files(path))
-        if download_is_vbr is None and inspection.is_vbr is not None:
-            download_is_vbr = inspection.is_vbr
-        if download_min_bitrate_bps is None:
-            download_min_bitrate_bps = inspection.min_bitrate_bps
-        avg_bitrate_bps = inspection.avg_bitrate_bps
-
-    # --- Spectral gate ---
-    # Threshold: cfg.quality_ranks.mp3_vbr.excellent (the same V0 boundary
-    # transcode_detection() uses). Single source of truth per the
-    # "No Parallel Code Paths" rule — retuning one also retunes the other.
-    avg_bitrate_kbps = (avg_bitrate_bps // 1000) if avg_bitrate_bps else None
-    if not _needs_spectral_check(
-        download_filetype, download_is_vbr,
-        avg_bitrate_kbps=avg_bitrate_kbps,
-        vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
-    ):
-        return result
-
-    try:
-        dl_sp = spectral_analyze(path, trim_seconds=30)
-        dl_grade = dl_sp.grade
-        dl_cliff_bitrate = dl_sp.estimated_bitrate_kbps
-        dl_suspect_pct = dl_sp.suspect_pct
-        cliff_count = sum(
-            1 for track in getattr(dl_sp, "tracks", [])
-            if getattr(track, "cliff_detected", False)
-        )
-        result.download_spectral = SpectralMeasurement.from_parts(
-            dl_grade, dl_cliff_bitrate)
-        logger.info(
-            f"SPECTRAL: {label} grade={dl_grade}, "
-            f"estimated_bitrate={dl_cliff_bitrate}kbps, "
-            f"suspect={dl_suspect_pct:.0f}%, cliffs={cliff_count}")
-    except Exception:
-        # Keep the log prefix pre-refactor had ("SPECTRAL: failed for ...")
-        # so operators grepping for it continue to match.
-        logger.exception(f"SPECTRAL: failed for {label}")
-        return result
-
-    # --- Existing-album lookup + analysis ---
-    if mb_release_id:
-        existing_min, existing_spectral = _analyze_existing(mb_release_id, cfg)
-        result.existing_min_bitrate = existing_min
-        result.existing_spectral = existing_spectral
-
-    # --- Fall back to persisted spectral state when BeetsDB couldn't walk ---
-    # Only fires when BeetsDB FOUND the album (existing_min_bitrate set) but
-    # couldn't measure spectral from its album_path (stale/missing directory).
-    # When BeetsDB returns no album at all — album deleted, beets DB offline,
-    # or first-time import — we must NOT use stale album_requests.min_bitrate
-    # as "proof" that something is still on disk, or the gate would reject
-    # a valid redownload against non-existent state.
-    #
-    # GRADE-AWARE: only use the stored spectral_bitrate when the grade is a
-    # transcode grade (suspect/likely_transcode). A stored
-    # ``grade=genuine, bitrate=96`` is stale (genuine files have no cliff),
-    # and admitting a 96kbps "existing" would let a real transcode be imported
-    # as an upgrade. Matches ``compute_effective_override_bitrate`` and
-    # ``load_quality_gate_state`` — the same rule applied across the pipeline.
-    beets_knows_album = result.existing_min_bitrate is not None
-    if (beets_knows_album
-            and result.existing_spectral is None
-            and db is not None and request_id is not None):
-        try:
-            req = db.get_request(request_id)
-            if req:
-                stored_grade = req.get("current_spectral_grade")
-                stored_bitrate = req.get("current_spectral_bitrate")
-                if stored_grade in SPECTRAL_TRANSCODE_GRADES:
-                    stored = SpectralMeasurement.from_parts(
-                        stored_grade, stored_bitrate)
-                    if stored is not None:
-                        result.existing_spectral = stored
-                        logger.info(
-                            f"SPECTRAL: {label} using persisted "
-                            f"current_spectral (grade={stored.grade}, "
-                            f"bitrate={stored.bitrate_kbps}kbps) — BeetsDB "
-                            "lookup returned no spectral measurement")
-        except Exception:
-            logger.debug("failed to read persisted spectral state",
-                         exc_info=True)
-
-    # --- Spectral decision ---
-    #
-    # Issue #90: the decision MUST run BEFORE _persist_spectral_state
-    # propagates the download's spectral into ``result.existing_spectral``.
-    # When BeetsDB returns an album (``existing_min_bitrate`` populated) but
-    # the on-disk album_path is stale — so ``existing_spectral`` stayed None
-    # — the propagation helper adopts the download's spectral as "the
-    # current on-disk state". If we then read ``result.existing_spectral``
-    # for the decision, we compare the download against a copy of itself
-    # and every suspect-grade download rejects at ``new <= existing`` when
-    # new == existing by construction.
-    #
-    # Snapshot the value spectral_import_decision will see here, keep the
-    # propagation logic intact, and persist AFTER the decision so the DB
-    # still carries the download's spectral forward for the NEXT run's
-    # decision (which is what the propagation is actually for).
-    existing_cliff_bitrate = (
-        result.existing_spectral.bitrate_kbps
-        if result.existing_spectral is not None else None
+    measurement = measure_preimport_state(
+        path=path,
+        mb_release_id=mb_release_id,
+        label=label,
+        download_filetype=download_filetype,
+        download_min_bitrate_bps=download_min_bitrate_bps,
+        download_is_vbr=download_is_vbr,
+        cfg=cfg,
+        db=db,
+        request_id=request_id,
+        propagate_download_to_existing=propagate_download_to_existing,
+        precomputed_inspection=precomputed_inspection,
     )
-    # 4-arg form matches main's _apply_spectral_decision exactly. The
-    # cliff-count heuristic (``download_min_bitrate`` + ``cliff_track_count``
-    # kwargs on spectral_import_decision) lives on a separate branch with
-    # its own tests; wire it in here once that lands.
-    spectral_decision = spectral_import_decision(
-        dl_grade, dl_cliff_bitrate, existing_cliff_bitrate,
-        existing_min_bitrate=result.existing_min_bitrate,
+    # Legacy decision: pre-U3 ``run_preimport_gates`` evaluated only three
+    # reject gates — ``audio_corrupt``, ``bad_audio_hash``, ``spectral_reject``.
+    # ``nested_layout`` was gated by callers (preview) and ``empty_fileset`` was
+    # never explicitly checked. The full ``preimport_decide`` adds those, but
+    # the shim must preserve the legacy decision surface so existing callers
+    # don't regress. U5/U6 will move callers onto the full decision function.
+    decision = _legacy_preimport_decision(measurement)
+
+    result = PreImportGateResult(
+        corrupt_files=list(measurement.corrupt_files),
+        download_spectral=measurement.download_spectral,
+        existing_spectral=measurement.existing_spectral,
+        existing_min_bitrate=measurement.existing_min_bitrate,
+        matched_bad_hash_id=measurement.matched_bad_hash_id,
+        matched_bad_track_path=measurement.matched_bad_track_path,
     )
 
-    effective_existing = (
-        existing_cliff_bitrate or result.existing_min_bitrate or 0)
-    if spectral_decision == "reject":
+    if decision.decision == "reject":
         result.valid = False
-        result.scenario = "spectral_reject"
-        result.detail = (
-            f"spectral {dl_cliff_bitrate}kbps <= existing {effective_existing}kbps")
-        logger.warning(
-            f"SPECTRAL REJECT: {label} "
-            f"new spectral {dl_cliff_bitrate}kbps <= existing {effective_existing}kbps")
-        if db is not None and request_id is not None and usernames:
-            for username in usernames:
-                try:
-                    db.add_denylist(
-                        request_id, username,
-                        f"spectral: {dl_cliff_bitrate}kbps <= existing {effective_existing}kbps")
-                except Exception:
-                    logger.exception(
-                        f"Failed to denylist {username} for request {request_id}")
-            logger.info(f"  Denylisted {usernames} for request {request_id}")
-    elif spectral_decision == "import_upgrade":
-        logger.info(
-            f"SPECTRAL UPGRADE: {label} suspect at {dl_cliff_bitrate}kbps "
-            f"but > existing {effective_existing}kbps, importing")
-    elif spectral_decision == "import_no_exist":
-        logger.info(
-            f"SPECTRAL: {label} suspect at {dl_cliff_bitrate}kbps "
-            f"but no existing album, importing")
-
-    # --- Persist spectral state to DB (if wired) ---
-    # Runs AFTER the decision so the propagation (download → existing) can't
-    # poison the comparison above. The written value still flows back into
-    # ``result.existing_spectral`` for downstream logging — callers read this
-    # field to populate DownloadInfo.current_spectral and validation logs.
-    if db is not None and request_id is not None:
-        written = _persist_spectral_state(
-            db=db, request_id=request_id,
-            download_spectral=result.download_spectral,
-            existing_spectral=result.existing_spectral,
-            existing_min_bitrate=result.existing_min_bitrate,
-            label=label,
-            propagate_download_to_existing=propagate_download_to_existing,
+        result.scenario = decision.reason
+        result.detail = decision.detail
+        _apply_legacy_denylist_side_effects(
+            measurement=measurement,
+            decision=decision,
+            db=db,
+            request_id=request_id,
+            usernames=usernames,
         )
-        result.existing_spectral = written
+        # Operator-visible reject log — preserved from pre-U3 behavior.
+        if decision.reason == "spectral_reject":
+            dl_bitrate = (
+                measurement.download_spectral.bitrate_kbps
+                if measurement.download_spectral is not None else None
+            )
+            effective_existing = (
+                (measurement.existing_spectral.bitrate_kbps
+                 if measurement.existing_spectral is not None else None)
+                or measurement.existing_min_bitrate or 0
+            )
+            logger.warning(
+                f"SPECTRAL REJECT: {label} "
+                f"new spectral {dl_bitrate}kbps <= existing "
+                f"{effective_existing}kbps")
+    else:
+        # Operator-visible accept log for spectral upgrades / no-exist (pre-U3
+        # behavior). Only fires when spectral actually ran.
+        ds = measurement.download_spectral
+        if ds is not None:
+            dl_bitrate = ds.bitrate_kbps
+            verdict = spectral_import_decision(
+                ds.grade, dl_bitrate,
+                (measurement.existing_spectral.bitrate_kbps
+                 if measurement.existing_spectral is not None else None),
+                existing_min_bitrate=measurement.existing_min_bitrate,
+            )
+            effective_existing = (
+                (measurement.existing_spectral.bitrate_kbps
+                 if measurement.existing_spectral is not None else None)
+                or measurement.existing_min_bitrate or 0
+            )
+            if verdict == "import_upgrade":
+                logger.info(
+                    f"SPECTRAL UPGRADE: {label} suspect at {dl_bitrate}kbps "
+                    f"but > existing {effective_existing}kbps, importing")
+            elif verdict == "import_no_exist":
+                logger.info(
+                    f"SPECTRAL: {label} suspect at {dl_bitrate}kbps "
+                    f"but no existing album, importing")
 
     return result
+
+
+def _legacy_preimport_decision(
+    measurement: PreimportMeasurement,
+) -> PreimportDecision:
+    """Subset of ``preimport_decide`` matching pre-U3 ``run_preimport_gates`` gates.
+
+    Only audio_corrupt → bad_audio_hash → spectral_reject. ``nested_layout``
+    and ``empty_fileset`` are intentionally excluded so this shim is bit-for-bit
+    backward compatible with pre-U3 callers (preview filters nested itself;
+    auto path never checked file count). U6 wires the full ``preimport_decide``
+    into the importer where the broader gate set is correct.
+    """
+    if measurement.audio_corrupt:
+        n = len(measurement.corrupt_files)
+        return PreimportDecision(
+            decision="reject",
+            reason="audio_corrupt",
+            detail=f"{n} files failed ffmpeg decode" if n else "audio_corrupt",
+        )
+    if measurement.matched_bad_hash_id is not None:
+        track = measurement.matched_bad_track_path or "<unknown>"
+        return PreimportDecision(
+            decision="reject",
+            reason="bad_audio_hash",
+            detail=(
+                f"matched bad audio hash {measurement.matched_bad_hash_id} on "
+                f"track {track}"
+            ),
+        )
+    ds = measurement.download_spectral
+    if ds is not None:
+        existing_cliff_bitrate = (
+            measurement.existing_spectral.bitrate_kbps
+            if measurement.existing_spectral is not None else None
+        )
+        verdict = spectral_import_decision(
+            ds.grade, ds.bitrate_kbps,
+            existing_cliff_bitrate,
+            existing_min_bitrate=measurement.existing_min_bitrate,
+        )
+        if verdict == "reject":
+            effective_existing = (
+                existing_cliff_bitrate or measurement.existing_min_bitrate or 0
+            )
+            return PreimportDecision(
+                decision="reject",
+                reason="spectral_reject",
+                detail=(
+                    f"spectral {ds.bitrate_kbps}kbps <= existing "
+                    f"{effective_existing}kbps"
+                ),
+            )
+    return PreimportDecision(decision="accept")
+
+
+def _apply_legacy_denylist_side_effects(
+    *,
+    measurement: PreimportMeasurement,
+    decision: PreimportDecision,
+    db: "PipelineDB | None",
+    request_id: int | None,
+    usernames: set[str] | None,
+) -> None:
+    """Denylist side effects preserved during the U3 → U6 transition.
+
+    Bad-hash and spectral-reject scenarios denylist the Soulseek users who
+    served the bad source so the search executor doesn't ask them again on the
+    next attempt. U6 moves this into the shared rejection-finalize helper;
+    until then the shim continues to do it inline to keep behavior identical
+    to pre-U3.
+    """
+    if db is None or request_id is None or not usernames:
+        return
+    if decision.reason == "bad_audio_hash":
+        match_id = measurement.matched_bad_hash_id
+        for username in usernames:
+            try:
+                db.add_denylist(
+                    request_id, username,
+                    f"matched bad hash {match_id}")
+            except Exception:
+                logger.exception(
+                    "Failed to denylist %s for request %s "
+                    "(bad-hash match)", username, request_id)
+        logger.info(
+            f"  Denylisted {usernames} for request {request_id}")
+        return
+    if decision.reason == "spectral_reject":
+        dl_bitrate = (
+            measurement.download_spectral.bitrate_kbps
+            if measurement.download_spectral is not None else None
+        )
+        effective_existing = (
+            (measurement.existing_spectral.bitrate_kbps
+             if measurement.existing_spectral is not None else None)
+            or measurement.existing_min_bitrate or 0
+        )
+        for username in usernames:
+            try:
+                db.add_denylist(
+                    request_id, username,
+                    f"spectral: {dl_bitrate}kbps <= existing "
+                    f"{effective_existing}kbps")
+            except Exception:
+                logger.exception(
+                    f"Failed to denylist {username} for request {request_id}")
+        logger.info(f"  Denylisted {usernames} for request {request_id}")

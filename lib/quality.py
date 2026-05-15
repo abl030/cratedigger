@@ -2117,6 +2117,124 @@ def preimport_nested_gate(import_mode: str, has_nested_audio: bool) -> str:
     return "reject_nested" if has_nested_audio else "pass"
 
 
+# ---------------------------------------------------------------------------
+# preimport_decide — U3 pure decision function
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PreimportDecision:
+    """Pure-function output of ``preimport_decide``.
+
+    The decision function consumes a ``PreimportMeasurement`` (facts collected
+    by the measurement helper in ``lib.preimport``) plus the runtime
+    ``QualityRankConfig`` and optional existing-album evidence, and returns
+    one of two decisions:
+
+      * ``decision='accept'`` — the candidate passes every pre-import gate.
+        Reason is None.
+      * ``decision='reject'`` — the candidate fails a gate. ``reason`` is a
+        machine-readable taxonomy (``audio_corrupt``, ``bad_audio_hash``,
+        ``nested_layout``, ``empty_fileset``, ``spectral_reject``); ``detail``
+        is a human-readable diagnostic.
+
+    The previous ``PreImportGateResult.scenario`` strings map 1:1 onto
+    ``reason``. The legacy ``run_preimport_gates`` shim derives ``scenario``
+    from ``reason`` and ``valid`` from ``decision``.
+    """
+    decision: str = "accept"  # Literal["accept", "reject"]
+    reason: str | None = None
+    detail: str | None = None
+
+
+def preimport_decide(
+    measurement,  # lib.preimport.PreimportMeasurement
+    cfg: "QualityRankConfig",
+    existing_evidence: "AlbumQualityEvidence | None" = None,
+) -> PreimportDecision:
+    """Decide accept/reject from a measurement + cfg + existing-album evidence.
+
+    Pure function — no DB writes, no denylist mutations, no filesystem
+    side effects. Mirror of the decision branches that previously lived inline
+    inside ``lib.preimport.run_preimport_gates`` (U3 split).
+
+    Decision order matches the legacy gate pipeline:
+      1. ``audio_corrupt`` — any decode failure → reject.
+      2. ``bad_audio_hash`` — track matches a curator-reported bad hash → reject.
+      3. ``nested_layout`` — audio in subdirectories → reject.
+      4. ``empty_fileset`` — no audio files found → reject.
+      5. ``spectral_reject`` — ``spectral_import_decision`` says "reject" → reject.
+
+    Everything else is ``accept``.
+    """
+    # 1. audio integrity
+    if measurement.audio_corrupt:
+        n = len(measurement.corrupt_files)
+        return PreimportDecision(
+            decision="reject",
+            reason="audio_corrupt",
+            detail=f"{n} files failed ffmpeg decode" if n else "audio_corrupt",
+        )
+
+    # 2. bad audio hash
+    if measurement.matched_bad_hash_id is not None:
+        track = measurement.matched_bad_track_path or "<unknown>"
+        return PreimportDecision(
+            decision="reject",
+            reason="bad_audio_hash",
+            detail=(
+                f"matched bad audio hash {measurement.matched_bad_hash_id} on "
+                f"track {track}"
+            ),
+        )
+
+    # 3. nested layout
+    if measurement.folder_layout == "nested":
+        return PreimportDecision(
+            decision="reject",
+            reason="nested_layout",
+            detail="audio files found in subdirectories",
+        )
+
+    # 4. empty fileset
+    if measurement.audio_file_count == 0:
+        return PreimportDecision(
+            decision="reject",
+            reason="empty_fileset",
+            detail="no audio files found",
+        )
+
+    # 5. spectral
+    download_spectral = measurement.download_spectral
+    existing_spectral = measurement.existing_spectral
+    if download_spectral is not None:
+        dl_grade = download_spectral.grade
+        dl_bitrate = download_spectral.bitrate_kbps
+        existing_cliff_bitrate = (
+            existing_spectral.bitrate_kbps
+            if existing_spectral is not None else None
+        )
+        verdict = spectral_import_decision(
+            dl_grade,
+            dl_bitrate,
+            existing_cliff_bitrate,
+            existing_min_bitrate=measurement.existing_min_bitrate,
+        )
+        if verdict == "reject":
+            effective_existing = (
+                existing_cliff_bitrate or measurement.existing_min_bitrate or 0
+            )
+            return PreimportDecision(
+                decision="reject",
+                reason="spectral_reject",
+                detail=(
+                    f"spectral {dl_bitrate}kbps <= existing "
+                    f"{effective_existing}kbps"
+                ),
+            )
+
+    return PreimportDecision(decision="accept")
+
+
 def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate,
                              existing_min_bitrate=None):
     """Decide whether to import a download based on spectral analysis.

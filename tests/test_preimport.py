@@ -136,7 +136,15 @@ class TestIterAudioFiles(unittest.TestCase):
 class TestBadAudioHashGateFastPath(unittest.TestCase):
     """``run_preimport_gates`` empty-table fast-path: when
     ``has_any_bad_audio_hashes`` returns False, the gate must NOT hash
-    candidate tracks or call ``lookup_bad_audio_hash``."""
+    candidate tracks or call ``lookup_bad_audio_hash``.
+
+    Note (U3): the measurement helper still walks the filesystem to derive
+    ``folder_layout`` / ``audio_file_count`` for the new evidence facts. That
+    walk is cheap (no hashing) and is now part of every measurement. The
+    fast-path that this test protects is the *hash* path — verified by
+    asserting ``hash_audio_content`` and ``lookup_bad_audio_hash`` are not
+    called.
+    """
 
     def test_empty_table_skips_hashing_and_lookup(self):
         from lib.config import CratediggerConfig
@@ -150,7 +158,6 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
         # Bypass spectral and existing-album lookups so we isolate the
         # bad-hash gate's fast-path skip.
         with patch("lib.preimport.hash_audio_content") as hashfn, \
-             patch("lib.preimport._iter_audio_files") as walker, \
              patch("lib.preimport._needs_spectral_check", return_value=False):
             run_preimport_gates(
                 path=str(FIXTURE_DIR),
@@ -168,7 +175,123 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
         db.has_any_bad_audio_hashes.assert_called_once()
         db.lookup_bad_audio_hash.assert_not_called()
         hashfn.assert_not_called()
-        walker.assert_not_called()
+
+
+class TestMeasurePreimportState(unittest.TestCase):
+    """U3: ``measure_preimport_state`` produces fact-only ``PreimportMeasurement``.
+
+    The new pure measurement helper has no decision fields. These tests
+    verify the measurement fields populate correctly for representative
+    fixture shapes.
+    """
+
+    def test_audio_corrupt_short_circuits_with_facts(self):
+        """audio_corrupt=True must flow through; spectral / file counts
+        short-circuit, but the audio facts must be intact."""
+        from lib.config import CratediggerConfig
+        from lib.preimport import measure_preimport_state
+        from lib.util import AudioValidationResult
+
+        db = MagicMock()
+        db.has_any_bad_audio_hashes.return_value = False
+        cfg = CratediggerConfig(audio_check_mode="normal")
+        bad_result = AudioValidationResult(
+            valid=False, error="decode failed",
+            failed_files=[("track01.mp3", "decode error")],
+        )
+        with patch("lib.preimport.validate_audio", return_value=bad_result), \
+             patch("lib.preimport.repair_mp3_headers"):
+            m = measure_preimport_state(
+                path="/tmp/does-not-exist",
+                mb_release_id="mbid-corrupt",
+                label="Corrupt",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,
+                request_id=42,
+            )
+        self.assertTrue(m.audio_corrupt)
+        self.assertEqual(m.corrupt_files, ["track01.mp3"])
+        # Short-circuit: spectral did not run.
+        self.assertIsNone(m.download_spectral)
+
+    def test_empty_directory_reports_zero_file_count(self):
+        """No audio files → audio_file_count=0, layout='flat'."""
+        from lib.config import CratediggerConfig
+        from lib.preimport import measure_preimport_state
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        with patch("lib.preimport.repair_mp3_headers"), \
+             patch("lib.preimport._iter_audio_files", return_value=[]), \
+             patch("lib.preimport._needs_spectral_check", return_value=False):
+            m = measure_preimport_state(
+                path="/tmp/empty",
+                mb_release_id="mbid-empty",
+                label="Empty",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+            )
+        self.assertEqual(m.audio_file_count, 0)
+        self.assertEqual(m.folder_layout, "flat")
+        self.assertFalse(m.audio_corrupt)
+        self.assertIsNone(m.matched_bad_hash_id)
+
+    def test_nested_layout_detected_via_inspection(self):
+        """has_nested_audio=True in the inspection → folder_layout='nested'."""
+        from pathlib import Path
+        from lib.config import CratediggerConfig
+        from lib.preimport import LocalFileInspection, measure_preimport_state
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        # Precomputed inspection signaling nested layout.
+        inspection = LocalFileInspection(
+            filetype="mp3", min_bitrate_bps=320_000,
+            avg_bitrate_bps=320_000, is_vbr=False, has_nested_audio=True,
+        )
+        with patch("lib.preimport.repair_mp3_headers"), \
+             patch(
+                 "lib.preimport._iter_audio_files",
+                 return_value=[Path("/tmp/album/CD1/01.mp3"),
+                               Path("/tmp/album/CD2/01.mp3")],
+             ), \
+             patch("lib.preimport._needs_spectral_check", return_value=False):
+            m = measure_preimport_state(
+                path="/tmp/album",
+                mb_release_id="mbid-nested",
+                label="Nested",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                precomputed_inspection=inspection,
+            )
+        self.assertEqual(m.folder_layout, "nested")
+        self.assertEqual(m.audio_file_count, 2)
+
+    def test_filetype_band_and_bitrate_in_kbps(self):
+        """filetype_band lowercased; min_bitrate_kbps in kbps not bps."""
+        from lib.config import CratediggerConfig
+        from lib.preimport import measure_preimport_state
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        with patch("lib.preimport.repair_mp3_headers"), \
+             patch("lib.preimport._iter_audio_files", return_value=[]), \
+             patch("lib.preimport._needs_spectral_check", return_value=False):
+            m = measure_preimport_state(
+                path="/tmp/album",
+                mb_release_id="mbid-x",
+                label="X",
+                download_filetype="MP3, FLAC",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+            )
+        self.assertEqual(m.filetype_band, "mp3, flac")
+        self.assertEqual(m.min_bitrate_kbps, 320)
 
 
 if __name__ == "__main__":
