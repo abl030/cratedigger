@@ -1053,6 +1053,33 @@ class FakePipelineDB:
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
 
+    def requeue_import_job_for_preview(
+        self,
+        job_id: int,
+        *,
+        reason: str,
+    ) -> ImportJob | None:
+        """Fake mirror of PipelineDB.requeue_import_job_for_preview.
+
+        Only matches rows currently in ``status='running'``. Clears writer
+        state, sets preview_status='waiting', preserves attempt counters.
+        """
+        for row in self._import_jobs:
+            if row["id"] == job_id and row.get("status") == "running":
+                now = _utcnow()
+                row["status"] = "queued"
+                row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
+                row["message"] = reason
+                row["error"] = None
+                row["worker_id"] = None
+                row["started_at"] = None
+                row["heartbeat_at"] = None
+                row["preview_message"] = None
+                row["preview_error"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
     def requeue_disabled_automation_preview_jobs(
         self,
         *,

@@ -1480,6 +1480,69 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         assert failed is not None
         self.assertEqual(failed.status, "failed")
 
+    def test_requeue_import_job_for_preview_flips_running_back_to_waiting(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:requeue-fake",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        claimed = db.claim_next_import_job(worker_id="importer")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        prior_attempts = claimed.attempts
+        prior_preview_attempts = claimed.preview_attempts
+
+        updated = db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="candidate evidence missing",
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "waiting")
+        self.assertIsNone(updated.worker_id)
+        self.assertIsNone(updated.started_at)
+        self.assertIsNone(updated.heartbeat_at)
+        self.assertIsNone(updated.preview_message)
+        self.assertIsNone(updated.preview_error)
+        self.assertEqual(updated.message, "candidate evidence missing")
+        # Counters preserved.
+        self.assertEqual(updated.attempts, prior_attempts)
+        self.assertEqual(updated.preview_attempts, prior_preview_attempts)
+
+        # Now claimable by preview.
+        preview = db.claim_next_import_preview_job(worker_id="preview-1")
+        assert preview is not None
+        self.assertEqual(preview.id, claimed.id)
+
+    def test_requeue_import_job_for_preview_idempotent_when_not_running(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:requeue-fake-idem",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
+        )
+        # Not yet claimed by importer (preview_status='waiting', status='queued').
+        result = db.requeue_import_job_for_preview(
+            job.id,
+            reason="not running",
+        )
+        self.assertIsNone(result)
+
     def test_import_job_queue_defaults_to_importable_without_preview_gate(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 

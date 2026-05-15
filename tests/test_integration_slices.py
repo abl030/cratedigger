@@ -5235,5 +5235,124 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         )
 
 
+class TestImporterRequeueToPreviewSlice(unittest.TestCase):
+    """Integration slice: importer claim with no evidence → requeue → preview
+    re-claims and measures → importer claims again and proceeds.
+
+    Exercises U2 end-to-end: real ``dispatch_import_from_db``,
+    ``ensure_candidate_evidence_for_action``, ``requeue_import_job_for_preview``,
+    and the importer claim WHERE clause. Uses FakePipelineDB for state.
+    """
+
+    def test_force_import_missing_evidence_routes_through_preview(self):
+        from lib.import_dispatch import (
+            DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+            dispatch_import_from_db,
+        )
+        from lib.import_queue import (
+            IMPORT_JOB_MANUAL,
+            manual_import_payload,
+        )
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+        )
+        from lib.quality_evidence import snapshot_audio_files
+        from tests.helpers import make_album_quality_evidence
+
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-requeue",
+                status="manual",
+                artist_name="A",
+                album_title="B",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key="manual:slice",
+                payload=manual_import_payload(failed_path=source),
+                preview_enabled=True,
+            )
+            # Step 1: simulate an importer-importable state without evidence
+            # (the lossy real-world starting point: preview marked ready in a
+            # prior cycle, then evidence was lost / never persisted).
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "would_import"},
+                message="ready",
+            )
+
+            # Step 2: importer claims.
+            claimed = db.claim_next_import_job(worker_id="importer-1")
+            assert claimed is not None
+            self.assertEqual(claimed.status, "running")
+
+            # Step 3: dispatch sees no candidate evidence → requeues.
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS, pipeline_db_enabled=True
+            )
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch.repair_mp3_headers"), \
+                 patch("lib.import_dispatch.inspect_local_files"), \
+                 patch("lib.import_dispatch.run_preimport_gates"), \
+                 patch("lib.config.read_runtime_config", return_value=cfg):
+                outcome = dispatch_import_from_db(
+                    cast(Any, db),
+                    request_id=42,
+                    failed_path=source,
+                    force=False,
+                    outcome_label="manual_import",
+                    import_job_id=job.id,
+                )
+
+            self.assertFalse(outcome.success)
+            self.assertEqual(outcome.code, DISPATCH_CODE_REQUEUED_FOR_PREVIEW)
+            ext.run.assert_not_called()
+            row = next(r for r in db._import_jobs if r["id"] == job.id)
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["preview_status"], "waiting")
+            self.assertIsNone(row["worker_id"])
+
+            # Step 4: preview claims the requeued row.
+            preview_claimed = db.claim_next_import_preview_job(
+                worker_id="preview-1"
+            )
+            assert preview_claimed is not None
+            self.assertEqual(preview_claimed.id, job.id)
+            self.assertEqual(preview_claimed.preview_status, "running")
+
+            # Step 5: preview persists candidate evidence and marks ready.
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3 V0",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+            ))
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "would_import"},
+                message="ready",
+            )
+
+            # Step 6: importer claims again — this time evidence exists.
+            second_claim = db.claim_next_import_job(worker_id="importer-2")
+            assert second_claim is not None
+            self.assertEqual(second_claim.id, job.id)
+            self.assertEqual(second_claim.status, "running")
+
+
 if __name__ == "__main__":
     unittest.main()

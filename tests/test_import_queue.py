@@ -887,8 +887,14 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_failed_force_import_with_stale_candidate_evidence_skips_cleanup(self):
+    def test_force_import_requeued_for_preview_does_not_mark_failed(self):
+        """U2: when dispatch returns DISPATCH_CODE_REQUEUED_FOR_PREVIEW the
+        importer does NOT write a terminal failed status and does NOT run
+        the wrong-match cleanup path. The dispatch-side requeue has already
+        flipped the row back to queued/waiting; the importer just logs and
+        yields."""
         from scripts import importer
+        from lib.import_dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
 
         db = FakePipelineDB()
         source = tempfile.mkdtemp()
@@ -910,13 +916,84 @@ class TestImporterWorker(unittest.TestCase):
             self._mark_importable(db, job)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
+            claimed_attempts = claimed.attempts
+
+            def fake_dispatch(*_args, **_kwargs):
+                # Simulate the dispatch-side requeue.
+                db.requeue_import_job_for_preview(
+                    job.id,
+                    reason="candidate evidence missing",
+                )
+                return DispatchOutcome(
+                    False,
+                    "Candidate evidence unavailable; requeued for preview",
+                    code=DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+                )
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                side_effect=fake_dispatch,
+            ), patch(
+                "lib.wrong_match_cleanup_decision.decide_wrong_match_cleanup",
+            ) as decision, patch(
+                "lib.wrong_matches.cleanup_wrong_match_source",
+            ) as cleanup:
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            # Importer must NOT have written a terminal status.
+            decision.assert_not_called()
+            cleanup.assert_not_called()
+            self.assertTrue(os.path.isdir(source))
+            # Job row is queued/waiting after the requeue.
+            row = next(r for r in db._import_jobs if r["id"] == job.id)
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["preview_status"], "waiting")
+            # Importer did not retry-count: row attempts not bumped beyond
+            # the original claim.
+            self.assertEqual(row["attempts"], claimed_attempts)
+            # process_claimed_job returns the job ImportJob (current state),
+            # not a terminal failure. The job should not be in 'failed'.
+            if updated is not None:
+                self.assertNotEqual(updated.status, "failed")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_force_import_requeue_failed_leaves_job_running(self):
+        """U2: when dispatch returns DISPATCH_CODE_REQUEUE_FAILED (its
+        requeue UPDATE itself raised), the importer must not write
+        terminal failure — the job stays 'running' so
+        requeue_running_import_jobs on next worker boot recovers it."""
+        from scripts import importer
+        from lib.import_dispatch import DISPATCH_CODE_REQUEUE_FAILED
+
+        db = FakePipelineDB()
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+                preview_enabled=True,
+            )
+            self._mark_importable(db, job)
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+            claimed_attempts = claimed.attempts
 
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(
                     False,
-                    "Candidate quality evidence unavailable at import time: stale",
-                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                    "requeue UPDATE failed: boom",
+                    code=DISPATCH_CODE_REQUEUE_FAILED,
                 ),
             ), patch(
                 "lib.wrong_match_cleanup_decision.decide_wrong_match_cleanup",
@@ -925,16 +1002,15 @@ class TestImporterWorker(unittest.TestCase):
             ) as cleanup:
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
-            assert updated is not None
-            self.assertEqual(updated.status, "failed")
-            self.assertTrue(os.path.isdir(source))
             decision.assert_not_called()
             cleanup.assert_not_called()
-            result = self._result(updated)
-            self.assertEqual(
-                result["cleanup"]["reason"],
-                "candidate_evidence_unavailable",
-            )
+            row = next(r for r in db._import_jobs if r["id"] == job.id)
+            # Stuck in running for startup recovery (requeue_running_import_jobs).
+            self.assertEqual(row["status"], "running")
+            self.assertEqual(row["attempts"], claimed_attempts)
+            self.assertTrue(os.path.isdir(source))
+            if updated is not None:
+                self.assertNotEqual(updated.status, "failed")
         finally:
             shutil.rmtree(source, ignore_errors=True)
 

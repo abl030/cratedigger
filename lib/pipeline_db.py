@@ -1260,6 +1260,52 @@ class PipelineDB:
         """, (limit, message))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
+    def requeue_import_job_for_preview(
+        self,
+        job_id: int,
+        *,
+        reason: str,
+    ) -> ImportJob | None:
+        """Flip a running import job back to preview's lane.
+
+        Used by the importer's dispatch path when candidate evidence is
+        missing, stale, or incomplete at claim time. Preview will pick up
+        the row on its next sweep, measure, persist evidence, and mark it
+        importable again.
+
+        Column semantics (modeled on ``requeue_running_import_jobs``):
+        - ``status`` → ``queued``
+        - ``preview_status`` → ``waiting``
+        - ``worker_id`` / ``started_at`` / ``heartbeat_at`` → ``NULL``
+        - ``preview_message`` / ``preview_error`` → ``NULL`` so preview's
+          claim starts clean
+        - ``message`` → ``reason`` (top-level diagnostic)
+        - ``attempts`` and ``preview_attempts`` preserved (historical
+          counters; the cycle is operator-visible via these)
+
+        Idempotent: only matches rows currently in ``status='running'``.
+        Returns ``None`` if the job is not running (already requeued,
+        completed, failed, or non-existent).
+        """
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET status = 'queued',
+                preview_status = 'waiting',
+                message = %s,
+                error = NULL,
+                worker_id = NULL,
+                started_at = NULL,
+                heartbeat_at = NULL,
+                preview_message = NULL,
+                preview_error = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'running'
+            RETURNING *
+        """, (reason, job_id))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
     def requeue_disabled_automation_preview_jobs(
         self,
         *,

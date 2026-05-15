@@ -17,6 +17,8 @@ if REPO_ROOT not in sys.path:
 
 from lib.import_dispatch import (
     DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+    DISPATCH_CODE_REQUEUE_FAILED,
+    DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
 )
 from lib.import_queue import (
@@ -322,6 +324,29 @@ def process_claimed_job(
             result=result,
             message=outcome.message,
         )
+    # U2: dispatch flipped this row back to the preview lane (or tried to).
+    # We do NOT write a terminal failed status, do NOT bump retry counters,
+    # and do NOT run the wrong-match cleanup decision. The dispatch-side
+    # state change is already persisted; we just log and yield.
+    if outcome.code == DISPATCH_CODE_REQUEUED_FOR_PREVIEW:
+        logger.info(
+            "Import job %s (request %s) requeued for preview: %s",
+            job.id,
+            job.request_id,
+            outcome.message,
+        )
+        return None
+    if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
+        # Recoverable: leave the job in 'running' so the next worker boot's
+        # requeue_running_import_jobs sweep resets it. No terminal status.
+        logger.warning(
+            "Import job %s (request %s) requeue to preview failed; "
+            "leaving job in running for startup recovery: %s",
+            job.id,
+            job.request_id,
+            outcome.message,
+        )
+        return None
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:
         result["cleanup"] = cleanup

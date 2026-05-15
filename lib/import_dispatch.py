@@ -58,6 +58,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE = "candidate_evidence_unavailable"
+# U2: when the importer claim arrives without valid candidate evidence
+# (missing row, stale snapshot, incomplete), dispatch flips the row back to
+# the preview lane via ``PipelineDB.requeue_import_job_for_preview`` and
+# returns this code. The importer interprets it as "yield, do NOT
+# write terminal failure, do NOT bump retry counters." Preview's next
+# sweep recovers the row.
+DISPATCH_CODE_REQUEUED_FOR_PREVIEW = "requeued_for_preview"
+# U2: when the requeue UPDATE itself raised (DB transient, connection drop),
+# dispatch swallows the exception and returns this code so the importer
+# leaves the job in ``running`` for ``requeue_running_import_jobs`` on next
+# worker boot to recover. NEVER write terminal failure on this code.
+DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -168,6 +180,58 @@ def load_quality_gate_state(
         min_bitrate_kbps=min_br_kbps,
         spectral_bitrate_kbps=spectral_br,
         spectral_grade=spectral_grade,
+    )
+
+
+def _requeue_import_job_to_preview(
+    db: "PipelineDB",
+    *,
+    import_job_id: int | None,
+    reason: str,
+) -> "DispatchOutcome":
+    """Shared requeue helper for the two outer evidence-required branches.
+
+    Called from ``_dispatch_import_from_db_locked`` (force/manual) and from
+    ``lib.download._process_beets_validation`` (automation) when
+    ``ensure_candidate_evidence_for_action`` reports the candidate row is
+    missing, stale, or incomplete.
+
+    The requeue happens inside the dispatch advisory-lock region so the
+    evidence check + state flip is atomic against the importer claim. If
+    the requeue UPDATE itself raises (DB transient), we swallow and
+    return ``DISPATCH_CODE_REQUEUE_FAILED`` — the job stays in
+    ``running`` for ``requeue_running_import_jobs`` on next importer
+    boot to recover.
+
+    ``import_job_id=None`` covers the automation pre-import branch in
+    ``lib/download.py`` for paths that did not enqueue an import_job
+    (legacy or test seam). Returns a hard requeue-failed outcome in
+    that case rather than crashing — there's no row to flip.
+    """
+    detail = f"Candidate quality evidence unavailable at import time: {reason}"
+    if import_job_id is None:
+        # No row to flip. Report as a requeue failure so the importer
+        # leaves the job (if any) in running for startup recovery.
+        return DispatchOutcome(
+            success=False,
+            message=detail + " (no import_job_id; cannot requeue)",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+    try:
+        db.requeue_import_job_for_preview(import_job_id, reason=reason)
+    except Exception as exc:  # noqa: BLE001 — swallow + log for retry
+        logger.exception(
+            "Failed to requeue import_job %s for preview", import_job_id
+        )
+        return DispatchOutcome(
+            success=False,
+            message=f"Requeue to preview failed: {type(exc).__name__}: {exc}",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+    return DispatchOutcome(
+        success=False,
+        message=detail + "; requeued for preview",
+        code=DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     )
 
 
@@ -1860,13 +1924,12 @@ def _dispatch_import_from_db_locked(
                 or candidate_result.provenance.candidate_status
                 or "missing"
             )
-            return DispatchOutcome(
-                success=False,
-                message=(
-                    "Candidate quality evidence unavailable at import "
-                    f"time: {reason}"
-                ),
-                code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+            # U2: requeue to preview rather than failing. Preview owns
+            # candidate-evidence production; the importer never measures.
+            return _requeue_import_job_to_preview(
+                db,
+                import_job_id=import_job_id,
+                reason=reason,
             )
         dl_info = _download_info_from_candidate_evidence(
             candidate_result.evidence,

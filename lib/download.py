@@ -38,9 +38,9 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          extract_usernames,
                          rejection_backfill_override)
 from lib import transitions
-from lib.import_dispatch import (DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
-                                 DispatchOutcome, _build_download_info,
+from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
+                                 _requeue_import_job_to_preview,
                                  dispatch_import_core)
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
@@ -1175,13 +1175,14 @@ def _process_beets_validation(
                     or candidate_result.provenance.candidate_status
                     or "missing"
                 )
-                return DispatchOutcome(
-                    success=False,
-                    message=(
-                        "Candidate quality evidence unavailable at import "
-                        f"time: {reason}"
-                    ),
-                    code=DISPATCH_CODE_CANDIDATE_EVIDENCE_UNAVAILABLE,
+                # U2: requeue the import_job to preview rather than failing.
+                # Preview owns candidate-evidence production; the importer
+                # never measures. The dispatch-side requeue keeps the
+                # advisory-lock atomicity intact.
+                return _requeue_import_job_to_preview(
+                    db,
+                    import_job_id=import_job_id,
+                    reason=reason,
                 )
 
         if not candidate_evidence_available:

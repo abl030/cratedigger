@@ -352,8 +352,13 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_force_import_with_stale_candidate_evidence_fails_before_preimport(self):
-        from lib.import_dispatch import dispatch_import_from_db
+    def test_force_import_with_stale_candidate_evidence_requeues_to_preview(self):
+        """U2: stale candidate evidence requeues the import_job for preview
+        rather than hard-failing."""
+        from lib.import_dispatch import (
+            DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+            dispatch_import_from_db,
+        )
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -363,19 +368,28 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
-        download_log_id = db.log_download(
-            42,
-            outcome="rejected",
-            validation_result={"failed_path": ""},
-        )
         tmpdir = tempfile.mkdtemp()
         try:
             track = os.path.join(tmpdir, "01.mp3")
             with open(track, "wb") as handle:
                 handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+                dedupe_key="manual:requeue-stale",
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "would_import"},
+                message="ready",
+            )
+            claimed = db.claim_next_import_job(worker_id="importer")
+            assert claimed is not None
             db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=download_log_id,
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -388,6 +402,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="mp3 v0",
             ))
+            # Mutate file so the snapshot now mismatches.
             with open(track, "ab") as handle:
                 handle.write(b" changed")
 
@@ -406,15 +421,161 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     failed_path=tmpdir,  # type: ignore[arg-type]
                     force=True,
                     source_username="alice",
-                    download_log_id=download_log_id,
+                    import_job_id=job.id,
                 )
 
             self.assertFalse(result.success)
-            self.assertIn("Candidate quality evidence unavailable", result.message)
+            self.assertEqual(result.code, DISPATCH_CODE_REQUEUED_FOR_PREVIEW)
             repair.assert_not_called()
             inspect.assert_not_called()
             gates.assert_not_called()
             ext.run.assert_not_called()
+            # Job is back on the preview lane.
+            row = next(r for r in db._import_jobs if r["id"] == job.id)
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["preview_status"], "waiting")
+            self.assertIsNone(row["worker_id"])
+            # Top-level message records the requeue reason (provenance
+            # text from ensure_candidate_evidence_for_action).
+            self.assertTrue(row.get("message"))
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_force_import_with_missing_candidate_evidence_requeues_to_preview(self):
+        """U2: missing candidate evidence requeues to preview instead of failing."""
+        from lib.import_dispatch import (
+            DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+            dispatch_import_from_db,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Son Ambulance",
+            album_title="Someone Else's Deja Vu",
+        ))
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+                dedupe_key="manual:requeue-missing",
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "would_import"},
+                message="ready",
+            )
+            claimed = db.claim_next_import_job(worker_id="importer")
+            assert claimed is not None
+            # No upsert_album_quality_evidence — candidate evidence is missing.
+
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.import_dispatch.repair_mp3_headers") as repair, \
+                 patch("lib.import_dispatch.inspect_local_files") as inspect, \
+                 patch("lib.import_dispatch.run_preimport_gates") as gates, \
+                 patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                    source_username="alice",
+                    import_job_id=job.id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.code, DISPATCH_CODE_REQUEUED_FOR_PREVIEW)
+            repair.assert_not_called()
+            inspect.assert_not_called()
+            gates.assert_not_called()
+            ext.run.assert_not_called()
+            row = next(r for r in db._import_jobs if r["id"] == job.id)
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["preview_status"], "waiting")
+            self.assertIsNone(row["worker_id"])
+            self.assertTrue(row.get("message"))
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_force_import_requeue_failure_leaves_job_running(self):
+        """U2: if the requeue UPDATE itself raises, dispatch returns
+        DISPATCH_CODE_REQUEUE_FAILED so the importer keeps the row in
+        `running` for startup recovery."""
+        from lib.import_dispatch import (
+            DISPATCH_CODE_REQUEUE_FAILED,
+            dispatch_import_from_db,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+            artist_name="Son Ambulance",
+            album_title="Someone Else's Deja Vu",
+        ))
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+                preview_enabled=True,
+                dedupe_key="manual:requeue-fail",
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "would_import"},
+                message="ready",
+            )
+            claimed = db.claim_next_import_job(worker_id="importer")
+            assert claimed is not None
+
+            from typing import cast as _cast, Any as _Any
+            from unittest.mock import patch as _patch
+            db_any = _cast(_Any, db)
+
+            with patch_dispatch_externals() as ext, \
+                 _patch.object(db_any, "requeue_import_job_for_preview",
+                              side_effect=RuntimeError("boom")), \
+                 patch("lib.import_dispatch.repair_mp3_headers"), \
+                 patch("lib.import_dispatch.inspect_local_files"), \
+                 patch("lib.import_dispatch.run_preimport_gates"), \
+                 patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=tmpdir,  # type: ignore[arg-type]
+                    force=True,
+                    source_username="alice",
+                    import_job_id=job.id,
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.code, DISPATCH_CODE_REQUEUE_FAILED)
+            ext.run.assert_not_called()
+            row = next(r for r in db._import_jobs if r["id"] == job.id)
+            # Importer left the job in running for startup recovery.
+            self.assertEqual(row["status"], "running")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

@@ -1011,6 +1011,135 @@ class TestImportJobQueueAPI(unittest.TestCase):
 
 
 @requires_postgres
+class TestRequeueImportJobForPreview(unittest.TestCase):
+    """U2: importer can requeue an actively-running job back to preview's lane."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="requeue-preview-mbid",
+            artist_name="Requeue",
+            album_title="Preview",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _enqueue_claimed_job(self):
+        """Enqueue a manual job, advance it through preview, and have the importer claim it."""
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:requeue-for-preview",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+            preview_enabled=True,
+        )
+        self.db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        claimed = self.db.claim_next_import_job(worker_id="importer-1")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        return claimed
+
+    def test_flips_running_job_back_to_queued_waiting(self):
+        claimed = self._enqueue_claimed_job()
+
+        updated = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="candidate evidence missing",
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "waiting")
+        self.assertIsNone(updated.worker_id)
+        self.assertIsNone(updated.started_at)
+        self.assertIsNone(updated.heartbeat_at)
+        self.assertIsNone(updated.preview_message)
+        self.assertIsNone(updated.preview_error)
+        self.assertEqual(updated.message, "candidate evidence missing")
+
+    def test_preserves_attempt_counters(self):
+        claimed = self._enqueue_claimed_job()
+        prior_attempts = claimed.attempts
+        prior_preview_attempts = claimed.preview_attempts
+        self.assertEqual(prior_attempts, 1)
+
+        updated = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="stale snapshot",
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.attempts, prior_attempts)
+        self.assertEqual(updated.preview_attempts, prior_preview_attempts)
+
+    def test_requeued_row_is_claimable_by_preview(self):
+        claimed = self._enqueue_claimed_job()
+        self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="incomplete",
+        )
+
+        preview = self.db.claim_next_import_preview_job(worker_id="preview-1")
+        assert preview is not None
+        self.assertEqual(preview.id, claimed.id)
+        self.assertEqual(preview.preview_status, "running")
+        # Preview's claim clears its own diagnostics.
+        self.assertIsNone(preview.preview_message)
+
+    def test_idempotent_when_already_requeued(self):
+        claimed = self._enqueue_claimed_job()
+        first = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="first requeue",
+        )
+        # Second call should be a no-op (status no longer running).
+        second = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="second requeue",
+        )
+
+        assert first is not None
+        self.assertIsNone(second)
+        # Message from first requeue stays.
+        row = self.db._execute(
+            "SELECT message FROM import_jobs WHERE id = %s",
+            (claimed.id,),
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row["message"], "first requeue")
+
+    def test_does_not_touch_unrelated_jobs(self):
+        claimed = self._enqueue_claimed_job()
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        other = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:unrelated",
+            payload=manual_import_payload(failed_path="/tmp/other"),
+            preview_enabled=True,
+        )
+
+        self.db.requeue_import_job_for_preview(claimed.id, reason="x")
+
+        other_row = self.db._execute(
+            "SELECT status, preview_status FROM import_jobs WHERE id = %s",
+            (other.id,),
+        ).fetchone()
+        assert other_row is not None
+        self.assertEqual(other_row["status"], "queued")
+        self.assertEqual(other_row["preview_status"], "waiting")
+
+
+@requires_postgres
 class TestUpdateStatus(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
