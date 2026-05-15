@@ -6,6 +6,7 @@
 - [Dict boundary lesson](feedback_dict_boundary.md) — Two dict shapes flow through cratedigger.py; only one is DownloadFile — converting the wrong one crashed prod
 - [Playwright test artists](feedback_playwright_test_artists.md) — Brief the playwright agent to use small/obscure artists, not Radiohead — 15s mirror timeout
 - [Prose over picker](feedback_prose_over_picker.md) — User dislikes the AskUserQuestion picker; default to plain prose questions in chat
+- [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
 - [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
 - [Audio quality type system](project_audio_quality_types.md) — AudioFileSpec + AudioQualityMeasurement deployed; AudioQualityState deferred
