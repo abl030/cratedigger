@@ -301,6 +301,114 @@ class TestValidateAudio(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestValidateAudioStderrPolicy(unittest.TestCase):
+    """#251 regressions: stderr is informational; only ffmpeg rc != 0 rejects.
+
+    ffmpeg's exit code is the authoritative signal that the audio stream failed
+    to decode. Demuxer/parser warnings about metadata, attached pictures, or
+    recoverable frame-level glitches are emitted to stderr but ffmpeg still
+    returns rc=0 — those albums decode fine and must not be flagged as
+    ``audio_corrupt``. Each false-positive case below is sourced from issue
+    #251's matrix; the real-corruption cases pair them with documented
+    rc != 0 stderr we MUST still reject.
+    """
+
+    # (description, returncode, stderr) — rc=0 cases must produce corrupt_files=[]
+    FALSE_POSITIVE_CASES = [
+        ("empty_stderr_happy_path", 0, ""),
+        (
+            "mp3float_backstep_recovery",
+            0,
+            "[mp3float @ 0xdeadbeef] invalid new backstep -1",
+        ),
+        (
+            "bom_lyrics_id3_skipped",
+            0,
+            "[id3v2 @ 0xdeadbeef] Incorrect BOM value\n"
+            "Error reading lyrics, skipped",
+        ),
+        (
+            "bom_comment_frame_id3_skipped",
+            0,
+            "[id3v2 @ 0xdeadbeef] Incorrect BOM value\n"
+            "Error reading comment frame, skipped",
+        ),
+        (
+            "mjpeg_app_fields_warning",
+            0,
+            "[mjpeg @ 0xdeadbeef] unable to decode APP fields: "
+            "Invalid data found when processing input",
+        ),
+        (
+            "attached_picture_mimetype_warning",
+            0,
+            "[flac @ 0xdeadbeef] Could not read mimetype from an attached "
+            "picture.",
+        ),
+    ]
+
+    # (description, returncode, stderr) — rc != 0 cases MUST still reject
+    REAL_CORRUPTION_CASES = [
+        (
+            "invalid_sync_code_decode_failure",
+            1,
+            "[mp3 @ 0xdeadbeef] invalid sync code\n"
+            "[mp3 @ 0xdeadbeef] invalid frame header\n"
+            "decode_frame() failed",
+        ),
+        (
+            "illegal_residual_coding_method",
+            1,
+            "[flac @ 0xdeadbeef] illegal residual coding method 2",
+        ),
+        (
+            "invalid_residual",
+            1,
+            "[flac @ 0xdeadbeef] invalid residual",
+        ),
+    ]
+
+    def _run_validate(self, returncode: int, stderr: str):
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            open(os.path.join(tmpdir, "track.flac"), "w").close()
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=returncode, stderr=stderr,
+                )
+                return validate_audio(tmpdir)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_false_positive_stderr_does_not_reject(self):
+        for desc, rc, stderr in self.FALSE_POSITIVE_CASES:
+            with self.subTest(case=desc):
+                result = self._run_validate(rc, stderr)
+                self.assertTrue(
+                    result.valid,
+                    f"{desc}: rc={rc} stderr={stderr!r} should be accepted, "
+                    f"got error={result.error!r}",
+                )
+                self.assertEqual(
+                    result.failed_files, [],
+                    f"{desc}: expected empty failed_files",
+                )
+
+    def test_real_corruption_still_rejects(self):
+        for desc, rc, stderr in self.REAL_CORRUPTION_CASES:
+            with self.subTest(case=desc):
+                result = self._run_validate(rc, stderr)
+                self.assertFalse(
+                    result.valid,
+                    f"{desc}: rc={rc} stderr={stderr!r} must reject",
+                )
+                self.assertEqual(
+                    len(result.failed_files), 1,
+                    f"{desc}: expected one failed file",
+                )
+
+
 class TestDenylist(unittest.TestCase):
 
     def test_round_trip(self):

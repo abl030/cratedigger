@@ -27,10 +27,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 
-_IGNORABLE_AUDIO_VALIDATION_STDERR = (
-    "Could not read mimetype from an attached picture.",
-)
-
 
 @dataclass
 class AudioValidationResult:
@@ -93,25 +89,6 @@ def beets_subprocess_env() -> dict[str, str]:
 
 def sanitize_folder_name(folder_name: str) -> str:
     return sanitize_processing_folder_name(folder_name)
-
-
-def _is_ignorable_audio_validation_stderr(
-    *, returncode: int, stderr: str,
-) -> bool:
-    """Return True for metadata-only ffmpeg stderr we do not treat as corruption.
-
-    ``validate_audio`` exists to answer one question: did the audio stream fail
-    to decode? Some FLACs with malformed embedded artwork print demuxer errors
-    to stderr even though ``-map 0:a`` decodes the audio successfully and
-    exits 0. Those should not be rejected as ``audio_corrupt``.
-    """
-    if returncode != 0:
-        return False
-    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-    return bool(lines) and all(
-        any(marker in line for marker in _IGNORABLE_AUDIO_VALIDATION_STDERR)
-        for line in lines
-    )
 
 
 _BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})
@@ -332,16 +309,10 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
                     )
                     ffmpeg_returncode = retest.returncode
                     stderr = retest.stderr.strip()
-                    if retest.returncode == 0 and (
-                        not stderr
-                        or _is_ignorable_audio_validation_stderr(
-                            returncode=retest.returncode,
-                            stderr=stderr,
-                        )
-                    ):
+                    if retest.returncode == 0:
                         if stderr:
                             logger.info(
-                                "AUDIO_CHECK: ignoring metadata-only stderr after MD5 fix: %s",
+                                "AUDIO_CHECK: ignoring informational stderr after MD5 fix: %s",
                                 display,
                             )
                         continue  # fixed and clean enough for audio validation
@@ -350,17 +321,15 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
                     failed.append((display, stderr))
                     continue
 
-            if ffmpeg_returncode == 0 and _is_ignorable_audio_validation_stderr(
-                returncode=ffmpeg_returncode,
-                stderr=stderr,
-            ):
-                logger.info(
-                    "AUDIO_CHECK: ignoring metadata-only stderr: %s",
-                    display,
-                )
-                continue
-
-            if ffmpeg_returncode != 0 or stderr:
+            # #251: ffmpeg's exit code is the authoritative signal for decode
+            # failure. Stderr at rc=0 is informational only (metadata-only
+            # demuxer warnings: BOM, mjpeg APP fields, mp3float backstep,
+            # attached-picture mimetype) and must not flag audio_corrupt.
+            # The previous `_IGNORABLE_AUDIO_VALIDATION_STDERR` allowlist was
+            # retired with this change: every documented "ignorable" stderr
+            # pattern had rc=0 in practice (see d7fdff7 commit history), so
+            # trusting rc alone subsumes the filter without loss of coverage.
+            if ffmpeg_returncode != 0:
                 err = stderr[:200]
                 failed.append((display, err))
         except sp.TimeoutExpired:
