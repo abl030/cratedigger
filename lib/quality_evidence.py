@@ -138,18 +138,53 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
     return sorted(files, key=lambda f: f.relative_path)
 
 
+def _snapshot_match_key(
+    file: AlbumQualityEvidenceFile,
+) -> tuple[str, int, str, str, str | None]:
+    """Stable identity tuple for snapshot equality.
+
+    Excludes ``mtime_ns`` because:
+    * ``process_completed_album`` writes ID3 tags to source files via
+      ``music_tag.save()`` AFTER preview snapshots them. Tagging bumps
+      mtime even when the audio bytes are unchanged. With strict mtime
+      equality the importer requeues every job to preview as
+      ``"candidate source changed since evidence capture"`` and the
+      queue never drains — see issue audit-2026-05-15.
+    * virtiofs has been observed to return slightly different
+      ``st_mtime_ns`` between back-to-back ``stat`` calls on the same
+      file. Strict equality is fragile under that flake.
+
+    Size + path + extension/container/codec is sufficient to detect any
+    content change that matters here. ``mtime_ns`` stays in the
+    persisted struct as a forensic field but does not gate freshness.
+    """
+    return (
+        file.relative_path,
+        file.size_bytes,
+        file.extension,
+        file.container,
+        file.codec,
+    )
+
+
 def audio_snapshot_matches(
     root: str,
     files: list[AlbumQualityEvidenceFile],
 ) -> bool:
-    """Return whether ``root`` still has the recorded active audio snapshot."""
+    """Return whether ``root`` still has the recorded active audio snapshot.
+
+    Compares on stable identity (path/size/codec) only. See
+    :func:`_snapshot_match_key` for why ``mtime_ns`` is excluded.
+    """
 
     try:
         current = snapshot_audio_files(root)
     except OSError:
         return False
     expected = sorted(files, key=lambda f: f.relative_path)
-    return current == expected
+    return [_snapshot_match_key(f) for f in current] == [
+        _snapshot_match_key(f) for f in expected
+    ]
 
 
 def neutral_v0_metric_from_probe(
@@ -494,6 +529,7 @@ def load_or_backfill_current_evidence(
     quality_ranks: Any = None,
     preloaded_evidence: AlbumQualityEvidence | None = None,
     preloaded: bool = False,
+    beets_library_root: str = "",
 ) -> EvidenceBuildResult:
     """Load current Beets evidence, backfilling when absent or incomplete."""
 
@@ -512,7 +548,7 @@ def load_or_backfill_current_evidence(
             return EvidenceBuildResult(existing, "ready")
 
     cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
-    with BeetsDB() as beets:
+    with BeetsDB(library_root=beets_library_root) as beets:
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return EvidenceBuildResult(None, "empty_current", "album not in beets")

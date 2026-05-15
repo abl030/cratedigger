@@ -121,10 +121,28 @@ class AlbumInfo:
 class BeetsDB:
     """Read-only connection to the beets SQLite library database."""
 
-    def __init__(self, db_path: str = DEFAULT_BEETS_DB) -> None:
+    def __init__(
+        self,
+        db_path: str = DEFAULT_BEETS_DB,
+        *,
+        library_root: str = "",
+    ) -> None:
+        """Open the library DB.
+
+        ``library_root`` is the absolute filesystem path that beets'
+        ``items.path`` values are stored relative to (matches the
+        ``directory:`` setting in the beets config). When set,
+        :meth:`get_album_info` returns an absolute ``album_path``;
+        otherwise it returns whatever beets stored, which in production
+        is a path relative to ``library_root`` and breaks any consumer
+        that does host-side filesystem ops (see
+        ``evidence_from_album_info`` → ``snapshot_audio_files`` →
+        bogus ``empty_fileset / "no audio files found"``).
+        """
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Beets DB not found: {db_path}")
         self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        self._library_root = library_root
 
     def close(self) -> None:
         self._conn.close()
@@ -373,8 +391,13 @@ class BeetsDB:
         is_cbr = len(set(bitrates)) == 1
         track_count = len(rows)
 
-        # Album path = directory of first track
+        # Album path = directory of first track. Beets stores items.path
+        # relative to the library root in production; absolutize so
+        # downstream FS consumers (snapshot_audio_files, spectral_analyze,
+        # os.path.isdir checks) work regardless of cwd.
         first_path = self._decode_path(rows[0][1])
+        if self._library_root and not os.path.isabs(first_path):
+            first_path = os.path.join(self._library_root, first_path)
         album_path = os.path.dirname(first_path)
 
         # Reduce multi-format albums via cfg.mixed_format_precedence.

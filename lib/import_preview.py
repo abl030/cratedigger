@@ -413,6 +413,7 @@ def preview_import_from_path(
                     request_id=request_id,
                     mb_release_id=mbid,
                     quality_ranks=cfg.quality_ranks,
+                    beets_library_root=getattr(cfg, "beets_directory", ""),
                 )
                 current_evidence = current_result.evidence
             except Exception:
