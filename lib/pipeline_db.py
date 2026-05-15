@@ -29,18 +29,27 @@ import msgspec
 
 from lib.import_queue import (
     ImportJob,
-    IMPORT_JOB_AUTOMATION,
-    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
     IMPORT_JOB_PREVIEW_WAITING,
-    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
-    import_preview_enabled_from_env,
     validate_preview_failure_status,
     validate_job_type,
     validate_payload,
     validate_status,
 )
-from lib.quality import (CooldownConfig, SpectralMeasurement, V0ProbeEvidence,
-                         should_cooldown)
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
+    AlbumQualityEvidenceOwner,
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    CooldownConfig,
+    SpectralMeasurement,
+    V0ProbeEvidence,
+    VerifiedLosslessProof,
+    should_cooldown,
+)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 logger = logging.getLogger(__name__)
@@ -905,24 +914,10 @@ class PipelineDB:
         dedupe_key: str | None = None,
         payload: dict[str, Any] | None = None,
         message: str | None = None,
-        preview_enabled: bool | None = None,
     ) -> ImportJob:
         """Create an import job or return the active job with the same key."""
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
-        preview_enabled = (
-            import_preview_enabled_from_env()
-            if preview_enabled is None
-            else preview_enabled
-        )
-        preview_status = (
-            IMPORT_JOB_PREVIEW_WAITING
-            if preview_enabled
-            else IMPORT_JOB_PREVIEW_WOULD_IMPORT
-        )
-        preview_message = None if preview_enabled else IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-        preview_completed_at = None if preview_enabled else datetime.now(timezone.utc)
-        importable_at = None if preview_enabled else preview_completed_at
         cur = self._execute("""
             WITH inserted AS (
                 INSERT INTO import_jobs (
@@ -930,7 +925,7 @@ class PipelineDB:
                     preview_status, preview_message, preview_completed_at,
                     importable_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
                 ON CONFLICT (dedupe_key)
                     WHERE dedupe_key IS NOT NULL
                       AND status IN ('queued', 'running')
@@ -954,10 +949,7 @@ class PipelineDB:
             dedupe_key,
             psycopg2.extras.Json(payload),
             message,
-            preview_status,
-            preview_message,
-            preview_completed_at,
-            importable_at,
+            IMPORT_JOB_PREVIEW_WAITING,
             dedupe_key,
             dedupe_key,
         ))
@@ -1060,6 +1052,7 @@ class PipelineDB:
             WHERE status IN ('queued', 'running')
             ORDER BY
               CASE
+                WHEN status = 'queued' AND preview_status = 'evidence_ready' THEN 0
                 WHEN status = 'queued' AND preview_status = 'would_import' THEN 0
                 WHEN status = 'running' THEN 1
                 WHEN status = 'queued' AND preview_status = 'running' THEN 2
@@ -1085,7 +1078,7 @@ class PipelineDB:
                 SELECT id
                 FROM import_jobs
                 WHERE status = 'queued'
-                  AND preview_status = 'would_import'
+                  AND preview_status IN ('evidence_ready', 'would_import')
                 ORDER BY importable_at ASC NULLS LAST, created_at ASC, id ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -1233,48 +1226,51 @@ class PipelineDB:
         """, (limit, message))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
-    def requeue_disabled_automation_preview_jobs(
+    def requeue_import_job_for_preview(
         self,
+        job_id: int,
         *,
-        limit: int = 100,
-    ) -> list[ImportJob]:
-        """Move legacy automation jobs into the async preview lane."""
+        reason: str,
+    ) -> ImportJob | None:
+        """Flip a running import job back to preview's lane.
+
+        Used by the importer's dispatch path when candidate evidence is
+        missing, stale, or incomplete at claim time. Preview will pick up
+        the row on its next sweep, measure, persist evidence, and mark it
+        importable again.
+
+        Column semantics (modeled on ``requeue_running_import_jobs``):
+        - ``status`` → ``queued``
+        - ``preview_status`` → ``waiting``
+        - ``worker_id`` / ``started_at`` / ``heartbeat_at`` → ``NULL``
+        - ``preview_message`` / ``preview_error`` → ``NULL`` so preview's
+          claim starts clean
+        - ``message`` → ``reason`` (top-level diagnostic)
+        - ``attempts`` and ``preview_attempts`` preserved (historical
+          counters; the cycle is operator-visible via these)
+
+        Idempotent: only matches rows currently in ``status='running'``.
+        Returns ``None`` if the job is not running (already requeued,
+        completed, failed, or non-existent).
+        """
         cur = self._execute("""
-            WITH disabled AS (
-                SELECT id
-                FROM import_jobs
-                WHERE status = 'queued'
-                  AND job_type = %s
-                  AND preview_status = %s
-                  AND preview_message = %s
-                  AND preview_result IS NULL
-                ORDER BY created_at ASC, id ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT %s
-            )
             UPDATE import_jobs
-            SET preview_status = %s,
-                preview_result = NULL,
+            SET status = 'queued',
+                preview_status = 'waiting',
+                message = %s,
+                error = NULL,
+                worker_id = NULL,
+                started_at = NULL,
+                heartbeat_at = NULL,
                 preview_message = NULL,
                 preview_error = NULL,
-                preview_attempts = 0,
-                preview_worker_id = NULL,
-                preview_started_at = NULL,
-                preview_heartbeat_at = NULL,
-                preview_completed_at = NULL,
-                importable_at = NULL,
                 updated_at = NOW()
-            FROM disabled
-            WHERE import_jobs.id = disabled.id
-            RETURNING import_jobs.*
-        """, (
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_PREVIEW_WOULD_IMPORT,
-            IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
-            limit,
-            IMPORT_JOB_PREVIEW_WAITING,
-        ))
-        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+            WHERE id = %s
+              AND status = 'running'
+            RETURNING *
+        """, (reason, job_id))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
 
     def claim_next_import_preview_job(
         self,
@@ -1327,7 +1323,7 @@ class PipelineDB:
     ) -> ImportJob | None:
         cur = self._execute("""
             UPDATE import_jobs
-            SET preview_status = 'would_import',
+            SET preview_status = 'evidence_ready',
                 preview_result = %s,
                 preview_message = %s,
                 preview_error = NULL,
@@ -1384,6 +1380,52 @@ class PipelineDB:
             message,
             error,
             psycopg2.extras.Json({"preview": result}),
+            message,
+            error,
+            job_id,
+        ))
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row else None
+
+    def mark_import_job_preview_blocked(
+        self,
+        job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        """Record a failed preview while keeping the job active as a blocker.
+
+        Automation preview failures must not become inactive terminal jobs while
+        the request remains ``downloading``. A queued, non-importable job keeps
+        the poller from re-enqueueing the same completed download in a loop.
+        """
+
+        validate_preview_failure_status(preview_status)
+        result = dict(preview_result or {})
+        cur = self._execute("""
+            UPDATE import_jobs
+            SET preview_status = %s,
+                preview_result = %s,
+                preview_message = %s,
+                preview_error = %s,
+                message = %s,
+                error = %s,
+                preview_completed_at = NOW(),
+                preview_worker_id = NULL,
+                preview_heartbeat_at = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+              AND status = 'queued'
+              AND preview_status IN ('waiting', 'running')
+            RETURNING *
+        """, (
+            preview_status,
+            psycopg2.extras.Json(result),
+            message,
+            error,
             message,
             error,
             job_id,
@@ -1519,6 +1561,29 @@ class PipelineDB:
         return self.get_request_by_mb_release_id(identity.release_id)
 
     def delete_request(self, request_id: int) -> None:
+        log_cur = self._execute(
+            "SELECT id FROM download_log WHERE request_id = %s",
+            (request_id,),
+        )
+        download_log_ids = [int(row["id"]) for row in log_cur.fetchall()]
+        self._execute(
+            """
+            DELETE FROM album_quality_evidence
+            WHERE owner_type = %s AND owner_id = %s
+            """,
+            (ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT, request_id),
+        )
+        if download_log_ids:
+            self._execute(
+                """
+                DELETE FROM album_quality_evidence
+                WHERE owner_type = %s AND owner_id = ANY(%s)
+                """,
+                (
+                    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                    download_log_ids,
+                ),
+            )
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()
 
@@ -1604,6 +1669,279 @@ class PipelineDB:
     ) -> None:
         """Write current comparable source-probe state together."""
         self.update_request_fields(request_id, **update.as_update_fields())
+
+    # --- active album-quality evidence --------------------------------------
+
+    def validate_album_quality_evidence_owner(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> bool:
+        """Return whether an evidence owner is well-formed and present."""
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT:
+            cur = self._execute(
+                "SELECT 1 FROM album_requests WHERE id = %s",
+                (owner.owner_id,),
+            )
+        elif owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE:
+            cur = self._execute(
+                "SELECT 1 FROM download_log WHERE id = %s",
+                (owner.owner_id,),
+            )
+        elif owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE:
+            cur = self._execute(
+                "SELECT 1 FROM import_jobs WHERE id = %s",
+                (owner.owner_id,),
+            )
+        else:  # pragma: no cover - guarded by owner.validation_errors()
+            raise ValueError(f"invalid owner_type: {owner.owner_type!r}")
+        return cur.fetchone() is not None
+
+    def upsert_album_quality_evidence(
+        self,
+        evidence: AlbumQualityEvidence,
+    ) -> None:
+        """Atomically replace one owner-scoped evidence row and its snapshot."""
+        evidence = evidence.sorted_for_storage()
+        errors = evidence.storage_validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        if not self.validate_album_quality_evidence_owner(evidence.owner):
+            raise LookupError(
+                "album quality evidence owner does not exist: "
+                f"{evidence.owner.owner_type}:{evidence.owner.owner_id}"
+            )
+
+        v0 = evidence.v0_metric
+        proof = evidence.verified_lossless_proof
+        m = evidence.measurement
+        file_rows = [
+            {
+                "ordinal": ordinal,
+                "relative_path": file.relative_path,
+                "size_bytes": file.size_bytes,
+                "mtime_ns": file.mtime_ns,
+                "extension": file.extension,
+                "container": file.container,
+                "codec": file.codec,
+            }
+            for ordinal, file in enumerate(evidence.files)
+        ]
+        self._execute(
+            """
+            WITH upserted AS (
+                INSERT INTO album_quality_evidence (
+                    owner_type, owner_id, measured_at, codec, container,
+                    storage_format, target_format, min_bitrate_kbps,
+                    avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
+                    spectral_grade, spectral_bitrate_kbps,
+                    verified_lossless, was_converted_from,
+                    v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                    v0_median_bitrate_kbps, v0_source_lineage,
+                    v0_source_provenance, v0_proof_provenance,
+                    verified_lossless_proof_origin,
+                    verified_lossless_source, verified_lossless_classifier,
+                    verified_lossless_detail, updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    NOW()
+                )
+                ON CONFLICT (owner_type, owner_id)
+                DO UPDATE SET
+                    measured_at = EXCLUDED.measured_at,
+                    codec = EXCLUDED.codec,
+                    container = EXCLUDED.container,
+                    storage_format = EXCLUDED.storage_format,
+                    target_format = EXCLUDED.target_format,
+                    min_bitrate_kbps = EXCLUDED.min_bitrate_kbps,
+                    avg_bitrate_kbps = EXCLUDED.avg_bitrate_kbps,
+                    median_bitrate_kbps = EXCLUDED.median_bitrate_kbps,
+                    format = EXCLUDED.format,
+                    is_cbr = EXCLUDED.is_cbr,
+                    spectral_grade = EXCLUDED.spectral_grade,
+                    spectral_bitrate_kbps = EXCLUDED.spectral_bitrate_kbps,
+                    verified_lossless = EXCLUDED.verified_lossless,
+                    was_converted_from = EXCLUDED.was_converted_from,
+                    v0_min_bitrate_kbps = EXCLUDED.v0_min_bitrate_kbps,
+                    v0_avg_bitrate_kbps = EXCLUDED.v0_avg_bitrate_kbps,
+                    v0_median_bitrate_kbps = EXCLUDED.v0_median_bitrate_kbps,
+                    v0_source_lineage = EXCLUDED.v0_source_lineage,
+                    v0_source_provenance = EXCLUDED.v0_source_provenance,
+                    v0_proof_provenance = EXCLUDED.v0_proof_provenance,
+                    verified_lossless_proof_origin =
+                        EXCLUDED.verified_lossless_proof_origin,
+                    verified_lossless_source =
+                        EXCLUDED.verified_lossless_source,
+                    verified_lossless_classifier =
+                        EXCLUDED.verified_lossless_classifier,
+                    verified_lossless_detail =
+                        EXCLUDED.verified_lossless_detail,
+                    updated_at = NOW()
+                RETURNING id
+            ),
+            deleted AS (
+                DELETE FROM album_quality_evidence_files
+                WHERE evidence_id = (SELECT id FROM upserted)
+                RETURNING 1
+            ),
+            delete_complete AS (
+                SELECT COUNT(*) AS ignored FROM deleted
+            ),
+            file_rows AS (
+                SELECT *
+                FROM jsonb_to_recordset(%s::jsonb) AS row(
+                    ordinal INTEGER,
+                    relative_path TEXT,
+                    size_bytes BIGINT,
+                    mtime_ns BIGINT,
+                    extension TEXT,
+                    container TEXT,
+                    codec TEXT
+                )
+            )
+            INSERT INTO album_quality_evidence_files (
+                evidence_id, ordinal, relative_path, size_bytes, mtime_ns,
+                extension, container, codec
+            )
+            SELECT upserted.id, file_rows.ordinal, file_rows.relative_path,
+                   file_rows.size_bytes, file_rows.mtime_ns,
+                   file_rows.extension, file_rows.container, file_rows.codec
+            FROM upserted
+            CROSS JOIN delete_complete
+            CROSS JOIN file_rows
+            """,
+            (
+                evidence.owner.owner_type,
+                evidence.owner.owner_id,
+                evidence.measured_at,
+                evidence.codec,
+                evidence.container,
+                evidence.storage_format,
+                evidence.target_format,
+                m.min_bitrate_kbps,
+                m.avg_bitrate_kbps,
+                m.median_bitrate_kbps,
+                m.format,
+                m.is_cbr,
+                m.spectral_grade,
+                m.spectral_bitrate_kbps,
+                m.verified_lossless,
+                m.was_converted_from,
+                v0.min_bitrate_kbps if v0 else None,
+                v0.avg_bitrate_kbps if v0 else None,
+                v0.median_bitrate_kbps if v0 else None,
+                v0.source_lineage if v0 else None,
+                v0.source_provenance if v0 else None,
+                v0.proof_provenance if v0 else None,
+                proof.proof_origin if proof else None,
+                proof.source if proof else None,
+                proof.classifier if proof else None,
+                proof.detail if proof else None,
+                json.dumps(file_rows),
+            ),
+        )
+
+    def load_album_quality_evidence(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> AlbumQualityEvidence | None:
+        """Load active album-quality evidence by owner, without legacy fallbacks."""
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        cur = self._execute(
+            """
+            SELECT *
+            FROM album_quality_evidence
+            WHERE owner_type = %s AND owner_id = %s
+            """,
+            (owner.owner_type, owner.owner_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        evidence_id = int(row["id"])
+        files_cur = self._execute(
+            """
+            SELECT relative_path, size_bytes, mtime_ns, extension, container,
+                   codec
+            FROM album_quality_evidence_files
+            WHERE evidence_id = %s
+            ORDER BY relative_path
+            """,
+            (evidence_id,),
+        )
+        file_rows = [dict(r) for r in files_cur.fetchall()]
+        return self._album_quality_evidence_from_row(dict(row), file_rows)
+
+    def _album_quality_evidence_from_row(
+        self,
+        row: dict[str, Any],
+        file_rows: list[dict[str, Any]],
+    ) -> AlbumQualityEvidence:
+        v0_metric = None
+        if (
+            row.get("v0_min_bitrate_kbps") is not None
+            or row.get("v0_avg_bitrate_kbps") is not None
+            or row.get("v0_median_bitrate_kbps") is not None
+            or row.get("v0_source_lineage") is not None
+        ):
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=row.get("v0_min_bitrate_kbps"),
+                avg_bitrate_kbps=row.get("v0_avg_bitrate_kbps"),
+                median_bitrate_kbps=row.get("v0_median_bitrate_kbps"),
+                source_lineage=row.get("v0_source_lineage"),
+                source_provenance=row.get("v0_source_provenance"),
+                proof_provenance=row.get("v0_proof_provenance"),
+            )
+        proof = None
+        if row.get("verified_lossless"):
+            proof = VerifiedLosslessProof(
+                proof_origin=row["verified_lossless_proof_origin"],
+                source=row["verified_lossless_source"],
+                classifier=row["verified_lossless_classifier"],
+                detail=row.get("verified_lossless_detail"),
+            )
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type=row["owner_type"],
+                owner_id=int(row["owner_id"]),
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=row.get("min_bitrate_kbps"),
+                avg_bitrate_kbps=row.get("avg_bitrate_kbps"),
+                median_bitrate_kbps=row.get("median_bitrate_kbps"),
+                format=row.get("format"),
+                is_cbr=bool(row.get("is_cbr")),
+                spectral_grade=row.get("spectral_grade"),
+                spectral_bitrate_kbps=row.get("spectral_bitrate_kbps"),
+                verified_lossless=bool(row.get("verified_lossless")),
+                was_converted_from=row.get("was_converted_from"),
+            ),
+            measured_at=row["measured_at"],
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path=file["relative_path"],
+                    size_bytes=int(file["size_bytes"]),
+                    mtime_ns=int(file["mtime_ns"]),
+                    extension=file["extension"],
+                    container=file["container"],
+                    codec=file.get("codec"),
+                )
+                for file in file_rows
+            ],
+            codec=row.get("codec"),
+            container=row.get("container"),
+            storage_format=row.get("storage_format"),
+            target_format=row.get("target_format"),
+            v0_metric=v0_metric,
+            verified_lossless_proof=proof,
+        )
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         """Zero fields that describe files currently on disk in beets.

@@ -666,5 +666,111 @@ class TestPersistedSearchPlansSchema(unittest.TestCase):
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
+@requires_postgres
+class TestAlbumQualityEvidenceSchema(unittest.TestCase):
+    """Migration 017 stores active quality evidence relationally."""
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_tables_and_owner_domain_exist(self):
+        tables = self._query("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN (
+                'album_quality_evidence',
+                'album_quality_evidence_files'
+              )
+        """)
+        self.assertEqual(
+            {row[0] for row in tables},
+            {"album_quality_evidence", "album_quality_evidence_files"},
+        )
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec("""
+                INSERT INTO album_quality_evidence (
+                    owner_type, owner_id, measured_at, format,
+                    verified_lossless
+                )
+                VALUES ('simulator', 1, NOW(), 'mp3 v0', FALSE)
+            """)
+
+    def test_relational_file_rows_and_verified_proof_constraints(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('aqe-schema-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("aqe-schema-mbid",),
+        )[0][0]
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO album_quality_evidence (
+                        owner_type, owner_id, measured_at, format,
+                        verified_lossless
+                    )
+                    VALUES ('request_current', %s, NOW(), 'flac', TRUE)
+                """, (rid,))
+
+            self._exec("""
+                INSERT INTO album_quality_evidence (
+                    owner_type, owner_id, measured_at, format,
+                    verified_lossless, verified_lossless_proof_origin,
+                    verified_lossless_source, verified_lossless_classifier,
+                    v0_avg_bitrate_kbps, v0_source_lineage
+                )
+                VALUES (
+                    'request_current', %s, NOW(), 'flac', TRUE, 'import',
+                    'lossless candidate', 'spectral+v0', 228,
+                    'lossless_container_source'
+                )
+            """, (rid,))
+            evidence_id = self._query(
+                "SELECT id FROM album_quality_evidence "
+                "WHERE owner_type = 'request_current' AND owner_id = %s",
+                (rid,),
+            )[0][0]
+            self._exec("""
+                INSERT INTO album_quality_evidence_files (
+                    evidence_id, ordinal, relative_path, size_bytes, mtime_ns,
+                    extension, container, codec
+                )
+                VALUES (%s, 0, '01.flac', 1000, 10, 'flac', 'flac', 'flac')
+            """, (evidence_id,))
+            rows = self._query(
+                "SELECT relative_path, container FROM album_quality_evidence_files "
+                "WHERE evidence_id = %s",
+                (evidence_id,),
+            )
+            self.assertEqual(rows, [("01.flac", "flac")])
+        finally:
+            self._exec(
+                "DELETE FROM album_quality_evidence "
+                "WHERE owner_type = 'request_current' AND owner_id = %s",
+                (rid,),
+            )
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
 if __name__ == "__main__":
     unittest.main()

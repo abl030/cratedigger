@@ -16,19 +16,38 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence, TYPE_CHECKING
 
+import msgspec
+
 from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ImportResult, SpectralMeasurement, V0ProbeEvidence,
                          ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
-                         V0_PROBE_LOSSLESS_SOURCE,
+                         AlbumQualityEvidence,
+                         AlbumQualityEvidenceDecisionFacts,
+                         QualityEvidenceActionPayload,
+                         QualityEvidenceActionProvenance,
                          dispatch_action, compute_effective_override_bitrate,
+                         evidence_decision_name,
                          extract_usernames, is_comparable_lossless_source_probe,
+                         full_pipeline_decision_from_evidence,
                          narrow_override_on_downgrade,
+                         override_bitrate_from_current_evidence,
                          rejection_backfill_override)
+from lib.quality_evidence import (
+    backfill_current_evidence_from_album_info,
+    legacy_current_lossless_v0_probe_from_request,
+    lossless_source_v0_probe_from_metric,
+    verified_lossless_proof_from_import_result,
+)
+from lib.import_evidence import (
+    CandidateEvidenceActionResult,
+    CURRENT_STATUS_MISSING,
+    ensure_candidate_evidence_for_action,
+    ensure_current_evidence_for_action,
+)
 from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
-                      repair_mp3_headers, trigger_meelo_clean)
-from lib.preimport import inspect_local_files, run_preimport_gates
+                      trigger_meelo_clean)
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -37,6 +56,25 @@ if TYPE_CHECKING:
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 logger = logging.getLogger("cratedigger")
+# U2: when the importer claim arrives without valid candidate evidence
+# (missing row, stale snapshot, incomplete), dispatch flips the row back to
+# the preview lane via ``PipelineDB.requeue_import_job_for_preview`` and
+# returns this code. The importer interprets it as "yield, do NOT
+# write terminal failure, do NOT bump retry counters." Preview's next
+# sweep recovers the row.
+DISPATCH_CODE_REQUEUED_FOR_PREVIEW = "requeued_for_preview"
+# U2: when the requeue UPDATE itself raised (DB transient, connection drop),
+# dispatch swallows the exception and returns this code so the importer
+# leaves the job in ``running`` for ``requeue_running_import_jobs`` on next
+# worker boot to recover. NEVER write terminal failure on this code.
+DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
+# U4: programmer-error code returned by ``dispatch_import_from_db`` when
+# neither ``import_job_id`` nor ``download_log_id`` is supplied. After U3
+# the only production caller (``scripts/importer.py``) always supplies
+# ``import_job_id``, so this code only surfaces from test seams or future
+# misuse. The legacy direct-measurement branch that previously handled
+# this case was deleted in U4 because no production path reaches it.
+DISPATCH_CODE_BAD_REQUEST = "bad_request"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -150,6 +188,80 @@ def load_quality_gate_state(
     )
 
 
+def _requeue_import_job_to_preview(
+    db: "PipelineDB",
+    *,
+    import_job_id: int | None,
+    reason: str,
+) -> "DispatchOutcome":
+    """Shared requeue helper for the two outer evidence-required branches.
+
+    Called from ``_dispatch_import_from_db_locked`` (force/manual) and from
+    ``lib.download._process_beets_validation`` (automation) when
+    ``ensure_candidate_evidence_for_action`` reports the candidate row is
+    missing, stale, or incomplete.
+
+    Lock context differs by caller. The force/manual call site holds the
+    per-request IMPORT advisory lock; the automation call site holds the
+    RELEASE lock. Either way the evidence-check + state-flip pair sits
+    inside whatever lock the caller already has, which is sufficient for
+    importer-vs-importer atomicity (only one importer worker drains the
+    queue serially) — concurrent preview-worker claims of a still-running
+    job are prevented by the importer's own ``status='running'``
+    invariant, not by this lock.
+
+    If the requeue UPDATE itself raises (DB transient), we swallow and
+    return ``DISPATCH_CODE_REQUEUE_FAILED`` — the job stays in
+    ``running`` for ``requeue_running_import_jobs`` on next importer
+    boot to recover.
+
+    ``import_job_id=None`` covers the automation pre-import branch in
+    ``lib/download.py`` for paths that did not enqueue an import_job
+    (legacy or test seam). Returns a hard requeue-failed outcome in
+    that case rather than crashing — there's no row to flip.
+    """
+    detail = f"Candidate quality evidence unavailable at import time: {reason}"
+    if import_job_id is None:
+        # No row to flip. Report as a requeue failure so the importer
+        # leaves the job (if any) in running for startup recovery.
+        return DispatchOutcome(
+            success=False,
+            message=detail + " (no import_job_id; cannot requeue)",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+    try:
+        updated = db.requeue_import_job_for_preview(import_job_id, reason=reason)
+    except Exception as exc:  # noqa: BLE001 — swallow + log for retry
+        logger.exception(
+            "Failed to requeue import_job %s for preview", import_job_id
+        )
+        return DispatchOutcome(
+            success=False,
+            message=f"Requeue to preview failed: {type(exc).__name__}: {exc}",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+    if updated is None:
+        # Row was not in ``status='running'`` when the UPDATE fired — either
+        # already requeued by a concurrent worker, terminal, or never existed.
+        # Conflating this with a successful requeue would hide drift; report
+        # as a requeue failure so startup recovery handles whatever state the
+        # job is actually in.
+        logger.warning(
+            "Requeue for import_job %s matched zero rows; job may already be "
+            "requeued or terminal", import_job_id
+        )
+        return DispatchOutcome(
+            success=False,
+            message=detail + " (requeue UPDATE matched zero rows)",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+    return DispatchOutcome(
+        success=False,
+        message=detail + "; requeued for preview",
+        code=DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+    )
+
+
 @dataclass(frozen=True)
 class DispatchOutcome:
     """Summary of an import outcome."""
@@ -157,6 +269,7 @@ class DispatchOutcome:
     success: bool
     message: str
     deferred: bool = False
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +281,111 @@ class ImportOneRun:
     stdout: str
     stderr: str
     import_result: ImportResult | None
+
+
+@dataclass(frozen=True)
+class EvidenceImportGate:
+    """Action-time quality evidence loaded for one mutating import."""
+
+    current: AlbumQualityEvidence | None = None
+    candidate: AlbumQualityEvidence | None = None
+    candidate_status: str | None = None
+    candidate_reason: str | None = None
+    current_status: str | None = None
+    current_reason: str | None = None
+    current_fail_closed: bool = False
+    snapshot_guard: str | None = None
+
+
+def _import_allowed_by_evidence_pipeline(result: dict[str, object]) -> bool:
+    return bool(result.get("imported"))
+
+
+def _current_evidence_allows_action(gate: EvidenceImportGate) -> bool:
+    """Current evidence may be absent only when Beets has no current album."""
+
+    return not gate.current_fail_closed
+
+
+def _download_info_from_candidate_evidence(
+    candidate: AlbumQualityEvidence,
+    *,
+    username: str | None,
+) -> DownloadInfo:
+    """Build the force/manual audit info without remeasuring the candidate."""
+
+    measurement = candidate.measurement
+    bitrate = (
+        measurement.min_bitrate_kbps * 1000
+        if measurement.min_bitrate_kbps is not None
+        else None
+    )
+    return DownloadInfo(
+        username=username,
+        filetype=(
+            candidate.storage_format
+            or measurement.format
+            or candidate.container
+            or candidate.codec
+        ),
+        bitrate=bitrate,
+        is_vbr=not measurement.is_cbr,
+        download_spectral=SpectralMeasurement.from_parts(
+            measurement.spectral_grade,
+            measurement.spectral_bitrate_kbps,
+        ),
+        v0_probe=lossless_source_v0_probe_from_metric(candidate.v0_metric),
+    )
+
+
+def _write_quality_evidence_action_file(
+    *,
+    candidate: AlbumQualityEvidence,
+    current: AlbumQualityEvidence | None,
+    decision: dict[str, object],
+    target_format: str | None,
+    verified_lossless_target: str,
+    gate: EvidenceImportGate,
+) -> str:
+    """Write the action-time evidence payload consumed by import_one.py."""
+
+    payload = QualityEvidenceActionPayload(
+        candidate=candidate,
+        current=current,
+        decision=decision,
+        decision_name=evidence_decision_name(decision),
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target or None,
+        provenance=QualityEvidenceActionProvenance(
+            candidate_status=gate.candidate_status,
+            current_status=gate.current_status,
+            snapshot_status=gate.snapshot_guard,
+            fallback_reason=gate.candidate_reason,
+        ),
+    )
+    handle = tempfile.NamedTemporaryFile(
+        prefix="cratedigger-quality-evidence-action-",
+        suffix=".json",
+        delete=False,
+    )
+    try:
+        handle.write(msgspec.json.encode(payload))
+        return handle.name
+    finally:
+        handle.close()
+
+
+def _remove_quality_evidence_action_file(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.debug(
+            "Failed to remove quality evidence action file %s",
+            path,
+            exc_info=True,
+        )
 
 
 def import_one_script_from_harness(beets_harness_path: str) -> str:
@@ -189,7 +407,7 @@ def build_import_one_command(
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
-    preview_import_result_file: str | None = None,
+    quality_evidence_action_file: str | None = None,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     cmd = [
@@ -214,8 +432,8 @@ def build_import_one_command(
         cmd.extend(["--override-min-bitrate", str(override_min_bitrate)])
     if quality_rank_config_json:
         cmd.extend(["--quality-rank-config", quality_rank_config_json])
-    if preview_import_result_file:
-        cmd.extend(["--preview-import-result-file", preview_import_result_file])
+    if quality_evidence_action_file:
+        cmd.extend(["--quality-evidence-action-file", quality_evidence_action_file])
     if existing_v0_probe is not None:
         if existing_v0_probe.min_bitrate_kbps is not None:
             cmd.extend([
@@ -249,60 +467,42 @@ def run_import_one(
     verified_lossless_target: str = "",
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
-    preview_import_result: ImportResult | None = None,
+    quality_evidence_action_file: str | None = None,
     timeout: int = 1800,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
-    preview_import_result_file: str | None = None
-    try:
-        if preview_import_result is not None:
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                prefix="cratedigger-preview-import-result-",
-                suffix=".json",
-                delete=False,
-            ) as fp:
-                fp.write(preview_import_result.to_json())
-                preview_import_result_file = fp.name
-        cmd = build_import_one_command(
-            path=path,
-            mb_release_id=mb_release_id,
-            beets_harness_path=beets_harness_path,
-            request_id=request_id,
-            force=force,
-            preserve_source=preserve_source,
-            dry_run=dry_run,
-            override_min_bitrate=override_min_bitrate,
-            target_format=target_format,
-            verified_lossless_target=verified_lossless_target,
-            quality_rank_config_json=quality_rank_config_json,
-            existing_v0_probe=existing_v0_probe,
-            preview_import_result_file=preview_import_result_file,
-        )
-        result = sp.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            env=beets_subprocess_env(),
-        )
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        return ImportOneRun(
-            command=tuple(cmd),
-            returncode=int(result.returncode),
-            stdout=stdout,
-            stderr=stderr,
-            import_result=parse_import_result(stdout),
-        )
-    finally:
-        if preview_import_result_file:
-            try:
-                os.unlink(preview_import_result_file)
-            except FileNotFoundError:
-                pass
+    cmd = build_import_one_command(
+        path=path,
+        mb_release_id=mb_release_id,
+        beets_harness_path=beets_harness_path,
+        request_id=request_id,
+        force=force,
+        preserve_source=preserve_source,
+        dry_run=dry_run,
+        override_min_bitrate=override_min_bitrate,
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target,
+        quality_rank_config_json=quality_rank_config_json,
+        existing_v0_probe=existing_v0_probe,
+        quality_evidence_action_file=quality_evidence_action_file,
+    )
+    result = sp.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+        env=beets_subprocess_env(),
+    )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    return ImportOneRun(
+        command=tuple(cmd),
+        returncode=int(result.returncode),
+        stdout=stdout,
+        stderr=stderr,
+        import_result=parse_import_result(stdout),
+    )
 
 
 def _v0_probe_log_fields(dl_info: DownloadInfo) -> dict[str, int | str | None]:
@@ -332,25 +532,193 @@ def _v0_probe_log_fields(dl_info: DownloadInfo) -> dict[str, int | str | None]:
     }
 
 
-def _current_lossless_v0_probe_from_request(
-    row: dict[str, object] | None,
-) -> V0ProbeEvidence | None:
-    """Build the current comparable source-probe evidence from album_requests."""
-    if not row:
-        return None
-    def optional_int(value: object | None) -> int | None:
-        return value if isinstance(value, int) else None
+def _load_evidence_import_gate(
+    db: "PipelineDB",
+    *,
+    request_id: int,
+    mb_release_id: str,
+    path: str,
+    quality_ranks: "QualityRankConfig | None",
+    candidate_import_job_id: int | None,
+    candidate_download_log_id: int | None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+) -> EvidenceImportGate:
+    """Load persisted evidence for import-time quality authority."""
 
-    avg = optional_int(row.get("current_lossless_source_v0_probe_avg_bitrate"))
-    if avg is None:
-        return None
-    return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=optional_int(row.get(
-            "current_lossless_source_v0_probe_min_bitrate")),
-        avg_bitrate_kbps=avg,
-        median_bitrate_kbps=optional_int(row.get(
-            "current_lossless_source_v0_probe_median_bitrate")),
+    if candidate_import_job_id is None and candidate_download_log_id is None:
+        return EvidenceImportGate()
+
+    candidate_result = prevalidated_candidate_result
+    if candidate_result is None:
+        candidate_result = ensure_candidate_evidence_for_action(
+            db,
+            source_path=path,
+            import_job_id=candidate_import_job_id,
+            download_log_id=candidate_download_log_id,
+        )
+    if not candidate_result.available:
+        return EvidenceImportGate(
+            candidate=None,
+            candidate_status=candidate_result.provenance.candidate_status,
+            candidate_reason=candidate_result.provenance.fallback_reason,
+            snapshot_guard=candidate_result.provenance.snapshot_guard,
+        )
+
+    try:
+        from lib.beets_db import BeetsDB
+        from lib.quality import QualityRankConfig
+
+        cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
+        with BeetsDB() as beets:
+            album_info = beets.get_album_info(mb_release_id, cfg)
+        if album_info is None:
+            return EvidenceImportGate(
+                current=None,
+                candidate=candidate_result.evidence,
+                candidate_status=candidate_result.provenance.candidate_status,
+                candidate_reason=candidate_result.provenance.fallback_reason,
+                current_status=CURRENT_STATUS_MISSING,
+                current_reason="album not in beets",
+                current_fail_closed=False,
+                snapshot_guard=candidate_result.provenance.snapshot_guard,
+            )
+        current_result = ensure_current_evidence_for_action(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=quality_ranks,
+            current_album_path=album_info.album_path,
+            album_info=album_info,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Failed to load/backfill current quality evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return EvidenceImportGate(
+            current=None,
+            candidate=candidate_result.evidence,
+            candidate_status=candidate_result.provenance.candidate_status,
+            candidate_reason=candidate_result.provenance.fallback_reason,
+            current_status="failed",
+            current_reason=f"{type(exc).__name__}: {exc}",
+            current_fail_closed=True,
+            snapshot_guard=candidate_result.provenance.snapshot_guard,
+        )
+
+    return EvidenceImportGate(
+        current=current_result.evidence if current_result.available else None,
+        candidate=candidate_result.evidence,
+        candidate_status=candidate_result.provenance.candidate_status,
+        candidate_reason=candidate_result.provenance.fallback_reason,
+        current_status=current_result.provenance.current_status,
+        current_reason=current_result.provenance.fallback_reason,
+        current_fail_closed=current_result.provenance.fail_closed,
+        snapshot_guard=candidate_result.provenance.snapshot_guard,
+    )
+
+
+def _refresh_current_evidence_after_import(
+    db: "PipelineDB",
+    *,
+    request_id: int,
+    mb_release_id: str,
+    quality_ranks: "QualityRankConfig | None",
+    source_candidate: AlbumQualityEvidence | None = None,
+    import_result: ImportResult | None = None,
+) -> None:
+    """Persist current evidence from the just-imported Beets album."""
+
+    from lib.beets_db import BeetsDB
+    from lib.quality import QualityRankConfig
+
+    cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
+    with BeetsDB() as beets:
+        album_info = beets.get_album_info(mb_release_id, cfg)
+    if album_info is None:
+        return
+    decision = import_result.decision if import_result is not None else None
+    verified_lossless_proof = None
+    if decision != "preflight_existing":
+        verified_lossless_proof = (
+            source_candidate.verified_lossless_proof
+            if (
+                source_candidate is not None
+                and source_candidate.measurement.verified_lossless
+            )
+            else (
+                verified_lossless_proof_from_import_result(import_result)
+                if import_result is not None
+                else None
+            )
+        )
+    backfill_current_evidence_from_album_info(
+        db,
+        request_id=request_id,
+        album_info=album_info,
+        verified_lossless_proof=verified_lossless_proof,
+        preserve_existing_verified_lossless_proof=(
+            import_result is None or decision == "preflight_existing"
+        ),
+    )
+
+
+def _reject_import_from_evidence_decision(
+    *,
+    db: "PipelineDB",
+    request_id: int,
+    dl_info: DownloadInfo,
+    distance: float,
+    decision: str,
+    detail: str,
+    requeue_on_failure: bool,
+    validation_result: str | None,
+    staged_path: str,
+    scenario: str,
+    files: Sequence[object] | None,
+    source_path_cleanup_scenario: str,
+    cooled_down_users: set[str] | None,
+) -> DispatchOutcome:
+    """Record a persisted-evidence rejection before beets can mutate files."""
+
+    action = dispatch_action(decision)
+    _record_rejection_and_maybe_requeue(
+        db,
+        request_id,
+        dl_info,
+        distance=distance,
+        scenario=decision or scenario,
+        detail=detail,
+        error=None,
+        requeue=requeue_on_failure,
+        outcome_label="rejected",
+        validation_result=validation_result,
+        staged_path=staged_path,
+    )
+    if action.denylist:
+        usernames = extract_usernames(files or [])
+        if dl_info.username:
+            usernames.add(dl_info.username)
+        reason = (
+            "quality downgrade prevented"
+            if decision == "downgrade"
+            else "suspect lossless source not an upgrade"
+            if decision.startswith("suspect_lossless")
+            else "lossless source locked"
+            if decision == "lossless_source_locked"
+            else f"rejected: {decision}"
+        )
+        for username in usernames:
+            db.add_denylist(request_id, username, reason)
+            if cooled_down_users is not None:
+                if db.check_and_apply_cooldown(username):
+                    cooled_down_users.add(username)
+    if action.cleanup and _should_cleanup_path(source_path_cleanup_scenario, action):
+        _cleanup_staged_dir(staged_path)
+    return DispatchOutcome(
+        success=False,
+        message=f"Rejected by persisted quality evidence: {decision}",
     )
 
 
@@ -813,7 +1181,9 @@ def dispatch_import_core(
     requeue_on_failure: bool = True,
     cooled_down_users: set[str] | None = None,
     source_dirs: list[str] | None = None,
-    preview_import_result: ImportResult | None = None,
+    candidate_import_job_id: int | None = None,
+    candidate_download_log_id: int | None = None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -920,17 +1290,137 @@ def dispatch_import_core(
                 deferred=True,
             )
 
+        quality_evidence_action_file: str | None = None
         try:
             try:
                 request_row = db.get_request(request_id)
             except Exception:
                 logger.debug(
-                    "Failed to read current V0 probe state before import",
+                    "Failed to read request row before import",
                     exc_info=True,
                 )
                 request_row = None
-            existing_v0_probe = _current_lossless_v0_probe_from_request(
-                request_row)
+
+            evidence_gate = _load_evidence_import_gate(
+                db,
+                request_id=request_id,
+                mb_release_id=mb_release_id,
+                path=path,
+                quality_ranks=cfg.quality_ranks if cfg is not None else None,
+                candidate_import_job_id=candidate_import_job_id,
+                candidate_download_log_id=candidate_download_log_id,
+                prevalidated_candidate_result=prevalidated_candidate_result,
+            )
+            existing_v0_probe = lossless_source_v0_probe_from_metric(
+                evidence_gate.current.v0_metric
+                if evidence_gate.current is not None
+                else None
+            )
+            evidence_override = override_bitrate_from_current_evidence(
+                evidence_gate.current
+            )
+            if evidence_override is not None:
+                override_min_bitrate = evidence_override
+            if existing_v0_probe is None:
+                existing_v0_probe = legacy_current_lossless_v0_probe_from_request(
+                    request_row)
+
+            if (
+                (candidate_import_job_id is not None
+                 or candidate_download_log_id is not None)
+                and evidence_gate.candidate is None
+            ):
+                # U4: outer callers (``_dispatch_import_from_db_locked`` and
+                # ``lib/download.py::_process_beets_validation``) already
+                # call ``ensure_candidate_evidence_for_action`` and requeue
+                # via ``_requeue_import_job_to_preview`` when evidence is
+                # missing. Reaching this inner site means a caller bypassed
+                # the outer gate (test seam or future misuse). Behave
+                # consistently with the outer invariant — requeue rather
+                # than hard-fail — so the importer never measures and
+                # never writes a terminal failure on missing evidence.
+                reason = evidence_gate.candidate_reason or evidence_gate.candidate_status
+                return _requeue_import_job_to_preview(
+                    db,
+                    import_job_id=candidate_import_job_id,
+                    reason=reason or "missing",
+                )
+            if evidence_gate.candidate is not None and not _current_evidence_allows_action(
+                evidence_gate
+            ):
+                reason = evidence_gate.current_reason or evidence_gate.current_status
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Current quality evidence unavailable at import "
+                        f"time: {reason or 'missing'}"
+                    ),
+                )
+
+            if evidence_gate.candidate is not None:
+                facts = AlbumQualityEvidenceDecisionFacts(
+                    import_mode=(
+                        "force"
+                        if force
+                        else "manual"
+                        if scenario == "manual_import"
+                        else "auto"
+                    ),
+                    verified_lossless_target=verified_lossless_target or None,
+                    target_format=target_format,
+                )
+                evidence_decision = full_pipeline_decision_from_evidence(
+                    evidence_gate.candidate,
+                    evidence_gate.current,
+                    facts=facts,
+                    cfg=cfg.quality_ranks if cfg is not None else None,
+                )
+                if not _import_allowed_by_evidence_pipeline(evidence_decision):
+                    decision = evidence_decision_name(evidence_decision)
+                    detail = (
+                        "import-time persisted evidence rejected candidate "
+                        f"(decision={decision})"
+                    )
+                    dl_info.import_result = ImportResult(
+                        decision=decision,
+                        new_measurement=evidence_gate.candidate.measurement,
+                        existing_measurement=(
+                            evidence_gate.current.measurement
+                            if evidence_gate.current is not None
+                            else None
+                        ),
+                        v0_probe=lossless_source_v0_probe_from_metric(
+                            evidence_gate.candidate.v0_metric
+                        ),
+                        existing_v0_probe=existing_v0_probe,
+                    ).to_json()
+                    dl_info.v0_probe = lossless_source_v0_probe_from_metric(
+                        evidence_gate.candidate.v0_metric
+                    )
+                    dl_info.existing_v0_probe = existing_v0_probe
+                    return _reject_import_from_evidence_decision(
+                        db=db,
+                        request_id=request_id,
+                        dl_info=dl_info,
+                        distance=distance,
+                        decision=decision,
+                        detail=detail,
+                        requeue_on_failure=requeue_on_failure,
+                        validation_result=dl_info.validation_result,
+                        staged_path=path,
+                        scenario=scenario,
+                        files=files,
+                        source_path_cleanup_scenario=scenario,
+                        cooled_down_users=cooled_down_users,
+                    )
+                quality_evidence_action_file = _write_quality_evidence_action_file(
+                    candidate=evidence_gate.candidate,
+                    current=evidence_gate.current,
+                    decision=evidence_decision,
+                    target_format=target_format,
+                    verified_lossless_target=verified_lossless_target,
+                    gate=evidence_gate,
+                )
             # Mark the subprocess as launching on the auto-import path
             # so the resume guard can distinguish "never started" from
             # "may have written to beets" if this process crashes
@@ -974,8 +1464,10 @@ def dispatch_import_core(
                     cfg.quality_ranks.to_json() if cfg is not None else None
                 ),
                 existing_v0_probe=existing_v0_probe,
-                preview_import_result=preview_import_result,
+                quality_evidence_action_file=quality_evidence_action_file,
             )
+            _remove_quality_evidence_action_file(quality_evidence_action_file)
+            quality_evidence_action_file = None
             for line in run.stderr.strip().split("\n"):
                 if line.strip():
                     logger.info(f"  [import] {line}")
@@ -1039,6 +1531,23 @@ def dispatch_import_core(
                         clear_stale_v0_probe=(
                             decision != "preflight_existing"
                         ))
+                    try:
+                        _refresh_current_evidence_after_import(
+                            db,
+                            request_id=request_id,
+                            mb_release_id=mb_release_id,
+                            quality_ranks=(
+                                cfg.quality_ranks if cfg is not None else None
+                            ),
+                            source_candidate=evidence_gate.candidate,
+                            import_result=ir,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to refresh current quality evidence "
+                            "after import for request %s",
+                            request_id,
+                        )
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
@@ -1327,6 +1836,8 @@ def dispatch_import_core(
                 ).to_json(),
                 staged_path=path)
             outcome_message = "Unhandled exception"
+        finally:
+            _remove_quality_evidence_action_file(quality_evidence_action_file)
 
     return DispatchOutcome(success=outcome_success, message=outcome_message)
 
@@ -1339,15 +1850,24 @@ def dispatch_import_from_db(
     outcome_label: str = "force_import",
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
-    preview_import_result: ImportResult | None = None,
+    import_job_id: int | None = None,
+    download_log_id: int | None = None,
 ) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
-    Runs the same pre-import gates (audio integrity + spectral transcode
-    detection) as the auto path via ``lib.preimport.run_preimport_gates``
-    — only the beets *distance* check is skipped when ``force=True``.
-    All other quality checks (downgrade prevention, quality gate, meelo scan,
-    denylist) run identically to auto-import.
+    Requires pre-recorded candidate evidence: the caller supplies either
+    ``import_job_id`` or ``download_log_id`` (or both), and dispatch loads
+    the candidate ``AlbumQualityEvidence`` via
+    ``ensure_candidate_evidence_for_action``. The preview worker is the
+    only producer of candidate measurements; dispatch never invokes
+    ``run_preimport_gates`` itself. When evidence is missing or stale, the
+    job is requeued back to the preview lane via
+    ``_requeue_import_job_to_preview`` (returning
+    ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
+    on the preview worker's next claim. Quality decisions (downgrade
+    prevention, quality gate, meelo scan, denylist) still run identically
+    to auto-import — only the beets *distance* check is skipped when
+    ``force=True``.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force/manual imports
@@ -1364,9 +1884,15 @@ def dispatch_import_from_db(
         request_id: Album request ID
         failed_path: Path to the files on disk
         force: Pass --force to import_one.py (bypass distance check)
-        outcome_label: download_log outcome string (e.g. "force_import", "manual_import")
-        source_username: Original Soulseek username for force-import audit/denylist flows
-        source_dirs: Original remote source directories for wrong-match forensics
+        outcome_label: download_log outcome label for successful imports
+        source_username: Soulseek peer who supplied the source files
+        source_dirs: Remote directories the source was downloaded from
+        import_job_id: Import-job row this dispatch belongs to. Required
+            in production (the importer always supplies it); ``None`` is
+            a developer-error precondition error.
+        download_log_id: Originating download_log row for Wrong Matches
+            force-imports; scopes candidate-evidence lookup to that
+            owner. Optional but typically supplied for force-imports.
     """
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 
@@ -1386,7 +1912,8 @@ def dispatch_import_from_db(
             outcome_label=outcome_label,
             source_username=source_username,
             source_dirs=source_dirs,
-            preview_import_result=preview_import_result,
+            import_job_id=import_job_id,
+            download_log_id=download_log_id,
         )
 
 
@@ -1399,10 +1926,32 @@ def _dispatch_import_from_db_locked(
     outcome_label: str,
     source_username: str | None,
     source_dirs: list[str] | None,
-    preview_import_result: ImportResult | None,
+    import_job_id: int | None,
+    download_log_id: int | None,
 ) -> "DispatchOutcome":
-    """Body of dispatch_import_from_db, called once the advisory lock is held."""
+    """Body of dispatch_import_from_db, called once the advisory lock is held.
+
+    Precondition: at least one of ``import_job_id`` or ``download_log_id``
+    MUST be supplied. After U4 (importer-never-measures refactor) the only
+    production caller is ``scripts/importer.py``, which always supplies
+    ``import_job_id``. The previous legacy direct-measurement branch that
+    ran ``inspect_local_files`` / ``run_preimport_gates`` for callers that
+    omitted both IDs has been deleted; the importer never measures.
+    """
     from lib.grab_list import DownloadFile
+
+    if import_job_id is None and download_log_id is None:
+        # Programmer-error: every production caller supplies at least
+        # ``import_job_id``. Reject up front rather than silently measuring.
+        return DispatchOutcome(
+            success=False,
+            message=(
+                "dispatch_import_from_db requires import_job_id or "
+                "download_log_id (importer never measures; preview owns "
+                "candidate evidence production)"
+            ),
+            code=DISPATCH_CODE_BAD_REQUEST,
+        )
 
     source_dirs = normalize_source_dirs(source_dirs or [])
 
@@ -1430,167 +1979,41 @@ def _dispatch_import_from_db_locked(
 
     label = f"{req.get('artist_name', '')} - {req.get('album_title', '')}"
 
-    # --- Shared pre-import gates (audio + spectral) ---
-    # Force only skips the beets distance check (--force in import_one.py);
-    # audio integrity and spectral transcode detection always run so a
-    # force/manual import can't quietly replace an existing copy with a
-    # transcode the auto path would have rejected.
-    #
-    # Repair MP3 headers BEFORE inspect_local_files — broken headers can make
-    # mutagen fail to read bitrate_mode, leaving download_is_vbr=None. Treated
-    # as CBR by the spectral gate, that would falsely reject a VBR album
-    # force-imported here (the auto path only gets headers repaired before
-    # validate_audio, but inspection metadata there comes from slskd, not
-    # filesystem scan — so the problem is unique to force/manual). Idempotent:
-    # run_preimport_gates still calls repair_mp3_headers internally.
-    try:
-        repair_mp3_headers(failed_path)
-    except Exception:
-        logger.debug("pre-inspect mp3 header repair failed", exc_info=True)
-    inspection = inspect_local_files(failed_path)
-
-    # --- Reject nested-folder layouts early ---
-    # The preimport gates (validate_audio / analyze_album / repair_mp3_headers)
-    # recurse, but the downstream harness (harness/import_one.py) still uses
-    # os.listdir for bitrate measurement and conversion. A nested force/manual
-    # import would pass gates and then produce an empty/misclassified
-    # measurement — better to fail fast with a clear message so the user can
-    # flatten the folder themselves. Auto-path downloads are already
-    # flattened by process_completed_album, so this only affects force/manual.
-    if inspection.has_nested_audio:
-        mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
-        detail = ("Audio files are in subdirectories — flatten the folder "
-                  "before import (multi-disc layouts are not supported here).")
-        logger.warning(f"{mode} REJECTED (nested layout): {label} — {detail}")
-        _record_rejection_and_maybe_requeue(
-            db, request_id, DownloadInfo(username=source_username),
-            distance=0.0,
-            scenario="nested_layout",
-            detail=detail,
-            error=None,
-            requeue=False,
-            # outcome="rejected" — force_import/manual_import are reserved for
-            # SUCCESSFUL imports (see CLAUDE.md). The /api/pipeline/log "imported"
-            # counter filters on outcome IN ('success','force_import'), so tagging
-            # a rejection as force_import mis-counts it as imported. Source
-            # attribution for rejections is available via download_log.soulseek_username
-            # + the surrounding request row.
-            outcome_label="rejected",
-            validation_result=ValidationResult(
-                distance=0.0,
-                scenario="nested_layout",
-                detail=detail,
-                failed_path=failed_path,
-                source_dirs=source_dirs,
-            ).to_json(),
-            staged_path=failed_path,
-        )
-        return DispatchOutcome(success=False, message=detail)
-    # download_log.soulseek_username can be a comma-joined list of peers for
-    # multi-source downloads. Split before denylisting so a spectral reject
-    # blocks each real peer, not the literal combined string.
-    source_usernames: set[str] = {
-        u.strip() for u in (source_username or "").split(",") if u.strip()
-    }
-    preimport = run_preimport_gates(
-        path=failed_path,
-        mb_release_id=mbid,
-        label=label,
-        download_filetype=inspection.filetype,
-        download_min_bitrate_bps=inspection.min_bitrate_bps,
-        download_is_vbr=inspection.is_vbr,
-        cfg=cfg,
-        db=db,
-        request_id=request_id,
-        usernames=source_usernames,
-        # Don't propagate the download's spectral into on-disk state on the
-        # force/manual path: if dispatch_import_core subsequently fails
-        # (downgrade, no JSON, timeout), the DB would be left claiming the
-        # failed download is on-disk. The auto path is safe to propagate
-        # because the spectral decision happens immediately before the
-        # import subprocess and a failure there still means the files
-        # ended up in failed_imports/ unchanged.
-        propagate_download_to_existing=False,
-        # Reuse the inspection computed for the nested-layout gate to
-        # avoid a second mutagen walk (~100ms per album).
-        precomputed_inspection=inspection,
+    candidate_result = ensure_candidate_evidence_for_action(
+        db,
+        source_path=failed_path,
+        import_job_id=import_job_id,
+        download_log_id=download_log_id,
     )
-
-    if not preimport.valid:
-        mode = "FORCE-IMPORT" if force else "MANUAL-IMPORT"
-        logger.warning(
-            f"{mode} REJECTED (preimport gate): {label} "
-            f"scenario={preimport.scenario} detail={preimport.detail}")
-
-        dl_info = DownloadInfo(
-            username=source_username,
-            filetype=inspection.filetype or None,
-            bitrate=inspection.min_bitrate_bps,
-            is_vbr=inspection.is_vbr,
-            download_spectral=preimport.download_spectral,
-            current_spectral=preimport.existing_spectral,
-            existing_min_bitrate=preimport.existing_min_bitrate,
+    if not candidate_result.available or candidate_result.evidence is None:
+        reason = (
+            candidate_result.provenance.fallback_reason
+            or candidate_result.provenance.candidate_status
+            or "missing"
         )
-        _record_rejection_and_maybe_requeue(
-            db, request_id, dl_info,
-            distance=0.0,
-            scenario=preimport.scenario or "preimport_reject",
-            detail=preimport.detail,
-            error=None,
-            requeue=False,
-            # outcome="rejected" — force_import/manual_import are reserved for
-            # SUCCESSFUL imports (see CLAUDE.md). Tagging a gate-rejection as
-            # force_import would mis-count it as imported in the UI's "imported"
-            # counter (web/routes/pipeline.py and lib/pipeline_db.py::get_log).
-            outcome_label="rejected",
-            validation_result=ValidationResult(
-                distance=0.0,
-                scenario=preimport.scenario or "preimport_reject",
-                detail=preimport.detail,
-                failed_path=failed_path,
-                source_dirs=source_dirs,
-                corrupt_files=list(preimport.corrupt_files),
-                matched_bad_hash_id=preimport.matched_bad_hash_id,
-                matched_bad_track_path=preimport.matched_bad_track_path,
-            ).to_json(),
-            staged_path=failed_path,
+        # U2: requeue to preview rather than failing. Preview owns
+        # candidate-evidence production; the importer never measures.
+        return _requeue_import_job_to_preview(
+            db,
+            import_job_id=import_job_id,
+            reason=reason,
         )
-        return DispatchOutcome(
-            success=False,
-            message=f"Pre-import gate rejected: {preimport.detail or preimport.scenario}")
-
-    # Compute override from DB state — grade-aware: current_spectral_bitrate only
-    # lowers the override when current_spectral_grade is suspect/likely_transcode.
-    # Re-read the request row so we pick up the measured existing spectral that
-    # run_preimport_gates just wrote via _persist_spectral_state. (Force/manual
-    # paths pass propagate_download_to_existing=False, so no download-as-proxy
-    # propagation happens — we only pick up what beets actually measured.)
-    req = db.get_request(request_id) or req
-    override_min_bitrate = compute_effective_override_bitrate(
-        req.get("min_bitrate"),
-        req.get("current_spectral_bitrate"),
-        req.get("current_spectral_grade"))
-
+    dl_info = _download_info_from_candidate_evidence(
+        candidate_result.evidence,
+        username=source_username,
+    )
     return dispatch_import_core(
         path=failed_path,
         mb_release_id=mbid,
         request_id=request_id,
         label=label,
         force=force,
-        override_min_bitrate=override_min_bitrate,
+        override_min_bitrate=None,
         target_format=req.get("target_format"),
         verified_lossless_target=cfg.verified_lossless_target,
         beets_harness_path=cfg.beets_harness_path,
         db=db,
-        dl_info=DownloadInfo(
-            username=source_username,
-            filetype=inspection.filetype or None,
-            bitrate=inspection.min_bitrate_bps,
-            is_vbr=inspection.is_vbr,
-            download_spectral=preimport.download_spectral,
-            current_spectral=preimport.existing_spectral,
-            existing_min_bitrate=preimport.existing_min_bitrate,
-        ),
+        dl_info=dl_info,
         distance=0.0,
         scenario="force_import" if force else "manual_import",
         files=files,
@@ -1598,5 +2021,7 @@ def _dispatch_import_from_db_locked(
         outcome_label=outcome_label,
         requeue_on_failure=False,
         source_dirs=source_dirs,
-        preview_import_result=preview_import_result,
+        candidate_import_job_id=import_job_id,
+        candidate_download_log_id=download_log_id,
+        prevalidated_candidate_result=candidate_result,
     )

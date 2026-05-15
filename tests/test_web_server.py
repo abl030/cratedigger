@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
+from lib.import_preview import ImportPreviewResult
 from lib.import_queue import ImportJob
 from lib.pipeline_db import SearchPlanProvenance
 from tests.fakes import FakePipelineDB
@@ -5979,11 +5980,17 @@ class TestWrongMatchesContract(unittest.TestCase):
         # filtering. Individual tests override this to exercise missing-file
         # and mixed-existence cases. Also stub rmtree so delete tests don't
         # touch the real filesystem.
+        cleanup_decision_patch = patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            side_effect=lambda _db, lid: self._allowed_cleanup_decision(lid),
+        )
         resolve_patch = patch("web.routes.imports.resolve_failed_path",
                               side_effect=lambda p: p if p else None)
         rmtree_patch = patch("web.routes.imports.shutil.rmtree")
+        self.mock_cleanup_decision = cleanup_decision_patch.start()
         self.mock_resolve_failed_path = resolve_patch.start()
         self.mock_rmtree = rmtree_patch.start()
+        self.addCleanup(cleanup_decision_patch.stop)
         self.addCleanup(resolve_patch.stop)
         self.addCleanup(rmtree_patch.stop)
 
@@ -6081,6 +6088,54 @@ class TestWrongMatchesContract(unittest.TestCase):
             completed_at=None,
             deduped=deduped,
         )
+
+    def _uncertain_cleanup_decision(self, log_id: int):
+        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
+
+        return WrongMatchCleanupDecision(
+            download_log_id=log_id,
+            delete_allowed=False,
+            uncertain=True,
+            provenance="album_quality_evidence",
+            verdict="uncertain",
+            confident_reject=False,
+            cleanup_eligible=False,
+            reason="fresh evidence unavailable",
+        )
+
+    def _allowed_cleanup_decision(self, log_id: int):
+        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
+
+        return WrongMatchCleanupDecision(
+            download_log_id=log_id,
+            delete_allowed=True,
+            uncertain=False,
+            provenance="album_quality_evidence",
+            verdict="confident_reject",
+            confident_reject=True,
+            cleanup_eligible=True,
+            preview_decision="spectral_reject",
+            reason="fresh cleanup-safe reject",
+        )
+
+    def _entry_with_poisoned_cleanup_triage(
+        self,
+        download_log_id: int,
+        request_id: int,
+        failed_path: str,
+    ) -> dict:
+        entry = self._entry(download_log_id, request_id, failed_path)
+        entry["validation_result"]["wrong_match_triage"] = {
+            "preview_verdict": "confident_reject",
+            "cleanup_eligible": True,
+            "action": "deleted_reject",
+        }
+        entry["import_result"] = {
+            "decision": "spectral_reject",
+            "confident_reject": True,
+            "cleanup_eligible": True,
+        }
+        return entry
 
     def test_response_has_groups(self):
         """RED for issue #113: payload must be {groups: [...]}, not {entries: [...]}."""
@@ -6639,6 +6694,24 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
 
+    def test_delete_recomputes_cleanup_and_keeps_uncertain_candidate(self):
+        entry = self._entry_with_poisoned_cleanup_triage(42, 100, "/fi/stale")
+        self.mock_db.get_download_log_entry.return_value = entry
+
+        with patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(42),
+        ) as preview:
+            status, _data = self._post(
+                "/api/wrong-matches/delete",
+                {"download_log_id": 42},
+            )
+
+        self.assertEqual(status, 200)
+        preview.assert_called_once_with(self.mock_db, 42)
+        self.mock_rmtree.assert_not_called()
+        self.mock_db.clear_wrong_match_path.assert_not_called()
+
     @patch("web.routes.imports.resolve_failed_path",
            return_value="/mnt/virtio/music/slskd/failed_imports/Test")
     def test_relative_failed_path_uses_resolved_path(self, _mock_resolve):
@@ -6668,7 +6741,19 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
         mock_rmtree.assert_called_once_with(
-            "/mnt/virtio/music/slskd/failed_imports/Test", ignore_errors=True)
+            "/mnt/virtio/music/slskd/failed_imports/Test")
+
+    def test_delete_filesystem_error_keeps_wrong_match_pointer(self):
+        self.mock_rmtree.side_effect = OSError("permission denied")
+        self.mock_db.get_download_log_entry.return_value = copy.deepcopy(
+            _DEFAULT_WRONG_MATCH_ENTRY
+        )
+
+        status, data = self._post("/api/wrong-matches/delete", {"download_log_id": 42})
+
+        self.assertEqual(status, 500)
+        self.assertIn("error", data)
+        self.mock_db.clear_wrong_match_path.assert_not_called()
 
     def test_delete_group_missing_request_id_returns_error(self):
         status, data = self._post("/api/wrong-matches/delete-group", {})
@@ -6710,6 +6795,34 @@ class TestWrongMatchesContract(unittest.TestCase):
             "/api/wrong-matches/delete-group", {"request_id": 999})
         self.assertEqual(status, 200)
         self.assertEqual(data["deleted"], 0)
+
+    def test_delete_group_recomputes_cleanup_and_keeps_uncertain_candidates(self):
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a"),
+            self._row(101, 42, "u2", "/fi/b"),
+        ]
+        entries = {
+            100: self._entry_with_poisoned_cleanup_triage(100, 42, "/fi/a"),
+            101: self._entry_with_poisoned_cleanup_triage(101, 42, "/fi/b"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid])
+        )
+
+        with patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            side_effect=lambda _db, lid: self._uncertain_cleanup_decision(lid),
+        ) as preview:
+            status, data = self._post(
+                "/api/wrong-matches/delete-group",
+                {"request_id": 42},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 0)
+        self.assertEqual([call.args[1] for call in preview.call_args_list], [100, 101])
+        self.mock_rmtree.assert_not_called()
+        self.mock_db.clear_wrong_match_path.assert_not_called()
 
     @patch("web.server.compute_library_rank", return_value="transparent")
     @patch("web.server.check_beets_library_detail")
@@ -6756,6 +6869,34 @@ class TestWrongMatchesContract(unittest.TestCase):
             [call.args[0] for call in self.mock_db.clear_wrong_match_path.call_args_list],
             [100, 101],
         )
+
+    @patch("web.server.compute_library_rank", return_value="transparent")
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-mp3": {"beets_format": "MP3", "beets_bitrate": 245},
+    })
+    def test_delete_transparent_non_flac_recomputes_cleanup_and_keeps_uncertain_candidate(
+            self, _mock_beets_detail, _mock_rank):
+        row = self._row(100, 42, "u1", "/fi/a", mb_release_id="mb-mp3")
+        row["validation_result"]["items"] = [{"path": "01.mp3", "format": "MP3"}]
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_log_entry.return_value = (
+            self._entry_with_poisoned_cleanup_triage(100, 42, "/fi/a")
+        )
+
+        with patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(100),
+        ) as preview:
+            status, data = self._post(
+                "/api/wrong-matches/delete-transparent-non-flac",
+                {},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 0)
+        preview.assert_called_once_with(self.mock_db, 100)
+        self.mock_rmtree.assert_not_called()
+        self.mock_db.clear_wrong_match_path.assert_not_called()
 
     @patch("web.server.check_beets_library_detail", return_value={
         "mb-transparent": {"beets_format": "MP3", "beets_bitrate": 245},
@@ -6804,6 +6945,37 @@ class TestWrongMatchesContract(unittest.TestCase):
         )
         called_ids = [c.args[0] for c in self.mock_db.clear_wrong_match_path.call_args_list]
         self.assertEqual(called_ids, [101])
+
+    @patch("web.server.check_beets_library_detail", return_value={
+        "mb-opus": {"beets_format": "Opus", "beets_bitrate": 128},
+    })
+    def test_delete_lossless_opus_recomputes_cleanup_and_keeps_uncertain_candidate(
+            self, _mock_beets):
+        row = self._row(101, 43, "u2", "/fi/lossless-opus",
+                        mb_release_id="mb-opus")
+        row["request_status"] = "imported"
+        row["request_min_bitrate"] = 128
+        row["request_verified_lossless"] = True
+        row["request_current_spectral_grade"] = "genuine"
+        self.mock_db.get_wrong_matches.return_value = [row]
+        self.mock_db.get_download_log_entry.return_value = (
+            self._entry_with_poisoned_cleanup_triage(101, 43, "/fi/lossless-opus")
+        )
+
+        with patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(101),
+        ) as preview:
+            status, data = self._post(
+                "/api/wrong-matches/delete-lossless-opus",
+                {},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["deleted"], 0)
+        preview.assert_called_once_with(self.mock_db, 101)
+        self.mock_rmtree.assert_not_called()
+        self.mock_db.clear_wrong_match_path.assert_not_called()
 
     @patch("web.server.check_beets_library_detail", return_value={
         "mb-opus-suspect": {"beets_format": "Opus", "beets_bitrate": 128},
@@ -7065,9 +7237,9 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["unmatched_count"], 1)
         self.assertTrue(data["delete_unmatched"])
         self.assertEqual(data["deleted"], 1)
-        self.assertEqual(data["dismissed"], 2)
-        self.assertEqual(data["remaining"], 0)
-        self.assertTrue(data["group_empty"])
+        self.assertEqual(data["dismissed"], 0)
+        self.assertEqual(data["remaining"], 2)
+        self.assertFalse(data["group_empty"])
         self.assertEqual(
             {item["download_log_id"] for item in data["selected"]},
             {100, 101},
@@ -7080,16 +7252,16 @@ class TestWrongMatchesContract(unittest.TestCase):
                 "force_import:download_log:101",
             ],
         )
-        self.assertEqual(self.mock_db.clear_wrong_match_paths.call_count, 2)
+        self.mock_db.clear_wrong_match_paths.assert_not_called()
         self.assertEqual(
             self.mock_db.enqueue_import_job.call_args_list[0].kwargs["payload"]["source_dirs"],
             ["u1\\Artist\\Album"],
         )
-        self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
+        self.mock_rmtree.assert_called_once_with("/fi/c")
         self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
 
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
-        """Legacy true payloads still delete non-green rows while selected rows are dismissed."""
+        """Legacy true payloads still delete non-green rows while selected rows stay visible."""
         self.mock_db.get_wrong_matches.return_value = [
             self._row(100, 42, "u1", "/fi/a", distance=0.167),
             self._row(101, 42, "u2", "/fi/b", distance=0.180),
@@ -7117,10 +7289,41 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(data["queued"], 2)
         self.assertEqual(data["deleted"], 1)
-        self.assertEqual(data["remaining"], 0)
-        self.assertTrue(data["group_empty"])
-        self.mock_rmtree.assert_called_once_with("/fi/c", ignore_errors=True)
+        self.assertEqual(data["remaining"], 2)
+        self.assertFalse(data["group_empty"])
+        self.mock_rmtree.assert_called_once_with("/fi/c")
         self.mock_db.clear_wrong_match_path.assert_called_once_with(102)
+
+    def test_converge_recomputes_cleanup_and_keeps_uncertain_unmatched_candidate(self):
+        self.mock_db.get_wrong_matches.return_value = [
+            self._row(100, 42, "u1", "/fi/a", distance=0.167),
+            self._row(102, 42, "u3", "/fi/c", distance=0.226),
+        ]
+        entries = {
+            100: self._entry(100, 42, "/fi/a"),
+            102: self._entry_with_poisoned_cleanup_triage(102, 42, "/fi/c"),
+        }
+        self.mock_db.get_download_log_entry.side_effect = (
+            lambda lid: copy.deepcopy(entries[lid])
+        )
+        self.mock_db.enqueue_import_job.return_value = self._job(900, 42, 100, "/fi/a")
+
+        with patch(
+            "web.routes.imports.decide_wrong_match_cleanup",
+            return_value=self._uncertain_cleanup_decision(102),
+        ) as preview:
+            status, data = self._post("/api/wrong-matches/converge", {
+                "request_id": 42,
+                "threshold_milli": 180,
+                "delete_unmatched": True,
+            })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["deleted"], 0)
+        self.assertEqual(data["remaining"], 2)
+        preview.assert_called_once_with(self.mock_db, 102)
+        self.mock_rmtree.assert_not_called()
+        self.mock_db.clear_wrong_match_path.assert_not_called()
 
     def test_converge_skips_missing_green_files(self):
         """A green row with no surviving failed_path is not queued or dismissed."""
@@ -7146,7 +7349,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.mock_rmtree.assert_not_called()
 
     def test_converge_reports_deduped_jobs(self):
-        """Existing active force-import jobs still count as selected and dismissed."""
+        """Existing active force-import jobs still count as selected but remain visible."""
         self.mock_db.get_wrong_matches.return_value = [
             self._row(100, 42, "u1", "/fi/a", distance=0.167),
         ]
@@ -7163,7 +7366,8 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["queued"], 1)
         self.assertEqual(data["deduped"], 1)
         self.assertTrue(data["selected"][0]["deduped"])
-        self.assertEqual(data["dismissed"], 1)
+        self.assertEqual(data["dismissed"], 0)
+        self.assertEqual(data["remaining"], 1)
 
     def test_converge_missing_request_id_returns_error(self):
         status, _data = self._post("/api/wrong-matches/converge", {})

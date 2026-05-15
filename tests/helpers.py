@@ -14,6 +14,11 @@ from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
+    AlbumQualityEvidenceOwner,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     CodecRankBands,
     ConversionInfo,
@@ -28,6 +33,7 @@ from lib.quality import (
     SpectralMeasurement,
     V0ProbeEvidence,
     ValidationResult,
+    VerifiedLosslessProof,
 )
 
 
@@ -85,6 +91,60 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
     }
     row.update(overrides)
     return row
+
+
+def make_album_quality_evidence(
+    *,
+    owner_type: str = ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    owner_id: int = 1,
+    measured_at: datetime | None = None,
+    files: list[AlbumQualityEvidenceFile] | None = None,
+    measurement: AudioQualityMeasurement | None = None,
+    v0_metric: AlbumQualityV0Metric | None = None,
+    verified_lossless_proof: VerifiedLosslessProof | None = None,
+    codec: str | None = "mp3",
+    container: str | None = "mp3",
+    storage_format: str | None = "mp3 v0",
+    target_format: str | None = None,
+) -> AlbumQualityEvidence:
+    """Build production-shaped active album-quality evidence."""
+    if measured_at is None:
+        measured_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    if files is None:
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="01 - Track.mp3",
+                size_bytes=123456,
+                mtime_ns=1_700_000_000_000_000_000,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            ),
+        ]
+    if measurement is None:
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=256,
+            median_bitrate_kbps=252,
+            format="mp3 v0",
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=None,
+        )
+    return AlbumQualityEvidence(
+        owner=AlbumQualityEvidenceOwner(
+            owner_type=owner_type,
+            owner_id=owner_id,
+        ),
+        measurement=measurement,
+        measured_at=measured_at,
+        files=files,
+        codec=codec,
+        container=container,
+        storage_format=storage_format,
+        target_format=target_format,
+        v0_metric=v0_metric,
+        verified_lossless_proof=verified_lossless_proof,
+    )
 
 
 def make_import_result(

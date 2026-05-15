@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -21,6 +20,12 @@ IMPORT_JOB_STATUSES = frozenset({"queued", "running", "completed", "failed"})
 IMPORT_JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
 IMPORT_JOB_PREVIEW_WAITING = "waiting"
 IMPORT_JOB_PREVIEW_RUNNING = "running"
+IMPORT_JOB_PREVIEW_EVIDENCE_READY = "evidence_ready"
+# Historical: new jobs are never written with this status after the
+# importer-never-measures refactor (migration 018 swept legacy rows). Kept in
+# IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES so any pre-deploy rows that still
+# carry it can be claimed by the importer and drained. Do not remove until
+# a follow-up cleanup confirms zero rows remain.
 IMPORT_JOB_PREVIEW_WOULD_IMPORT = "would_import"
 IMPORT_JOB_PREVIEW_CONFIDENT_REJECT = "confident_reject"
 IMPORT_JOB_PREVIEW_UNCERTAIN = "uncertain"
@@ -28,6 +33,7 @@ IMPORT_JOB_PREVIEW_ERROR = "error"
 IMPORT_JOB_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_PREVIEW_RUNNING,
+    IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
     IMPORT_JOB_PREVIEW_CONFIDENT_REJECT,
     IMPORT_JOB_PREVIEW_UNCERTAIN,
@@ -38,17 +44,10 @@ IMPORT_JOB_PREVIEW_FAILURE_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_UNCERTAIN,
     IMPORT_JOB_PREVIEW_ERROR,
 })
-IMPORT_JOB_PREVIEW_ENABLED_ENV = "CRATEDIGGER_IMPORT_PREVIEW_ENABLE"
-IMPORT_JOB_PREVIEW_DISABLED_MESSAGE = "Preview gate disabled"
-
-
-def import_preview_enabled_from_env() -> bool:
-    value = os.environ.get(IMPORT_JOB_PREVIEW_ENABLED_ENV)
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
+IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES = frozenset({
+    IMPORT_JOB_PREVIEW_EVIDENCE_READY,
+    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
+})
 @dataclass(frozen=True)
 class ImportJob:
     """One row from ``import_jobs`` with JSONB fields normalized to dicts."""

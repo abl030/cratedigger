@@ -15,7 +15,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.import_dispatch import DispatchOutcome
+from lib.import_dispatch import (
+    DISPATCH_CODE_REQUEUE_FAILED,
+    DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+    DispatchOutcome,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -27,7 +31,7 @@ from lib.pipeline_db import (
     DEFAULT_DSN,
     PipelineDB,
 )
-from lib.quality import ActiveDownloadState, ImportResult
+from lib.quality import ActiveDownloadState
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
@@ -38,28 +42,19 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         "success": outcome.success,
         "message": outcome.message,
         "deferred": outcome.deferred,
+        "code": outcome.code,
     }
 
 
-def _preview_import_result(job: ImportJob) -> ImportResult | None:
-    """Extract the dry-run import_one result stored by the preview worker."""
-    preview_result = job.preview_result or {}
-    raw = preview_result.get("import_result")
-    if raw is None:
+def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
+    if job.job_type != IMPORT_JOB_FORCE:
         return None
-    try:
-        if isinstance(raw, ImportResult):
-            return raw
-        if isinstance(raw, dict):
-            return ImportResult.from_dict(raw)
-    except Exception:
-        logger.warning(
-            "Import job %s has an unreadable preview import_result; "
-            "falling back to full import measurement",
-            job.id,
-            exc_info=True,
-        )
-    return None
+    payload = job.payload or {}
+    download_log_id = payload.get("download_log_id")
+    if not isinstance(download_log_id, int):
+        return None
+    failed_path = payload.get("failed_path")
+    return download_log_id, failed_path if isinstance(failed_path, str) else None
 
 
 def _cleanup_failed_force_import(
@@ -67,26 +62,66 @@ def _cleanup_failed_force_import(
     job: ImportJob,
     outcome: DispatchOutcome,
 ) -> dict[str, object] | None:
-    if job.job_type != IMPORT_JOB_FORCE or outcome.deferred:
+    if outcome.deferred:
         return None
-    payload = job.payload or {}
-    download_log_id = payload.get("download_log_id")
-    if not isinstance(download_log_id, int):
+    force_payload = _force_job_wrong_match_payload(job)
+    if force_payload is None:
         return None
-    failed_path = payload.get("failed_path")
-    failed_path_hint = failed_path if isinstance(failed_path, str) else None
+    download_log_id, failed_path_hint = force_payload
     try:
+        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
         from lib.wrong_matches import cleanup_wrong_match_source
 
+        decision = decide_wrong_match_cleanup(db, download_log_id)
+        if not decision.delete_allowed:
+            return {
+                "success": False,
+                "skipped": True,
+                "download_log_id": download_log_id,
+                "failed_path_hint": failed_path_hint,
+                "reason": decision.skip_reason,
+                "cleanup_decision": decision.to_dict(),
+            }
         cleanup = cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
         )
-        return cleanup.to_dict()
+        result = cleanup.to_dict()
+        result["cleanup_decision"] = decision.to_dict()
+        return result
     except Exception as exc:
         logger.exception(
             "Failed to clean wrong-match source for import job %s",
+            job.id,
+        )
+        return {
+            "success": False,
+            "download_log_id": download_log_id,
+            "failed_path_hint": failed_path_hint,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _dismiss_successful_force_import(
+    db: PipelineDB,
+    job: ImportJob,
+) -> dict[str, object] | None:
+    force_payload = _force_job_wrong_match_payload(job)
+    if force_payload is None:
+        return None
+    download_log_id, failed_path_hint = force_payload
+    try:
+        from lib.wrong_matches import dismiss_wrong_match_source
+
+        return dismiss_wrong_match_source(
+            db,
+            download_log_id,
+            failed_path_hint=failed_path_hint,
+        ).to_dict()
+    except Exception as exc:
+        logger.exception(
+            "Failed to dismiss wrong-match source for import job %s",
             job.id,
         )
         return {
@@ -122,6 +157,7 @@ def execute_import_job(
             )
         source_username = payload.get("source_username")
         source_dirs = payload.get("source_dirs")
+        download_log_id = payload.get("download_log_id")
         return dispatch_import_from_db(
             db,
             request_id=job.request_id,
@@ -138,7 +174,12 @@ def execute_import_job(
                 if isinstance(source_dirs, list)
                 else None
             ),
-            preview_import_result=_preview_import_result(job),
+            import_job_id=job.id,
+            download_log_id=(
+                int(download_log_id)
+                if isinstance(download_log_id, int)
+                else None
+            ),
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
@@ -199,7 +240,7 @@ def execute_automation_import_job(
             state,
             db,
             runtime_ctx,
-            preview_import_result=_preview_import_result(job),
+            import_job_id=job.id,
         )
     finally:
         if created_ctx:
@@ -245,10 +286,44 @@ def process_claimed_job(
 
     result = _job_result(outcome)
     if outcome.success:
+        dismissal = _dismiss_successful_force_import(db, job)
+        if dismissal is not None:
+            result["wrong_match_dismissal"] = dismissal
         return db.mark_import_job_completed(
             job.id,
             result=result,
             message=outcome.message,
+        )
+    # U2: dispatch flipped this row back to the preview lane (or tried to).
+    # We do NOT write a terminal failed status, do NOT bump retry counters,
+    # and do NOT run the wrong-match cleanup decision. The dispatch-side
+    # state change is already persisted; we just log and yield.
+    if outcome.code == DISPATCH_CODE_REQUEUED_FOR_PREVIEW:
+        logger.info(
+            "Import job %s (request %s) requeued for preview: %s",
+            job.id,
+            job.request_id,
+            outcome.message,
+        )
+        return None
+    if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
+        # The requeue UPDATE itself failed (DB transient). Mark the job
+        # terminally failed so it surfaces to ops rather than leaving it in
+        # 'running' for startup recovery, which would just re-claim and hit
+        # the same condition (REL-001). The operator can re-trigger the
+        # import once the underlying DB issue is resolved.
+        logger.error(
+            "Import job %s (request %s) requeue to preview failed; "
+            "marking job failed (operator must investigate): %s",
+            job.id,
+            job.request_id,
+            outcome.message,
+        )
+        return db.mark_import_job_failed(
+            job.id,
+            error=outcome.message,
+            message=f"requeue-to-preview failed: {outcome.message}",
+            result=result,
         )
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:

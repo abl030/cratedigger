@@ -63,7 +63,9 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (5-min timer picks up new code).
 - `cratedigger.timer` — starts the next cycle after the previous oneshot exits
   (configurable via `timer.onUnitInactiveSec`).
-- `cratedigger-importer.service` — long-running serial beets import worker. It only claims queued import jobs after async preview marks them `would_import`.
+- `cratedigger-importer.service` — long-running serial beets import worker. It
+  claims queued import jobs after async preview marks durable candidate
+  evidence as `evidence_ready` (legacy `would_import` rows remain claimable).
 - `cratedigger-import-preview-worker.service` — optional long-running async preview worker. It starts after DB migrations when `importer.preview.enable = true`, defaults to two worker loops, and runs validation/spectral/measurement preview outside the beets mutation lane.
 - `cratedigger-web.service` — long-running web UI for music.ablz.au.
 
@@ -161,8 +163,29 @@ systemctl status cratedigger-db-migrate cratedigger-import-preview-worker crated
 journalctl -u cratedigger-import-preview-worker -u cratedigger-importer -n 100 --no-pager
 ```
 
-Queued jobs should move from `preview_status='waiting'` to `would_import` or a
-terminal preview failure. The importer should only claim `would_import` jobs.
+Queued jobs should move from `preview_status='waiting'` to `evidence_ready` or
+a terminal preview failure. The importer claims `evidence_ready` jobs, with
+legacy `would_import` rows drained as preview-disabled compatibility.
 If `importer.preview.enable = false`, `cratedigger-import-preview-worker.service`
 should not exist and newly queued jobs should already have
 `preview_status='would_import'` with `preview_message='Preview gate disabled'`.
+
+Rollback note: before starting pre-018 importer or preview-worker code, stop the
+queue services and reset active `evidence_ready` rows to `waiting` so old code
+re-previews them instead of treating a neutral readiness token as import
+authority. Include `running` rows because a stopped new importer can leave a
+claimed job with `preview_status='evidence_ready'`, which old startup recovery
+would otherwise requeue without changing the preview token:
+
+```sql
+UPDATE import_jobs
+SET status = 'queued',
+    worker_id = NULL,
+    started_at = NULL,
+    heartbeat_at = NULL,
+    preview_status = 'waiting',
+    importable_at = NULL,
+    updated_at = NOW()
+WHERE status IN ('queued', 'running')
+  AND preview_status = 'evidence_ready';
+```

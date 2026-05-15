@@ -12,6 +12,7 @@ from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralContext, SpectralMeasurement, ValidationResult
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
+    make_album_quality_evidence,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
@@ -21,6 +22,143 @@ from tests.helpers import (
 
 
 class TestFakePipelineDB(unittest.TestCase):
+    def test_album_quality_evidence_round_trips_like_pipeline_db(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=42,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="b.mp3",
+                    size_bytes=2,
+                    mtime_ns=2,
+                    extension="mp3",
+                    container="mp3",
+                ),
+                AlbumQualityEvidenceFile(
+                    relative_path="a.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        )
+
+        db.upsert_album_quality_evidence(evidence)
+        loaded = db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+            )
+        )
+
+        assert loaded is not None
+        self.assertEqual(
+            [file.relative_path for file in loaded.files],
+            ["a.mp3", "b.mp3"],
+        )
+        loaded.files.append(AlbumQualityEvidenceFile(
+            relative_path="mutated.mp3",
+            size_bytes=3,
+            mtime_ns=3,
+            extension="mp3",
+            container="mp3",
+        ))
+        reloaded = db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=42,
+            )
+        )
+        assert reloaded is not None
+        self.assertEqual(
+            [file.relative_path for file in reloaded.files],
+            ["a.mp3", "b.mp3"],
+        )
+
+    def test_album_quality_evidence_validates_owner_and_snapshot(self):
+        from lib.quality import AlbumQualityEvidenceFile, AlbumQualityEvidenceOwner
+
+        db = FakePipelineDB()
+        self.assertFalse(db.validate_album_quality_evidence_owner(
+            AlbumQualityEvidenceOwner("request_current", 99)
+        ))
+        with self.assertRaisesRegex(ValueError, "invalid owner_type"):
+            db.validate_album_quality_evidence_owner(
+                AlbumQualityEvidenceOwner("simulator", 1)
+            )
+        db.seed_request(make_request_row(id=42))
+        with self.assertRaisesRegex(ValueError, "container is required"):
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_id=42,
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="bad.mp3",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension="mp3",
+                        container="",
+                    ),
+                ],
+            ))
+
+    def test_album_quality_evidence_supports_download_log_candidate_owner(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        log_id = db.log_download(request_id=42, outcome="rejected")
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+        )
+
+        db.upsert_album_quality_evidence(evidence)
+
+        self.assertIsNotNone(db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=log_id,
+            )
+        ))
+
+    def test_album_quality_evidence_supports_import_job_candidate_owner(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        job = db.enqueue_import_job(
+            "manual_import",
+            request_id=42,
+            payload={"failed_path": "/tmp/candidate"},
+        )
+
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job.id,
+        ))
+
+        loaded = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job.id,
+        ))
+        assert loaded is not None
+        self.assertEqual(loaded.owner.owner_type, "import_job_candidate")
+
     def test_record_attempt_updates_retry_metadata(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -1281,14 +1419,12 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:42",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         duplicate = db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=42,
             dedupe_key="manual:42",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertEqual(first.id, duplicate.id)
         self.assertTrue(duplicate.deduped)
@@ -1330,7 +1466,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:42",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertNotEqual(first.id, later.id)
         failed = db.mark_import_job_failed(
@@ -1341,28 +1476,87 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         assert failed is not None
         self.assertEqual(failed.status, "failed")
 
-    def test_import_job_queue_defaults_to_importable_without_preview_gate(self):
+    def test_requeue_import_job_for_preview_flips_running_back_to_waiting(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
         db = FakePipelineDB()
-        with patch.dict("os.environ", {}, clear=True):
-            queued = db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=42,
-                dedupe_key="manual:preview-disabled",
-                payload=manual_import_payload(failed_path="/tmp/manual"),
-            )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:requeue-fake",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        claimed = db.claim_next_import_job(worker_id="importer")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        prior_attempts = claimed.attempts
+        prior_preview_attempts = claimed.preview_attempts
 
-        self.assertEqual(queued.preview_status, "would_import")
-        self.assertEqual(queued.preview_message, "Preview gate disabled")
-        self.assertIsNotNone(queued.preview_completed_at)
-        self.assertIsNotNone(queued.importable_at)
-        self.assertIsNone(db.claim_next_import_preview_job(worker_id="preview"))
+        updated = db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="candidate evidence missing",
+        )
 
-        claimed = db.claim_next_import_job(worker_id="fake-worker")
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "waiting")
+        self.assertIsNone(updated.worker_id)
+        self.assertIsNone(updated.started_at)
+        self.assertIsNone(updated.heartbeat_at)
+        self.assertIsNone(updated.preview_message)
+        self.assertIsNone(updated.preview_error)
+        self.assertEqual(updated.message, "candidate evidence missing")
+        # Counters preserved.
+        self.assertEqual(updated.attempts, prior_attempts)
+        self.assertEqual(updated.preview_attempts, prior_preview_attempts)
+
+        # Now claimable by preview.
+        preview = db.claim_next_import_preview_job(worker_id="preview-1")
+        assert preview is not None
+        self.assertEqual(preview.id, claimed.id)
+
+    def test_requeue_import_job_for_preview_idempotent_when_not_running(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:requeue-fake-idem",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        # Not yet claimed by importer (preview_status='waiting', status='queued').
+        result = db.requeue_import_job_for_preview(
+            job.id,
+            reason="not running",
+        )
+        self.assertIsNone(result)
+
+    def test_import_job_queue_defaults_to_preview_waiting(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db = FakePipelineDB()
+        queued = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=42,
+            dedupe_key="manual:fresh",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+
+        self.assertEqual(queued.preview_status, "waiting")
+        self.assertIsNone(queued.preview_message)
+        self.assertIsNone(queued.preview_completed_at)
+        self.assertIsNone(queued.importable_at)
+        # Preview worker can claim it; importer cannot.
+        self.assertIsNone(db.claim_next_import_job(worker_id="importer"))
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
         self.assertEqual(claimed.id, queued.id)
-        self.assertEqual(claimed.status, "running")
 
     def test_abandon_auto_import_request_guards_state_and_logs(self):
         db = FakePipelineDB()
@@ -1448,7 +1642,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=42,
             dedupe_key="manual:preview",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertEqual(queued.preview_status, "waiting")
 
@@ -1466,7 +1659,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             message="Preview would import",
         )
         assert importable is not None
-        self.assertEqual(importable.preview_status, "would_import")
+        self.assertEqual(importable.preview_status, "evidence_ready")
         self.assertEqual(importable.preview_result, {"verdict": "would_import"})
         self.assertIsNotNone(importable.importable_at)
 
@@ -1475,7 +1668,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             request_id=43,
             dedupe_key="manual:preview-reject",
             payload=manual_import_payload(failed_path="/tmp/reject"),
-            preview_enabled=True,
         )
         failed = db.mark_import_job_preview_failed(
             rejected.id,
@@ -1583,6 +1775,40 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual([e.request_id for e in db.download_logs], [2])
         self.assertEqual([e.request_id for e in db.search_logs], [2])
         self.assertEqual([e.request_id for e in db.denylist], [2])
+
+    def test_delete_request_cascades_album_quality_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        log_id = db.log_download(1, outcome="rejected")
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=1,
+        ))
+        db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+        ))
+
+        db.delete_request(1)
+
+        self.assertIsNone(db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                1,
+            )
+        ))
+        self.assertIsNone(db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                log_id,
+            )
+        ))
 
     def test_get_wanted_prioritizes_new_and_respects_limit(self):
         db = FakePipelineDB()
@@ -2197,7 +2423,6 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
             request_id=request_id,
             dedupe_key=dedupe_key,
             payload=manual_import_payload(failed_path="/tmp/x"),
-            preview_enabled=False,
         )
 
     def test_returns_none_when_no_jobs(self):

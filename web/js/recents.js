@@ -113,8 +113,11 @@ function queueBadge(job, index) {
   if (job.status === 'completed') return ['completed', 'badge-new'];
   if (job.status === 'failed') return ['failed', 'badge-failed'];
   if (job.status === 'running') return ['importing', 'badge-force'];
+  if (job.preview_status === 'evidence_ready') {
+    return [index === 0 ? 'next check' : 'ready check', 'badge-new'];
+  }
   if (job.preview_status === 'would_import') {
-    return [index === 0 ? 'next import' : 'importable', 'badge-new'];
+    return [index === 0 ? 'next legacy check' : 'legacy ready', 'badge-new'];
   }
   if (job.preview_status === 'running') return ['previewing', 'badge-warn'];
   if (job.preview_status === 'waiting') return ['waiting preview', 'badge-library'];
@@ -127,7 +130,7 @@ function queueBadge(job, index) {
 function queueBorderColor(job) {
   if (job.status === 'failed' || ['confident_reject', 'error'].includes(job.preview_status)) return '#a33';
   if (job.preview_status === 'uncertain' || job.preview_status === 'running') return '#a93';
-  if (job.preview_status === 'would_import' || job.status === 'completed') return '#1a4a2a';
+  if (job.preview_status === 'evidence_ready' || job.preview_status === 'would_import' || job.status === 'completed') return '#1a4a2a';
   if (job.status === 'running') return '#36c';
   return '#1a3a5a';
 }

@@ -2493,8 +2493,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        with patch.dict("os.environ", {"CRATEDIGGER_IMPORT_PREVIEW_ENABLE": "1"}):
-            poll_active_downloads(ctx)
+        poll_active_downloads(ctx)
 
         jobs = fake_db.list_import_jobs()
         self.assertEqual(len(jobs), 1)
@@ -3623,7 +3622,6 @@ class TestPollActiveDownloads(unittest.TestCase):
                 request_id=1,
                 dedupe_key="manual:1",
                 payload=manual_import_payload(failed_path=resumed_path),
-                preview_enabled=False,
             )
 
             poll_active_downloads(ctx)

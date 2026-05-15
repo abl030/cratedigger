@@ -7,12 +7,16 @@ takes data inputs and returns a StageResult without I/O.
 
 import io
 import importlib
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+
+import msgspec
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
@@ -182,89 +186,52 @@ class TestStageResult(unittest.TestCase):
         self.assertFalse(r.terminal)
 
 
-class TestPreviewReuseHelpers(unittest.TestCase):
-    def test_reuses_importable_preview_when_beets_state_matches(self):
+class TestPreviewImportResultSurface(unittest.TestCase):
+    def test_preview_import_result_file_rejected_by_cli_parser(self):
+        import_script = os.path.join(HARNESS_DIR, "import_one.py")
+        result = subprocess.run(
+            [
+                sys.executable,
+                import_script,
+                "/tmp/cratedigger-parser-only-album",
+                "mbid-123",
+                "--preview-import-result-file",
+                "/tmp/stale-preview.json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "unrecognized arguments: --preview-import-result-file",
+            result.stderr,
+        )
+
+    def test_preview_import_result_file_absent_from_help(self):
+        import_script = os.path.join(HARNESS_DIR, "import_one.py")
+        result = subprocess.run(
+            [sys.executable, import_script, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("--preview-import-result-file", result.stdout)
+
+    def test_no_preview_import_result_reuse_path_in_main(self):
+        import inspect
         from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult
 
-        preview = ImportResult(
-            decision="import",
-            already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
-        )
+        main_source = inspect.getsource(import_one.main)
 
-        self.assertIsNone(import_one._preview_import_result_reuse_reason(
-            preview,
-            already_in_beets=False,
-        ))
-
-    def test_rejects_preview_when_existing_beets_state_changed(self):
-        from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult
-
-        preview = ImportResult(
-            decision="import",
-            already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
-        )
-
-        reason = import_one._preview_import_result_reuse_reason(
-            preview,
-            already_in_beets=True,
-        )
-
-        self.assertIn("existing-beets state changed", reason or "")
-
-    def test_rejects_stale_provisional_preview_when_v0_override_now_verifies(self):
-        from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult, V0ProbeEvidence
-
-        preview = ImportResult(
-            decision="provisional_lossless_upgrade",
-            already_in_beets=False,
-            new_measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=141,
-                avg_bitrate_kbps=141,
-                format="opus 128",
-                verified_lossless=False,
-            ),
-            v0_probe=V0ProbeEvidence(
-                kind="lossless_source_v0",
-                min_bitrate_kbps=237,
-                avg_bitrate_kbps=276,
-                median_bitrate_kbps=279,
-            ),
-        )
-
-        reason = import_one._preview_import_result_reuse_reason(
-            preview,
-            already_in_beets=False,
-        )
-
-        self.assertIn("V0 override", reason or "")
-
-    def test_provisional_preview_uses_verified_lossless_target(self):
-        from argparse import Namespace
-        from harness import import_one
-        from lib.quality import AudioQualityMeasurement, ImportResult
-
-        preview = ImportResult(
-            decision="provisional_lossless_upgrade",
-            new_measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=245,
-                verified_lossless=False,
-            ),
-        )
-
-        target = import_one._preview_conversion_target(
-            Namespace(
-                target_format=None,
-                verified_lossless_target="opus 128",
-            ),
-            preview,
-        )
-
-        self.assertEqual(target, "opus 128")
+        self.assertNotIn("preview_import_result", main_source)
+        self.assertNotIn("reuse_preview", main_source)
+        self.assertFalse(hasattr(import_one, "_load_preview_import_result"))
+        self.assertFalse(hasattr(import_one, "_preview_import_result_reuse_reason"))
+        self.assertFalse(hasattr(import_one, "_preview_conversion_target"))
 
 
 class TestPostflightBadExtensionWarnings(unittest.TestCase):
@@ -869,6 +836,396 @@ class TestPreserveSourceFlag(unittest.TestCase):
             capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0)
         self.assertIn("--preserve-source", result.stdout)
+
+
+class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
+    def _payload_for_album(
+        self,
+        album_path: str,
+        *,
+        decision: str = "import",
+        imported: bool | None = True,
+        decision_name: str | None = None,
+        final_status: str | None = None,
+        target_final_format: str | None = None,
+        target_format: str | None = None,
+        verified_lossless_target: str | None = None,
+    ):
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+            AudioQualityMeasurement,
+            QualityEvidenceActionPayload,
+            QualityEvidenceActionProvenance,
+        )
+
+        files = []
+        for fname in sorted(os.listdir(album_path)):
+            full_path = os.path.join(album_path, fname)
+            if not os.path.isfile(full_path):
+                continue
+            stat = os.stat(full_path)
+            ext = os.path.splitext(fname)[1].lstrip(".").lower()
+            files.append(AlbumQualityEvidenceFile(
+                relative_path=fname,
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                extension=ext,
+                container=ext,
+                codec=ext,
+            ))
+
+        candidate = AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type="download_log_candidate",
+                owner_id=1,
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=252,
+                median_bitrate_kbps=250,
+                format="mp3 v0",
+                spectral_grade="genuine",
+            ),
+            measured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            files=files,
+            codec=files[0].codec if files else "mp3",
+            container=files[0].container if files else "mp3",
+            storage_format="mp3 v0",
+            target_format=target_format,
+        )
+        decision_payload: dict[str, object] = {"stage2_import": decision}
+        if imported is not None:
+            decision_payload["imported"] = imported
+        if final_status is not None:
+            decision_payload["final_status"] = final_status
+        if target_final_format is not None:
+            decision_payload["target_final_format"] = target_final_format
+        return QualityEvidenceActionPayload(
+            candidate=candidate,
+            current=None,
+            decision=decision_payload,
+            decision_name=decision if decision_name is None else decision_name,
+            target_format=target_format,
+            verified_lossless_target=verified_lossless_target,
+            provenance=QualityEvidenceActionProvenance(
+                candidate_status="reused",
+                current_status="missing",
+                snapshot_status="matched",
+            ),
+        )
+
+    def _write_payload(self, payload, path: str) -> None:
+        with open(path, "wb") as f:
+            f.write(msgspec.json.encode(payload))
+
+    def test_quality_evidence_action_flag_present_in_help(self):
+        import_script = os.path.join(HARNESS_DIR, "import_one.py")
+        result = subprocess.run(
+            [sys.executable, import_script, "--help"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--quality-evidence-action-file", result.stdout)
+        self.assertNotIn("--preview-import-result-file", result.stdout)
+
+    def test_evidence_backed_import_skips_candidate_measurement_helpers(self):
+        from harness import import_one
+        from lib.beets_db import AlbumInfo
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            imported = os.path.join(tmpdir, "library", "album")
+            os.makedirs(album)
+            os.makedirs(imported)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"not real audio")
+            action_path = os.path.join(tmpdir, "action.json")
+            self._write_payload(self._payload_for_album(album), action_path)
+
+            beets = MagicMock()
+            beets.album_exists.return_value = False
+            beets.get_all_album_ids_for_release.return_value = [77]
+            beets.get_album_info.return_value = AlbumInfo(
+                album_id=77,
+                track_count=1,
+                min_bitrate_kbps=245,
+                is_cbr=False,
+                album_path=imported,
+                avg_bitrate_kbps=252,
+                median_bitrate_kbps=250,
+                format="MP3",
+            )
+            beets.get_item_paths.return_value = []
+
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-123",
+                "--quality-evidence-action-file",
+                action_path,
+            ]
+            measurement_error = AssertionError(
+                "evidence-backed path must not remeasure candidate")
+            with patch.object(sys, "argv", argv), \
+                 patch("sys.stdout", stdout), \
+                 patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import",
+                       return_value=import_one.RunImportOutcome(0, [])) as mock_run_import, \
+                 patch("harness.import_one.fix_library_modes"), \
+                 patch("harness.import_one._get_folder_bitrates",
+                       side_effect=measurement_error), \
+                 patch("harness.import_one._get_folder_min_bitrate",
+                       side_effect=measurement_error), \
+                 patch("harness.import_one._probe_lossless_source_as_v0",
+                       side_effect=measurement_error), \
+                 patch("harness.import_one._probe_native_lossy_as_v0",
+                       side_effect=measurement_error), \
+                 patch("harness.import_one.determine_verified_lossless",
+                       side_effect=measurement_error), \
+                 patch("harness.import_one.provisional_lossless_decision",
+                       side_effect=measurement_error), \
+                 patch("harness.import_one.quality_decision_stage",
+                       side_effect=measurement_error), \
+                 patch("lib.spectral_check.analyze_album",
+                       side_effect=measurement_error), \
+                 self.assertRaises(SystemExit) as cm:
+                import_one.main()
+
+            self.assertEqual(cm.exception.code, 0)
+            mock_run_import.assert_called_once_with(album, "mbid-123")
+            sentinel = stdout.getvalue().strip().splitlines()[-1]
+            self.assertTrue(sentinel.startswith("__IMPORT_RESULT__"))
+            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+            self.assertEqual(result["decision"], "import")
+            self.assertEqual(result["new_measurement"]["format"], "mp3 v0")
+            self.assertEqual(
+                result["quality_evidence_provenance"]["candidate_status"],
+                "reused",
+            )
+            self.assertEqual(result["postflight"]["beets_id"], 77)
+
+    def test_evidence_backed_snapshot_mismatch_fails_before_run_import(self):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            track = os.path.join(album, "01 - Track.mp3")
+            with open(track, "wb") as f:
+                f.write(b"original")
+            action_path = os.path.join(tmpdir, "action.json")
+            self._write_payload(self._payload_for_album(album), action_path)
+            with open(track, "ab") as f:
+                f.write(b" changed")
+
+            beets = MagicMock()
+            beets.album_exists.return_value = False
+
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-123",
+                "--quality-evidence-action-file",
+                action_path,
+            ]
+            with patch.object(sys, "argv", argv), \
+                 patch("sys.stdout", stdout), \
+                 patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import") as mock_run_import, \
+                 self.assertRaises(SystemExit) as cm:
+                import_one.main()
+
+            self.assertEqual(cm.exception.code, 5)
+            mock_run_import.assert_not_called()
+            sentinel = stdout.getvalue().strip().splitlines()[-1]
+            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+            self.assertEqual(result["decision"], "quality_evidence_action_failed")
+            self.assertIn("snapshot mismatch", result["error"])
+
+    def test_malformed_evidence_action_file_fails_before_run_import(self):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"audio")
+            action_path = os.path.join(tmpdir, "action.json")
+            with open(action_path, "wb") as f:
+                f.write(b"{")
+
+            beets = MagicMock()
+            beets.album_exists.return_value = False
+
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-123",
+                "--quality-evidence-action-file",
+                action_path,
+            ]
+            with patch.object(sys, "argv", argv), \
+                 patch("sys.stdout", stdout), \
+                 patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import") as mock_run_import, \
+                 self.assertRaises(SystemExit) as cm:
+                import_one.main()
+
+            self.assertEqual(cm.exception.code, 5)
+            mock_run_import.assert_not_called()
+            sentinel = stdout.getvalue().strip().splitlines()[-1]
+            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+            self.assertEqual(result["decision"], "quality_evidence_action_failed")
+
+    def test_evidence_action_rejects_downgrade_even_when_final_status_imported(self):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"audio")
+
+            payload = self._payload_for_album(
+                album,
+                decision="downgrade",
+                imported=False,
+                final_status="imported",
+            )
+
+        self.assertFalse(import_one._evidence_action_allows_import(payload))
+
+    def test_evidence_action_rejects_missing_imported_flag(self):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"audio")
+
+            payload = self._payload_for_album(album, imported=None)
+
+        self.assertFalse(import_one._evidence_action_allows_import(payload))
+
+    def test_evidence_action_rejects_empty_decision_as_failed_action(self):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as f:
+                f.write(b"audio")
+
+            payload = self._payload_for_album(
+                album,
+                decision="",
+                imported=True,
+                decision_name="",
+            )
+
+        self.assertFalse(import_one._evidence_action_allows_import(payload))
+        self.assertEqual(
+            import_one._evidence_action_decision_name(payload),
+            "quality_evidence_action_failed",
+        )
+
+    def test_evidence_materialization_ignores_verified_target_for_transcode(self):
+        from harness import import_one
+        from lib.quality import ImportResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "01 - Track.flac"), "wb") as f:
+                f.write(b"audio")
+            payload = self._payload_for_album(
+                album,
+                decision="transcode_upgrade",
+                verified_lossless_target="opus 128",
+            )
+            result = ImportResult()
+
+            with patch("harness.import_one.convert_lossless",
+                       return_value=(1, 0, "flac")) as convert:
+                quality_is_transcode = (
+                    import_one._materialize_quality_evidence_action(
+                        work_path=album,
+                        payload=payload,
+                        r=result,
+                    )
+                )
+
+        self.assertTrue(quality_is_transcode)
+        self.assertEqual(convert.call_args.args[1].label, "mp3 v0")
+        self.assertEqual(result.final_format, "mp3 v0")
+
+    def test_evidence_materialization_uses_decision_target_final_format(self):
+        from harness import import_one
+        from lib.quality import ImportResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            with open(os.path.join(album, "01 - Track.flac"), "wb") as f:
+                f.write(b"audio")
+            payload = self._payload_for_album(
+                album,
+                decision="import",
+                target_final_format="opus 128",
+                verified_lossless_target="opus 128",
+            )
+            result = ImportResult()
+
+            with patch("harness.import_one.convert_lossless",
+                       return_value=(1, 0, "flac")) as convert:
+                quality_is_transcode = (
+                    import_one._materialize_quality_evidence_action(
+                        work_path=album,
+                        payload=payload,
+                        r=result,
+                    )
+                )
+
+        self.assertFalse(quality_is_transcode)
+        self.assertEqual(convert.call_args.args[1].label, "opus 128")
+        self.assertEqual(result.final_format, "opus 128")
+
+    def test_evidence_materialization_removes_lossless_left_by_retry_skip(self):
+        from harness import import_one
+        from lib.quality import ImportResult
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            flac_path = os.path.join(album, "01 - Track.flac")
+            mp3_path = os.path.join(album, "01 - Track.mp3")
+            with open(flac_path, "wb") as f:
+                f.write(b"lossless")
+            with open(mp3_path, "wb") as f:
+                f.write(b"existing transcode")
+            payload = self._payload_for_album(
+                album,
+                decision="import",
+                target_final_format="mp3 v0",
+            )
+            result = ImportResult()
+
+            with patch("harness.import_one.convert_lossless",
+                       return_value=(0, 0, "flac")):
+                import_one._materialize_quality_evidence_action(
+                    work_path=album,
+                    payload=payload,
+                    r=result,
+                )
+
+            self.assertFalse(os.path.exists(flac_path))
+            self.assertTrue(os.path.exists(mp3_path))
+            self.assertEqual(result.final_format, "mp3 v0")
 
 
 # ============================================================================

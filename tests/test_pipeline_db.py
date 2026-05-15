@@ -12,11 +12,13 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.insert(0, os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
+from tests.helpers import make_album_quality_evidence
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
@@ -37,7 +39,20 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in ["peer_dir_daily_aggregates", "peer_dir_observations", "cycle_metrics", "bad_audio_hashes", "import_jobs", "user_cooldowns", "source_denylist", "search_log", "download_log", "album_tracks", "album_requests"]:
+    for table in [
+        "album_quality_evidence",
+        "peer_dir_daily_aggregates",
+        "peer_dir_observations",
+        "cycle_metrics",
+        "bad_audio_hashes",
+        "import_jobs",
+        "user_cooldowns",
+        "source_denylist",
+        "search_log",
+        "download_log",
+        "album_tracks",
+        "album_requests",
+    ]:
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
@@ -63,6 +78,8 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("cycle_metrics", table_names)
         self.assertIn("peer_dir_observations", table_names)
         self.assertIn("peer_dir_daily_aggregates", table_names)
+        self.assertIn("album_quality_evidence", table_names)
+        self.assertIn("album_quality_evidence_files", table_names)
         # The migrator's own tracking table must also exist
         self.assertIn("schema_migrations", table_names)
         db.close()
@@ -441,7 +458,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:1",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -471,29 +487,185 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertIsNone(missing)
 
-    def test_enqueue_defaults_to_importable_when_preview_env_absent(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+    def test_migration_018_resets_legacy_would_import_without_evidence(self):
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_dedupe_key
+        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE
 
-        with patch.dict(os.environ, {}, clear=True):
-            job = self.db.enqueue_import_job(
-                IMPORT_JOB_MANUAL,
-                request_id=self.req_id,
-                dedupe_key="manual:preview-disabled",
-                payload=manual_import_payload(failed_path="/tmp/manual"),
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
             )
-
-        self.assertEqual(job.preview_status, "would_import")
-        self.assertEqual(job.preview_message, "Preview gate disabled")
-        self.assertIsNotNone(job.preview_completed_at)
-        self.assertIsNotNone(job.importable_at)
-        self.assertIsNone(
-            self.db.claim_next_import_preview_job(worker_id="preview-worker")
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'would_import', '{"verdict": "would_import"}'::jsonb,
+                'Queued before async preview gate', NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                automation_import_dedupe_key(self.req_id),
+            ),
         )
+        row = cur.fetchone()
+        assert row is not None
+        legacy_job_id = row["id"]
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'would_import', NULL, NULL, NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:null-message-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        null_message_job_id = row["id"]
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'evidence_ready', '{"verdict": "would_import"}'::jsonb,
+                'Evidence ready but row missing', NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:evidence-ready-without-evidence-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        evidence_ready_without_evidence_id = row["id"]
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'evidence_ready', '{"verdict": "would_import"}'::jsonb,
+                'Evidence already captured', NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:with-evidence-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        with_evidence_job_id = row["id"]
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=with_evidence_job_id,
+        ))
+        # Legacy disabled-preview row shape (mode deleted in U3); insert
+        # directly to assert migration 018 leaves these untouched.
+        cur = self.db._execute(
+            """
+            INSERT INTO import_jobs (
+                job_type, status, request_id, dedupe_key, payload,
+                preview_status, preview_result, preview_message, importable_at,
+                preview_completed_at
+            )
+            VALUES (
+                %s, 'queued', %s, %s, '{}'::jsonb,
+                'would_import', NULL, 'Preview gate disabled', NOW(), NOW()
+            )
+            RETURNING id
+            """,
+            (
+                IMPORT_JOB_AUTOMATION,
+                self.req_id,
+                "automation:preview-disabled-migration",
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        disabled_job_id = row["id"]
 
-        claimed = self.db.claim_next_import_job(worker_id="test-worker")
-        assert claimed is not None
-        self.assertEqual(claimed.id, job.id)
-        self.assertEqual(claimed.status, "running")
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "migrations"
+            / "018_neutral_import_job_preview_ready.sql"
+        )
+        migration_sql = migration.read_text(encoding="utf-8")
+        reconciliation_sql = migration_sql[migration_sql.index("UPDATE import_jobs"):]
+        self.db._execute(reconciliation_sql)
+
+        cur = self.db._execute(
+            """
+            SELECT id, preview_status, preview_result, preview_message,
+                   importable_at
+            FROM import_jobs
+            WHERE id IN (%s, %s, %s, %s, %s)
+            ORDER BY id
+            """,
+            (
+                legacy_job_id,
+                null_message_job_id,
+                evidence_ready_without_evidence_id,
+                with_evidence_job_id,
+                disabled_job_id,
+            ),
+        )
+        rows = {row["id"]: row for row in cur.fetchall()}
+        self.assertEqual(rows[legacy_job_id]["preview_status"], "waiting")
+        self.assertIsNone(rows[legacy_job_id]["preview_result"])
+        self.assertIsNone(rows[legacy_job_id]["preview_message"])
+        self.assertIsNone(rows[legacy_job_id]["importable_at"])
+        self.assertEqual(rows[null_message_job_id]["preview_status"], "waiting")
+        self.assertIsNone(rows[null_message_job_id]["preview_result"])
+        self.assertIsNone(rows[null_message_job_id]["preview_message"])
+        self.assertIsNone(rows[null_message_job_id]["importable_at"])
+        self.assertEqual(
+            rows[evidence_ready_without_evidence_id]["preview_status"],
+            "waiting",
+        )
+        self.assertIsNone(
+            rows[evidence_ready_without_evidence_id]["preview_result"]
+        )
+        self.assertIsNone(
+            rows[evidence_ready_without_evidence_id]["preview_message"]
+        )
+        self.assertIsNone(
+            rows[evidence_ready_without_evidence_id]["importable_at"]
+        )
+        self.assertEqual(rows[with_evidence_job_id]["preview_status"], "evidence_ready")
+        self.assertEqual(
+            rows[with_evidence_job_id]["preview_message"],
+            "Evidence already captured",
+        )
+        self.assertIsNotNone(rows[with_evidence_job_id]["importable_at"])
+        self.assertEqual(rows[disabled_job_id]["preview_status"], "would_import")
+        self.assertEqual(
+            rows[disabled_job_id]["preview_message"],
+            "Preview gate disabled",
+        )
+        self.assertIsNotNone(rows[disabled_job_id]["importable_at"])
 
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
@@ -504,7 +676,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:claim-once",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -528,7 +699,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:stale",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -563,7 +733,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:restart-retry",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -597,7 +766,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-gate",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
 
@@ -619,14 +787,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:timeline-waiting",
             payload=manual_import_payload(failed_path="/tmp/waiting"),
-            preview_enabled=True,
         )
         importable = self.db.enqueue_import_job(
             IMPORT_JOB_MANUAL,
             request_id=self.req_id,
             dedupe_key="manual:timeline-importable",
             payload=manual_import_payload(failed_path="/tmp/importable"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -637,7 +803,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         timeline = self.db.list_import_job_timeline(limit=10)
 
         self.assertEqual([job.id for job in timeline[:2]], [importable.id, waiting.id])
-        self.assertEqual(timeline[0].preview_status, "would_import")
+        self.assertEqual(timeline[0].preview_status, "evidence_ready")
 
     def test_import_job_timeline_excludes_terminal_jobs(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
@@ -647,7 +813,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:timeline-active",
             payload=manual_import_payload(failed_path="/tmp/active"),
-            preview_enabled=True,
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -689,7 +854,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
@@ -718,7 +882,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         assert marked is not None
         assert marked.preview_result is not None
         self.assertEqual(marked.status, "queued")
-        self.assertEqual(marked.preview_status, "would_import")
+        self.assertEqual(marked.preview_status, "evidence_ready")
         self.assertEqual(marked.preview_result["verdict"], "would_import")
         self.assertEqual(marked.preview_message, "Preview would import")
         self.assertIsNotNone(marked.preview_completed_at)
@@ -732,7 +896,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-reject",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
 
         failed = self.db.mark_import_job_preview_failed(
@@ -762,7 +925,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
             request_id=self.req_id,
             dedupe_key="manual:preview-claim-once",
             payload=manual_import_payload(failed_path="/tmp/manual"),
-            preview_enabled=True,
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
@@ -772,6 +934,133 @@ class TestImportJobQueueAPI(unittest.TestCase):
             self.assertIsNone(second)
         finally:
             other.close()
+
+
+@requires_postgres
+class TestRequeueImportJobForPreview(unittest.TestCase):
+    """U2: importer can requeue an actively-running job back to preview's lane."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="requeue-preview-mbid",
+            artist_name="Requeue",
+            album_title="Preview",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _enqueue_claimed_job(self):
+        """Enqueue a manual job, advance it through preview, and have the importer claim it."""
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:requeue-for-preview",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        self.db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        claimed = self.db.claim_next_import_job(worker_id="importer-1")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        return claimed
+
+    def test_flips_running_job_back_to_queued_waiting(self):
+        claimed = self._enqueue_claimed_job()
+
+        updated = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="candidate evidence missing",
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "waiting")
+        self.assertIsNone(updated.worker_id)
+        self.assertIsNone(updated.started_at)
+        self.assertIsNone(updated.heartbeat_at)
+        self.assertIsNone(updated.preview_message)
+        self.assertIsNone(updated.preview_error)
+        self.assertEqual(updated.message, "candidate evidence missing")
+
+    def test_preserves_attempt_counters(self):
+        claimed = self._enqueue_claimed_job()
+        prior_attempts = claimed.attempts
+        prior_preview_attempts = claimed.preview_attempts
+        self.assertEqual(prior_attempts, 1)
+
+        updated = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="stale snapshot",
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.attempts, prior_attempts)
+        self.assertEqual(updated.preview_attempts, prior_preview_attempts)
+
+    def test_requeued_row_is_claimable_by_preview(self):
+        claimed = self._enqueue_claimed_job()
+        self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="incomplete",
+        )
+
+        preview = self.db.claim_next_import_preview_job(worker_id="preview-1")
+        assert preview is not None
+        self.assertEqual(preview.id, claimed.id)
+        self.assertEqual(preview.preview_status, "running")
+        # Preview's claim clears its own diagnostics.
+        self.assertIsNone(preview.preview_message)
+
+    def test_idempotent_when_already_requeued(self):
+        claimed = self._enqueue_claimed_job()
+        first = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="first requeue",
+        )
+        # Second call should be a no-op (status no longer running).
+        second = self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="second requeue",
+        )
+
+        assert first is not None
+        self.assertIsNone(second)
+        # Message from first requeue stays.
+        row = self.db._execute(
+            "SELECT message FROM import_jobs WHERE id = %s",
+            (claimed.id,),
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row["message"], "first requeue")
+
+    def test_does_not_touch_unrelated_jobs(self):
+        claimed = self._enqueue_claimed_job()
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        other = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:unrelated",
+            payload=manual_import_payload(failed_path="/tmp/other"),
+        )
+
+        self.db.requeue_import_job_for_preview(claimed.id, reason="x")
+
+        other_row = self.db._execute(
+            "SELECT status, preview_status FROM import_jobs WHERE id = %s",
+            (other.id,),
+        ).fetchone()
+        assert other_row is not None
+        self.assertEqual(other_row["status"], "queued")
+        self.assertEqual(other_row["preview_status"], "waiting")
 
 
 @requires_postgres
@@ -1178,7 +1467,7 @@ class TestGetSearchHistoryPage(unittest.TestCase):
                 self.req_id, query=f"q{i}", outcome="no_match",
             )
         full = self.db.get_search_history(self.req_id)
-        return [int(r["id"]) for r in full]  # newest-first
+        return [int(cast(Any, r["id"])) for r in full]  # newest-first
 
     def test_first_page_clamps_to_limit_and_seeds_next_before_id(self):
         ids_desc = self._seed(75)
@@ -1188,7 +1477,7 @@ class TestGetSearchHistoryPage(unittest.TestCase):
         self.assertEqual(len(page.rows), 50)
         # Newest 50 rows in DESC order.
         self.assertEqual(
-            [int(r["id"]) for r in page.rows], ids_desc[:50],
+            [int(cast(Any, r["id"])) for r in page.rows], ids_desc[:50],
         )
         # next_before_id seeds the next page from the 51st row's id.
         self.assertEqual(page.next_before_id, ids_desc[50])
@@ -1207,10 +1496,10 @@ class TestGetSearchHistoryPage(unittest.TestCase):
         self.assertEqual(len(second.rows), 25)
         # Second page rows are older-or-equal to the cursor and
         # id-monotonic descending.
-        page_ids = [int(r["id"]) for r in second.rows]
+        page_ids = [int(cast(Any, r["id"])) for r in second.rows]
         self.assertEqual(page_ids, ids_desc[50:75])
         # No id appears in both pages (no boundary overlap).
-        first_ids = {int(r["id"]) for r in first.rows}
+        first_ids = {int(cast(Any, r["id"])) for r in first.rows}
         self.assertFalse(first_ids.intersection(page_ids))
         self.assertIsNone(second.next_before_id)
 
@@ -1483,6 +1772,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
                 MAX(seen_count)::int AS max_seen
             FROM peer_dir_observations
         """).fetchone()
+        assert stored is not None
         self.assertEqual(stored["rows"], 3)
         self.assertEqual(stored["total_seen"], 4)
         self.assertEqual(stored["max_seen"], 2)
@@ -2234,6 +2524,380 @@ class TestApplyTransitionDB(unittest.TestCase):
         req = self.db.get_request(req_id)
         assert req is not None
         self.assertIsNone(req["search_filetype_override"])
+
+
+@requires_postgres
+class TestAlbumQualityEvidenceStorage(unittest.TestCase):
+    """Active relational album-quality evidence storage."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="evidence-uuid",
+            artist_name="Evidence Artist",
+            album_title="Evidence Album",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_upsert_load_request_current_round_trips_typed_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=860,
+                avg_bitrate_kbps=912,
+                median_bitrate_kbps=899,
+                format="flac",
+                spectral_grade="genuine",
+                verified_lossless=True,
+                was_converted_from="flac",
+            ),
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="02 - Beta.flac",
+                    size_bytes=2000,
+                    mtime_ns=20,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ),
+                AlbumQualityEvidenceFile(
+                    relative_path="01 - Alpha.flac",
+                    size_bytes=1000,
+                    mtime_ns=10,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ),
+            ],
+            codec="flac",
+            container="flac",
+            storage_format="flac",
+            target_format="lossless",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=165,
+                avg_bitrate_kbps=228,
+                median_bitrate_kbps=225,
+                source_lineage="lossless_container_source",
+                source_provenance="transcoded from verified FLAC candidate",
+                proof_provenance="spectral genuine plus V0 probe",
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="import",
+                source="lossless candidate",
+                classifier="spectral+v0",
+                detail="genuine spectral result",
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.owner.owner_id, self.req_id)
+        self.assertEqual(loaded.measurement.format, "flac")
+        self.assertTrue(loaded.measurement.verified_lossless)
+        self.assertIsNotNone(loaded.verified_lossless_proof)
+        self.assertEqual(
+            [file.relative_path for file in loaded.files],
+            ["01 - Alpha.flac", "02 - Beta.flac"],
+        )
+        self.assertEqual(loaded.files[0].mtime_ns, 10)
+        assert loaded.v0_metric is not None
+        self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
+        self.assertEqual(
+            loaded.v0_metric.source_lineage,
+            "lossless_container_source",
+        )
+
+    def test_upsert_load_download_log_candidate_uses_neutral_v0_shape(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+            AlbumQualityV0Metric,
+        )
+
+        log_id = self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="user",
+            outcome="rejected",
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_avg_bitrate=111,
+        )
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            owner_id=log_id,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=150,
+                avg_bitrate_kbps=221,
+                median_bitrate_kbps=219,
+                source_lineage="native_lossy_candidate",
+                source_provenance="probe of downloaded MP3 files",
+                proof_provenance="research-only source line",
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=log_id,
+            )
+        )
+
+        assert loaded is not None
+        assert loaded.v0_metric is not None
+        self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 221)
+        self.assertEqual(loaded.v0_metric.source_lineage, "native_lossy_candidate")
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(history[0]["v0_probe_kind"], "lossless_source_v0")
+
+    def test_import_job_candidate_owner_round_trips(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidenceOwner,
+        )
+
+        job = self.db.enqueue_import_job(
+            "manual_import",
+            request_id=self.req_id,
+            payload={"failed_path": "/tmp/candidate"},
+        )
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            owner_id=job.id,
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=job.id,
+            )
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.owner.owner_type, "import_job_candidate")
+
+    def test_duplicate_owner_upsert_replaces_parent_and_snapshot_rows(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        owner = AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+        )
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=owner.owner_type,
+            owner_id=owner.owner_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                ),
+                AlbumQualityEvidenceFile(
+                    relative_path="02.mp3",
+                    size_bytes=2,
+                    mtime_ns=2,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        ))
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=owner.owner_type,
+            owner_id=owner.owner_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="03.mp3",
+                    size_bytes=3,
+                    mtime_ns=3,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        ))
+
+        loaded = self.db.load_album_quality_evidence(owner)
+        assert loaded is not None
+        self.assertEqual([file.relative_path for file in loaded.files], ["03.mp3"])
+        cur = self.db._execute(
+            "SELECT count(*) AS n FROM album_quality_evidence "
+            "WHERE owner_type = %s AND owner_id = %s",
+            (owner.owner_type, owner.owner_id),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["n"], 1)
+
+    def test_failed_child_replace_rolls_back_existing_snapshot(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        owner = AlbumQualityEvidenceOwner(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+        )
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=owner.owner_type,
+            owner_id=owner.owner_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="old.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                ),
+            ],
+        ))
+
+        with self.assertRaises(Exception):
+            self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_type=owner.owner_type,
+                owner_id=owner.owner_id,
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="dup.mp3",
+                        size_bytes=2,
+                        mtime_ns=2,
+                        extension="mp3",
+                        container="mp3",
+                    ),
+                    AlbumQualityEvidenceFile(
+                        relative_path="dup.mp3",
+                        size_bytes=3,
+                        mtime_ns=3,
+                        extension="mp3",
+                        container="mp3",
+                    ),
+                ],
+            ))
+
+        loaded = self.db.load_album_quality_evidence(owner)
+        assert loaded is not None
+        self.assertEqual([file.relative_path for file in loaded.files], ["old.mp3"])
+
+    def test_legacy_scalars_are_not_loaded_as_active_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        self.db.update_request_fields(
+            self.req_id,
+            current_lossless_source_v0_probe_min_bitrate=165,
+            current_lossless_source_v0_probe_avg_bitrate=228,
+            current_lossless_source_v0_probe_median_bitrate=225,
+            verified_lossless=True,
+        )
+
+        self.assertIsNone(self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        ))
+
+    def test_delete_request_removes_owned_album_quality_evidence(self):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        log_id = self.db.log_download(self.req_id, outcome="rejected")
+        current_owner = AlbumQualityEvidenceOwner(
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            self.req_id,
+        )
+        candidate_owner = AlbumQualityEvidenceOwner(
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            log_id,
+        )
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=current_owner.owner_type,
+            owner_id=current_owner.owner_id,
+        ))
+        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+            owner_type=candidate_owner.owner_type,
+            owner_id=candidate_owner.owner_id,
+        ))
+
+        self.db.delete_request(self.req_id)
+
+        self.assertIsNone(self.db.load_album_quality_evidence(current_owner))
+        self.assertIsNone(self.db.load_album_quality_evidence(candidate_owner))
+
+    def test_validation_rejects_bad_owner_and_bad_snapshot(self):
+        from lib.quality import AlbumQualityEvidenceFile, AlbumQualityEvidenceOwner
+
+        with self.assertRaisesRegex(ValueError, "invalid owner_type"):
+            self.db.validate_album_quality_evidence_owner(
+                AlbumQualityEvidenceOwner("simulator", 1)
+            )
+        self.assertFalse(self.db.validate_album_quality_evidence_owner(
+            AlbumQualityEvidenceOwner("request_current", 999999)
+        ))
+        with self.assertRaisesRegex(ValueError, "extension is required"):
+            self.db.upsert_album_quality_evidence(make_album_quality_evidence(
+                owner_id=self.req_id,
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="bad",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension="",
+                        container="mp3",
+                    ),
+                ],
+            ))
+
+    def test_policy_incomplete_reasons_do_not_enter_reducer_shape(self):
+        from lib.quality import (
+            AudioQualityMeasurement,
+            AlbumQualityEvidenceOwner,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_id=self.req_id,
+            measurement=AudioQualityMeasurement(format=None),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner("request_current", self.req_id)
+        )
+
+        assert loaded is not None
+        reasons = loaded.policy_incomplete_reasons()
+        self.assertIn("measurement.format is required", reasons)
+        self.assertIn("at least one measurement bitrate metric is required", reasons)
 
 
 @requires_postgres
@@ -3825,7 +4489,6 @@ class TestActiveImportJobForRequest(unittest.TestCase):
             request_id=request_id,
             dedupe_key=dedupe_key,
             payload=manual_import_payload(failed_path="/tmp/x"),
-            preview_enabled=False,
         )
 
     def test_returns_none_when_no_jobs(self):
@@ -3966,6 +4629,8 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         self.assertIsInstance(
             active.plan.metadata_snapshot, SearchPlanMetadataSnapshot)
         self.assertIsInstance(active.plan.provenance, SearchPlanProvenance)
+        assert active.plan.metadata_snapshot is not None
+        assert active.plan.provenance is not None
         self.assertEqual(active.plan.metadata_snapshot.year, 2024)
         self.assertEqual(
             active.plan.provenance.values["dropped_low_entropy_tokens"],
@@ -4104,6 +4769,8 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         from lib.pipeline_db import SearchPlanItemProvenance
         self.assertIsInstance(
             active.items[0].provenance, SearchPlanItemProvenance)
+        assert active.items[0].provenance is not None
+        assert active.items[1].provenance is not None
         self.assertEqual(active.items[0].provenance.values["repeat_index"], 1)
         self.assertEqual(active.items[1].strategy, "track1")
         self.assertEqual(

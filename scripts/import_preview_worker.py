@@ -11,29 +11,38 @@ import sys
 import threading
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+
+import msgspec
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.import_preview import ImportPreviewResult, preview_import_from_path
+from lib.import_evidence import (
+    CANDIDATE_STATUS_REUSED,
+    ensure_candidate_evidence_for_action,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
     ImportJob,
-    import_preview_enabled_from_env,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
-from lib.quality import ActiveDownloadState
+from lib.quality import ActiveDownloadState, AlbumQualityEvidence
+from lib.quality_evidence import (
+    EvidenceBuildResult,
+    load_candidate_evidence_for_source,
+)
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
-LEGACY_DISABLED_REQUEUE_LIMIT = 100
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(hours=1)
+PREVIEW_FAILURE_STATUS = "uncertain"
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -44,12 +53,34 @@ def _preview_reason(result: ImportPreviewResult) -> str:
     return result.reason or result.decision or result.verdict
 
 
-def _failure_preview_status(result: ImportPreviewResult) -> str:
-    if result.confident_reject:
-        return "confident_reject"
-    if result.uncertain:
-        return "uncertain"
-    return "error"
+def _download_log_id_from_job(job: ImportJob) -> int | None:
+    payload = job.payload or {}
+    download_log_id = payload.get("download_log_id")
+    return download_log_id if isinstance(download_log_id, int) else None
+
+
+def _candidate_evidence_ready_for_job(
+    db: Any,
+    job: ImportJob,
+    result: ImportPreviewResult,
+) -> tuple[bool, str]:
+    source_path = result.source_path
+    if not source_path:
+        return False, "preview_source_path_missing"
+    candidate = ensure_candidate_evidence_for_action(
+        db,
+        source_path=source_path,
+        import_job_id=job.id,
+        download_log_id=_download_log_id_from_job(job),
+    )
+    if candidate.available and candidate.evidence is not None:
+        return True, "ready"
+    return (
+        False,
+        candidate.provenance.fallback_reason
+        or candidate.provenance.candidate_status
+        or "candidate_evidence_unavailable",
+    )
 
 
 def _state_from_raw(raw: Any) -> ActiveDownloadState:
@@ -67,6 +98,31 @@ def _first_state_username(state: ActiveDownloadState) -> str | None:
     return None
 
 
+def derive_canonical_import_folder(
+    row: dict[str, Any],
+    state: ActiveDownloadState,
+) -> str:
+    """Cheaply derive the canonical automation import folder.
+
+    Computes the same path ``_materialize_automation_preview_path`` would
+    settle on, without performing any filesystem materialization. Used by
+    the preview-worker front-gate to test stored candidate evidence's
+    snapshot against the current source location before deciding whether
+    to skip measurement.
+    """
+    from lib.config import read_runtime_config
+    from lib.download import (
+        _canonical_import_folder_path,
+        reconstruct_grab_list_entry,
+    )
+
+    cfg = read_runtime_config()
+    entry = reconstruct_grab_list_entry(row, state)
+    if entry.import_folder:
+        return entry.import_folder
+    return _canonical_import_folder_path(entry, cfg.slskd_download_dir)
+
+
 def _materialize_automation_preview_path(
     db: Any,
     request_id: int,
@@ -76,7 +132,6 @@ def _materialize_automation_preview_path(
     """Ensure automation preview has the same stable folder importer uses."""
     from lib.config import read_runtime_config
     from lib.download import (
-        _canonical_import_folder_path,
         _materialize_processing_dir,
         reconstruct_grab_list_entry,
     )
@@ -84,21 +139,16 @@ def _materialize_automation_preview_path(
 
     cfg = read_runtime_config()
     entry = reconstruct_grab_list_entry(row, state)
+    canonical_path = derive_canonical_import_folder(row, state)
     if entry.import_folder is None:
-        entry.import_folder = _canonical_import_folder_path(
-            entry,
-            cfg.slskd_download_dir,
-        )
-    ctx = SimpleNamespace(
+        entry.import_folder = canonical_path
+    ctx = cast(Any, SimpleNamespace(
         cfg=cfg,
         pipeline_db_source=SimpleNamespace(_get_db=lambda: db),
-    )
+    ))
     staged_album = StagedAlbum.from_entry(
         entry,
-        default_path=_canonical_import_folder_path(
-            entry,
-            cfg.slskd_download_dir,
-        ),
+        default_path=canonical_path,
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
     if materialized is not True:
@@ -106,6 +156,108 @@ def _materialize_automation_preview_path(
             f"Album request {request_id} could not be materialized for preview"
         )
     return staged_album.current_path
+
+
+def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
+    """Cheap source-path derivation for the candidate-evidence front-gate.
+
+    Returns the path the evidence snapshot would have captured, or ``None``
+    when the path cannot be derived without invoking measurement-time
+    materialization. ``None`` is a graceful skip: the worker falls through
+    to the existing measurement codepath.
+    """
+    payload = job.payload or {}
+    if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
+        failed_path = payload.get("failed_path")
+        if isinstance(failed_path, str) and failed_path:
+            return failed_path
+        return None
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        if job.request_id is None:
+            return None
+        row = db.get_request(job.request_id)
+        if not row:
+            return None
+        state_raw = row.get("active_download_state")
+        if state_raw is None:
+            return None
+        try:
+            state = _state_from_raw(state_raw)
+        except ValueError:
+            return None
+        try:
+            return derive_canonical_import_folder(row, state)
+        except Exception:
+            logger.debug(
+                "front-gate path derivation failed for job %s; "
+                "falling through to measurement",
+                job.id,
+                exc_info=True,
+            )
+            return None
+    return None
+
+
+def _reused_evidence_preview_payload(
+    job: ImportJob,
+    evidence: AlbumQualityEvidence,
+    source_path: str,
+) -> dict[str, Any]:
+    """Synthesize a preview_result payload for the reused-evidence branch.
+
+    Mirrors the shape ``ImportPreviewResult.to_dict()`` produces so
+    downstream consumers (web UI recents tab, decision-tree viewers) see
+    the keys they already render. Adds top-level ``candidate_status``
+    provenance so the reused path is distinguishable from the measured
+    path.
+    """
+    del evidence  # measurement is recorded in the evidence row itself
+    payload = msgspec.to_builtins(ImportPreviewResult(
+        mode="reused",
+        verdict="would_import",
+        would_import=True,
+        decision="candidate_evidence_reused",
+        reason="candidate_evidence_reused",
+        stage_chain=["preview:candidate_evidence_reused"],
+        request_id=job.request_id,
+        download_log_id=_download_log_id_from_job(job),
+        source_path=source_path,
+    ))
+    assert isinstance(payload, dict)
+    payload["candidate_status"] = CANDIDATE_STATUS_REUSED
+    return payload
+
+
+def _front_gate_check(
+    db: Any,
+    job: ImportJob,
+) -> tuple[EvidenceBuildResult | None, str | None]:
+    """Run the cheap candidate-evidence front-gate for ``job``.
+
+    Returns ``(result, source_path)``. ``result is None`` means the
+    front-gate could not run at all (path-derivation deferred to the
+    measurement path) and the caller should fall through. A non-None
+    result with ``status == 'ready'`` means measurement can be skipped.
+    """
+    source_path = _front_gate_source_path(db, job)
+    if not source_path:
+        return None, None
+    try:
+        result = load_candidate_evidence_for_source(
+            db,
+            source_path=source_path,
+            download_log_id=_download_log_id_from_job(job),
+            import_job_id=job.id,
+        )
+    except Exception:
+        logger.debug(
+            "front-gate evidence load failed for job %s; "
+            "falling through to measurement",
+            job.id,
+            exc_info=True,
+        )
+        return None, source_path
+    return result, source_path
 
 
 def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
@@ -170,40 +322,67 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
 def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
     preview_input = _preview_input(db, job)
-    return preview_import_from_path(db, **preview_input)
+    return preview_import_from_path(
+        db,
+        import_job_id=job.id,
+        persist_candidate_evidence=True,
+        **preview_input,
+    )
 
 
-def _denylist_confident_reject(
+def _mark_automation_preview_blocked(
     db: Any,
     job: ImportJob,
-    result: ImportPreviewResult,
-) -> dict[str, Any] | None:
-    if not result.confident_reject or job.request_id is None:
-        return None
-    if result.reason == "path_missing":
-        return None
-
-    try:
-        preview_input = _preview_input(db, job)
-    except Exception:
-        return None
-    source_username = preview_input.get("source_username")
-    if not source_username:
-        return None
-
-    add_denylist = getattr(db, "add_denylist", None)
-    if not callable(add_denylist):
-        return None
-    reason = f"import preview rejected: {_preview_reason(result)}"
-    add_denylist(job.request_id, str(source_username), reason)
-    return {
-        "request_id": job.request_id,
-        "username": str(source_username),
-        "reason": reason,
-    }
+    *,
+    preview_status: str,
+    reason: str,
+    preview_payload: dict[str, Any],
+) -> ImportJob | None:
+    blocker = getattr(db, "mark_import_job_preview_blocked", None)
+    if callable(blocker):
+        return cast(ImportJob | None, blocker(
+            job.id,
+            preview_status=preview_status,
+            error=reason,
+            preview_result=preview_payload,
+            message=f"Preview blocked automation import: {reason}",
+        ))
+    return db.mark_import_job_preview_failed(
+        job.id,
+        preview_status=preview_status,
+        error=reason,
+        preview_result=preview_payload,
+        message=f"Preview blocked automation import: {reason}",
+    )
 
 
 def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
+    # Front-gate: if stored candidate evidence already passes the cheap
+    # snapshot guard, mark the job importable without invoking measurement.
+    # The post-measurement gate below remains as belt-and-braces for the
+    # fall-through path.
+    front_gate_result, front_gate_source = _front_gate_check(db, job)
+    if (
+        front_gate_result is not None
+        and front_gate_result.status == "ready"
+        and front_gate_result.evidence is not None
+        and front_gate_source is not None
+    ):
+        reused_payload = _reused_evidence_preview_payload(
+            job,
+            front_gate_result.evidence,
+            front_gate_source,
+        )
+        logger.info(
+            "Reused candidate evidence for import job %s; skipping preview measurement",
+            job.id,
+        )
+        return db.mark_import_job_preview_importable(
+            job.id,
+            preview_result=reused_payload,
+            message="Reused stored candidate evidence (snapshot matched)",
+        )
+
     try:
         result = execute_preview_job(db, job)
     except Exception as exc:
@@ -221,20 +400,30 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         )
 
     preview_payload = _preview_result_dict(result)
-    if result.would_import:
+    evidence_ready, evidence_reason = _candidate_evidence_ready_for_job(
+        db,
+        job,
+        result,
+    )
+    if evidence_ready:
         return db.mark_import_job_preview_importable(
             job.id,
             preview_result=preview_payload,
-            message=f"Preview would import: {_preview_reason(result)}",
+            message=f"Evidence ready for final check: {_preview_reason(result)}",
         )
 
-    denylist = _denylist_confident_reject(db, job, result)
-    if denylist is not None:
-        preview_payload["denylist"] = denylist
-    reason = _preview_reason(result)
+    reason = _preview_reason(result) or evidence_reason
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        return _mark_automation_preview_blocked(
+            db,
+            job,
+            preview_status=PREVIEW_FAILURE_STATUS,
+            reason=reason,
+            preview_payload=preview_payload,
+        )
     return db.mark_import_job_preview_failed(
         job.id,
-        preview_status=_failure_preview_status(result),
+        preview_status=PREVIEW_FAILURE_STATUS,
         error=reason,
         preview_result=preview_payload,
         message=f"Preview failed: {reason}",
@@ -250,8 +439,8 @@ def preview_heartbeat_loop(
     db_factory: Any | None = None,
 ) -> None:
     """Heartbeat a running preview from its own DB session."""
-    db_factory = db_factory or PipelineDB
-    db = db_factory(dsn)
+    factory = db_factory or PipelineDB
+    db = factory(dsn)
     try:
         while not stop.wait(interval):
             if not db.heartbeat_import_job_preview(job_id):
@@ -301,16 +490,6 @@ def run_once(
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
 ) -> ImportJob | None:
-    if import_preview_enabled_from_env():
-        requeued = db.requeue_disabled_automation_preview_jobs(
-            limit=LEGACY_DISABLED_REQUEUE_LIMIT,
-        )
-        if requeued:
-            logger.info(
-                "Requeued %s legacy disabled automation preview job(s)",
-                len(requeued),
-            )
-
     job = db.claim_next_import_preview_job(worker_id=worker_id)
     if job is None:
         return None
@@ -340,8 +519,8 @@ def preview_recovery_loop(
     interval: float = PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS,
     db_factory: Any | None = None,
 ) -> None:
-    db_factory = db_factory or PipelineDB
-    db = db_factory(dsn)
+    factory = db_factory or PipelineDB
+    db = factory(dsn)
     try:
         while not stop.wait(interval):
             recovered = recover_abandoned_preview_jobs(db)

@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -20,6 +21,11 @@ from lib.quality import (
     quality_gate_decision,
     is_verified_lossless,
     AudioQualityMeasurement,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceDecisionFacts,
+    AlbumQualityEvidenceFile,
+    AlbumQualityEvidenceOwner,
+    AlbumQualityV0Metric,
     SpectralContext,
     DownloadInfo,
     rejected_download_tier,
@@ -47,6 +53,8 @@ from lib.quality import (
     DECISION_LOSSLESS_SOURCE_LOCKED,
     is_opus_copy_safe_for_lossless_delete,
     OPUS_DELETE_SKIP_REASON_SPECTRAL,
+    evidence_decision_name,
+    full_pipeline_decision_from_evidence,
 )
 
 
@@ -353,10 +361,12 @@ class TestMeasuredImportDecision(unittest.TestCase):
         )
 
         self.assertIsNotNone(cbr)
+        assert cbr is not None
         self.assertEqual(cbr.min_bitrate_kbps, 96)
         self.assertEqual(cbr.avg_bitrate_kbps, 96)
         self.assertEqual(cbr.median_bitrate_kbps, 96)
         self.assertIsNotNone(vbr)
+        assert vbr is not None
         self.assertEqual(vbr.min_bitrate_kbps, 96)
         self.assertEqual(vbr.avg_bitrate_kbps, 225)
         self.assertEqual(vbr.median_bitrate_kbps, 230)
@@ -365,7 +375,11 @@ class TestMeasuredImportDecision(unittest.TestCase):
 class TestProvisionalLosslessDecision(unittest.TestCase):
     """Suspect lossless-source V0 probe grind-up policy."""
 
-    def _probe(self, avg, kind="lossless_source_v0"):
+    def _probe(
+        self,
+        avg: int | None,
+        kind: str = "lossless_source_v0",
+    ) -> V0ProbeEvidence:
         return V0ProbeEvidence(
             kind=kind,
             min_bitrate_kbps=avg - 10 if avg is not None else None,
@@ -373,8 +387,16 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
             median_bitrate_kbps=avg + 1 if avg is not None else None,
         )
 
-    def _decide(self, *, avg=250, existing=None, grade="suspect",
-                supported=True, kind="lossless_source_v0", tolerance=5):
+    def _decide(
+        self,
+        *,
+        avg: int | None = 250,
+        existing: V0ProbeEvidence | None = None,
+        grade: str = "suspect",
+        supported: bool = True,
+        kind: str = "lossless_source_v0",
+        tolerance: int = 5,
+    ) -> Any:
         cfg = QualityRankConfig(within_rank_tolerance_kbps=tolerance)
         return provisional_lossless_decision(
             ProvisionalLosslessDecisionInput(
@@ -948,6 +970,250 @@ EXPECTED_PARAMS = {
     "audio_check_mode", "audio_corrupt",
     "import_mode", "has_nested_audio",
 }
+
+
+class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
+    """Evidence-pair reducer coverage for neutral album-quality evidence."""
+
+    def _evidence(
+        self,
+        *,
+        owner_type: str,
+        owner_id: int,
+        min_bitrate: int,
+        avg_bitrate: int | None = None,
+        fmt: str,
+        is_cbr: bool = False,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+        container: str | None = None,
+        codec: str | None = None,
+        storage_format: str | None = None,
+        v0_lineage: str | None = None,
+        v0_min: int | None = None,
+        v0_avg: int | None = None,
+        v0_proof: str | None = None,
+    ) -> AlbumQualityEvidence:
+        container = container or fmt.lower().split()[0]
+        codec = codec or container
+        storage_format = storage_format or fmt
+        metric = None
+        if v0_lineage is not None:
+            metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=v0_min,
+                avg_bitrate_kbps=v0_avg,
+                median_bitrate_kbps=v0_avg,
+                source_lineage=v0_lineage,
+                source_provenance="neutral_album_quality_evidence",
+                proof_provenance=v0_proof,
+            )
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(owner_type, owner_id),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
+                median_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
+                format=fmt,
+                is_cbr=is_cbr,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+            ),
+            measured_at=datetime(2026, 5, 14, tzinfo=timezone.utc),
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path=f"{owner_type}-{owner_id}.{container}",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension=container,
+                    container=container,
+                    codec=codec,
+                )
+            ],
+            codec=codec,
+            container=container,
+            storage_format=storage_format,
+            v0_metric=metric,
+        )
+
+    def _suspect_lossless_candidate(self) -> AlbumQualityEvidence:
+        return self._evidence(
+            owner_type="download_log_candidate",
+            owner_id=3291,
+            min_bitrate=900,
+            avg_bitrate=900,
+            fmt="FLAC",
+            spectral_grade="suspect",
+            spectral_bitrate=128,
+            container="flac",
+            storage_format="flac",
+            v0_lineage="lossless_source",
+            v0_min=141,
+            v0_avg=240,
+            v0_proof="lossless_source_probe",
+        )
+
+    def _current_with_v0_lineage(self, lineage: str) -> AlbumQualityEvidence:
+        return self._evidence(
+            owner_type="request_current",
+            owner_id=42,
+            min_bitrate=116,
+            avg_bitrate=131,
+            fmt="Opus",
+            spectral_grade="likely_transcode",
+            spectral_bitrate=96,
+            container="opus",
+            storage_format="opus",
+            v0_lineage=lineage,
+            v0_min=211,
+            v0_avg=260,
+            v0_proof="neutral_v0_probe",
+        )
+
+    def test_stale_preview_candidate_loses_when_recomputed_against_current_evidence(self):
+        candidate = self._suspect_lossless_candidate()
+        stale_preview = full_pipeline_decision_from_evidence(
+            candidate,
+            None,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                import_mode="force",
+                verified_lossless_target="opus 128",
+            ),
+        )
+        fresh_action = full_pipeline_decision_from_evidence(
+            candidate,
+            self._current_with_v0_lineage("lossless_source"),
+            facts=AlbumQualityEvidenceDecisionFacts(
+                import_mode="force",
+                verified_lossless_target="opus 128",
+            ),
+        )
+
+        self.assertTrue(stale_preview["imported"])
+        self.assertEqual(
+            stale_preview["stage2_import"],
+            DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+        )
+        self.assertFalse(fresh_action["imported"])
+        self.assertEqual(
+            fresh_action["stage2_import"],
+            DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+        )
+
+    def test_force_distance_bypass_context_does_not_change_quality_decision(self):
+        candidate = self._suspect_lossless_candidate()
+        current = self._current_with_v0_lineage("lossless_source")
+
+        normal = full_pipeline_decision_from_evidence(candidate, current)
+        forced = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                import_mode="force",
+            ),
+        )
+
+        quality_keys = (
+            "stage0_spectral_gate",
+            "stage1_spectral",
+            "stage2_import",
+            "stage3_quality_gate",
+            "final_status",
+            "imported",
+            "denylisted",
+            "keep_searching",
+            "target_final_format",
+            "verified_lossless",
+        )
+        self.assertEqual(
+            {key: normal[key] for key in quality_keys},
+            {key: forced[key] for key in quality_keys},
+        )
+
+    def test_v0_policy_comparability_derives_from_neutral_source_lineage(self):
+        candidate = self._suspect_lossless_candidate()
+        native_research_current = self._current_with_v0_lineage("native_lossy_research")
+        lossless_source_current = self._current_with_v0_lineage("lossless_source")
+        native_metric = native_research_current.v0_metric
+        lossless_metric = lossless_source_current.v0_metric
+        self.assertIsNotNone(native_metric)
+        self.assertIsNotNone(lossless_metric)
+        assert native_metric is not None
+        assert lossless_metric is not None
+
+        self.assertEqual(
+            native_metric.avg_bitrate_kbps,
+            lossless_metric.avg_bitrate_kbps,
+        )
+        self.assertEqual(
+            native_metric.proof_provenance,
+            lossless_metric.proof_provenance,
+        )
+
+        native_result = full_pipeline_decision_from_evidence(
+            candidate,
+            native_research_current,
+        )
+        lossless_source_result = full_pipeline_decision_from_evidence(
+            candidate,
+            lossless_source_current,
+        )
+
+        self.assertEqual(
+            native_result["stage2_import"],
+            DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+        )
+        self.assertEqual(
+            lossless_source_result["stage2_import"],
+            DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+        )
+
+    def test_bare_m4a_container_does_not_prove_lossless_source(self):
+        candidate = self._evidence(
+            owner_type="download_log_candidate",
+            owner_id=77,
+            min_bitrate=256,
+            avg_bitrate=256,
+            fmt="AAC",
+            container="m4a",
+            codec="aac",
+            storage_format="m4a",
+        )
+        result = full_pipeline_decision_from_evidence(
+            candidate,
+            self._current_with_v0_lineage("lossless_source"),
+        )
+
+        self.assertFalse(result["imported"])
+        self.assertEqual(
+            result["stage2_import"],
+            DECISION_LOSSLESS_SOURCE_LOCKED,
+        )
+
+    def test_evidence_decision_name_uses_stage1_reject_not_final_status(self):
+        candidate = self._evidence(
+            owner_type="download_log_candidate",
+            owner_id=91,
+            min_bitrate=320,
+            avg_bitrate=320,
+            fmt="MP3",
+            is_cbr=True,
+            spectral_grade="suspect",
+            spectral_bitrate=96,
+        )
+        current = self._evidence(
+            owner_type="request_current",
+            owner_id=42,
+            min_bitrate=245,
+            avg_bitrate=245,
+            fmt="MP3",
+            spectral_grade="genuine",
+            spectral_bitrate=128,
+        )
+        result = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(result["stage1_spectral"], "reject")
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertEqual(evidence_decision_name(result), "spectral_reject")
 
 
 class TestPreimportAudioGate(unittest.TestCase):
@@ -2036,6 +2302,9 @@ class TestDispatchAction(unittest.TestCase):
         ("lossless_source_locked",
          dict(mark_done=False, record_rejection=True, denylist=True,
               requeue=True, cleanup=True)),
+        ("spectral_reject",
+         dict(mark_done=False, record_rejection=True, denylist=True,
+              requeue=False, cleanup=True)),
         ("conversion_failed", dict(record_rejection=True, denylist=False)),
         ("import_failed", dict(record_rejection=True)),
         ("target_conversion_failed", dict(record_rejection=True, denylist=False)),

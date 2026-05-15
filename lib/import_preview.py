@@ -18,15 +18,25 @@ import msgspec
 
 from lib.import_dispatch import run_import_one
 from lib.preimport import inspect_local_files, run_preimport_gates
+from lib.quality_evidence import (
+    audio_snapshot_matches,
+    legacy_current_lossless_v0_probe_from_request,
+    load_or_backfill_current_evidence,
+    lossless_source_v0_probe_from_metric,
+    persist_candidate_evidence_from_import_result,
+    request_current_owner,
+    snapshot_audio_files,
+)
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
+    QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QualityRankConfig,
+    classify_full_pipeline_decision,
+    classify_quality_import_stages,
     compute_effective_override_bitrate,
     full_pipeline_decision,
     quality_gate_decision,
-    V0_PROBE_LOSSLESS_SOURCE,
-    V0ProbeEvidence,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
 
@@ -145,81 +155,6 @@ def _stage_chain_from_simulation(simulation: dict[str, Any]) -> list[str]:
     return chain
 
 
-_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
-    "import",
-    "preflight_existing",
-    "transcode_upgrade",
-    "transcode_first",
-    "provisional_lossless_upgrade",
-})
-_REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
-    "downgrade",
-    "transcode_downgrade",
-    "suspect_lossless_downgrade",
-    "suspect_lossless_probe_missing",
-    "lossless_source_locked",
-})
-_QUALITY_GATE_REQUEUE_DECISIONS: frozenset[str] = frozenset({
-    "requeue_upgrade",
-    "requeue_lossless",
-})
-
-
-def _classify_import_stages(
-    stage2: object,
-    stage3: object,
-    *,
-    imported: bool,
-) -> tuple[str, bool, str | None]:
-    stage2_decision = str(stage2) if isinstance(stage2, str) else None
-    stage3_decision = str(stage3) if isinstance(stage3, str) else None
-
-    if stage2_decision in _REJECT_STAGE_DECISIONS:
-        return "confident_reject", True, stage2_decision
-
-    if stage2_decision in _IMPORT_STAGE_DECISIONS or imported:
-        reason = (
-            stage3_decision
-            if stage3_decision in _QUALITY_GATE_REQUEUE_DECISIONS
-            else stage2_decision or stage3_decision or "import"
-        )
-        return "would_import", False, reason
-
-    if stage3_decision in _QUALITY_GATE_REQUEUE_DECISIONS:
-        return "uncertain", False, stage3_decision
-
-    return "uncertain", False, stage2_decision or stage3_decision or "unknown"
-
-
-def _classify_simulation(simulation: dict[str, Any]) -> tuple[str, bool, str | None]:
-    if simulation.get("preimport_nested") == "reject_nested":
-        return "confident_reject", True, "nested_layout"
-    if simulation.get("preimport_audio") == "reject_corrupt":
-        return "confident_reject", True, "audio_corrupt"
-    if (simulation.get("stage1_spectral") == "reject"
-            and not simulation.get("stage2_import")):
-        return "confident_reject", True, "spectral_reject"
-    return _classify_import_stages(
-        simulation.get("stage2_import"),
-        simulation.get("stage3_quality_gate"),
-        imported=bool(simulation.get("imported")),
-    )
-
-
-def _current_lossless_v0_probe(req: dict[str, Any]) -> V0ProbeEvidence | None:
-    avg = req.get("current_lossless_source_v0_probe_avg_bitrate")
-    if not isinstance(avg, int):
-        return None
-    min_br = req.get("current_lossless_source_v0_probe_min_bitrate")
-    median_br = req.get("current_lossless_source_v0_probe_median_bitrate")
-    return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=min_br if isinstance(min_br, int) else None,
-        avg_bitrate_kbps=avg,
-        median_bitrate_kbps=median_br if isinstance(median_br, int) else None,
-    )
-
-
 def preview_import_from_values(
     values: ImportPreviewValues,
     *,
@@ -259,7 +194,7 @@ def preview_import_from_values(
         supported_lossless_source=values.supported_lossless_source,
         cfg=cfg,
     )
-    verdict, cleanup_eligible, reason = _classify_simulation(simulation)
+    verdict, cleanup_eligible, reason = classify_full_pipeline_decision(simulation)
     return _preview_result(
         mode="values",
         verdict=verdict,
@@ -306,10 +241,10 @@ def _classify_import_result(
             chain.append(f"stage3_quality_gate:{gate}")
     if decision in ("conversion_failed", "target_conversion_failed"):
         return "uncertain", False, decision, chain
-    verdict, cleanup_eligible, reason = _classify_import_stages(
+    verdict, cleanup_eligible, reason = classify_quality_import_stages(
         decision,
         gate if decision in ("import", "preflight_existing") else None,
-        imported=decision in _IMPORT_STAGE_DECISIONS,
+        imported=decision in QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     )
     return verdict, cleanup_eligible, reason, chain
 
@@ -326,8 +261,14 @@ def preview_import_from_path(
     force: bool = True,
     source_username: str | None = None,
     download_log_id: int | None = None,
+    import_job_id: int | None = None,
+    persist_candidate_evidence: bool = False,
 ) -> ImportPreviewResult:
-    """Preview a real source folder with no source, beets, or DB mutation."""
+    """Preview a real source folder without mutating source files or beets.
+
+    DB evidence persistence is opt-in for the async preview worker. Ad-hoc
+    preview and cleanup authorization callers receive an audit/UI verdict only.
+    """
     req = db.get_request(request_id)
     if not req:
         return _preview_result(
@@ -365,6 +306,33 @@ def preview_import_from_path(
     from lib.config import read_runtime_config
 
     cfg = read_runtime_config()
+    source_snapshot = None
+    if persist_candidate_evidence:
+        try:
+            source_snapshot = snapshot_audio_files(path)
+        except OSError as exc:
+            return _preview_result(
+                mode="path",
+                verdict="uncertain",
+                decision="evidence_snapshot_failed",
+                reason="evidence_snapshot_failed",
+                detail=str(exc),
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+        if not source_snapshot:
+            return _preview_result(
+                mode="path",
+                verdict="uncertain",
+                decision="evidence_empty_fileset",
+                reason="evidence_empty_fileset",
+                detail="no audio files found",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+
     temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
     try:
         preview_path = os.path.join(
@@ -431,11 +399,43 @@ def preview_import_from_path(
             if existing_spectral is not None
             else req.get("current_spectral_bitrate")
         )
+        current_evidence = None
+        try:
+            current_evidence = db.load_album_quality_evidence(
+                request_current_owner(request_id)
+            )
+        except Exception:
+            current_evidence = None
+        if persist_candidate_evidence and current_evidence is None:
+            try:
+                current_result = load_or_backfill_current_evidence(
+                    db,
+                    request_id=request_id,
+                    mb_release_id=mbid,
+                    quality_ranks=cfg.quality_ranks,
+                )
+                current_evidence = current_result.evidence
+            except Exception:
+                current_evidence = None
+        if current_evidence is not None:
+            current_m = current_evidence.measurement
+            existing_grade = current_m.spectral_grade
+            existing_bitrate = current_m.spectral_bitrate_kbps
         override_min_bitrate = compute_effective_override_bitrate(
-            req.get("min_bitrate"),
+            (
+                current_evidence.measurement.min_bitrate_kbps
+                if current_evidence is not None
+                else req.get("min_bitrate")
+            ),
             existing_bitrate if isinstance(existing_bitrate, int) else None,
             existing_grade if isinstance(existing_grade, str) else None,
         )
+
+        existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
+        if current_evidence is not None and current_evidence.v0_metric is not None:
+            existing_v0_probe = lossless_source_v0_probe_from_metric(
+                current_evidence.v0_metric
+            )
 
         run = run_import_one(
             path=preview_path,
@@ -449,18 +449,68 @@ def preview_import_from_path(
             verified_lossless_target=cfg.verified_lossless_target,
             beets_harness_path=cfg.beets_harness_path,
             quality_rank_config_json=cfg.quality_ranks.to_json(),
-            existing_v0_probe=_current_lossless_v0_probe(req),
+            existing_v0_probe=existing_v0_probe,
         )
         verdict, cleanup_eligible, reason, chain = _classify_import_result(
             run.import_result,
             cfg=cfg.quality_ranks,
         )
+        evidence_status: str | None = None
+        evidence_reason: str | None = None
+        if persist_candidate_evidence:
+            if source_snapshot is None or not audio_snapshot_matches(path, source_snapshot):
+                return _preview_result(
+                    mode="path",
+                    verdict="uncertain",
+                    decision="source_changed_during_preview",
+                    reason="source_changed_during_preview",
+                    detail="source files changed while preview was running",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
+            try:
+                evidence = persist_candidate_evidence_from_import_result(
+                    db,
+                    source_path=path,
+                    import_result=run.import_result,
+                    download_log_id=download_log_id,
+                    import_job_id=import_job_id,
+                    target_format=req.get("target_format") if req else None,
+                    files=source_snapshot,
+                )
+                evidence_status = evidence.status
+                evidence_reason = evidence.reason
+            except Exception as exc:
+                evidence_status = "failed"
+                evidence_reason = f"{type(exc).__name__}: {exc}"
+            if evidence_status != "ready":
+                return _preview_result(
+                    mode="path",
+                    verdict="uncertain",
+                    decision=f"evidence_{evidence_status}",
+                    reason=f"evidence_{evidence_status}",
+                    detail=evidence_reason,
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
         return _preview_result(
             mode="path",
             verdict=verdict,
             decision=run.import_result.decision if run.import_result else reason,
             reason=reason,
-            detail=run.import_result.error if run.import_result else "import_one.py emitted no JSON",
+            detail=(
+                run.import_result.error
+                if run.import_result and run.import_result.error
+                else evidence_reason
+                if evidence_status in {"failed", "incomplete", "empty_fileset"}
+                else "import_one.py emitted no JSON"
+                if run.import_result is None
+                else None
+            ),
             stage_chain=chain,
             request_id=request_id,
             download_log_id=download_log_id,
@@ -475,6 +525,8 @@ def preview_import_from_path(
 def preview_import_from_download_log(
     db: Any,
     download_log_id: int,
+    *,
+    persist_candidate_evidence: bool = False,
 ) -> ImportPreviewResult:
     """Preview the failed source referenced by one download_log row."""
     entry = db.get_download_log_entry(download_log_id)
@@ -524,4 +576,5 @@ def preview_import_from_download_log(
         force=True,
         source_username=entry.get("soulseek_username"),
         download_log_id=download_log_id,
+        persist_candidate_evidence=persist_candidate_evidence,
     )

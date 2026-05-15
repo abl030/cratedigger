@@ -32,9 +32,7 @@ from lib.processing_paths import (
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
-                         ImportResult,
                          DownloadDecision, ValidationResult,
-                         SpectralMeasurement,
                          decide_download_action,
                          compute_effective_override_bitrate,
                          extract_usernames,
@@ -42,7 +40,12 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
 from lib import transitions
 from lib.import_dispatch import (DispatchOutcome, _build_download_info,
                                  _record_rejection_and_maybe_requeue,
+                                 _requeue_import_job_to_preview,
                                  dispatch_import_core)
+from lib.import_evidence import (
+    CandidateEvidenceActionResult,
+    ensure_candidate_evidence_for_action,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -1064,7 +1067,7 @@ def process_completed_album(
     failed_grab: list[Any],
     ctx: CratediggerContext,
     *,
-    preview_import_result: ImportResult | None = None,
+    import_job_id: int | None = None,
 ) -> "bool | DispatchOutcome | None":
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
@@ -1105,7 +1108,7 @@ def process_completed_album(
             album_data,
             staged_album,
             ctx,
-            preview_import_result=preview_import_result,
+            import_job_id=import_job_id,
         )
         if outcome is not None:
             if outcome.deferred:
@@ -1121,47 +1124,12 @@ def process_completed_album(
     return True
 
 
-def _preview_import_result_is_importable(
-    preview_import_result: ImportResult | None,
-) -> bool:
-    return (
-        preview_import_result is not None
-        and preview_import_result.decision in {
-            "import",
-            "transcode_upgrade",
-            "transcode_first",
-            "provisional_lossless_upgrade",
-        }
-        and preview_import_result.new_measurement is not None
-    )
-
-
-def _apply_preimport_from_preview(
-    album_data: GrabListEntry,
-    preview_import_result: ImportResult,
-) -> None:
-    """Populate preimport spectral fields from an accepted async preview."""
-    new_m = preview_import_result.new_measurement
-    existing_m = preview_import_result.existing_measurement
-    if new_m is not None:
-        album_data.download_spectral = SpectralMeasurement.from_parts(
-            new_m.spectral_grade,
-            new_m.spectral_bitrate_kbps,
-        )
-    if existing_m is not None:
-        album_data.current_spectral = SpectralMeasurement.from_parts(
-            existing_m.spectral_grade,
-            existing_m.spectral_bitrate_kbps,
-        )
-        album_data.current_min_bitrate = existing_m.min_bitrate_kbps
-
-
 def _process_beets_validation(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
     *,
-    preview_import_result: ImportResult | None = None,
+    import_job_id: int | None = None,
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
@@ -1186,47 +1154,64 @@ def _process_beets_validation(
     bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
     bv_result.download_folder = current_path
     bv_result.source_dirs = _source_dirs_for_album(album_data)
+    candidate_evidence_result: CandidateEvidenceActionResult | None = None
 
-    if bv_result.valid and _preview_import_result_is_importable(preview_import_result):
-        assert preview_import_result is not None
-        logger.info(
-            "PREIMPORT: reusing async preview measurements for %s - %s "
-            "(decision=%s)",
-            album_data.artist,
-            album_data.title,
-            preview_import_result.decision,
-        )
-        _apply_preimport_from_preview(album_data, preview_import_result)
-    elif bv_result.valid:
+    if bv_result.valid:
         dl_pre = _build_download_info(album_data)
         db = (ctx.pipeline_db_source._get_db()
               if ctx.pipeline_db_source is not None else None)
-        preimport = run_preimport_gates(
-            path=current_path,
-            mb_release_id=album_data.mb_release_id or "",
-            label=f"{album_data.artist} - {album_data.title}",
-            download_filetype=dl_pre.filetype or "",
-            download_min_bitrate_bps=dl_pre.bitrate,
-            download_is_vbr=dl_pre.is_vbr,
-            cfg=ctx.cfg,
-            db=db,
-            request_id=album_data.db_request_id,
-            usernames=usernames_pre,
-        )
-        album_data.download_spectral = preimport.download_spectral
-        album_data.current_spectral = preimport.existing_spectral
-        album_data.current_min_bitrate = preimport.existing_min_bitrate
-        if not preimport.valid:
-            bv_result.valid = False
-            bv_result.scenario = preimport.scenario
-            bv_result.detail = preimport.detail
-            if preimport.corrupt_files:
-                bv_result.corrupt_files = preimport.corrupt_files
-            # Carry bad-audio-hash gate match through to download_log via
-            # ValidationResult JSONB (plan 2026-04-29-005 / U5).
-            if preimport.matched_bad_hash_id is not None:
-                bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
-                bv_result.matched_bad_track_path = preimport.matched_bad_track_path
+        candidate_evidence_available = False
+        if import_job_id is not None and db is not None:
+            candidate_result = ensure_candidate_evidence_for_action(
+                db,
+                source_path=current_path,
+                import_job_id=import_job_id,
+            )
+            candidate_evidence_result = candidate_result
+            candidate_evidence_available = candidate_result.available
+            if not candidate_evidence_available:
+                reason = (
+                    candidate_result.provenance.fallback_reason
+                    or candidate_result.provenance.candidate_status
+                    or "missing"
+                )
+                # U2: requeue the import_job to preview rather than failing.
+                # Preview owns candidate-evidence production; the importer
+                # never measures. The dispatch-side requeue keeps the
+                # advisory-lock atomicity intact.
+                return _requeue_import_job_to_preview(
+                    db,
+                    import_job_id=import_job_id,
+                    reason=reason,
+                )
+
+        if not candidate_evidence_available:
+            preimport = run_preimport_gates(
+                path=current_path,
+                mb_release_id=album_data.mb_release_id or "",
+                label=f"{album_data.artist} - {album_data.title}",
+                download_filetype=dl_pre.filetype or "",
+                download_min_bitrate_bps=dl_pre.bitrate,
+                download_is_vbr=dl_pre.is_vbr,
+                cfg=ctx.cfg,
+                db=db,
+                request_id=album_data.db_request_id,
+                usernames=usernames_pre,
+            )
+            album_data.download_spectral = preimport.download_spectral
+            album_data.current_spectral = preimport.existing_spectral
+            album_data.current_min_bitrate = preimport.existing_min_bitrate
+            if not preimport.valid:
+                bv_result.valid = False
+                bv_result.scenario = preimport.scenario
+                bv_result.detail = preimport.detail
+                if preimport.corrupt_files:
+                    bv_result.corrupt_files = preimport.corrupt_files
+                # Carry bad-audio-hash gate match through to download_log via
+                # ValidationResult JSONB (plan 2026-04-29-005 / U5).
+                if preimport.matched_bad_hash_id is not None:
+                    bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
+                    bv_result.matched_bad_track_path = preimport.matched_bad_track_path
 
     if bv_result.valid:
         return _handle_valid_result(
@@ -1234,7 +1219,8 @@ def _process_beets_validation(
             bv_result,
             staged_album,
             ctx,
-            preview_import_result=preview_import_result,
+            import_job_id=import_job_id,
+            prevalidated_candidate_result=candidate_evidence_result,
         )
     return _handle_rejected_result(
         album_data, bv_result, staged_album, ctx)
@@ -1364,7 +1350,8 @@ def _handle_valid_result(
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
     *,
-    preview_import_result: ImportResult | None = None,
+    import_job_id: int | None = None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1549,11 +1536,8 @@ def _handle_valid_result(
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
                 source_dirs=_source_dirs_for_album(album_data),
-                preview_import_result=(
-                    preview_import_result
-                    if _preview_import_result_is_importable(preview_import_result)
-                    else None
-                ),
+                candidate_import_job_id=import_job_id,
+                prevalidated_candidate_result=prevalidated_candidate_result,
             )
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
@@ -2044,7 +2028,7 @@ def _run_completed_processing(
     db: Any,
     ctx: CratediggerContext,
     *,
-    preview_import_result: ImportResult | None = None,
+    import_job_id: int | None = None,
 ) -> bool | DispatchOutcome | None:
     """Run or resume local post-download processing for a completed album."""
     if state.processing_started_at is None:
@@ -2061,7 +2045,7 @@ def _run_completed_processing(
             entry,
             [],
             ctx,
-            preview_import_result=preview_import_result,
+            import_job_id=import_job_id,
         )
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "

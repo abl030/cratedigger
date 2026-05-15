@@ -3,6 +3,8 @@
 import json
 import os
 import shutil
+from typing import Literal
+
 import msgspec
 
 from lib.manual_import import (
@@ -23,8 +25,8 @@ from lib.quality import (
     is_opus_copy_safe_for_lossless_delete,
 )
 from lib.util import resolve_failed_path
-from lib.wrong_matches import dismiss_wrong_match_source
 from lib.wrong_match_triage import triage_wrong_match
+from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
 from lib.import_preview import (
     ImportPreviewValues,
     preview_import_from_download_log,
@@ -692,24 +694,34 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
             remaining -= len(chunk)
 
 
-def _delete_wrong_match_row(pdb, log_id: int) -> bool:
+WrongMatchDeleteResult = Literal["deleted", "skipped", "missing", "error"]
+
+
+def _delete_wrong_match_row(pdb, log_id: int) -> WrongMatchDeleteResult:
     """Shared helper: delete files for one wrong-match entry and clear its path.
 
-    Returns ``True`` if the entry existed and was processed, ``False`` if the
-    download_log row was missing. Used by both the single-row delete endpoint
-    and the per-release bulk delete.
+    Cleanup decisions are recomputed at action time; stored triage/preview
+    verdicts are audit only.
     """
     entry = pdb.get_download_log_entry(log_id)
     if not entry:
-        return False
+        return "missing"
+    decision = decide_wrong_match_cleanup(pdb, log_id)
+    if not decision.delete_allowed:
+        return "skipped"
     vr = _parse_validation_result(entry.get("validation_result"))
     failed_path_raw = vr.get("failed_path")
     failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
     resolved_path = resolve_failed_path(failed_path)
     if resolved_path is not None:
-        shutil.rmtree(resolved_path, ignore_errors=True)
+        try:
+            shutil.rmtree(resolved_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            return "error"
     pdb.clear_wrong_match_path(log_id)
-    return True
+    return "deleted"
 
 
 def post_wrong_match_delete(h, body: dict) -> None:
@@ -720,8 +732,15 @@ def post_wrong_match_delete(h, body: dict) -> None:
         return
 
     pdb = _server()._db()
-    if not _delete_wrong_match_row(pdb, int(log_id)):
+    result = _delete_wrong_match_row(pdb, int(log_id))
+    if result == "missing":
         h._error(f"Download log entry {log_id} not found", 404)
+        return
+    if result == "skipped":
+        h._json({"status": "skipped", "download_log_id": log_id})
+        return
+    if result == "error":
+        h._error("Wrong-match cleanup failed", 500)
         return
 
     h._json({"status": "ok", "download_log_id": log_id})
@@ -756,7 +775,7 @@ def post_wrong_match_delete_group(h, body: dict) -> None:
             log_ids.append(lid)
     deleted = 0
     for log_id in log_ids:
-        if _delete_wrong_match_row(pdb, log_id):
+        if _delete_wrong_match_row(pdb, log_id) == "deleted":
             deleted += 1
     h._json({"status": "ok", "request_id": rid, "deleted": deleted})
 
@@ -778,13 +797,18 @@ def post_wrong_match_delete_transparent_non_flac(h, body: dict) -> None:
         for log_id in log_ids:
             if not isinstance(log_id, int):
                 continue
-            if _delete_wrong_match_row(pdb, log_id):
+            result = _delete_wrong_match_row(pdb, log_id)
+            if result == "deleted":
                 deleted += 1
                 request_deleted += 1
             else:
                 skipped.append({
                     "download_log_id": log_id,
-                    "reason": "delete_failed",
+                    "reason": (
+                        "delete_failed"
+                        if result == "missing"
+                        else "cleanup_uncertain"
+                    ),
                 })
         request_id = target.get("request_id")
         if request_deleted and isinstance(request_id, int):
@@ -865,7 +889,8 @@ def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
             continue
         if request_id not in safe_request_id_set:
             continue
-        if _delete_wrong_match_row(pdb, log_id):
+        result = _delete_wrong_match_row(pdb, log_id)
+        if result == "deleted":
             deleted += 1
             assert isinstance(request_id, int)
             deleted_by_request_id[request_id] = (
@@ -874,7 +899,11 @@ def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
         else:
             skipped.append({
                 "download_log_id": log_id,
-                "reason": "delete_failed",
+                "reason": (
+                    "delete_failed"
+                    if result == "missing"
+                    else "cleanup_uncertain"
+                ),
             })
 
     deleted_request_ids = [
@@ -978,18 +1007,13 @@ def post_wrong_match_converge(h, body: dict) -> None:
             if getattr(job, "deduped", False):
                 deduped += 1
             jobs.append(_serialize_import_job(job))
-            dismiss_result = dismiss_wrong_match_source(
-                pdb,
-                lid,
-                failed_path_hint=resolved_path,
-            )
-            dismissed += int(dismiss_result.cleared_rows)
             selected.append({
                 "download_log_id": lid,
                 "distance": distance,
                 "job_id": job.id,
                 "deduped": bool(getattr(job, "deduped", False)),
             })
+            remaining += 1
             continue
 
         unmatched.append({
@@ -1000,12 +1024,17 @@ def post_wrong_match_converge(h, body: dict) -> None:
 
     if selected:
         for lid in unmatched_log_ids:
-            if _delete_wrong_match_row(pdb, lid):
+            result = _delete_wrong_match_row(pdb, lid)
+            if result == "deleted":
                 deleted += 1
             else:
                 skipped.append({
                     "download_log_id": lid,
-                    "reason": "delete_failed",
+                    "reason": (
+                        "delete_failed"
+                        if result == "missing"
+                        else "cleanup_uncertain"
+                    ),
                 })
                 remaining += 1
     else:

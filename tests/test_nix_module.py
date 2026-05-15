@@ -86,6 +86,36 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
         self.assertIn("WorkingDirectory = cfg.stateDir", text)
 
+    def test_importer_service_does_not_restart_on_switch(self) -> None:
+        """The long-lived importer worker must NOT restart on nixos-rebuild
+        switch — that would kill in-flight beets mutations. The existing
+        requeue_running_import_jobs path covers crashes; deploys should not
+        manufacture them.
+        """
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        # Find the importer service block and assert restartIfChanged=false
+        # appears within it (not just somewhere in the file).
+        importer_block_start = text.index("systemd.services.cratedigger-importer")
+        importer_block_end = text.index(
+            "systemd.services.cratedigger-import-preview-worker"
+        )
+        importer_block = text[importer_block_start:importer_block_end]
+        self.assertIn("restartIfChanged = false", importer_block)
+
+    def test_preview_worker_service_does_not_restart_on_switch(self) -> None:
+        """Same rationale as the importer — avoid killing in-flight
+        measurement on deploy. Recovery via requeue_stale_import_preview_jobs
+        exists but skipping the kill is cheaper.
+        """
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        preview_block_start = text.index(
+            "systemd.services.cratedigger-import-preview-worker"
+        )
+        # The next service definition or end of the systemd.services block
+        # bounds the preview-worker block. Use a sentinel that's safe.
+        preview_block = text[preview_block_start:preview_block_start + 4000]
+        self.assertIn("restartIfChanged = false", preview_block)
+
     def test_prestart_renders_config_atomically_for_parallel_services(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn('mktemp "$config_dir/.config.ini.XXXXXX"', text)
@@ -96,9 +126,8 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('writeShellScriptBin "cratedigger-import-preview-worker"', text)
         self.assertIn("${src}/scripts/import_preview_worker.py", text)
         self.assertIn("systemd.services.cratedigger-import-preview-worker", text)
-        self.assertIn("cfg.importer.enable && cfg.importer.preview.enable", text)
-        self.assertIn("preview.enable = mkOption", text)
-        self.assertIn("CRATEDIGGER_IMPORT_PREVIEW_ENABLE", text)
+        # Preview is mandatory: service gated only on importer.enable.
+        self.assertIn("mkIf cfg.importer.enable", text)
         self.assertIn("previewWorkers", text)
         self.assertIn("default = 2", text)
         self.assertIn("cfg.importer.previewWorkers >= 1", text)

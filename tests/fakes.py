@@ -26,14 +26,13 @@ _PERTH_TZ = ZoneInfo("Australia/Perth")
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+    from lib.pipeline_db import SearchLogHistoryPage
 
 from lib.import_queue import (
     ImportJob,
-    IMPORT_JOB_AUTOMATION,
-    IMPORT_JOB_PREVIEW_DISABLED_MESSAGE,
+    IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
+    IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
-    IMPORT_JOB_PREVIEW_WOULD_IMPORT,
-    import_preview_enabled_from_env,
     validate_job_type,
     validate_preview_failure_status,
     validate_payload,
@@ -58,6 +57,13 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanMetadataSnapshot,
                              SearchPlanProvenance, SearchPlanRow,
                              WantedReconciliationCandidate)
+from lib.quality import (
+    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceOwner,
+)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
@@ -660,6 +666,9 @@ class FakePipelineDB:
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
+        self.album_quality_evidence: dict[
+            tuple[str, int], AlbumQualityEvidence,
+        ] = {}
         self._next_bad_audio_hash_id = 0
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
@@ -744,15 +753,9 @@ class FakePipelineDB:
         dedupe_key: str | None = None,
         payload: dict[str, Any] | None = None,
         message: str | None = None,
-        preview_enabled: bool | None = None,
     ) -> ImportJob:
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
-        preview_enabled = (
-            import_preview_enabled_from_env()
-            if preview_enabled is None
-            else preview_enabled
-        )
         if dedupe_key is not None:
             existing = self.get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
@@ -760,7 +763,6 @@ class FakePipelineDB:
 
         self._next_import_job_id += 1
         now = _utcnow()
-        preview_completed_at = None if preview_enabled else now
         row: dict[str, Any] = {
             "id": self._next_import_job_id,
             "job_type": job_type,
@@ -778,22 +780,16 @@ class FakePipelineDB:
             "started_at": None,
             "heartbeat_at": None,
             "completed_at": None,
-            "preview_status": (
-                IMPORT_JOB_PREVIEW_WAITING
-                if preview_enabled
-                else IMPORT_JOB_PREVIEW_WOULD_IMPORT
-            ),
+            "preview_status": IMPORT_JOB_PREVIEW_WAITING,
             "preview_result": None,
-            "preview_message": (
-                None if preview_enabled else IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-            ),
+            "preview_message": None,
             "preview_error": None,
             "preview_attempts": 0,
             "preview_worker_id": None,
             "preview_started_at": None,
             "preview_heartbeat_at": None,
-            "preview_completed_at": preview_completed_at,
-            "importable_at": None if preview_enabled else now,
+            "preview_completed_at": None,
+            "importable_at": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
@@ -868,7 +864,10 @@ class FakePipelineDB:
         def sort_key(row: dict[str, Any]) -> tuple[int, datetime, datetime, int]:
             status = row.get("status")
             preview_status = row.get("preview_status")
-            if status == "queued" and preview_status == "would_import":
+            if (
+                status == "queued"
+                and preview_status in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ):
                 bucket = 0
             elif status == "running":
                 bucket = 1
@@ -896,7 +895,7 @@ class FakePipelineDB:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
-            and row.get("preview_status") == "would_import"
+            and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
         ]
         queued.sort(key=lambda row: (
             _as_datetime(row.get("importable_at")),
@@ -1030,36 +1029,32 @@ class FakePipelineDB:
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
 
-    def requeue_disabled_automation_preview_jobs(
+    def requeue_import_job_for_preview(
         self,
+        job_id: int,
         *,
-        limit: int = 100,
-    ) -> list[ImportJob]:
-        disabled = [
-            row for row in self._import_jobs
-            if row.get("status") == "queued"
-            and row.get("job_type") == IMPORT_JOB_AUTOMATION
-            and row.get("preview_status") == IMPORT_JOB_PREVIEW_WOULD_IMPORT
-            and row.get("preview_message") == IMPORT_JOB_PREVIEW_DISABLED_MESSAGE
-            and row.get("preview_result") is None
-        ]
-        disabled.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
-        updated_jobs = []
-        for row in disabled[:limit]:
-            now = _utcnow()
-            row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
-            row["preview_result"] = None
-            row["preview_message"] = None
-            row["preview_error"] = None
-            row["preview_attempts"] = 0
-            row["preview_worker_id"] = None
-            row["preview_started_at"] = None
-            row["preview_heartbeat_at"] = None
-            row["preview_completed_at"] = None
-            row["importable_at"] = None
-            row["updated_at"] = now
-            updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
-        return updated_jobs
+        reason: str,
+    ) -> ImportJob | None:
+        """Fake mirror of PipelineDB.requeue_import_job_for_preview.
+
+        Only matches rows currently in ``status='running'``. Clears writer
+        state, sets preview_status='waiting', preserves attempt counters.
+        """
+        for row in self._import_jobs:
+            if row["id"] == job_id and row.get("status") == "running":
+                now = _utcnow()
+                row["status"] = "queued"
+                row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
+                row["message"] = reason
+                row["error"] = None
+                row["worker_id"] = None
+                row["started_at"] = None
+                row["heartbeat_at"] = None
+                row["preview_message"] = None
+                row["preview_error"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
 
     def claim_next_import_preview_job(
         self,
@@ -1113,7 +1108,7 @@ class FakePipelineDB:
                 and row.get("preview_status") in ("waiting", "running")
             ):
                 now = _utcnow()
-                row["preview_status"] = "would_import"
+                row["preview_status"] = IMPORT_JOB_PREVIEW_EVIDENCE_READY
                 row["preview_result"] = copy.deepcopy(preview_result or {})
                 row["preview_message"] = message
                 row["preview_error"] = None
@@ -1153,6 +1148,37 @@ class FakePipelineDB:
                 row["error"] = error
                 row["preview_completed_at"] = now
                 row["completed_at"] = now
+                row["preview_worker_id"] = None
+                row["preview_heartbeat_at"] = None
+                row["updated_at"] = now
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def mark_import_job_preview_blocked(
+        self,
+        job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None:
+        validate_preview_failure_status(preview_status)
+        result = copy.deepcopy(preview_result or {})
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("status") == "queued"
+                and row.get("preview_status") in ("waiting", "running")
+            ):
+                now = _utcnow()
+                row["preview_status"] = preview_status
+                row["preview_result"] = result
+                row["preview_message"] = message
+                row["preview_error"] = error
+                row["message"] = message
+                row["error"] = error
+                row["preview_completed_at"] = now
                 row["preview_worker_id"] = None
                 row["preview_heartbeat_at"] = None
                 row["updated_at"] = now
@@ -1761,6 +1787,48 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
+    def validate_album_quality_evidence_owner(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> bool:
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT:
+            return owner.owner_id in self._requests
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE:
+            return any(row.id == owner.owner_id for row in self.download_logs)
+        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE:
+            return any(row.get("id") == owner.owner_id for row in self._import_jobs)
+        return False
+
+    def upsert_album_quality_evidence(
+        self,
+        evidence: AlbumQualityEvidence,
+    ) -> None:
+        evidence = evidence.sorted_for_storage()
+        errors = evidence.storage_validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        if not self.validate_album_quality_evidence_owner(evidence.owner):
+            raise LookupError(
+                "album quality evidence owner does not exist: "
+                f"{evidence.owner.owner_type}:{evidence.owner.owner_id}"
+            )
+        self.album_quality_evidence[
+            (evidence.owner.owner_type, evidence.owner.owner_id)
+        ] = copy.deepcopy(evidence)
+
+    def load_album_quality_evidence(
+        self,
+        owner: AlbumQualityEvidenceOwner,
+    ) -> AlbumQualityEvidence | None:
+        errors = owner.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        evidence = self.album_quality_evidence.get((owner.owner_type, owner.owner_id))
+        return copy.deepcopy(evidence) if evidence is not None else None
+
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         row = self._requests.get(request_id)
         if row is None:
@@ -1878,6 +1946,20 @@ class FakePipelineDB:
             e for e in self.search_logs if e.request_id != request_id]
         self.denylist = [
             e for e in self.denylist if e.request_id != request_id]
+        self.album_quality_evidence = {
+            key: evidence
+            for key, evidence in self.album_quality_evidence.items()
+            if not (
+                key == (
+                    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                    request_id,
+                )
+                or (
+                    key[0] == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
+                    and all(row.id != key[1] for row in self.download_logs)
+                )
+            )
+        }
         # U1: cascade plans + items with the request, mirroring the real
         # ON DELETE CASCADE FKs from migration 014.
         plan_ids_to_drop = [
