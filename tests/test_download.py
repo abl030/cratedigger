@@ -3867,6 +3867,126 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
+    def test_poll_overlong_album_title_does_not_starve_other_rows(self):
+        """ENAMETOOLONG in canonical-path makedirs must not abort the loop.
+
+        Real failure: a Sade row with 240+ char artist + title produced a
+        canonical path > ext4's 255-byte component limit. ``os.makedirs``
+        raised ``OSError(36)`` which propagated through
+        ``_enqueue_completed_processing`` and killed the per-row for-loop
+        in ``poll_active_downloads``. Because ``get_downloading()`` orders
+        by ``updated_at ASC``, a single poison row starved every later
+        row from getting its import job enqueued.
+        """
+        from lib.download import poll_active_downloads
+        long_name = "X" * 250
+        poison = self._make_downloading_row(
+            request_id=1,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     "last_state": "Completed, Succeeded"},
+                ],
+            },
+        )
+        poison["artist_name"] = long_name
+        poison["album_title"] = long_name
+
+        healthy = self._make_downloading_row(
+            request_id=2,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\02.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     "last_state": "Completed, Succeeded"},
+                ],
+            },
+        )
+
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[poison, healthy], slskd_downloads=[],
+        )
+
+        # Must not raise — the poison row's ENAMETOOLONG must be caught
+        # inside _materialize_processing_dir (or by the per-row guard).
+        poll_active_downloads(ctx)
+
+        self.assertEqual(
+            len(fake_db.list_import_jobs(request_id=2)), 1,
+            "Healthy row never got an import job — poison row killed the loop",
+        )
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 0)
+
+    def test_poll_continues_after_per_row_unexpected_exception(self):
+        """Belt-and-braces: any unhandled per-row exception must not abort the loop.
+
+        Even if a future change reintroduces an uncaught exception in the
+        materialize / enqueue path, the per-row guard in
+        ``poll_active_downloads`` must contain it so other rows still
+        process.
+        """
+        from lib.download import poll_active_downloads
+        from lib import download as download_module
+
+        poison = self._make_downloading_row(
+            request_id=1,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     "last_state": "Completed, Succeeded"},
+                ],
+            },
+        )
+        healthy = self._make_downloading_row(
+            request_id=2,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\02.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     "last_state": "Completed, Succeeded"},
+                ],
+            },
+        )
+
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[poison, healthy], slskd_downloads=[],
+        )
+
+        real_enqueue = download_module._enqueue_completed_processing
+
+        def selectively_explode(entry, request_id, state, db, ctx):
+            if request_id == 1:
+                raise RuntimeError("synthetic kaboom for test")
+            return real_enqueue(entry, request_id, state, db, ctx)
+
+        with patch.object(
+            download_module,
+            "_enqueue_completed_processing",
+            side_effect=selectively_explode,
+        ):
+            poll_active_downloads(ctx)
+
+        self.assertEqual(
+            len(fake_db.list_import_jobs(request_id=2)), 1,
+            "Per-row exception aborted the loop; healthy row never got "
+            "an import job",
+        )
+
 
 class TestBuildActiveDownloadState(unittest.TestCase):
     """Test build_active_download_state() — GrabListEntry → ActiveDownloadState."""

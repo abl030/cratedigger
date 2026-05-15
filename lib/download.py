@@ -1013,7 +1013,18 @@ def _materialize_processing_dir(
         logger.info(f"Staging folder {canonical_path} already exists — "
                     f"resuming or reusing prior attempt")
     else:
-        os.makedirs(canonical_path, exist_ok=True)
+        try:
+            os.makedirs(canonical_path, exist_ok=True)
+        except OSError:
+            # ENAMETOOLONG, EACCES, ENOSPC, etc. Letting this propagate
+            # would abort the entire poll loop and starve every later row.
+            logger.exception(
+                "Failed to create canonical staging dir %s for request %s — "
+                "leaving for next poll cycle",
+                canonical_path,
+                album_data.db_request_id,
+            )
+            return False
 
     for file in album_data.files:
         # Destination filename keeps the remote basename (no ticks suffix,
@@ -2310,245 +2321,272 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
 
     for row in downloading:
         request_id = row["id"]
-        raw_state = row.get("active_download_state")
-        if not raw_state:
-            # Crash recovery: downloading with no state means process_completed_album
-            # crashed on a previous run. Reset to wanted so it gets re-searched.
-            logger.error(f"Downloading album {request_id} has no active_download_state — "
-                         f"resetting to wanted")
-            transitions.finalize_request(
-                db,
+        try:
+            _poll_one_active_download(row, db, ctx, cycle_snapshot)
+        except Exception:
+            # A single bad row (overlong canonical path, missing slskd
+            # files raising past our inner guards, etc.) must never
+            # starve the rest of the poll cycle.
+            logger.exception(
+                "Unhandled exception processing downloading request %s — "
+                "skipping for this poll cycle so other rows still process",
                 request_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status="downloading",
-                ),
             )
-            continue
 
-        # psycopg2 returns JSONB as dict, not string — use from_dict directly
-        if isinstance(raw_state, dict):
-            state = ActiveDownloadState.from_dict(raw_state)
-        else:
-            state = ActiveDownloadState.from_json(raw_state)
-        active_import_job = _active_import_job_for_request(db, request_id)
-        if active_import_job is not None:
-            job_id = (
-                active_import_job.get("id")
-                if isinstance(active_import_job, dict)
-                else getattr(active_import_job, "id", "?")
-            )
-            job_status = (
-                active_import_job.get("status")
-                if isinstance(active_import_job, dict)
-                else getattr(active_import_job, "status", "?")
-            )
-            logger.info(
-                "Request %s is waiting on importer job %s (%s)",
-                request_id,
-                job_id,
-                job_status,
-            )
-            continue
-        if state.processing_started_at is not None:
-            recovery_decision = reconcile_processing_current_path(
-                current_path=state.current_path,
-                artist=row["artist_name"],
-                title=row["album_title"],
-                year=str(row["year"] or ""),
-                request_id=request_id,
-                staging_dir=ctx.cfg.beets_staging_dir,
-                slskd_download_dir=ctx.cfg.slskd_download_dir,
-                has_entries=directory_has_entries,
-            )
-            if recovery_decision.blocked_reason == "multiple_populated_paths":
-                rendered_candidates = ", ".join(
-                    f"{location.short_label}={location.path}"
-                    for location in recovery_decision.populated_locations
-                )
-                logger.error(
-                    "MID-PROCESS RESUME BLOCKED: request_id=%s %s - %s "
-                    "found multiple populated recovery paths (%s). "
-                    "Manual recovery is required.",
-                    request_id,
-                    row["artist_name"],
-                    row["album_title"],
-                    rendered_candidates,
-                )
-                continue
-            if recovery_decision.blocked_reason == "legacy_shared_only":
-                logger.error(
-                    "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
-                    "persisted current_path=%s could not be resumed, "
-                    "canonical_path=%s has no files, "
-                    "and staged_path=%s is ambiguous across editions. "
-                    "Manual recovery is required.",
-                    request_id,
-                    row["artist_name"],
-                    row["album_title"],
-                    state.current_path,
-                    recovery_decision.canonical_path,
-                    recovery_decision.legacy_shared_path,
-                )
-                continue
-            assert recovery_decision.selected_location is not None
-            selected_path = recovery_decision.selected_location.path
-            if selected_path != state.current_path:
-                state.current_path = selected_path
-                db.update_download_state_current_path(
-                    request_id,
-                    state.current_path,
-                )
-        entry = reconstruct_grab_list_entry(row, state)
 
-        if state.processing_started_at is not None:
-            if not _processing_path_ready_for_importer(
-                entry,
-                request_id,
-                state,
-                db,
-                ctx,
-            ):
-                continue
-            _enqueue_completed_processing(entry, request_id, state, db, ctx)
-            continue
+def _poll_one_active_download(
+    row: dict[str, Any],
+    db: Any,
+    ctx: CratediggerContext,
+    cycle_snapshot: Any,
+) -> None:
+    """Process one ``downloading`` row.
 
-        # Re-derive transfer IDs from pre-fetched snapshot
-        if not rederive_transfer_ids(
-            entry,
-            ctx.slskd,
-            snapshot=cycle_snapshot,
-            not_before=state.enqueued_at,
-        ):
-            logger.warning(f"API error re-deriving transfers for {entry.artist} - {entry.title} "
-                           f"— will retry next cycle")
-            continue
-
-        enqueued_at = datetime.fromisoformat(state.enqueued_at)
-        if enqueued_at.tzinfo is None:
-            enqueued_at = enqueued_at.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        elapsed_seconds = (now - enqueued_at).total_seconds()
-
-        # Check if all transfers have vanished (slskd restart, user offline).
-        # A restored terminal status from a previous poll is still visible
-        # evidence; do not erase it just because slskd no longer lists the
-        # removed transfer row.
-        all_vanished = all(f.id == "" and f.status is None for f in entry.files)
-        if all_vanished:
-            if elapsed_seconds < 60:
-                logger.info(
-                    "Request %s has fresh planned ownership but no visible "
-                    "slskd transfers yet; deferring vanished-transfer reset",
-                    request_id,
-                )
-                continue
-            _timeout_album(entry, request_id, "all transfers vanished from slskd", ctx)
-            continue
-
-        # Mark files with vanished transfers as errored. Preserve restored
-        # terminal statuses (Completed, Rejected/Errored/etc.) from previous
-        # poll cycles so the reducer can report the real terminal failure.
-        for f in entry.files:
-            if f.id == "" and f.status is None:
-                f.status = {"state": "Completed, Errored"}
-
-        # Track total album age separately from stall/progress timing.
-        # Poll live status only for transfers that are still active in slskd.
-        files_requiring_status = [
-            f for f in entry.files
-            if f.id and not (f.status and str(f.status.get("state", "")).startswith("Completed,"))
-        ]
-        if files_requiring_status and not slskd_download_status(
-                files_requiring_status, ctx, snapshot=cycle_snapshot):
-            logger.warning(f"API error polling {entry.artist} - {entry.title} — "
-                          f"will retry next cycle")
-            continue
-
-        album_done, problems, queued = downloads_all_done(entry.files)
-        statusful_files = [f for f in entry.files if f.status is not None]
-        state_changed = _capture_download_progress(statusful_files, state, now)
-
-        all_remote_queued = _all_files_remotely_queued(entry.files, queued)
-        error_filenames = [f.filename for f in problems] if problems is not None else None
-        file_retries = {f.filename: (f.retry or 0) for f in entry.files}
-
-        progress_at = state.last_progress_at or state.enqueued_at
-        idle_seconds = (now - datetime.fromisoformat(progress_at)).total_seconds()
-
-        verdict = decide_download_action(
-            album_done=album_done,
-            error_filenames=error_filenames,
-            total_files=len(entry.files),
-            all_remote_queued=all_remote_queued,
-            elapsed_seconds=elapsed_seconds,
-            idle_seconds=idle_seconds,
-            remote_queue_timeout=ctx.cfg.remote_queue_timeout,
-            stalled_timeout=ctx.cfg.stalled_timeout,
-            file_retries=file_retries,
-            max_file_retries=MAX_FILE_RETRIES,
-            processing_started=False,
+    Extracted from ``poll_active_downloads`` so the per-row try/except
+    guard at the call site is the single seam where unhandled
+    exceptions get contained. Inside, ``return`` has the same semantics
+    as the original ``continue`` had inline.
+    """
+    request_id = row["id"]
+    raw_state = row.get("active_download_state")
+    if not raw_state:
+        # Crash recovery: downloading with no state means process_completed_album
+        # crashed on a previous run. Reset to wanted so it gets re-searched.
+        logger.error(f"Downloading album {request_id} has no active_download_state — "
+                     f"resetting to wanted")
+        transitions.finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+            ),
         )
+        return
 
-        if verdict.decision == DownloadDecision.timeout_remote_queue:
-            _timeout_album(entry, request_id, verdict.reason, ctx)
-            continue
+    # psycopg2 returns JSONB as dict, not string — use from_dict directly
+    if isinstance(raw_state, dict):
+        state = ActiveDownloadState.from_dict(raw_state)
+    else:
+        state = ActiveDownloadState.from_json(raw_state)
+    active_import_job = _active_import_job_for_request(db, request_id)
+    if active_import_job is not None:
+        job_id = (
+            active_import_job.get("id")
+            if isinstance(active_import_job, dict)
+            else getattr(active_import_job, "id", "?")
+        )
+        job_status = (
+            active_import_job.get("status")
+            if isinstance(active_import_job, dict)
+            else getattr(active_import_job, "status", "?")
+        )
+        logger.info(
+            "Request %s is waiting on importer job %s (%s)",
+            request_id,
+            job_id,
+            job_status,
+        )
+        return
+    if state.processing_started_at is not None:
+        recovery_decision = reconcile_processing_current_path(
+            current_path=state.current_path,
+            artist=row["artist_name"],
+            title=row["album_title"],
+            year=str(row["year"] or ""),
+            request_id=request_id,
+            staging_dir=ctx.cfg.beets_staging_dir,
+            slskd_download_dir=ctx.cfg.slskd_download_dir,
+            has_entries=directory_has_entries,
+        )
+        if recovery_decision.blocked_reason == "multiple_populated_paths":
+            rendered_candidates = ", ".join(
+                f"{location.short_label}={location.path}"
+                for location in recovery_decision.populated_locations
+            )
+            logger.error(
+                "MID-PROCESS RESUME BLOCKED: request_id=%s %s - %s "
+                "found multiple populated recovery paths (%s). "
+                "Manual recovery is required.",
+                request_id,
+                row["artist_name"],
+                row["album_title"],
+                rendered_candidates,
+            )
+            return
+        if recovery_decision.blocked_reason == "legacy_shared_only":
+            logger.error(
+                "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
+                "persisted current_path=%s could not be resumed, "
+                "canonical_path=%s has no files, "
+                "and staged_path=%s is ambiguous across editions. "
+                "Manual recovery is required.",
+                request_id,
+                row["artist_name"],
+                row["album_title"],
+                state.current_path,
+                recovery_decision.canonical_path,
+                recovery_decision.legacy_shared_path,
+            )
+            return
+        assert recovery_decision.selected_location is not None
+        selected_path = recovery_decision.selected_location.path
+        if selected_path != state.current_path:
+            state.current_path = selected_path
+            db.update_download_state_current_path(
+                request_id,
+                state.current_path,
+            )
+    entry = reconstruct_grab_list_entry(row, state)
 
-        if verdict.decision == DownloadDecision.complete:
-            logger.info(f"Download complete: {entry.artist} - {entry.title}")
-            _enqueue_completed_processing(entry, request_id, state, db, ctx)
-            continue
+    if state.processing_started_at is not None:
+        if not _processing_path_ready_for_importer(
+            entry,
+            request_id,
+            state,
+            db,
+            ctx,
+        ):
+            return
+        _enqueue_completed_processing(entry, request_id, state, db, ctx)
+        return
 
-        if verdict.decision == DownloadDecision.timeout_all_errored:
-            _timeout_album(entry, request_id, verdict.reason, ctx)
-            continue
+    # Re-derive transfer IDs from pre-fetched snapshot
+    if not rederive_transfer_ids(
+        entry,
+        ctx.slskd,
+        snapshot=cycle_snapshot,
+        not_before=state.enqueued_at,
+    ):
+        logger.warning(f"API error re-deriving transfers for {entry.artist} - {entry.title} "
+                       f"— will retry next cycle")
+        return
 
-        if verdict.decision == DownloadDecision.timeout_stalled:
-            _timeout_album(entry, request_id, verdict.reason, ctx)
-            continue
+    enqueued_at = datetime.fromisoformat(state.enqueued_at)
+    if enqueued_at.tzinfo is None:
+        enqueued_at = enqueued_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    elapsed_seconds = (now - enqueued_at).total_seconds()
 
-        if verdict.decision == DownloadDecision.retry_files:
-            for retry_filename in verdict.files_to_retry:
-                for df in entry.files:
-                    if df.filename == retry_filename:
-                        retries_used = (df.retry or 0) + 1
-                        df.retry = retries_used
-                        logger.info(f"Re-enqueue failed file "
-                                    f"({retries_used}/{MAX_FILE_RETRIES} retries): "
-                                    f"{retry_filename}")
-                        # Find the problem file for username/size/dir
-                        file = next((f for f in entry.files if f.filename == retry_filename), None)
-                        if file:
-                            requeue = slskd_do_enqueue(
-                                file.username,
-                                [{"filename": file.filename, "size": file.size}],
-                                file.file_dir, ctx)
-                            state_changed = True
-                            if requeue:
-                                df.id = requeue[0].id
-                                df.bytes_transferred = 0
-                                df.last_state = None
-                                state.last_progress_at = now.isoformat()
-                            else:
-                                logger.warning(f"Failed to re-enqueue file: {retry_filename}")
-                        break
+    # Check if all transfers have vanished (slskd restart, user offline).
+    # A restored terminal status from a previous poll is still visible
+    # evidence; do not erase it just because slskd no longer lists the
+    # removed transfer row.
+    all_vanished = all(f.id == "" and f.status is None for f in entry.files)
+    if all_vanished:
+        if elapsed_seconds < 60:
+            logger.info(
+                "Request %s has fresh planned ownership but no visible "
+                "slskd transfers yet; deferring vanished-transfer reset",
+                request_id,
+            )
+            return
+        _timeout_album(entry, request_id, "all transfers vanished from slskd", ctx)
+        return
 
-            refreshed = db.get_request(request_id)
-            if refreshed and refreshed["status"] != "downloading":
-                continue
+    # Mark files with vanished transfers as errored. Preserve restored
+    # terminal statuses (Completed, Rejected/Errored/etc.) from previous
+    # poll cycles so the reducer can report the real terminal failure.
+    for f in entry.files:
+        if f.id == "" and f.status is None:
+            f.status = {"state": "Completed, Errored"}
 
-        # In progress — persist state and log
+    # Track total album age separately from stall/progress timing.
+    # Poll live status only for transfers that are still active in slskd.
+    files_requiring_status = [
+        f for f in entry.files
+        if f.id and not (f.status and str(f.status.get("state", "")).startswith("Completed,"))
+    ]
+    if files_requiring_status and not slskd_download_status(
+            files_requiring_status, ctx, snapshot=cycle_snapshot):
+        logger.warning(f"API error polling {entry.artist} - {entry.title} — "
+                      f"will retry next cycle")
+        return
+
+    album_done, problems, queued = downloads_all_done(entry.files)
+    statusful_files = [f for f in entry.files if f.status is not None]
+    state_changed = _capture_download_progress(statusful_files, state, now)
+
+    all_remote_queued = _all_files_remotely_queued(entry.files, queued)
+    error_filenames = [f.filename for f in problems] if problems is not None else None
+    file_retries = {f.filename: (f.retry or 0) for f in entry.files}
+
+    progress_at = state.last_progress_at or state.enqueued_at
+    idle_seconds = (now - datetime.fromisoformat(progress_at)).total_seconds()
+
+    verdict = decide_download_action(
+        album_done=album_done,
+        error_filenames=error_filenames,
+        total_files=len(entry.files),
+        all_remote_queued=all_remote_queued,
+        elapsed_seconds=elapsed_seconds,
+        idle_seconds=idle_seconds,
+        remote_queue_timeout=ctx.cfg.remote_queue_timeout,
+        stalled_timeout=ctx.cfg.stalled_timeout,
+        file_retries=file_retries,
+        max_file_retries=MAX_FILE_RETRIES,
+        processing_started=False,
+    )
+
+    if verdict.decision == DownloadDecision.timeout_remote_queue:
+        _timeout_album(entry, request_id, verdict.reason, ctx)
+        return
+
+    if verdict.decision == DownloadDecision.complete:
+        logger.info(f"Download complete: {entry.artist} - {entry.title}")
+        _enqueue_completed_processing(entry, request_id, state, db, ctx)
+        return
+
+    if verdict.decision == DownloadDecision.timeout_all_errored:
+        _timeout_album(entry, request_id, verdict.reason, ctx)
+        return
+
+    if verdict.decision == DownloadDecision.timeout_stalled:
+        _timeout_album(entry, request_id, verdict.reason, ctx)
+        return
+
+    if verdict.decision == DownloadDecision.retry_files:
+        for retry_filename in verdict.files_to_retry:
+            for df in entry.files:
+                if df.filename == retry_filename:
+                    retries_used = (df.retry or 0) + 1
+                    df.retry = retries_used
+                    logger.info(f"Re-enqueue failed file "
+                                f"({retries_used}/{MAX_FILE_RETRIES} retries): "
+                                f"{retry_filename}")
+                    # Find the problem file for username/size/dir
+                    file = next((f for f in entry.files if f.filename == retry_filename), None)
+                    if file:
+                        requeue = slskd_do_enqueue(
+                            file.username,
+                            [{"filename": file.filename, "size": file.size}],
+                            file.file_dir, ctx)
+                        state_changed = True
+                        if requeue:
+                            df.id = requeue[0].id
+                            df.bytes_transferred = 0
+                            df.last_state = None
+                            state.last_progress_at = now.isoformat()
+                        else:
+                            logger.warning(f"Failed to re-enqueue file: {retry_filename}")
+                    break
+
         refreshed = db.get_request(request_id)
         if refreshed and refreshed["status"] != "downloading":
-            continue
-        if state_changed:
-            _persist_updated_download_state(db, request_id, entry, state)
+            return
 
-        # Still in progress — log and continue to next album
-        files_done = sum(1 for f in entry.files
-                        if f.status and f.status.get("state") == "Completed, Succeeded")
-        logger.info(f"In progress: {entry.artist} - {entry.title} "
-                    f"({files_done}/{len(entry.files)} files, "
-                    f"{elapsed_seconds/60:.1f}min elapsed)")
+    # In progress — persist state and log
+    refreshed = db.get_request(request_id)
+    if refreshed and refreshed["status"] != "downloading":
+        return
+    if state_changed:
+        _persist_updated_download_state(db, request_id, entry, state)
+
+    # Still in progress — log and continue to next album
+    files_done = sum(1 for f in entry.files
+                    if f.status and f.status.get("state") == "Completed, Succeeded")
+    logger.info(f"In progress: {entry.artist} - {entry.title} "
+                f"({files_done}/{len(entry.files)} files, "
+                f"{elapsed_seconds/60:.1f}min elapsed)")
 
 
 # === Top-level orchestration ===
