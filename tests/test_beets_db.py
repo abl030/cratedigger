@@ -710,6 +710,62 @@ class TestGetAlbumInfo(unittest.TestCase):
         self.assertEqual(info.album_path, "/music/Artist/Album")
         self.assertEqual(info.format, "MP3")
 
+    def test_relative_paths_absolutized_against_library_root(self) -> None:
+        """Real beets stores items.path relative to the library root.
+
+        Without absolutizing, downstream consumers like
+        ``snapshot_audio_files`` (called from
+        ``evidence_from_album_info``) test ``os.path.isdir`` against the
+        relative path from the importer's cwd, get False, and emit
+        ``empty_fileset / "no audio files found"`` even when the album
+        has files on disk. Surfaced as ``"kept: no audio files found"``
+        triage labels in the Wrong Matches UI.
+        """
+        _insert_album(self.db_path, 7, "rel-1", [
+            # Stored relative — exactly what production beets emits when
+            # `library: relative_to_lib: yes` (or similar) is set.
+            (192000, "Infinity Shred/2009 - Album/01.mp3"),
+            (192000, "Infinity Shred/2009 - Album/02.mp3"),
+        ])
+        with BeetsDB(self.db_path,
+                     library_root="/mnt/virtio/Music/Beets") as db:
+            info = db.get_album_info("rel-1", self.cfg)
+        assert info is not None
+        self.assertTrue(
+            os.path.isabs(info.album_path),
+            f"album_path must be absolute when library_root is set, "
+            f"got {info.album_path!r}",
+        )
+        self.assertEqual(
+            info.album_path,
+            "/mnt/virtio/Music/Beets/Infinity Shred/2009 - Album",
+        )
+
+    def test_absolute_paths_pass_through_with_library_root(self) -> None:
+        """An already-absolute beets path is returned untouched."""
+        _insert_album(self.db_path, 8, "abs-1", [
+            (320000, "/music/Foo/Bar/01.mp3"),
+        ])
+        with BeetsDB(self.db_path,
+                     library_root="/mnt/virtio/Music/Beets") as db:
+            info = db.get_album_info("abs-1", self.cfg)
+        assert info is not None
+        self.assertEqual(info.album_path, "/music/Foo/Bar")
+
+    def test_relative_paths_unchanged_without_library_root(self) -> None:
+        """Backwards compat: no library_root means no absolutization.
+
+        Existing call sites that don't pass ``library_root`` keep the
+        old contract — they still get whatever beets stored.
+        """
+        _insert_album(self.db_path, 9, "rel-2", [
+            (192000, "Artist/Album/01.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            info = db.get_album_info("rel-2", self.cfg)
+        assert info is not None
+        self.assertEqual(info.album_path, "Artist/Album")
+
     def test_vbr_album(self) -> None:
         _insert_album(self.db_path, 2, "def-456", [
             (245000, "/music/A/B/01.mp3"),

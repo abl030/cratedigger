@@ -223,7 +223,7 @@ def _analyze_existing(
     existing_min: int | None = None
     existing_spectral: SpectralMeasurement | None = None
     try:
-        with BeetsDB() as beets:
+        with BeetsDB(library_root=getattr(cfg, "beets_directory", "")) as beets:
             existing_info = beets.get_album_info(
                 mb_release_id, cfg.quality_ranks)
         if existing_info:

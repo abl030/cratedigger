@@ -542,6 +542,7 @@ def _load_evidence_import_gate(
     candidate_import_job_id: int | None,
     candidate_download_log_id: int | None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+    beets_library_root: str = "",
 ) -> EvidenceImportGate:
     """Load persisted evidence for import-time quality authority."""
 
@@ -569,7 +570,7 @@ def _load_evidence_import_gate(
         from lib.quality import QualityRankConfig
 
         cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
-        with BeetsDB() as beets:
+        with BeetsDB(library_root=beets_library_root) as beets:
             album_info = beets.get_album_info(mb_release_id, cfg)
         if album_info is None:
             return EvidenceImportGate(
@@ -589,6 +590,7 @@ def _load_evidence_import_gate(
             quality_ranks=quality_ranks,
             current_album_path=album_info.album_path,
             album_info=album_info,
+            beets_library_root=beets_library_root,
         )
     except Exception as exc:
         logger.debug(
@@ -1310,6 +1312,7 @@ def dispatch_import_core(
                 candidate_import_job_id=candidate_import_job_id,
                 candidate_download_log_id=candidate_download_log_id,
                 prevalidated_candidate_result=prevalidated_candidate_result,
+                beets_library_root=getattr(cfg, "beets_directory", "") if cfg is not None else "",
             )
             existing_v0_probe = lossless_source_v0_probe_from_metric(
                 evidence_gate.current.v0_metric

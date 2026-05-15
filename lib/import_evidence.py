@@ -125,6 +125,7 @@ def ensure_current_evidence_for_action(
     current_album_path: str | None = None,
     album_info: Any = None,
     backfill_builder: CurrentEvidenceBackfillBuilder | None = None,
+    beets_library_root: str = "",
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
 
@@ -183,6 +184,7 @@ def ensure_current_evidence_for_action(
                 quality_ranks=quality_ranks,
                 preloaded_evidence=None if existing_snapshot_stale else existing,
                 preloaded=True,
+                beets_library_root=beets_library_root,
             )
     except Exception as exc:
         return CurrentEvidenceActionResult(

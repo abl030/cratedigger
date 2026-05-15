@@ -18,9 +18,11 @@ from lib.quality import (
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import (
+    audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
     evidence_from_import_result,
     request_current_owner,
+    snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
@@ -311,6 +313,79 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.status, "incomplete")
         self.assertIn("duplicate snapshot relative_path", result.reason or "")
+
+
+class TestAudioSnapshotMatches(unittest.TestCase):
+    """Snapshot equality must ignore mtime_ns.
+
+    Real failure: ``process_completed_album`` writes ID3 tags to the
+    source files via ``music_tag.save()`` AFTER the preview worker has
+    already snapshotted them. The ``save()`` rewrites mtimes by
+    nanoseconds, the strict struct equality fails, the importer
+    requeues the job to preview as ``"candidate source changed since
+    evidence capture"``, preview re-runs, importer re-tags, infinite
+    loop. The queue grows but never drains.
+
+    virtiofs adds a second source of mtime jitter — the same file's
+    ``stat().st_mtime_ns`` can flicker by a few ns between reads. Any
+    fix must also make the snapshot resilient to that.
+
+    Comparison key is (relative_path, size_bytes, extension, container,
+    codec). mtime_ns stays in the struct as a forensic field but does
+    not participate in equality.
+    """
+
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp()
+        with open(os.path.join(self.root, "01.mp3"), "wb") as f:
+            f.write(b"track 1 audio content")
+        with open(os.path.join(self.root, "02.mp3"), "wb") as f:
+            f.write(b"track 2 audio content")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_snapshot_matches_after_mtime_only_change(self):
+        """Touching a file (size unchanged) must not invalidate the snapshot."""
+        captured = snapshot_audio_files(self.root)
+        # Simulate music_tag.save() rewriting the file in place: mtime
+        # advances even if the byte content (and so size) is identical.
+        for entry in os.listdir(self.root):
+            full = os.path.join(self.root, entry)
+            stat = os.stat(full)
+            os.utime(full, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000))
+
+        self.assertTrue(
+            audio_snapshot_matches(self.root, captured),
+            "mtime-only changes must not be treated as a source mismatch — "
+            "this caused the importer→preview infinite loop",
+        )
+
+    def test_snapshot_mismatch_when_size_differs(self):
+        """A real content change (size delta) must still be detected."""
+        captured = snapshot_audio_files(self.root)
+        with open(os.path.join(self.root, "01.mp3"), "ab") as f:
+            f.write(b"appended bytes")
+
+        self.assertFalse(audio_snapshot_matches(self.root, captured))
+
+    def test_snapshot_mismatch_when_file_removed(self):
+        captured = snapshot_audio_files(self.root)
+        os.remove(os.path.join(self.root, "02.mp3"))
+
+        self.assertFalse(audio_snapshot_matches(self.root, captured))
+
+    def test_snapshot_mismatch_when_file_added(self):
+        captured = snapshot_audio_files(self.root)
+        with open(os.path.join(self.root, "03.mp3"), "wb") as f:
+            f.write(b"new track")
+
+        self.assertFalse(audio_snapshot_matches(self.root, captured))
+
+    def test_snapshot_matches_unchanged_files(self):
+        """Sanity: an unchanged tree always matches."""
+        captured = snapshot_audio_files(self.root)
+        self.assertTrue(audio_snapshot_matches(self.root, captured))
 
 
 if __name__ == "__main__":

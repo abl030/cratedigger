@@ -146,7 +146,7 @@ def decide_wrong_match_cleanup(
             if quality_ranks is not None
             else QualityRankConfig.defaults()
         )
-        with BeetsDB() as beets:
+        with BeetsDB(library_root=getattr(cfg, "beets_directory", "")) as beets:
             album_info = beets.get_album_info(mb_release_id, rank_cfg)
     except Exception:
         logger.debug(
@@ -165,6 +165,7 @@ def decide_wrong_match_cleanup(
             quality_ranks=getattr(cfg, "quality_ranks", None),
             current_album_path=album_info.album_path,
             album_info=album_info,
+            beets_library_root=getattr(cfg, "beets_directory", ""),
         )
         if current_result.evidence is None:
             return _uncertain(
