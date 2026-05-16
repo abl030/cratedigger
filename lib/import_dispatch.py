@@ -655,6 +655,7 @@ def _refresh_current_evidence_after_import(
     quality_ranks: "QualityRankConfig | None",
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
+    beets_library_root: str = "",
 ) -> None:
     """Persist current evidence for the just-imported Beets album.
 
@@ -680,7 +681,13 @@ def _refresh_current_evidence_after_import(
     from lib.quality import QualityRankConfig
 
     cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
-    with BeetsDB() as beets:
+    # ``beets_library_root`` must be set: ``BeetsDB.get_album_info`` returns a
+    # path *relative* to the library root when constructed without one, which
+    # breaks ``snapshot_audio_files`` (host-side filesystem ops) — see the
+    # BeetsDB docstring. Both the U10 propagation path and the legacy
+    # ``backfill_current_evidence_from_album_info`` path depend on an
+    # absolute ``album_info.album_path`` to read the just-imported files.
+    with BeetsDB(library_root=beets_library_root) as beets:
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return
@@ -1791,6 +1798,9 @@ def dispatch_import_core(
                             ),
                             source_candidate=evidence_gate.candidate,
                             import_result=ir,
+                            beets_library_root=(
+                                cfg.beets_directory if cfg is not None else ""
+                            ),
                         )
                     except Exception:
                         logger.exception(

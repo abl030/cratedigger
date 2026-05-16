@@ -7524,5 +7524,93 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             )
 
 
+class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
+    """Regression: ``_refresh_current_evidence_after_import`` MUST pass
+    ``beets_library_root`` to ``BeetsDB(...)`` so ``get_album_info``
+    returns absolute paths. Without it, beets stores ``items.path``
+    relative to the library root, and ``snapshot_audio_files`` on a
+    relative path silently returns ``[]`` — ``propagate_candidate_evidence_to_current``
+    then short-circuits with ``status='empty_fileset'`` and no library
+    evidence row is written. First observed in prod on the
+    evidence-canonical-cleanup deploy (#261): every post-import
+    propagation silently no-op'd because the BeetsDB constructor wasn't
+    receiving the library root from cfg.beets_directory. The fix wires
+    it through the function signature."""
+
+    def test_refresh_passes_library_root_to_beets_db(self) -> None:
+        import inspect
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+
+        sig = inspect.signature(_refresh_current_evidence_after_import)
+        self.assertIn(
+            "beets_library_root",
+            sig.parameters,
+            "_refresh_current_evidence_after_import must accept "
+            "beets_library_root so the BeetsDB instance can resolve "
+            "items.path to absolute filesystem paths.",
+        )
+
+    def test_refresh_constructs_beets_db_with_library_root_kwarg(self) -> None:
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+
+        captured_library_root: list[str] = []
+
+        class FakeBeetsDB:
+            def __init__(self, db_path: str = "", *, library_root: str = "") -> None:
+                captured_library_root.append(library_root)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def get_album_info(self, mb_release_id, cfg):
+                # Returning None short-circuits the function before any
+                # snapshotting — we only care that BeetsDB was constructed
+                # with the right library_root kwarg.
+                return None
+
+        with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
+            _refresh_current_evidence_after_import(
+                db=None,  # type: ignore[arg-type]
+                request_id=1,
+                mb_release_id="mbid-test",
+                quality_ranks=None,
+                source_candidate=None,
+                import_result=None,
+                beets_library_root="/mnt/virtio/Music/Beets",
+            )
+
+        self.assertEqual(
+            captured_library_root,
+            ["/mnt/virtio/Music/Beets"],
+            "_refresh_current_evidence_after_import must forward "
+            "beets_library_root to the BeetsDB constructor — without "
+            "it, get_album_info returns relative paths and the "
+            "propagation silently no-ops.",
+        )
+
+    def test_dispatch_passes_cfg_beets_directory_to_refresh(self) -> None:
+        # Inspect the call site source to confirm cfg.beets_directory
+        # is wired to beets_library_root. Static check is sufficient and
+        # avoids a full dispatch-import-core orchestration test.
+        import inspect
+        from lib import import_dispatch
+
+        src = inspect.getsource(import_dispatch.dispatch_import_core)
+        # The call must include the beets_library_root kwarg sourced
+        # from cfg.beets_directory (with a None-safe fallback).
+        self.assertIn("_refresh_current_evidence_after_import(", src)
+        # Look for the wiring after the function call. Pattern:
+        #   beets_library_root=(... cfg.beets_directory ...)
+        refresh_block_start = src.index(
+            "_refresh_current_evidence_after_import("
+        )
+        refresh_block = src[refresh_block_start:refresh_block_start + 1500]
+        self.assertIn("beets_library_root=", refresh_block)
+        self.assertIn("cfg.beets_directory", refresh_block)
+
+
 if __name__ == "__main__":
     unittest.main()
