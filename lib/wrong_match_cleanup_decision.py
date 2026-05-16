@@ -112,6 +112,34 @@ def decide_wrong_match_cleanup(
                 candidate_result.provenance.fallback_reason
                 or "candidate_evidence_unavailable",
             )
+        # Cold-path fallback: re-measure the candidate. Two legitimate
+        # paths land here after U4:
+        #   * candidate_status='missing' — genuinely evidence-less legacy
+        #     row (no FK chain hit). Post-migration this should be rare;
+        #     log it so the operator can spot a regression in evidence
+        #     persistence.
+        #   * candidate_status='stale' — snapshot fingerprint no longer
+        #     matches the files on disk. This is the *only* mantra-aligned
+        #     re-measurement path: files genuinely changed.
+        candidate_status = candidate_result.provenance.candidate_status
+        if candidate_status == "missing":
+            logger.warning(
+                "wrong_match_cleanup.cold_path_fallback "
+                "download_log_id=%d candidate_status=%s reason=%s",
+                download_log_id,
+                candidate_status,
+                candidate_result.provenance.fallback_reason
+                or "candidate_evidence_unavailable",
+            )
+        else:
+            logger.info(
+                "wrong_match_cleanup.cold_path_fallback "
+                "download_log_id=%d candidate_status=%s reason=%s",
+                download_log_id,
+                candidate_status,
+                candidate_result.provenance.fallback_reason
+                or "candidate_evidence_unavailable",
+            )
         preview = preview_builder(db, download_log_id)
         candidate_source_path = preview.source_path or failed_path
         candidate_result = ensure_candidate_evidence_for_action(

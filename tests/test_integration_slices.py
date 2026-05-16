@@ -7211,5 +7211,134 @@ class TestPersistEvidenceOnRejectSlice(unittest.TestCase):
         )
 
 
+class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
+    """U4 regression guard: triage's happy path skips cold-path measurement.
+
+    When evidence is reachable through the FK chain
+    (``download_log.candidate_evidence_id`` direct, or via the cross-walk
+    through ``import_jobs``), ``triage_wrong_match`` must NOT trigger
+    ``measure_preimport_state``. The preview-worker contract (PR #254)
+    owns the only legitimate path that measures candidates; triage just
+    reads. This slice patches the measurement seam and asserts zero
+    calls — the regression that bit PR #256 was exactly this kind of
+    duplicate measurement on the rejection path.
+    """
+
+    def _seed(self, source: str) -> tuple[FakePipelineDB, int]:
+        from tests.helpers import make_request_row as _make_req
+        db = FakePipelineDB()
+        db.seed_request(_make_req(
+            id=1, status="manual", mb_release_id="mbid-1",
+        ))
+        db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "wrong_match",
+                "failed_path": source,
+            },
+        )
+        return db, db.download_logs[-1].id
+
+    def _evidence_for(self, source_dir: str, mb_release_id: str):
+        """Build content-addressed evidence matching files on disk."""
+        from datetime import datetime, timezone
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
+            AudioQualityMeasurement,
+        )
+        from lib.quality_evidence import snapshot_fingerprint
+        full = os.path.join(source_dir, "01.mp3")
+        stat = os.stat(full)
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="01.mp3",
+                size_bytes=int(stat.st_size),
+                mtime_ns=int(stat.st_mtime_ns),
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            ),
+        ]
+        return AlbumQualityEvidence(
+            mb_release_id=mb_release_id,
+            snapshot_fingerprint=snapshot_fingerprint(files),
+            source_path=source_dir,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="mp3 v0",
+                spectral_grade="genuine",
+            ),
+            measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            files=files,
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+            audio_file_count=1,
+            filetype_band="mp3",
+            folder_layout="flat",
+        )
+
+    def _patch_beets_no_album(self):
+        """Stub BeetsDB so wrong-match cleanup runs without a real beets lib."""
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        ctx.get_album_info.return_value = None
+        return patch("lib.beets_db.BeetsDB", return_value=ctx)
+
+    def _patch_cfg(self):
+        """Pin the runtime-config loader so the test doesn't read disk."""
+        from lib.quality import QualityRankConfig
+        from types import SimpleNamespace as _SN
+        cfg = _SN(
+            quality_ranks=QualityRankConfig.defaults(),
+            verified_lossless_target="",
+            beets_directory="",
+        )
+        return patch(
+            "lib.config.read_runtime_config",
+            return_value=cfg,
+        )
+
+    def test_triage_with_fk_evidence_does_not_measure(self) -> None:
+        """Happy path: evidence reachable via FK chain → zero measurement."""
+        from lib.wrong_match_triage import triage_wrong_match
+
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as fp:
+                fp.write(b"audio")
+            db, log_id = self._seed(source)
+            evidence = self._evidence_for(source, "mbid-1")
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id="mbid-1",
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_download_log_candidate_evidence(log_id, stored.id)
+
+            with self._patch_beets_no_album(), \
+                    self._patch_cfg(), \
+                    patch("lib.preimport.measure_preimport_state") as mp, \
+                    patch(
+                        "lib.wrong_match_triage._preview_for_triage"
+                    ) as cold:
+                result = triage_wrong_match(db, log_id)
+
+            mp.assert_not_called()
+            cold.assert_not_called()
+            self.assertTrue(result.success)
+            # Verdict resolved without ever calling the cold-path preview.
+            self.assertIsNotNone(result.preview)
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(source, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

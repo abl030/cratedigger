@@ -127,7 +127,7 @@ def _preview_from_cleanup_decision(
         decision=decision.preview_decision,
         reason=decision.reason,
         detail=decision.detail,
-        stage_chain=decision.stage_chain,
+        stage_chain=list(decision.stage_chain),
         request_id=decision.request_id,
         download_log_id=decision.download_log_id,
         source_path=decision.source_path,
