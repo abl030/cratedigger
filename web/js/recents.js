@@ -4,6 +4,8 @@ import { awstDate, awstTime, esc } from './util.js';
 import { toggleDetail } from './pipeline.js';
 import { renderSearchPlanButton } from './search_plan.js';
 
+const RECENTS_HISTORY_LIMIT = 500;
+
 /**
  * Set the recents filter and reload.
  * @param {string} f
@@ -29,6 +31,13 @@ function renderRecentsSubnav() {
     <button class="p-btn ${state.recentsSub === 'queue' ? 'active-status' : ''}" onclick="window.setRecentsSub('queue')">Queue</button>
     <button class="p-btn subtab-refresh" onclick="window.loadRecents()">Refresh</button>
   </div>`;
+}
+
+function recentsLogUrl() {
+  const params = new URLSearchParams();
+  if (state.recentsFilter !== 'all') params.set('outcome', state.recentsFilter);
+  params.set('limit', String(RECENTS_HISTORY_LIMIT));
+  return `${API}/api/pipeline/log?${params.toString()}`;
 }
 
 /**
@@ -433,8 +442,7 @@ export async function loadRecents() {
   }
   el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
   try {
-    const filterParam = state.recentsFilter === 'all' ? '' : `?outcome=${state.recentsFilter}`;
-    const r = await fetch(`${API}/api/pipeline/log${filterParam}`);
+    const r = await fetch(recentsLogUrl());
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const items = data.log || [];
@@ -453,6 +461,7 @@ export async function loadRecents() {
 export const __test__ = {
   hasMatchRates,
   matchRatesFromDashboardWindows,
+  recentsLogUrl,
   renderDownloadingItems,
   renderImportQueueItems,
   renderRecentsCounts,
