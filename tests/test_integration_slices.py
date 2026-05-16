@@ -6439,5 +6439,210 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         self.assertEqual(db.denylist[0].username, "alice")
 
 
+# ---------------------------------------------------------------------------
+# U7. Recovery sweep migration 020 — integration slice (AE8)
+# ---------------------------------------------------------------------------
+
+# Importing conftest boots the ephemeral PostgreSQL and sets TEST_DB_DSN so
+# this slice can use a real PipelineDB. Without this, running the slice via
+# ``python3 -m unittest tests.test_integration_slices`` directly would skip
+# (conftest is only auto-loaded by pytest discovery).
+import sys as _u7_sys
+_u7_sys.path.insert(0, os.path.dirname(__file__))
+import conftest as _u7_conftest  # noqa: F401  # boots ephemeral PG + sets DSN
+
+
+def _u7_test_dsn() -> str | None:
+    """Read the DSN lazily — conftest sets it during import, after this module
+    is parsed by the test runner."""
+    return os.environ.get("TEST_DB_DSN")
+
+
+@unittest.skipUnless(_u7_test_dsn(), "TEST_DB_DSN not set — slice needs real PG")
+class TestU7RecoverySweepSlice(unittest.TestCase):
+    """AE8 integration slice: pre-seed an ``import_jobs`` row with
+    ``preview_status='uncertain'``, run the migration-020 sweep against the
+    real PostgreSQL test fixture, then assert ``PipelineDB.claim_next_import_
+    preview_job`` (the actual preview-worker claim query) selects the
+    recovered row.
+
+    This is the AE8 contract: the 315-stuck-row symptom is resolved by
+    re-circulating those rows through the new preview-never-decides
+    pipeline. The slice proves end-to-end that the live SQL flow puts the
+    row into a state the preview worker will pick up on its next tick.
+    """
+
+    # Direct copy of the canonical sweep statement from
+    # ``migrations/020_recover_stuck_preview_uncertain_jobs.sql``.
+    _RECOVERY_SWEEP_SQL = """
+        UPDATE import_jobs
+        SET preview_status = 'waiting',
+            preview_result = NULL,
+            preview_message = 'Recovered by preview-never-decides refactor (020)',
+            preview_error = NULL,
+            preview_worker_id = NULL,
+            preview_started_at = NULL,
+            preview_heartbeat_at = NULL,
+            preview_completed_at = NULL,
+            importable_at = NULL,
+            updated_at = NOW()
+        WHERE status = 'queued'
+          AND preview_status = 'uncertain'
+    """
+
+    def setUp(self):
+        import psycopg2
+        from lib.pipeline_db import PipelineDB
+        self._psycopg2 = psycopg2
+        self.db = PipelineDB(_u7_test_dsn())
+        self.addCleanup(self.db.close)
+        # Track per-test resources for teardown.
+        self._mbids: list[str] = []
+
+    def tearDown(self):
+        # Drop any seeded rows (CASCADE handles import_jobs).
+        if self._mbids:
+            conn = self._psycopg2.connect(_u7_test_dsn())
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM album_requests WHERE mb_release_id = ANY(%s)",
+                        (self._mbids,),
+                    )
+            finally:
+                conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = self._psycopg2.connect(_u7_test_dsn())
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = self._psycopg2.connect(_u7_test_dsn())
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _seed_stuck_uncertain_job(self, *, mbid: str) -> tuple[int, int]:
+        """Insert a request + a stuck uncertain import_jobs row. Returns
+        (request_id, import_job_id)."""
+        self._mbids.append(mbid)
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'Test Artist', 'Test Album', 'request')
+        """, (mbid,))
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+        # Mimic a real pre-deploy stuck row — uncertain with verdict result,
+        # message, worker_id, and lifecycle timestamps populated.
+        self._exec("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, payload,
+                preview_status, preview_result, preview_message,
+                preview_error, preview_worker_id,
+                preview_started_at, preview_heartbeat_at,
+                preview_completed_at, importable_at
+            )
+            VALUES (
+                'automation_import', 'queued', %s, '{}'::jsonb,
+                'uncertain', '{"verdict": "uncertain"}'::jsonb,
+                'pre-U7 stuck preview verdict',
+                NULL, 'pre-U7-worker',
+                NOW(), NOW(), NOW(), NOW()
+            )
+        """, (rid,))
+        job_id = self._query(
+            "SELECT id FROM import_jobs WHERE request_id = %s",
+            (rid,),
+        )[0][0]
+        return rid, job_id
+
+    def test_ae8_stuck_uncertain_job_recovers_through_real_claim_query(self):
+        """AE8 happy path: stuck uncertain row → migration sweep → live
+        ``claim_next_import_preview_job`` selects it as the next preview job.
+        """
+        rid, job_id = self._seed_stuck_uncertain_job(
+            mbid="u7-slice-recover-mbid",
+        )
+
+        # Pre-condition: the worker would NOT claim this row before the sweep
+        # because the claim query gates on ``preview_status='waiting'``.
+        # We can't observe this directly without claiming the wrong row in
+        # tests running in parallel, so we just confirm the seed state.
+        pre = self._query(
+            "SELECT preview_status, preview_message FROM import_jobs WHERE id = %s",
+            (job_id,),
+        )
+        self.assertEqual(pre, [("uncertain", "pre-U7 stuck preview verdict")])
+
+        # Apply the canonical migration-020 sweep statement.
+        self._exec(self._RECOVERY_SWEEP_SQL)
+
+        # Post-condition: row flipped to waiting with cleared lifecycle and
+        # the audit message attached.
+        post = self._query("""
+            SELECT preview_status, preview_message, preview_result,
+                   preview_worker_id, preview_started_at,
+                   preview_heartbeat_at, preview_completed_at, importable_at
+            FROM import_jobs WHERE id = %s
+        """, (job_id,))
+        self.assertEqual(len(post), 1)
+        (preview_status, message, result, worker_id, started_at,
+         heartbeat_at, completed_at, importable_at) = post[0]
+        self.assertEqual(preview_status, "waiting")
+        self.assertEqual(
+            message,
+            "Recovered by preview-never-decides refactor (020)",
+        )
+        self.assertIsNone(result)
+        self.assertIsNone(worker_id)
+        self.assertIsNone(started_at)
+        self.assertIsNone(heartbeat_at)
+        self.assertIsNone(completed_at)
+        self.assertIsNone(importable_at)
+
+        # Now the live preview-worker claim query must select this row.
+        claimed = self.db.claim_next_import_preview_job(
+            worker_id="u7-test-worker",
+        )
+        # There may be other 'waiting' jobs from parallel tests in a shared
+        # DSN; if so we keep claiming until we find ours, but the contract is
+        # that our row IS claimable. We bound the loop at a small constant.
+        found = False
+        seen: list[int] = []
+        for _ in range(10):
+            if claimed is None:
+                break
+            seen.append(claimed.id)
+            if claimed.id == job_id:
+                found = True
+                break
+            claimed = self.db.claim_next_import_preview_job(
+                worker_id="u7-test-worker",
+            )
+        self.assertTrue(
+            found,
+            f"claim_next_import_preview_job did not surface job {job_id}; "
+            f"saw {seen}",
+        )
+        # Claimed row transitions to ``running`` per the claim contract.
+        running = self._query(
+            "SELECT preview_status, preview_worker_id FROM import_jobs WHERE id = %s",
+            (job_id,),
+        )
+        self.assertEqual(running, [("running", "u7-test-worker")])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1007,5 +1007,237 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
+# ---------------------------------------------------------------------------
+# Migration 020 — recovery sweep for preview_status='uncertain'
+# ---------------------------------------------------------------------------
+
+@requires_postgres
+class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
+    """Migration 020 sweeps stuck ``preview_status='uncertain'`` rows back
+    to ``'waiting'`` so the preview worker re-claims them under the new
+    preview-never-decides contract.
+
+    Validates:
+    - schema_migrations records 020
+    - the canonical UPDATE flips ``status='queued' AND preview_status='uncertain'``
+      rows to ``preview_status='waiting'`` and clears the lifecycle columns
+    - idempotent: re-running the UPDATE on a clean DB flips zero rows
+    - rows in other preview_status values (``evidence_ready``, ``error``,
+      ``measurement_failed``) are untouched
+    """
+
+    # The exact UPDATE statement shipped in
+    # ``migrations/020_recover_stuck_preview_uncertain_jobs.sql``. Tests run
+    # this statement directly against test-seeded rows because conftest.py
+    # already applied migration 020 at session start (so there's no stuck
+    # 'uncertain' row in the live test DB to observe).
+    _RECOVERY_SWEEP_SQL = """
+        UPDATE import_jobs
+        SET preview_status = 'waiting',
+            preview_result = NULL,
+            preview_message = 'Recovered by preview-never-decides refactor (020)',
+            preview_error = NULL,
+            preview_worker_id = NULL,
+            preview_started_at = NULL,
+            preview_heartbeat_at = NULL,
+            preview_completed_at = NULL,
+            importable_at = NULL,
+            updated_at = NOW()
+        WHERE status = 'queued'
+          AND preview_status = 'uncertain'
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _exec_with_rowcount(self, sql: str, params: tuple = ()) -> int:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.rowcount
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def _cleanup_request(self, rid: int) -> None:
+        # CASCADE on album_requests.id → import_jobs cleans up associated jobs.
+        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_schema_migrations_records_020(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 20"
+        )
+        self.assertEqual(rows, [(20,)])
+
+    def test_recovery_sweep_flips_uncertain_to_waiting_and_clears_lifecycle(self):
+        """A stuck uncertain row flips to waiting with the lifecycle cleared."""
+        rid = self._make_request("mig020-flip-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload,
+                    preview_status, preview_result, preview_message,
+                    preview_error, preview_worker_id,
+                    preview_started_at, preview_heartbeat_at,
+                    preview_completed_at, importable_at
+                )
+                VALUES (
+                    'automation_import', 'queued', %s, '{}'::jsonb,
+                    'uncertain', '{"verdict": "uncertain"}'::jsonb,
+                    'pre-U7 stuck reason',
+                    'pre-U7 stuck error', 'pre-U7-worker',
+                    NOW(), NOW(),
+                    NOW(), NOW()
+                )
+            """, (rid,))
+            affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(affected, 1)
+            rows = self._query("""
+                SELECT preview_status, preview_result, preview_message,
+                       preview_error, preview_worker_id,
+                       preview_started_at, preview_heartbeat_at,
+                       preview_completed_at, importable_at
+                FROM import_jobs WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(len(rows), 1)
+            (preview_status, preview_result, preview_message,
+             preview_error, preview_worker_id, preview_started_at,
+             preview_heartbeat_at, preview_completed_at,
+             importable_at) = rows[0]
+            self.assertEqual(preview_status, "waiting")
+            self.assertIsNone(preview_result)
+            self.assertEqual(
+                preview_message,
+                "Recovered by preview-never-decides refactor (020)",
+            )
+            self.assertIsNone(preview_error)
+            self.assertIsNone(preview_worker_id)
+            self.assertIsNone(preview_started_at)
+            self.assertIsNone(preview_heartbeat_at)
+            self.assertIsNone(preview_completed_at)
+            self.assertIsNone(importable_at)
+        finally:
+            self._cleanup_request(rid)
+
+    def test_recovery_sweep_is_idempotent(self):
+        """Re-running the sweep on a row already flipped touches nothing."""
+        rid = self._make_request("mig020-idem-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload, preview_status
+                )
+                VALUES (
+                    'automation_import', 'queued', %s, '{}'::jsonb, 'uncertain'
+                )
+            """, (rid,))
+            first = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(first, 1)
+            second = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(
+                second, 0,
+                "Second run of the recovery sweep must be a no-op",
+            )
+        finally:
+            self._cleanup_request(rid)
+
+    def test_recovery_sweep_leaves_other_preview_statuses_untouched(self):
+        """Rows in other preview_status values are untouched."""
+        rid = self._make_request("mig020-untouched-mbid")
+        try:
+            # Seed three jobs in distinct non-uncertain preview_status values.
+            # Use a heartbeat timestamp the sweep would have nulled, to prove
+            # those fields are untouched.
+            for preview_status in ("evidence_ready", "measurement_failed",
+                                   "error"):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, status, request_id, payload,
+                        preview_status, preview_message,
+                        preview_heartbeat_at
+                    )
+                    VALUES (
+                        'manual_import', 'queued', %s, '{}'::jsonb,
+                        %s, 'pre-existing message',
+                        '2026-05-15 00:00:00+00'
+                    )
+                """, (rid, preview_status))
+
+            affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(affected, 0)
+
+            rows = self._query("""
+                SELECT preview_status, preview_message, preview_heartbeat_at
+                FROM import_jobs WHERE request_id = %s
+                ORDER BY id ASC
+            """, (rid,))
+            self.assertEqual(len(rows), 3)
+            statuses = {r[0] for r in rows}
+            self.assertEqual(
+                statuses,
+                {"evidence_ready", "measurement_failed", "error"},
+            )
+            for _, message, heartbeat in rows:
+                self.assertEqual(message, "pre-existing message")
+                self.assertIsNotNone(heartbeat)
+        finally:
+            self._cleanup_request(rid)
+
+    def test_recovery_sweep_only_targets_queued_jobs(self):
+        """A non-queued ``uncertain`` row is left alone — the WHERE guard
+        gates on ``status='queued'`` so completed/failed legacy rows are
+        not retro-resurrected."""
+        rid = self._make_request("mig020-failed-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload,
+                    preview_status, preview_message
+                )
+                VALUES (
+                    'manual_import', 'failed', %s, '{}'::jsonb,
+                    'uncertain', 'historical failed job'
+                )
+            """, (rid,))
+            affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(affected, 0)
+            rows = self._query("""
+                SELECT status, preview_status, preview_message
+                FROM import_jobs WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(rows, [("failed", "uncertain",
+                                     "historical failed job")])
+        finally:
+            self._cleanup_request(rid)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -695,9 +695,25 @@ def run_preimport_gates(
     inline — denylisting on bad-hash and spectral-reject — also stay here so
     behavior is identical to pre-U3.
 
-    U5 / U6 will migrate every caller off this shim onto
-    ``measure_preimport_state`` + ``preimport_decide`` and the importer-side
-    rejection-finalize helper, after which this function can be deleted.
+    U5 / U6 migrated the worker path (the importer + the preview worker) onto
+    ``measure_preimport_state`` + ``preimport_decide`` + the importer-side
+    rejection-finalize helper. After U7 the remaining callers are:
+      * ``lib/import_preview.py::preview_import_from_download_log`` — the
+        non-worker force / manual / wrong-match-triage preview entry point
+        (called with ``db=None`` so the shim's denylist side effects are
+        bypassed). Migrating it requires reshaping the calling function to
+        read measurement facts directly instead of legacy ``valid``/
+        ``scenario`` flags.
+      * ``lib/download.py::_process_finalized_download`` — the auto-import
+        fallback path when candidate evidence isn't already available.
+        Migrating it requires reshaping the calling function to delegate to
+        ``preimport_decide`` and the shared rejection-finalize helper.
+
+    Both are intentionally left on the shim: they live outside the worker
+    pipeline and the U7 grep-clean targets (``verdict="uncertain"`` /
+    ``verdict="confident_reject"`` / ``PREVIEW_FAILURE_STATUS`` /
+    ``IMPORT_JOB_PREVIEW_UNCERTAIN`` / ``preview_status='uncertain'``) do
+    not constrain them. A follow-up may eliminate this shim entirely.
     """
     measurement = measure_preimport_state(
         path=path,
