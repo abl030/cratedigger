@@ -76,7 +76,6 @@ export function renderRecentsItems(items, matchRates = null) {
       const triageChip = triageSummary
         ? `<span class="badge badge-warn" title="${esc(triageDetail)}">triage: ${esc(triageSummary)}</span>`
         : '';
-      const clearedChip = clearedWrongMatchChip(item);
 
       // Search-plan inspector button — Recents rows always render the
       // button. Use the request_id (the album_requests.id) since the
@@ -87,7 +86,7 @@ export function renderRecentsItems(items, matchRates = null) {
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}${triageChip}${clearedChip}</div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}${triageChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
             <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>
@@ -108,30 +107,6 @@ function renderRecentsDateHeader(date, matchRates) {
     <span>${date}</span>
     <span class="recents-date-metrics">6h ${formatMatchRate(matchRates.matches_per_hour_6h)} match/hr · 24h ${formatMatchRate(matchRates.matches_per_hour_24h)} match/hr</span>
   </div>`;
-}
-
-function validationResultDict(raw) {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
-  if (typeof raw === 'string' && raw.length) {
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-    } catch (_e) {
-      return null;
-    }
-  }
-  return null;
-}
-
-function hasFailedPath(raw) {
-  const validationResult = validationResultDict(raw);
-  return Boolean(validationResult && validationResult.failed_path);
-}
-
-function clearedWrongMatchChip(item) {
-  if (item.outcome !== 'rejected') return '';
-  if (hasFailedPath(item.validation_result)) return '';
-  return '<span class="badge badge-library" title="No failed_path remains on this rejected history row.">not in Wrong Matches</span>';
 }
 
 function queueBadge(job, index) {

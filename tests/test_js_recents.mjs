@@ -320,7 +320,7 @@ console.log('renderRecentsItems() escapes wrong-match triage chip fields');
     'raw triage summary is not rendered');
 }
 
-console.log('renderRecentsItems() distinguishes rejected history from actionable Wrong Matches');
+console.log('renderRecentsItems() does not mark rejected history as cleared wrong-matches');
 {
   const html = __test__.renderRecentsItems([{
     id: 15838,
@@ -335,8 +335,8 @@ console.log('renderRecentsItems() distinguishes rejected history from actionable
     summary: 'downgrade · AliceLo',
     validation_result: null,
   }]);
-  assertContains(html, 'not in Wrong Matches',
-    'rejected history row with no failed_path is marked non-actionable');
+  assertExcludes(html, 'not in Wrong Matches',
+    'ordinary rejected history row is not labelled as a wrong-match cleanup result');
 }
 
 console.log('renderRecentsItems() does not mark visible wrong-match rows as cleared');
