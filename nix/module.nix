@@ -902,10 +902,16 @@ in {
       after = ["cratedigger-db-migrate.service"];
       requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
-      # Keep the importer running across nixos-rebuild switch so in-flight
-      # beets mutations aren't killed. requeue_running_import_jobs is the
-      # belt-and-braces recovery path if a kill does happen anyway.
-      restartIfChanged = false;
+      # Restart on deploy. The previous "skip restart to avoid killing
+      # in-flight work" rationale failed in practice on 2026-05-16:
+      # switch-to-configuration SIGTERM'd both workers anyway (units
+      # changed transitively) and never brought them back, leaving the
+      # pipeline silently dead for ~96 minutes. ``Restart=on-failure``
+      # doesn't help — SIGTERM is a clean exit. ``requeue_running_import_jobs``
+      # at startup is the belt-and-braces recovery for the mid-job kill
+      # case; that's the right place to handle in-flight work, not by
+      # leaving the worker dead.
+      restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = {
         Type = "simple";
@@ -926,11 +932,11 @@ in {
       after = ["cratedigger-db-migrate.service"];
       requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
-      # Same rationale as cratedigger-importer below: avoid killing in-flight
-      # measurement on deploy. Stale-job recovery via requeue_stale_import_preview_jobs
-      # exists, but skipping the kill in the first place is cheaper and the
-      # established pattern for long-lived workers.
-      restartIfChanged = false;
+      # Restart on deploy. Same reasoning as cratedigger-importer: deploy
+      # SIGTERM'd this unit on 2026-05-16 and never brought it back.
+      # ``requeue_stale_import_preview_jobs`` handles mid-job kills at startup;
+      # leaving the worker dead instead is strictly worse.
+      restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = {
         Type = "simple";
