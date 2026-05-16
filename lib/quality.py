@@ -725,14 +725,6 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     was_converted_from: Optional[str] = None
 
 
-ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE = "download_log_candidate"
-ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE = "import_job_candidate"
-ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT = "request_current"
-ALBUM_QUALITY_EVIDENCE_OWNER_TYPES: tuple[str, ...] = (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-)
 _LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (
     "lossless_source_v0",
     "native_lossy_research_v0",
@@ -742,27 +734,6 @@ V0_SOURCE_LINEAGE_LOSSLESS_SOURCE = "lossless_source"
 V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH = "native_lossy_research"
 V0_SOURCE_LINEAGE_ON_DISK_RESEARCH = "on_disk_research"
 _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND = "neutral_v0_research"
-
-
-class AlbumQualityEvidenceOwner(msgspec.Struct, frozen=True):
-    """Owner identity for persisted active album-quality evidence.
-
-    Only the three owner families below are persisted in U2:
-    ``download_log_candidate``, ``import_job_candidate``, and
-    ``request_current``. Simulator evidence remains in memory and must not
-    invent a persisted owner type.
-    """
-
-    owner_type: str
-    owner_id: int
-
-    def validation_errors(self) -> list[str]:
-        errors: list[str] = []
-        if self.owner_type not in ALBUM_QUALITY_EVIDENCE_OWNER_TYPES:
-            errors.append(f"invalid owner_type: {self.owner_type!r}")
-        if not isinstance(self.owner_id, int) or self.owner_id <= 0:
-            errors.append("owner_id must be a positive integer")
-        return errors
 
 
 class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
@@ -852,11 +823,20 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     policy-facing facts. Snapshot rows and intrinsic provenance live here;
     action provenance such as reused/recomputed/backfilled/fallback outcomes
     belongs to preview/import/cleanup result surfaces, not to this durable row.
+
+    Identity is content-addressed by ``(mb_release_id, snapshot_fingerprint)``
+    after migration 021. ``id`` is the surrogate PK populated after upsert.
+    Addressing (which entity points at this row) lives on the addressing
+    entity: ``import_jobs.candidate_evidence_id``,
+    ``download_log.candidate_evidence_id``, ``album_requests.current_evidence_id``.
     """
 
-    owner: AlbumQualityEvidenceOwner
+    mb_release_id: str
+    snapshot_fingerprint: str
+    source_path: str
     measurement: AudioQualityMeasurement
     measured_at: datetime
+    id: int | None = None
     files: list[AlbumQualityEvidenceFile] = msgspec.field(default_factory=list)
     codec: str | None = None
     container: str | None = None
@@ -878,9 +858,12 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
 
     def sorted_for_storage(self) -> "AlbumQualityEvidence":
         return AlbumQualityEvidence(
-            owner=self.owner,
+            mb_release_id=self.mb_release_id,
+            snapshot_fingerprint=self.snapshot_fingerprint,
+            source_path=self.source_path,
             measurement=self.measurement,
             measured_at=self.measured_at,
+            id=self.id,
             files=sorted(self.files, key=lambda f: f.relative_path),
             codec=self.codec,
             container=self.container,
@@ -897,7 +880,11 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
         )
 
     def storage_validation_errors(self) -> list[str]:
-        errors = self.owner.validation_errors()
+        errors: list[str] = []
+        if not self.mb_release_id:
+            errors.append("mb_release_id must be a non-empty string")
+        if not self.snapshot_fingerprint:
+            errors.append("snapshot_fingerprint must be a non-empty string")
         if self.measured_at is None:
             errors.append("measured_at is required")
         # Empty snapshot is a storable fact ONLY when audio_file_count=0

@@ -1,4 +1,9 @@
-"""Tests for album-quality evidence construction helpers."""
+"""Tests for album-quality evidence construction helpers.
+
+Migration 021 re-keyed evidence from ``(owner_type, owner_id)`` to
+``(mb_release_id, snapshot_fingerprint)``. These tests exercise the new
+content-addressed writers and the FK-chain readers.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +14,7 @@ import unittest
 
 from lib.beets_db import AlbumInfo
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AlbumQualityEvidenceFile,
-    AlbumQualityEvidenceOwner,
     AudioQualityMeasurement,
     ImportResult,
     V0ProbeEvidence,
@@ -21,7 +24,6 @@ from lib.quality_evidence import (
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
     evidence_from_import_result,
-    request_current_owner,
     snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
@@ -40,12 +42,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_import_result_builds_neutral_candidate_evidence(self):
-        owner = AlbumQualityEvidenceOwner(
-            owner_type="import_job_candidate",
-            owner_id=10,
-        )
         result = evidence_from_import_result(
-            owner=owner,
+            mb_release_id="mb-candidate-1",
             source_path=self.root,
             import_result=ImportResult(
                 decision="import",
@@ -68,6 +66,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             [file.relative_path for file in result.evidence.files],
             ["01.mp3", "02.mp3"],
         )
+        self.assertEqual(result.evidence.mb_release_id, "mb-candidate-1")
+        self.assertTrue(result.evidence.snapshot_fingerprint)
         assert result.evidence.v0_metric is not None
         self.assertEqual(result.evidence.v0_metric.source_lineage, "lossless_source")
 
@@ -75,10 +75,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         empty = tempfile.mkdtemp()
         try:
             result = evidence_from_import_result(
-                owner=AlbumQualityEvidenceOwner(
-                    owner_type="import_job_candidate",
-                    owner_id=10,
-                ),
+                mb_release_id="mb-empty-1",
                 source_path=empty,
                 import_result=ImportResult(
                     decision="import",
@@ -100,6 +97,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         result = backfill_current_evidence_from_album_info(
             db,
             request_id=42,
+            mb_release_id="mb-current-1",
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=2,
@@ -113,7 +111,9 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         self.assertTrue(result.available)
-        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        evidence_id = db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(evidence_id)
+        loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
         self.assertTrue(loaded.measurement.verified_lossless)
         assert loaded.verified_lossless_proof is not None
@@ -121,10 +121,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             loaded.verified_lossless_proof.proof_origin,
             "legacy_request_seed",
         )
-        self.assertEqual(
-            loaded.owner.owner_type,
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-        )
+        self.assertEqual(loaded.mb_release_id, "mb-current-1")
 
     def test_current_backfill_uses_final_beets_facts_with_carried_source_proof(self):
         db = FakePipelineDB()
@@ -139,6 +136,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         result = backfill_current_evidence_from_album_info(
             db,
             request_id=42,
+            mb_release_id="mb-current-2",
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=2,
@@ -153,7 +151,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         self.assertTrue(result.available)
-        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        evidence_id = db.get_request_current_evidence_id(42)
+        loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
         self.assertEqual(loaded.measurement.format, "Opus")
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 121)
@@ -169,9 +168,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             classifier="spectral_verified_lossless",
             detail="genuine",
         )
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+        seeded = make_album_quality_evidence(
+            mb_release_id="mb-current-3",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=116,
                 avg_bitrate_kbps=128,
@@ -181,11 +179,20 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             ),
             verified_lossless_proof=proof,
             storage_format="Opus",
-        ))
+            files=snapshot_audio_files(self.root),
+        )
+        db.upsert_album_quality_evidence(seeded)
+        seeded_id = db.find_album_quality_evidence(
+            mb_release_id=seeded.mb_release_id,
+            snapshot_fingerprint=seeded.snapshot_fingerprint,
+        )
+        assert seeded_id is not None and seeded_id.id is not None
+        db.set_request_current_evidence(42, seeded_id.id)
 
         result = backfill_current_evidence_from_album_info(
             db,
             request_id=42,
+            mb_release_id="mb-current-3",
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=2,
@@ -199,7 +206,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         self.assertTrue(result.available)
-        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        evidence_id = db.get_request_current_evidence_id(42)
+        loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 112)
         self.assertTrue(loaded.measurement.verified_lossless)
@@ -214,9 +222,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             classifier="spectral_verified_lossless",
             detail="genuine",
         )
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+        seeded = make_album_quality_evidence(
+            mb_release_id="mb-current-4",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=116,
                 avg_bitrate_kbps=128,
@@ -226,11 +233,20 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             ),
             verified_lossless_proof=proof,
             storage_format="Opus",
-        ))
+            files=snapshot_audio_files(self.root),
+        )
+        db.upsert_album_quality_evidence(seeded)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=seeded.mb_release_id,
+            snapshot_fingerprint=seeded.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
 
         result = backfill_current_evidence_from_album_info(
             db,
             request_id=42,
+            mb_release_id="mb-current-4",
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=2,
@@ -245,7 +261,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         self.assertTrue(result.available)
-        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        evidence_id = db.get_request_current_evidence_id(42)
+        loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
         self.assertFalse(loaded.measurement.verified_lossless)
         self.assertIsNone(loaded.verified_lossless_proof)
@@ -263,6 +280,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         result = backfill_current_evidence_from_album_info(
             db,
             request_id=42,
+            mb_release_id="mb-current-5",
             album_info=AlbumInfo(
                 album_id=1,
                 track_count=2,
@@ -276,7 +294,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         self.assertTrue(result.available)
-        loaded = db.load_album_quality_evidence(request_current_owner(42))
+        evidence_id = db.get_request_current_evidence_id(42)
+        loaded = db.load_album_quality_evidence_by_id(evidence_id)
         assert loaded is not None
         self.assertEqual(loaded.measurement.spectral_grade, "likely_transcode")
         self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 96)
@@ -285,10 +304,6 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 260)
 
     def test_duplicate_snapshot_relative_path_is_invalid(self):
-        owner = AlbumQualityEvidenceOwner(
-            owner_type="import_job_candidate",
-            owner_id=10,
-        )
         duplicated = AlbumQualityEvidenceFile(
             relative_path="01.mp3",
             size_bytes=1,
@@ -298,7 +313,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             codec="mp3",
         )
         result = evidence_from_import_result(
-            owner=owner,
+            mb_release_id="mb-dup-1",
             source_path=self.root,
             files=[duplicated, duplicated],
             import_result=ImportResult(

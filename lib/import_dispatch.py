@@ -845,6 +845,7 @@ def _refresh_current_evidence_after_import(
     backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
+        mb_release_id=mb_release_id,
         album_info=album_info,
         verified_lossless_proof=verified_lossless_proof,
         preserve_existing_verified_lossless_proof=(
