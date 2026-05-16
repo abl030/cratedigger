@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -184,6 +186,69 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
     if walk_errors:
         raise SnapshotAudioFilesError("; ".join(walk_errors))
     return sorted(files, key=lambda f: f.relative_path)
+
+
+def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
+    """SHA-256 fingerprint of an audio inventory used as the evidence row key.
+
+    This is the canonical addressing key for ``album_quality_evidence`` after
+    the rekey landed in plan ``2026-05-16-002`` (U1/U2/U3). The exact formula
+    is load-bearing: U2's SQL migration computes the same hash from each
+    row's ``album_quality_evidence_files`` records, so a Python-vs-SQL drift
+    here would scramble post-deploy lookup and break dedupe.
+
+    Formula (must be mirrored exactly by U2's migration):
+
+    1. For each file, build a tuple ``[relative_path, size_bytes, extension,
+       container, codec]`` as a JSON array. ``codec`` may be ``None`` and is
+       rendered as JSON ``null``.
+    2. Sort the per-file tuples by ``relative_path`` ascending.
+    3. JSON-encode the sorted list with ``sort_keys=False``,
+       ``separators=(",", ":")`` (no whitespace), ``ensure_ascii=False``.
+       Each file becomes e.g. ``["track01.flac",12345,"flac","flac","flac"]``.
+    4. SHA-256 hex digest of the UTF-8 bytes of that JSON string.
+
+    Fields chosen mirror ``_snapshot_match_key`` so freshness and identity
+    stay coherent. ``mtime_ns`` is deliberately excluded — see the
+    ``_snapshot_match_key`` docstring for why (ID3 tag mutation, virtiofs
+    flake). ``decode_ok`` is excluded too: it is per-file evidence written
+    by the measurement gate, not an identity attribute.
+
+    The empty list hashes the JSON encoding of ``[]`` (``"[]"`` → a stable,
+    defined 64-char digest), not an error.
+    """
+
+    payload: list[list[Any]] = sorted(
+        (
+            [
+                file.relative_path,
+                file.size_bytes,
+                file.extension,
+                file.container,
+                file.codec,
+            ]
+            for file in files
+        ),
+        key=lambda row: row[0],
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=False,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def snapshot_fingerprint_for_path(root: str) -> str:
+    """Snapshot the audio inventory under ``root`` and fingerprint it.
+
+    Thin wrapper combining :func:`snapshot_audio_files` and
+    :func:`snapshot_fingerprint` for the common "compute from disk" path.
+    Returns the same digest as ``snapshot_fingerprint(snapshot_audio_files(root))``.
+    """
+
+    return snapshot_fingerprint(snapshot_audio_files(root))
 
 
 def _snapshot_match_key(
