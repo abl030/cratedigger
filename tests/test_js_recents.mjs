@@ -175,6 +175,30 @@ console.log('renderImportQueueItems() prefers terminal import messages over stal
     'stale preview message hidden for terminal rows');
 }
 
+console.log('renderImportQueueItems() surfaces failed force-import source cleanup');
+{
+  const html = __test__.renderImportQueueItems([{
+    id: 40636,
+    job_type: 'force_import',
+    status: 'failed',
+    preview_status: 'evidence_ready',
+    artist_name: 'Parts & Labor',
+    album_title: 'Escapers Two',
+    message: 'Rejected by persisted quality evidence: downgrade',
+    result: {
+      cleanup: {
+        success: true,
+        outcome: 'deleted',
+        deleted_path: '/mnt/virtio/music/slskd/failed_imports/Parts & Labor - Escapers Two (2007)',
+      },
+    },
+  }]);
+  assertContains(html, 'source deleted',
+    'cleanup-success chip rendered on failed force-import row');
+  assertContains(html, 'Parts &amp; Labor - Escapers Two',
+    'cleanup path is escaped in chip hover text');
+}
+
 console.log('renderDownloadingItems() shows current file progress and user');
 {
   const html = __test__.renderDownloadingItems([{
@@ -294,6 +318,46 @@ console.log('renderRecentsItems() escapes wrong-match triage chip fields');
     'triage detail is escaped');
   assertExcludes(html, '<img src=x>',
     'raw triage summary is not rendered');
+}
+
+console.log('renderRecentsItems() distinguishes rejected history from actionable Wrong Matches');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 15838,
+    request_id: 2762,
+    outcome: 'rejected',
+    created_at: '2026-05-16T16:19:59+00:00',
+    album_title: 'Escapers Two',
+    artist_name: 'Parts & Labor',
+    badge: 'Rejected',
+    badge_class: 'badge-rejected',
+    border_color: '#a33',
+    summary: 'downgrade · AliceLo',
+    validation_result: null,
+  }]);
+  assertContains(html, 'not in Wrong Matches',
+    'rejected history row with no failed_path is marked non-actionable');
+}
+
+console.log('renderRecentsItems() does not mark visible wrong-match rows as cleared');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 14534,
+    request_id: 2762,
+    outcome: 'rejected',
+    created_at: '2026-05-15T08:02:42+00:00',
+    album_title: 'Escapers Two',
+    artist_name: 'Parts & Labor',
+    badge: 'Rejected',
+    badge_class: 'badge-rejected',
+    border_color: '#a33',
+    summary: 'Wrong match (dist 0.167) · AliceLo',
+    validation_result: {
+      failed_path: '/mnt/virtio/music/slskd/failed_imports/Parts & Labor - Escapers Two (2007)',
+    },
+  }]);
+  assertExcludes(html, 'not in Wrong Matches',
+    'actionable row with failed_path does not get cleared chip');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
