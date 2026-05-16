@@ -1153,9 +1153,17 @@ def _process_beets_validation(
     ``import_job_id`` or no DB) instead measures inline via
     ``lib.preimport.measure_preimport_state`` and surfaces only the two
     folder/audio-integrity facts (``audio_corrupt`` and ``bad_audio_hash``)
-    — quality decisions belong to the unified importer decider in U11. This
-    caller does NOT write the denylist: that side effect is the importer's
-    concern.
+    — quality decisions belong to the unified importer decider in U11.
+
+    Denylist on reject: this caller does NOT denylist peers directly from the
+    measurement. When the measurement flips ``bv_result.valid=False``, the
+    function returns into ``_handle_rejected_result``, which calls
+    ``reject_and_requeue(usernames=...)`` — that path writes the denylist
+    with the standard "beets validation rejected" reason. Per-fact denylist
+    differentiation (audio_corrupt → "audio decode failures", bad_audio_hash →
+    "matched curated bad audio hash") is the importer's concern via the
+    unified reject path (U11); the legacy fallback inherits whatever the
+    reject_and_requeue helper does, which is intentionally coarser.
 
     Returns the dispatch outcome when the auto-import path fires,
     ``None`` when beets validation rejects (``_handle_rejected_result``
@@ -1210,8 +1218,10 @@ def _process_beets_validation(
             # integrity facts (``audio_corrupt`` and ``bad_audio_hash``) —
             # ``nested_layout`` and ``empty_fileset`` are intentionally NOT
             # checked here, matching the historical scope of this fallback.
-            # No denylist write: that side effect belongs to the importer's
-            # unified reject path (U11).
+            # Denylist on reject is handled downstream by
+            # ``_handle_rejected_result`` → ``reject_and_requeue`` (which
+            # writes the standard "beets validation rejected" denylist
+            # entry). This caller does not issue per-fact denylist writes.
             measurement = measure_preimport_state(
                 path=current_path,
                 mb_release_id=album_data.mb_release_id or "",

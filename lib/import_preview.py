@@ -540,6 +540,7 @@ def _preview_import_from_path_worker_mode(
             try:
                 evidence_result = persist_candidate_evidence_from_measurement(
                     db,
+                    mb_release_id=mbid,
                     source_path=path,
                     measurement=measurement,
                     download_log_id=download_log_id,
@@ -707,6 +708,7 @@ def _preview_import_from_path_worker_mode(
         try:
             evidence_result = persist_candidate_evidence_from_import_result(
                 db,
+                mb_release_id=mbid,
                 source_path=path,
                 import_result=run.import_result,
                 download_log_id=download_log_id,
@@ -1184,6 +1186,7 @@ def preview_import_from_path(
             try:
                 evidence = persist_candidate_evidence_from_import_result(
                     db,
+                    mb_release_id=mbid,
                     source_path=path,
                     import_result=run.import_result,
                     download_log_id=download_log_id,
