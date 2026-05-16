@@ -1628,7 +1628,7 @@ def dispatch_import_core(
             #   reset-to-wanted left ``current_spectral_*`` populated
             #   from a download that was never imported, skewing the
             #   next cycle's quality-gate decisions. With no reset,
-            #   ``run_preimport_gates`` re-runs on retry and
+            #   ``measure_preimport_state`` re-runs on retry and
             #   re-populates spectral from the same files.
             #
             # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
@@ -2244,7 +2244,7 @@ def dispatch_import_from_db(
     the candidate ``AlbumQualityEvidence`` via
     ``ensure_candidate_evidence_for_action``. The preview worker is the
     only producer of candidate measurements; dispatch never invokes
-    ``run_preimport_gates`` itself. When evidence is missing or stale, the
+    ``measure_preimport_state`` itself. When evidence is missing or stale, the
     job is requeued back to the preview lane via
     ``_requeue_import_job_to_preview`` (returning
     ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
@@ -2319,8 +2319,8 @@ def _dispatch_import_from_db_locked(
     MUST be supplied. After U4 (importer-never-measures refactor) the only
     production caller is ``scripts/importer.py``, which always supplies
     ``import_job_id``. The previous legacy direct-measurement branch that
-    ran ``inspect_local_files`` / ``run_preimport_gates`` for callers that
-    omitted both IDs has been deleted; the importer never measures.
+    ran ``inspect_local_files`` / ``measure_preimport_state`` for callers
+    that omitted both IDs has been deleted; the importer never measures.
     """
     from lib.grab_list import DownloadFile
 

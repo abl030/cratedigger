@@ -1,6 +1,6 @@
 """Unit tests for ``lib.preimport`` helpers — focus: bad-audio-hash gate (U5).
 
-Slice-level coverage for ``run_preimport_gates`` lives in
+Slice-level coverage for ``measure_preimport_state`` lives in
 ``tests/test_integration_slices.py::TestBadAudioHashSlice``. These tests
 exercise the ``_check_bad_audio_hashes`` helper and the empty-table /
 hashing-error / DB-error fall-through behavior of the gate.
@@ -134,7 +134,7 @@ class TestIterAudioFiles(unittest.TestCase):
 
 
 class TestBadAudioHashGateFastPath(unittest.TestCase):
-    """``run_preimport_gates`` empty-table fast-path: when
+    """``measure_preimport_state`` empty-table fast-path: when
     ``has_any_bad_audio_hashes`` returns False, the gate must NOT hash
     candidate tracks or call ``lookup_bad_audio_hash``.
 
@@ -148,7 +148,7 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
 
     def test_empty_table_skips_hashing_and_lookup(self):
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         db = MagicMock()
         db.has_any_bad_audio_hashes.return_value = False
@@ -159,7 +159,7 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
         # bad-hash gate's fast-path skip.
         with patch("lib.preimport.hash_audio_content") as hashfn, \
              patch("lib.preimport._needs_spectral_check", return_value=False):
-            run_preimport_gates(
+            measure_preimport_state(
                 path=str(FIXTURE_DIR),
                 mb_release_id="mbid-empty",
                 label="Empty Table",
@@ -169,7 +169,6 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
                 cfg=cfg,
                 db=db,
                 request_id=42,
-                usernames={"user1"},
             )
 
         db.has_any_bad_audio_hashes.assert_called_once()

@@ -582,18 +582,22 @@ class TestImportPreviewPath(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
 
     def test_preview_legacy_path_does_not_call_run_preimport_gates(self):
-        """U6 anti-regression: legacy preview path is fully migrated off the
-        ``run_preimport_gates`` shim. If a future change reintroduces the
-        shim, this guard fires.
+        """U6/U8 anti-regression: the legacy ``run_preimport_gates`` shim
+        was deleted in U8. If a future change reintroduces it (in
+        lib.preimport or as a re-export from lib.import_preview), this
+        guard fires.
         """
-        # Importing here keeps the production import surface honest — the
-        # shim is still callable from lib.preimport (until U8) but must NOT
-        # be reachable from lib.import_preview after U6.
         import lib.import_preview as ip
+        import lib.preimport as pi
         self.assertFalse(
             hasattr(ip, "run_preimport_gates"),
-            "lib.import_preview must not re-export run_preimport_gates "
-            "after U6 — preview measures only",
+            "lib.import_preview must not re-export run_preimport_gates — "
+            "preview measures only",
+        )
+        self.assertFalse(
+            hasattr(pi, "run_preimport_gates"),
+            "lib.preimport must not export run_preimport_gates — the shim "
+            "was deleted in U8",
         )
 
     def test_missing_path_is_uncertain_not_cleanup_eligible(self):

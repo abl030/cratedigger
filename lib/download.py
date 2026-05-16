@@ -1152,11 +1152,10 @@ def _process_beets_validation(
     downstream. The legacy non-queue fallback (CLI / test callers with no
     ``import_job_id`` or no DB) instead measures inline via
     ``lib.preimport.measure_preimport_state`` and surfaces only the two
-    folder/audio-integrity facts that ``_legacy_preimport_decision`` checks
-    (``audio_corrupt`` and ``bad_audio_hash``) — quality decisions belong to
-    the unified importer decider in U11. This caller does NOT write the
-    denylist: that side effect was previously bundled into the legacy
-    pre-import shim and is now the importer's concern.
+    folder/audio-integrity facts (``audio_corrupt`` and ``bad_audio_hash``)
+    — quality decisions belong to the unified importer decider in U11. This
+    caller does NOT write the denylist: that side effect is the importer's
+    concern.
 
     Returns the dispatch outcome when the auto-import path fires,
     ``None`` when beets validation rejects (``_handle_rejected_result``
@@ -1207,13 +1206,12 @@ def _process_beets_validation(
         if not candidate_evidence_available:
             # U7: legacy non-queue fallback. Measure only; never decide. The
             # importer's full pipeline decider owns spectral / codec rank /
-            # quality-gate outcomes. We inline the two folder/audio-integrity
-            # facts that ``_legacy_preimport_decision`` checked pre-U7
-            # (``audio_corrupt`` and ``bad_audio_hash``) — ``nested_layout``
-            # and ``empty_fileset`` are intentionally NOT checked here, to
-            # stay bit-for-bit backward compatible with the legacy shim's
-            # scope. No denylist write: that side effect now belongs to the
-            # importer's unified reject path (U11).
+            # quality-gate outcomes. We inline only the two folder/audio-
+            # integrity facts (``audio_corrupt`` and ``bad_audio_hash``) —
+            # ``nested_layout`` and ``empty_fileset`` are intentionally NOT
+            # checked here, matching the historical scope of this fallback.
+            # No denylist write: that side effect belongs to the importer's
+            # unified reject path (U11).
             measurement = measure_preimport_state(
                 path=current_path,
                 mb_release_id=album_data.mb_release_id or "",

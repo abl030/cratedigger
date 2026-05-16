@@ -376,10 +376,12 @@ def _preview_import_from_path_worker_mode(
 ) -> ImportPreviewResult:
     """Worker-mode preview path: measure facts, persist evidence, never decide.
 
-    Replaces the legacy ``run_preimport_gates`` pipeline that bundled the
-    accept/reject decision with the measurement. The preview worker is now
-    purely a fact-gathering surface; the importer (``preimport_decide``) reads
-    the persisted ``AlbumQualityEvidence`` row and makes the import decision.
+    The preview worker is purely a fact-gathering surface: it calls
+    ``measure_preimport_state`` and persists the resulting facts on
+    ``AlbumQualityEvidence``. The importer
+    (``full_pipeline_decision_from_evidence``, with ``preimport_decide``
+    handling the folder/audio-integrity facts) reads the persisted evidence
+    row and makes the import decision.
 
     Flow:
       1. Validate request / mbid / path inputs (return measurement_failed on
@@ -792,14 +794,12 @@ def preview_import_from_path(
     classifier's ``would_import`` / ``confident_reject`` / ``uncertain``
     verdicts unchanged.
 
-    Contract (both paths post-U6): this function MUST NOT call
-    ``run_preimport_gates`` — that legacy shim bundles the decision (reject on
-    audio_corrupt / bad_hash / spectral) with the measurement. Preview only
-    measures. Both paths collect facts via ``measure_preimport_state``; the
-    legacy non-worker path inlines the four folder/audio-integrity facts as a
-    confident_reject verdict for CLI/triage UI, and the worker path persists
-    evidence and lets the importer call ``preimport_decide``. Spectral / codec
-    rank / V0 / quality-gate decisions belong to the importer's
+    Contract (both paths): preview only measures. Both paths collect facts
+    via ``measure_preimport_state``; the legacy non-worker path inlines the
+    four folder/audio-integrity facts as a confident_reject verdict for
+    CLI/triage UI, and the worker path persists evidence and lets the
+    importer call ``preimport_decide``. Spectral / codec rank / V0 /
+    quality-gate decisions belong to the importer's
     ``full_pipeline_decision_from_evidence`` in both paths.
     """
     if worker_mode:

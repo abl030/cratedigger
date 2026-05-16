@@ -750,28 +750,29 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
 
 
 class TestSpectralPropagationSlice(unittest.TestCase):
-    """Integration slice: shared run_preimport_gates updates spectral state + denylists.
+    """Integration slice: measure_preimport_state updates spectral state.
 
-    Exercises the pre-import gate pipeline that both the auto-import path
-    (lib.download.process_completed_album) and the force/manual-import path
-    (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves the
-    function does its side effects — spectral state write + denylist —
-    consistently regardless of caller.
+    Exercises the pre-import measurement pipeline that both the auto-import
+    path (lib.download.process_completed_album) and the force/manual-import
+    path (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves
+    the measurement helper persists existing-album spectral state
+    consistently regardless of caller. Quality decisions (and any denylist
+    side effects) live in the importer's evidence pipeline.
     """
 
     def test_suspect_download_persists_existing_spectral_state(self):
-        """Issue #90: when run_preimport_gates measures spectral on both the
-        download and the existing album, it must persist the *existing*
+        """Issue #90: when measure_preimport_state measures spectral on both
+        the download and the existing album, it must persist the *existing*
         spectral state to ``album_requests.current_spectral_*`` so subsequent
         attempts can compare evidence-to-evidence.
 
         Spectral comparison itself is owned by the importer's evidence
         pipeline (``full_pipeline_decision_from_evidence``) — preimport just
-        accepts and lets the importer decide. Denylisting on quality grounds
-        is the importer's responsibility, not this gate's.
+        measures. Denylisting on quality grounds is the importer's
+        responsibility, not this gate's.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -804,7 +805,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ],
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
                 label="Test Artist - Test Album",
@@ -814,15 +815,14 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
             )
 
-        # Preimport accepts — quality decisions live in
-        # full_pipeline_decision_from_evidence.
-        self.assertTrue(result.valid)
-        self.assertIsNone(result.scenario)
+        # Measurement is fact-only: no audio-corrupt, no bad-hash → the
+        # importer's evidence pipeline owns the accept/reject decision.
+        self.assertFalse(measurement.audio_corrupt)
+        self.assertIsNone(measurement.matched_bad_hash_id)
         self.assertEqual(len(db.denylist), 0,
-                         "preimport must not denylist on quality grounds")
+                         "preimport measurement must not denylist")
 
         # Spectral state for the *existing* album was persisted so the
         # importer's evidence pipeline can compare spectral-to-spectral on
@@ -854,7 +854,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         read ``spectral {x}kbps <= existing {x}kbps`` with equal numbers.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -880,7 +880,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=False):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
                 label="Test Artist - Test Album",
@@ -890,30 +890,32 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
                 propagate_download_to_existing=True,
             )
 
-        # The self-compare bug — if any reject fires, it must not read as
-        # "spectral X <= existing X" with equal numbers. A legitimate reject
-        # against the container bitrate (320) is allowed.
-        if not result.valid:
-            self.assertNotEqual(result.detail,
-                                "spectral 128kbps <= existing 128kbps",
-                                "self-compare bug: download compared against "
-                                "a propagated copy of its own spectral")
+        # The self-compare bug — propagation must not have copied the
+        # download's spectral into existing_spectral. existing_spectral
+        # may stay None (stale path on disk) or come from beets, but it
+        # must NOT equal the download's spectral exactly.
+        if measurement.download_spectral and measurement.existing_spectral:
+            self.assertNotEqual(
+                measurement.existing_spectral,
+                measurement.download_spectral,
+                "self-compare bug: existing_spectral propagated from download",
+            )
 
     def test_stale_album_path_imports_when_download_beats_container(self):
-        """Issue #90 correctness: suspect download above the container
-        bitrate must import (import_upgrade) instead of self-rejecting.
+        """Issue #90 correctness: a suspect download above the container
+        bitrate must persist its spectral state to album_requests for the
+        importer's evidence pipeline to consume.
 
-        Without the fix: propagation writes 280 into existing_spectral,
-        decision sees 280 <= 280 → reject. A legitimate upgrade blocked.
-
-        With the fix: decision sees 280 vs container 256 → import_upgrade.
+        Pre-fix: propagation wrote 280 into existing_spectral, decision saw
+        280 <= 280 → reject. After the fix the measurement keeps
+        existing_spectral disjoint from the download's; the importer's
+        full pipeline then sees 280 vs container 256 and imports.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -938,7 +940,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=False):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
                 label="Test Artist - Test Album",
@@ -948,12 +950,11 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
                 propagate_download_to_existing=True,
             )
 
-        self.assertTrue(result.valid,
-                        "suspect 280 > container 256 should import (upgrade)")
+        # Measurement is fact-only — accept/reject lives in the importer.
+        self.assertFalse(measurement.audio_corrupt)
         # Propagation still persisted the download's spectral for future runs.
         row = db.request(42)
         self.assertEqual(row["current_spectral_grade"], "suspect")
@@ -978,7 +979,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
     def test_accept_suspect_upgrade_still_persists_spectral(self):
         """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1016,7 +1017,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
             ],
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/dl",
                 mb_release_id="mbid-upgrade",
                 label="Upgrade Album",
@@ -1026,26 +1027,25 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
             )
 
-        # Accept (suspect grade BUT bitrate upgrades existing).
-        self.assertTrue(
-            result.valid,
-            "suspect 256 > existing 96 must accept (spectral upgrade)")
-        # Crucial: the spectral state still propagated despite the accept.
+        # Measurement is fact-only; the importer's evidence pipeline owns
+        # the accept/reject for the suspect-upgrade case.
+        self.assertFalse(measurement.audio_corrupt)
+        # Crucial: the existing-album spectral state propagated during the
+        # measurement so the importer can compare evidence-to-evidence.
         row = db.request(42)
         self.assertEqual(
             row["current_spectral_grade"], "likely_transcode",
-            "existing spectral measurement must be persisted on accept")
+            "existing spectral measurement must be persisted")
         self.assertEqual(row["current_spectral_bitrate"], 96)
-        # No denylist on accept paths.
+        # Measurement never writes denylist.
         self.assertEqual(len(db.denylist), 0)
 
     def test_accept_import_no_exist_still_persists_spectral(self):
         """Accept (suspect grade, no existing on disk) → spectral state propagates the download's spectral."""
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1064,7 +1064,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
             ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
              patch("os.path.isdir", return_value=True):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/dl",
                 mb_release_id="mbid-firsttime",
                 label="First Time Album",
@@ -1074,22 +1074,14 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
             )
 
-        # Accept — no existing album, suspect spectral is import_no_exist.
-        self.assertTrue(result.valid)
-        # Without an existing-on-disk and no existing_min_bitrate, the
-        # propagation helper does NOT adopt the download's spectral (it would
-        # be speculative). But it must still attempt to write the
-        # existing_spectral (None) — which means we DON'T expect a row update
-        # in this case. Per ``_persist_spectral_state`` semantics: when
-        # existing_spectral is None AND existing_min_bitrate is None, nothing
-        # is persisted. The accept decision itself fires correctly.
+        # Measurement is fact-only; no existing album means no
+        # existing-spectral propagation. Per ``_persist_spectral_state``
+        # semantics, when existing_spectral is None AND existing_min_bitrate
+        # is None, nothing is persisted.
+        self.assertFalse(measurement.audio_corrupt)
         row = db.request(42)
-        # Either NULL (no propagation triggered) or the download's spectral
-        # (if existing_min_bitrate had been set, propagation would adopt it).
-        # Here the invariant is: no crash, accept decision wins, no denylist.
         self.assertIsNone(row.get("current_spectral_grade"))
         self.assertEqual(len(db.denylist), 0)
 
@@ -1916,7 +1908,7 @@ class TestReleaseLockContention(unittest.TestCase):
           ``os.mkdir`` with ``os.path.exists`` and skips file moves
           when the destination already has the file).
         - **``current_spectral_*`` stays populated** — Codex R3 P2:
-          ``run_preimport_gates`` ran BEFORE this contention path
+          ``measure_preimport_state`` ran BEFORE this contention path
           fired and persisted spectral state from the downloaded
           files. A retry on the same files would compute the same
           spectral state anyway; clearing it would cause
@@ -1930,7 +1922,7 @@ class TestReleaseLockContention(unittest.TestCase):
                                      release_id_to_lock_key)
 
         db = self._make_db()
-        # Seed the spectral fields that ``run_preimport_gates`` would
+        # Seed the spectral fields that ``measure_preimport_state`` would
         # have populated pre-dispatch. These must survive the
         # contention path.
         db.request(42)["current_spectral_grade"] = "genuine"
@@ -1978,7 +1970,7 @@ class TestReleaseLockContention(unittest.TestCase):
                          "poll_active_downloads retries next cycle.")
         self.assertEqual(db.request(42)["current_spectral_grade"],
                          "genuine", "Spectral state from the "
-                         "pre-dispatch run_preimport_gates MUST "
+                         "pre-dispatch measure_preimport_state MUST "
                          "survive contention (Codex R3 P2).")
         self.assertEqual(db.request(42)["current_spectral_bitrate"], 245)
         # No staged-dir cleanup — Codex R3 P3.
@@ -2865,21 +2857,21 @@ class TestWrongMatchTriageMeasurementRoundTrip(unittest.TestCase):
 
 
 class TestBadAudioHashSlice(unittest.TestCase):
-    """Integration slice: bad-audio-hash gate inside ``run_preimport_gates``.
+    """Integration slice: bad-audio-hash gate inside ``measure_preimport_state``.
 
-    Plan 2026-04-29-005 / U5. Populates ``FakePipelineDB`` with the U3 fixture's
-    real hash, points ``run_preimport_gates`` at the fixture, and asserts the
-    full F2 path: rejection scenario, denylist row written, and
-    ``PreImportGateResult`` carries ``matched_bad_hash_id`` /
-    ``matched_bad_track_path`` for the caller to fold into ``ValidationResult``.
+    Plan 2026-04-29-005 / U5. Populates ``FakePipelineDB`` with the U3
+    fixture's real hash, points ``measure_preimport_state`` at the fixture,
+    and asserts the measurement surfaces ``matched_bad_hash_id`` /
+    ``matched_bad_track_path``. After U8, denylisting on bad-hash is the
+    importer's responsibility — measurement only reports facts.
     """
 
-    def test_known_bad_hash_rejects_and_denylists(self):
+    def test_known_bad_hash_surfaces_match_facts(self):
         from pathlib import Path
         from lib.audio_hash import hash_audio_content
         from lib.config import CratediggerConfig
         from lib.pipeline_db import BadAudioHashInput
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -2903,7 +2895,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
         # 'off' keeps the slice scoped to the bad-hash gate).
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        result = run_preimport_gates(
+        measurement = measure_preimport_state(
             path=str(fixture_dir),
             mb_release_id="mbid-bad",
             label="Bad Rip Test",
@@ -2913,33 +2905,24 @@ class TestBadAudioHashSlice(unittest.TestCase):
             cfg=cfg,
             db=db,  # type: ignore[arg-type]
             request_id=42,
-            usernames={"H@rco"},
         )
 
-        # 1. Gate rejected the candidate with the bad-hash scenario.
-        self.assertFalse(result.valid)
-        self.assertEqual(result.scenario, "bad_audio_hash")
-        self.assertIsNotNone(result.matched_bad_hash_id)
+        # 1. Measurement surfaced the bad-hash match facts.
+        self.assertIsNotNone(measurement.matched_bad_hash_id)
         # The matched track must be the actual fixture path we seeded.
-        self.assertEqual(result.matched_bad_track_path, str(bad_track))
+        self.assertEqual(measurement.matched_bad_track_path, str(bad_track))
 
-        # 2. Supplying user denylisted on this request, with bad-hash reason.
-        self.assertEqual(len(db.denylist), 1)
-        self.assertEqual(db.denylist[0].request_id, 42)
-        self.assertEqual(db.denylist[0].username, "H@rco")
-        self.assertIn("matched bad hash", db.denylist[0].reason or "")
-
-        # 3. Detail string surfaces the hash id + track path for log audit.
-        assert result.detail is not None
-        self.assertIn("matched bad audio hash", result.detail)
-        self.assertIn(str(bad_track), result.detail)
+        # 2. Measurement never writes the denylist — that is the importer's
+        # responsibility in the unified reject path (covered by importer-side
+        # slices via the persisted-evidence path).
+        self.assertEqual(len(db.denylist), 0)
 
     def test_empty_table_runs_no_hashing(self):
         """When ``has_any_bad_audio_hashes`` is False, the gate fast-skips:
         no calls to ``hash_audio_content`` or ``lookup_bad_audio_hash``."""
         from pathlib import Path
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.preimport import measure_preimport_state
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -2952,7 +2935,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
         with patch("lib.preimport.hash_audio_content") as hashfn, \
              patch.object(db, "lookup_bad_audio_hash") as lookup, \
              patch("lib.preimport._needs_spectral_check", return_value=False):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path=str(fixture_dir),
                 mb_release_id="mbid-empty",
                 label="Empty Table",
@@ -2962,11 +2945,10 @@ class TestBadAudioHashSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"someone"},
             )
 
-        self.assertTrue(result.valid)
-        self.assertIsNone(result.matched_bad_hash_id)
+        self.assertFalse(measurement.audio_corrupt)
+        self.assertIsNone(measurement.matched_bad_hash_id)
         hashfn.assert_not_called()
         lookup.assert_not_called()
         self.assertEqual(len(db.denylist), 0)
@@ -5222,7 +5204,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
     ``load_candidate_evidence_for_source`` and a FakePipelineDB. Asserts
     that when stored candidate evidence already passes the snapshot guard,
     the worker marks the job importable WITHOUT invoking
-    ``preview_import_from_path`` / ``run_preimport_gates`` / spectral
+    ``preview_import_from_path`` / ``measure_preimport_state`` / spectral
     analysis or, for automation jobs, the materialization helper.
 
     Covers AE4 for both force/manual and automation job types via the
@@ -5284,7 +5266,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
 
             sentinels = {
                 "preview_called": False,
-                "preimport_called": False,
+                "measure_called": False,
             }
 
             def _sentinel_preview(*args, **kwargs):
@@ -5293,18 +5275,18 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "preview_import_from_path must not be called when evidence is valid"
                 )
 
-            def _sentinel_preimport(*args, **kwargs):
-                sentinels["preimport_called"] = True
+            def _sentinel_measure(*args, **kwargs):
+                sentinels["measure_called"] = True
                 raise AssertionError(
-                    "run_preimport_gates must not be called when evidence is valid"
+                    "measure_preimport_state must not be called when evidence is valid"
                 )
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
                 side_effect=_sentinel_preview,
             ), patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_sentinel_preimport,
+                "lib.import_preview.measure_preimport_state",
+                side_effect=_sentinel_measure,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
@@ -5312,7 +5294,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
         self.assertFalse(sentinels["preview_called"])
-        self.assertFalse(sentinels["preimport_called"])
+        self.assertFalse(sentinels["measure_called"])
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -5365,7 +5347,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
 
             sentinels = {
                 "preview_called": False,
-                "preimport_called": False,
+                "measure_called": False,
                 "materialize_called": False,
             }
 
@@ -5375,10 +5357,10 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "preview_import_from_path must not be called when evidence is valid"
                 )
 
-            def _sentinel_preimport(*args, **kwargs):
-                sentinels["preimport_called"] = True
+            def _sentinel_measure(*args, **kwargs):
+                sentinels["measure_called"] = True
                 raise AssertionError(
-                    "run_preimport_gates must not be called when evidence is valid"
+                    "measure_preimport_state must not be called when evidence is valid"
                 )
 
             def _sentinel_materialize(*args, **kwargs):
@@ -5391,8 +5373,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 "scripts.import_preview_worker.preview_import_from_path",
                 side_effect=_sentinel_preview,
             ), patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_sentinel_preimport,
+                "lib.import_preview.measure_preimport_state",
+                side_effect=_sentinel_measure,
             ), patch(
                 "lib.download._materialize_processing_dir",
                 side_effect=_sentinel_materialize,
@@ -5403,7 +5385,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
         self.assertFalse(sentinels["preview_called"])
-        self.assertFalse(sentinels["preimport_called"])
+        self.assertFalse(sentinels["measure_called"])
         self.assertFalse(sentinels["materialize_called"])
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -6605,15 +6587,15 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
 
 class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
     """Hotfix coverage: ``preview_import_from_path(worker_mode=True)`` must
-    NEVER call ``run_preimport_gates``. The worker collects facts via
+    never decide accept/reject. The worker collects facts via
     ``measure_preimport_state``, persists evidence, and lets the importer's
     ``preimport_decide`` make the accept/reject call.
 
-    Reproduces the Boards-of-Canada production bug: previously preview ran
-    the legacy shim which made a ``spectral_reject`` decision, early-returned
+    Reproduces the Boards-of-Canada production bug: a pre-U8 legacy shim
+    bundled measurement with a ``spectral_reject`` decision, early-returned
     ``evidence_ready`` WITHOUT persisting evidence, and the importer's
     front-gate then fired ``evidence_persist_failed`` and re-queued the
-    request forever.
+    request forever. After U6/U8 the shim is gone — preview only measures.
     """
 
     def _seed_force_job(self, db, *, request_id, source_path):
@@ -6689,10 +6671,11 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         full pipeline returns ``downgrade`` and the importer rejects via
         the evidence pipeline.
 
-        Pre-fix: preview's legacy shim ran ``_legacy_preimport_decision``,
-        returned ``spectral_reject``, early-returned without persisting,
-        importer's front-gate then fired ``evidence_persist_failed`` and
-        re-queued forever.
+        Pre-U8 (deleted): preview's legacy shim ran
+        ``_legacy_preimport_decision``, returned ``spectral_reject``,
+        early-returned without persisting, importer's front-gate then fired
+        ``evidence_persist_failed`` and re-queued forever. After U8 the
+        shim is gone; preview only measures.
         """
         from lib.preimport import PreimportMeasurement
         from lib.quality import (
@@ -6744,21 +6727,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
-            sentinels = {"shim_called": False}
-
-            def _shim_sentinel(*args, **kwargs):
-                sentinels["shim_called"] = True
-                raise AssertionError(
-                    "worker_mode must NOT call run_preimport_gates"
-                )
-
             with patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
-                "lib.import_preview.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
@@ -6774,9 +6743,6 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 updated_job = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db), claimed,
                 )
-
-            # The shim must not have been invoked.
-            self.assertFalse(sentinels["shim_called"])
 
             # Preview marked the job evidence_ready.
             assert updated_job is not None
@@ -6886,21 +6852,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
-            sentinels = {"shim_called": False}
-
-            def _shim_sentinel(*args, **kwargs):
-                sentinels["shim_called"] = True
-                raise AssertionError(
-                    "worker_mode must NOT call run_preimport_gates"
-                )
-
             with patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
-                "lib.import_preview.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
@@ -6917,7 +6869,6 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     cast(Any, db), claimed,
                 )
 
-            self.assertFalse(sentinels["shim_called"])
             assert updated_job is not None
             self.assertEqual(updated_job.preview_status, "evidence_ready")
 
@@ -6964,13 +6915,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 is_vbr=False,
             )
 
-            sentinels = {"shim_called": False, "harness_called": False}
-
-            def _shim_sentinel(*args, **kwargs):
-                sentinels["shim_called"] = True
-                raise AssertionError(
-                    "worker_mode must NOT call run_preimport_gates"
-                )
+            sentinels = {"harness_called": False}
 
             def _harness_sentinel(*args, **kwargs):
                 sentinels["harness_called"] = True
@@ -6979,12 +6924,6 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 )
 
             with patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
-                "lib.import_preview.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
@@ -7001,7 +6940,6 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     cast(Any, db), claimed,
                 )
 
-            self.assertFalse(sentinels["shim_called"])
             self.assertFalse(sentinels["harness_called"])
             assert updated_job is not None
             self.assertEqual(updated_job.preview_status, "evidence_ready")

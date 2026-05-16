@@ -2062,9 +2062,10 @@ def spectral_gate_trigger(
 def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
     """Decide the outcome of the preimport audio-integrity gate.
 
-    Mirrors the first check in ``lib.preimport.run_preimport_gates``:
-    ``validate_audio`` runs an ffmpeg full-decode pass unless the operator
-    has set ``[Beets Validation] audio_check = off``.
+    Mirrors the audio-integrity check that ``measure_preimport_state``
+    performs in ``lib.preimport``: ``validate_audio`` runs an ffmpeg
+    full-decode pass unless the operator has set
+    ``[Beets Validation] audio_check = off``.
 
     Returns one of:
         "skipped_off"     — cfg.audio_check_mode == "off", validate_audio is not called
@@ -2168,9 +2169,9 @@ class PreimportDecision:
         ``nested_layout``, ``empty_fileset``, ``spectral_reject``); ``detail``
         is a human-readable diagnostic.
 
-    The previous ``PreImportGateResult.scenario`` strings map 1:1 onto
-    ``reason``. The legacy ``run_preimport_gates`` shim derives ``scenario``
-    from ``reason`` and ``valid`` from ``decision``.
+    ``reason`` is the canonical taxonomy persisted to evidence and
+    download_log audit blobs; callers consume ``decision`` + ``reason``
+    directly.
     """
     decision: str = "accept"  # Literal["accept", "reject"]
     reason: str | None = None
@@ -3308,7 +3309,7 @@ def get_decision_tree(
                 "path": "preimport",
                 "function": "preimport_audio_gate",
                 "when": "Every import path, before any FLAC/MP3 branching "
-                        "(lib.preimport.run_preimport_gates step 1)",
+                        "(lib.preimport.measure_preimport_state audio gate)",
                 "inputs": ["cfg.audio_check_mode", "validate_audio() result"],
                 "rules": [
                     {"condition": "audio_check_mode = off",
@@ -3770,9 +3771,10 @@ def full_pipeline_decision(
 
     # --- Preimport gates (issue #91) ---
     # Ordering mirrors the live flow: lib.import_dispatch.dispatch_import_from_db
-    # checks inspection.has_nested_audio *before* calling run_preimport_gates,
-    # so a force/manual import of a nested corrupt folder is rejected as
-    # nested_layout (not audio_corrupt). The nested gate returns "skipped_auto"
+    # checks inspection.has_nested_audio *before* calling
+    # measure_preimport_state, so a force/manual import of a nested corrupt
+    # folder is rejected as nested_layout (not audio_corrupt). The nested
+    # gate returns "skipped_auto"
     # on the auto path, which is a no-op — the auto pipeline flattens
     # downloads upstream in process_completed_album, so audio integrity is
     # the first real reject.

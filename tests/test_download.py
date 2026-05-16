@@ -4,10 +4,9 @@ Tests _build_download_info, cancel_and_delete, slskd_download_status,
 downloads_all_done, poll_active_downloads, grab_most_wanted.
 
 Pre-import measurement behavior (audio integrity + spectral analysis) is
-shared with the force/manual import paths and tested via the legacy
-``lib.preimport.run_preimport_gates`` shim in
-``tests/test_force_import_gates.py`` (deleted in U8) and through the live
-``measure_preimport_state`` measurement in
+shared with the force/manual import paths and tested directly against
+``lib.preimport.measure_preimport_state`` in ``tests/test_preimport.py``
+and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 

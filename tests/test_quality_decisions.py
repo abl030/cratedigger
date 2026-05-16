@@ -194,8 +194,8 @@ class TestSpectralImportDecision(unittest.TestCase):
 class TestPreimportDecide(unittest.TestCase):
     """preimport_decide: pure mapping from PreimportMeasurement → PreimportDecision.
 
-    Decision order mirrors run_preimport_gates today: audio_corrupt first, then
-    bad_audio_hash, then nested_layout, then empty_fileset, then spectral. Each
+    Decision order: audio_corrupt first, then bad_audio_hash, then
+    nested_layout, then empty_fileset, then spectral. Each
     row in CASES is one subTest. The decision function consumes only the typed
     measurement Struct + cfg + (optional) existing evidence — no DB writes, no
     denylists, no filesystem side effects.
@@ -1191,7 +1191,7 @@ EXPECTED_PARAMS = {
     "candidate_v0_probe_kind", "existing_v0_probe_kind",
     "supported_lossless_source",
     # Preimport gate inputs (issue #91) — keep the simulator's picture of the
-    # pipeline in sync with lib.preimport.run_preimport_gates.
+    # pipeline in sync with lib.preimport.measure_preimport_state + preimport_decide.
     "audio_check_mode", "audio_corrupt",
     "import_mode", "has_nested_audio",
 }
@@ -1444,10 +1444,10 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
 class TestPreimportAudioGate(unittest.TestCase):
     """Pure decision tests for the preimport audio-integrity gate (issue #91).
 
-    Models ``lib.preimport.run_preimport_gates``'s first gate (validate_audio).
-    The simulator must treat ``audio_check_mode=off`` as a distinct outcome
-    from a passing check so operators can see when the gate is disabled in
-    config.
+    Models the first gate in ``lib.preimport.measure_preimport_state``
+    (validate_audio). The simulator must treat ``audio_check_mode=off`` as
+    a distinct outcome from a passing check so operators can see when the
+    gate is disabled in config.
     """
 
     # (desc, audio_check_mode, audio_corrupt, expected)
@@ -1604,8 +1604,8 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
 
     def test_nested_wins_over_audio_in_force_mode(self):
         # Live ordering (dispatch_import_from_db): nested check runs *before*
-        # run_preimport_gates is even called, so a corrupt-AND-nested folder
-        # is reported as nested_layout, not audio_corrupt. The simulator
+        # measure_preimport_state is even called, so a corrupt-AND-nested
+        # folder is reported as nested_layout, not audio_corrupt. The simulator
         # must short-circuit the same way so operators are sent to the
         # right remediation (flatten the folder).
         r = full_pipeline_decision(

@@ -959,7 +959,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
     nor ``download_log_id`` is a programmer error.
 
     After the importer-never-measures refactor, the legacy direct-measurement
-    branch that ran ``inspect_local_files`` / ``run_preimport_gates`` for
+    branch that ran ``inspect_local_files`` / ``measure_preimport_state`` for
     callers that omitted both IDs has been deleted. The only production
     caller (``scripts/importer.py``) always supplies ``import_job_id``;
     a call that omits both is misuse and must surface as a typed
