@@ -28,8 +28,9 @@ Three pieces of legacy still violate that shape and one structural change makes 
 - **(B)** PR #256 papered over (A) by writing a second evidence row under `download_log_candidate:dl_id` at reject time, via `_persist_candidate_evidence_for_reject` re-measuring already-measured audio. Once (A) lands, that helper is dead. Delete it.
 - **(C)** `lib.preimport.run_preimport_gates` is a shim that bundles measurement and decision — the exact anti-pattern the three-PR refactor was eliminating. Two callers remain (`lib/import_preview.py:977`, `lib/download.py:1200`). Migrate them to the post-#254 pattern (`measure_preimport_state` + `preimport_decide`) and delete the shim + its legacy decision helper + its legacy denylist side-effect helper.
 - **(D)** Re-key `album_quality_evidence` from `(owner_type, owner_id)` to `(mb_release_id, snapshot_fingerprint)`. Owners become addressing FKs on `import_jobs` / `download_log` / `album_requests`. Multiple "owners" for the same on-disk audio collapse into one canonical row. **Backfill-and-rekey migration**, not a TRUNCATE: existing evidence rows have their files table already populated, so `snapshot_fingerprint` is computable inside the migration. `mb_release_id` is JOINable from the owner table. Addressing FKs are backfilled in the same migration. No shim, no dual-write, no transition — but no operational re-measurement either. The mantra ("evidence should never be deleted unless files change") holds.
+- **(E)** Propagate candidate evidence on successful import. Today `_refresh_current_evidence_after_import` rebuilds the library-side evidence from `BeetsDB.get_album_info()` plus a single piece carried from the candidate (`verified_lossless_proof`). Everything else expensive — spectral grade, V0 lineage, audio_corrupt, bad-audio-hash matches — drops on the floor. After D's rekey, the candidate evidence row and the post-import library evidence row are just two `(mb_release_id, fingerprint)` keys pointing at the same audio under two different filenames. Copy the candidate's measurement payload to the new fingerprint instead of re-deriving a weaker subset. Beets-renamed files only: the audio is unchanged, so the measurement is still valid. Beets-transcoded files (FLAC→V0): only `verified_lossless_proof` propagates; spectral and V0 fields refer to the new audio and must be re-measured (or left absent until the importer needs them).
 
-After A+B+C+D: `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylist_side_effects`, and `_persist_candidate_evidence_for_reject` are gone. Evidence rows are keyed by content. Owners are FKs. One queue, one measurement, one row per on-disk audio. The framing matches the code.
+After A+B+C+D+E: `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylist_side_effects`, and `_persist_candidate_evidence_for_reject` are gone. Evidence rows are keyed by content. Owners are FKs. Expensive measurements survive the candidate → library transition instead of being silently discarded. One queue, one measurement, one row per on-disk audio. The framing matches the code.
 
 ---
 
@@ -227,6 +228,8 @@ Then `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylis
 | In-flight import_jobs at deploy | No `preview_status` reset needed. Backfill keeps every job's evidence intact and writes the FK back to `import_jobs.candidate_evidence_id` from the existing `import_job_candidate:job_id` row | Previous design (TRUNCATE + reset to `waiting`) caused operational shock. Backfill makes it a no-op for in-flight work — the worker doesn't need to re-measure anything. The `running` requeue concern from the prior design is moot. |
 | Test re-keying | `FakePipelineDB` stores `album_quality_evidence` keyed by `(mb_release_id, snapshot_fingerprint)`; existing test sites using `AlbumQualityEvidenceOwner` migrate to passing `mb_release_id` + `snapshot_fingerprint` via a `helpers.py` builder | One round of test churn; no second shape to maintain. Builder makes future test sites cheap. |
 | Migration number | `021` (not `020` — `020_recover_stuck_preview_uncertain_jobs.sql` already exists; verified at planning time) | Avoid the numbering collision flagged in review. |
+| Post-import evidence propagation (U10) | After a successful import, build the new library evidence row by copying the candidate evidence row's measurement payload, refreshing the snapshot (new fingerprint + source_path + bitrate/format from `BeetsDB.get_album_info()`), and upserting. Detect transcoded imports (target_format differs from candidate codec) and skip propagation of spectral_grade / V0 lineage in that case — they describe the source audio, not the transcoded output. `verified_lossless_proof` always propagates (it's source classification, codec-agnostic). | Today's `_refresh_current_evidence_after_import` reads `BeetsDB.get_album_info()` (bitrate/format only) and carries `verified_lossless_proof` from the candidate. Everything else (spectral grade, V0 lineage, audio_corrupt, matched_bad_audio_hash_*) drops. Under the rekey, the candidate and library evidence rows are just two keys pointing at audio that's bit-equal in the non-transcoded case. Copying the row is trivial; the mantra ("Importer works on evidence") only holds if evidence outlives the file rename. |
+| Transcoded vs renamed-only detection | Compare candidate evidence `codec` (or `target_format` when conversion was planned) to the library copy's codec read from `BeetsDB.get_album_info()`. Equal → renamed only, propagate the full measurement payload. Different → transcoded, propagate only `verified_lossless_proof` and let spectral/V0 fields stay NULL until the next time a caller needs them | The cratedigger pipeline transcodes FLAC→V0 for certain target formats; spectral grade on FLAC is not the same as spectral grade on V0 derived from that FLAC. The verified-lossless proof IS still valid (it's about source provenance). Implementer's call on the exact predicate; the test scenarios in U10 cover both cases. |
 | Commit shape for U2 + U3 | U2 (migration SQL) and U3 (code that reads/writes the new schema) **land in one commit**. The unit split in this plan is documentary — they describe two coherent halves of one atomic change | Between U2 and U3 the suite goes red: schema has dropped `owner_type`, code still references `AlbumQualityEvidenceOwner`. Atomic commit avoids a broken intermediate state for reviewers, CI, and local development. The deploy already runs migrate-before-services; the commit boundary needs the same atomicity. |
 
 ---
@@ -237,7 +240,7 @@ Then `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylis
 |---------|--------|
 | Pipeline DB | Schema migration. `album_quality_evidence` re-keyed via in-place backfill: fingerprint computed from existing files rows, `mb_release_id` JOINed from old owner table, duplicates collapsed by `measured_at DESC`, three addressing FK columns added and populated. No evidence rows deleted unless files actually changed; in-flight `import_jobs` keep their evidence so the worker has nothing to re-measure. |
 | Preview worker (`scripts/import_preview_worker.py`, `lib/import_preview.py`) | Computes fingerprint as part of `persist_candidate_evidence_from_measurement`. Sets `import_jobs.candidate_evidence_id` after upsert. |
-| Importer worker (`lib/import_dispatch.py`, `lib/quality_evidence.py`) | Reads evidence by `import_jobs.candidate_evidence_id` FK rather than `(owner_type, owner_id)` lookup. Confirms freshness with `audio_snapshot_matches` (unchanged). |
+| Importer worker (`lib/import_dispatch.py`, `lib/quality_evidence.py`) | Reads evidence by `import_jobs.candidate_evidence_id` FK rather than `(owner_type, owner_id)` lookup. Confirms freshness with `audio_snapshot_matches` (unchanged). `_refresh_current_evidence_after_import` rewritten (U10) to propagate the candidate's full measurement payload into the new library evidence row instead of rebuilding from `BeetsDB.get_album_info()` plus only `verified_lossless_proof`. |
 | Reject path (`lib/download.py::_handle_rejected_result`) | No longer measures. Optionally copies `import_jobs.candidate_evidence_id` to `download_log.candidate_evidence_id` so triage has a direct FK. |
 | Wrong-match triage (`lib/wrong_match_cleanup_decision.py`, `lib/wrong_match_triage.py`, `lib/import_evidence.py`) | Lookup follows FK chain (`download_log` → `candidate_evidence_id`, fallback to import_job FK). No `_candidate_owners` helper. `_preview_for_triage` re-measurement path becomes cold (only fires for evidence-less legacy rows). |
 | Auto-import fallback (`lib/download.py:1200`) | Migrated off `run_preimport_gates` to direct `measure_preimport_state` + `preimport_decide`. |
@@ -368,6 +371,7 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 - `lib/quality_evidence.py`
 - `lib/pipeline_db.py`
 - `lib/import_evidence.py`
+- `lib/import_dispatch.py` (the existing call sites at `:773` and `:845` change signature when `request_current_owner` and `backfill_current_evidence_from_album_info` change shape; U10 rewrites `_refresh_current_evidence_after_import` more substantially)
 - `tests/fakes.py` (FakePipelineDB)
 - `tests/helpers.py` (new `make_evidence` builder)
 - `tests/test_fakes.py` (self-test for the new shape)
@@ -525,13 +529,50 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 
 ---
 
+### U10. (E) Propagate candidate evidence on successful import
+
+**Goal:** Rewrite `_refresh_current_evidence_after_import` (`lib/import_dispatch.py:811`) so the post-import library evidence row inherits the candidate's full measurement payload instead of being rebuilt as a weaker subset from `BeetsDB.get_album_info()`. After this unit, expensive measurements (spectral grade, V0 lineage, audio_corrupt, matched_bad_audio_hash_*) survive the candidate → library transition for non-transcoded imports. The `verified_lossless_proof` carry-forward that already exists keeps working — this unit subsumes and extends it.
+
+**Requirements:** Honors the architectural mantra in the non-trivial case: the importer doesn't have to re-derive evidence it already paid for, and triage on a recently-imported album doesn't see a weakened evidence row.
+
+**Dependencies:** U3 (uses the new evidence model and `album_requests.current_evidence_id` FK).
+
+**Files:**
+- `lib/import_dispatch.py` (rewrite `_refresh_current_evidence_after_import`)
+- `lib/quality_evidence.py` (likely needs a new helper, e.g. `propagate_candidate_evidence_to_current(candidate_evidence, *, library_path, library_album_info)` — exact name implementer's call)
+- `tests/test_import_dispatch.py` or `tests/test_integration_slices.py` (new slice covering both the renamed-only and transcoded paths)
+
+**Approach:** The helper takes the candidate evidence row, the post-import library path, and the freshly-read `BeetsDB.AlbumInfo`, and returns a new `AlbumQualityEvidence` to upsert:
+
+1. Snapshot library files at the library path → compute new `snapshot_fingerprint`.
+2. Detect whether files were renamed-only or transcoded: compare candidate's `codec` (or `target_format` when conversion was configured) to `album_info.format`.
+3. **Renamed-only case:** copy every measurement field from the candidate evidence except `source_path` (set to library path), `snapshot_fingerprint` (recomputed), the per-file `album_quality_evidence_files` records (re-snapshotted because file names changed), and the bitrate/format/track_count stats (refresh from `album_info` — beets may have re-encoded sample tags but audio is bit-equal, so the bitrate from beets is the same as the candidate's; this is the dual-check that catches drift).
+4. **Transcoded case:** copy only `verified_lossless_proof` and `was_converted_from`-style provenance fields. Spectral grade, V0 lineage, and bad-audio-hash matches are about the source audio and do not apply to the transcoded library copy. They stay NULL on the new row until something measures them.
+5. Upsert by `(mb_release_id, new_fingerprint)`. Set `album_requests.current_evidence_id` FK.
+
+`backfill_current_evidence_from_album_info` and `load_or_backfill_current_evidence` keep existing for non-post-import callers (e.g., wrong-match triage backfilling library evidence when the album was imported pre-refactor and never had a `current_evidence_id` FK set). Those continue to behave as today.
+
+**Patterns to follow:** The existing `_refresh_current_evidence_after_import` (lib/import_dispatch.py:811) for the integration point and call site. The `verified_lossless_proof` carry-forward logic at lib/import_dispatch.py:833-844 — U10 generalises this pattern to the rest of the payload.
+
+**Test scenarios:**
+- Renamed-only import (FLAC source → FLAC library, beets rename only): after `_refresh_current_evidence_after_import` returns, the new `request_current` evidence row has `spectral_grade` equal to the candidate's, `spectral_bitrate_kbps` equal, `verified_lossless` equal, `audio_corrupt` equal, V0 lineage fields equal. `snapshot_fingerprint` is different (file names changed). `source_path` points at the library location.
+- Transcoded import (FLAC source → V0 library): after `_refresh_current_evidence_after_import` returns, the new row has `spectral_grade=NULL`, `spectral_bitrate_kbps=NULL`, V0 lineage fields NULL. `verified_lossless_proof` is carried forward and present. `bitrate` reflects the V0 output (from `album_info`).
+- Equivalence with today's path on the `verified_lossless_proof` field: a known-pre-refactor fixture with `verified_lossless=True` produces a post-refactor row whose `verified_lossless_proof` matches what `backfill_current_evidence_from_album_info(verified_lossless_proof=...)` produced today.
+- The candidate evidence row is NOT deleted by this propagation. It survives as the audit trail for the import_job.
+- `album_requests.current_evidence_id` is set to the new row's id after propagation.
+- `audio_snapshot_matches(library_path, new_evidence.files)` returns True (the propagation re-snapshotted files at the library path, so freshness check passes immediately).
+
+**Verification:** Targeted unit + integration tests pass. On live deploy, watch one cycle of imports and confirm via `pipeline-cli show <request_id>` that the post-import current evidence has the spectral/V0 fields populated for FLAC-only imports.
+
+---
+
 ### U9. Verification + deploy
 
 **Goal:** Run the issue's verification checklist against a fresh deploy and capture the result.
 
-**Requirements:** All of A+B+C+D live and observed working.
+**Requirements:** All of A+B+C+D+E live and observed working.
 
-**Dependencies:** U1–U8.
+**Dependencies:** U1–U8, U10.
 
 **Files:**
 - None (verification is operational, not code).
@@ -550,6 +591,7 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 7. **In-flight requeue (negative check):** no `import_jobs` rows are stuck in `running` with NULL `candidate_evidence_id` after one full importer cycle. If any exist, they're either pre-deploy orphans flagged by the migration's logged drops, or a backfill bug — investigate before declaring deploy green.
 8. **Triage doesn't re-measure:** trigger a fresh wrong-match triage from the web UI on a known `high_distance` reject row that existed *before* the deploy. Confirm in `cratedigger-web` logs that neither `_preview_for_triage` nor `measure_preimport_state` fires — the migration's backfill populated `download_log.candidate_evidence_id` for historical rows. Grep `journalctl -u cratedigger-web --since '1 hour ago'` for any "legacy-evidence-less" WARN entries; these should be rare or absent.
 9. **Fresh reject produces one evidence row:** create a fresh download → reject cycle in production. After it lands, query `pipeline-cli query "SELECT mb_release_id, snapshot_fingerprint, COUNT(*) FROM album_quality_evidence WHERE mb_release_id = '<known release>' GROUP BY mb_release_id, snapshot_fingerprint HAVING COUNT(*) > 1"` and confirm zero duplicate-fingerprint rows.
+10. **Post-import propagation (E):** after the first successful auto-import post-deploy, query `pipeline-cli query "SELECT spectral_grade, spectral_bitrate_kbps, v0_source_lineage, verified_lossless FROM album_quality_evidence ae JOIN album_requests ar ON ar.current_evidence_id = ae.id WHERE ar.id = <known imported request_id>"`. For FLAC-only imports: spectral_grade and V0 fields are populated (propagated from the candidate). For transcoded imports: spectral fields are NULL but `verified_lossless` carries the candidate's value.
 
 ---
 
@@ -594,3 +636,5 @@ This plan is sourced from issue #257 directly (no upstream `*-requirements.md`).
 | First-time Wrong Matches triage on a reject row is instant (no `_preview_for_triage` fallback fires) | U4 test scenarios + U9 step 7 |
 
 The issue's "Optional cleanup (D)" is in scope (user-directed: "do the optional cleanup wtf. not optional"), folded into U1–U3 + U9 verification steps 2–3.
+
+**E (evidence propagation across rename)** is plan-scope-only — not in issue #257's verification list, added during planning when the user identified that the candidate→library transition silently downgrades evidence to a weaker subset. Covered by U10 + U9 step 10. Honors the mantra ("Importer works on evidence") in the case the mantra cares about most: an album that just got imported should not have its evidence quality regress in the process.
