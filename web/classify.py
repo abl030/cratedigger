@@ -846,6 +846,7 @@ def _rejection_verdict(entry: LogEntry) -> str:
 
     # Quality comparison scenarios — delegate to ImportResult when available
     if scenario in (
+        "downgrade",
         "quality_downgrade",
         "transcode_downgrade",
         "suspect_lossless_downgrade",

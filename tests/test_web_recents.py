@@ -650,6 +650,38 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("320", result.verdict)
         self.assertIn("not", result.verdict.lower())
 
+    def test_persisted_quality_downgrade_verdict_uses_import_result(self):
+        """Auto-import rows may store the quality-pipeline decision as the
+        scenario. Recents must still show the comparison, not bare
+        "downgrade".
+        """
+        result = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="downgrade",
+            soulseek_username="CondosInQueens",
+            import_result={
+                "version": 2,
+                "exit_code": 5,
+                "decision": "downgrade",
+                "new_measurement": {
+                    "min_bitrate_kbps": 159,
+                    "avg_bitrate_kbps": 159,
+                    "spectral_bitrate_kbps": 160,
+                    "spectral_grade": "likely_transcode",
+                    "format": "MP3",
+                },
+                "existing_measurement": {
+                    "min_bitrate_kbps": 192,
+                    "avg_bitrate_kbps": 192,
+                    "format": "MP3",
+                },
+            },
+        ))
+        self.assertNotEqual(result.verdict, "downgrade")
+        self.assertIn("159", result.verdict)
+        self.assertIn("192", result.verdict)
+        self.assertIn("CondosInQueens", result.summary)
+
     def test_spectral_reject_verdict(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="spectral_reject",
