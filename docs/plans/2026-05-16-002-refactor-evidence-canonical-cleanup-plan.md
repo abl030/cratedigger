@@ -29,8 +29,9 @@ Three pieces of legacy still violate that shape and one structural change makes 
 - **(C)** `lib.preimport.run_preimport_gates` is a shim that bundles measurement and decision — the exact anti-pattern the three-PR refactor was eliminating. Two callers remain (`lib/import_preview.py:977`, `lib/download.py:1200`). Migrate them to the post-#254 pattern (`measure_preimport_state` + `preimport_decide`) and delete the shim + its legacy decision helper + its legacy denylist side-effect helper.
 - **(D)** Re-key `album_quality_evidence` from `(owner_type, owner_id)` to `(mb_release_id, snapshot_fingerprint)`. Owners become addressing FKs on `import_jobs` / `download_log` / `album_requests`. Multiple "owners" for the same on-disk audio collapse into one canonical row. **Backfill-and-rekey migration**, not a TRUNCATE: existing evidence rows have their files table already populated, so `snapshot_fingerprint` is computable inside the migration. `mb_release_id` is JOINable from the owner table. Addressing FKs are backfilled in the same migration. No shim, no dual-write, no transition — but no operational re-measurement either. The mantra ("evidence should never be deleted unless files change") holds.
 - **(E)** Propagate candidate evidence on successful import. Today `_refresh_current_evidence_after_import` rebuilds the library-side evidence from `BeetsDB.get_album_info()` plus a single piece carried from the candidate (`verified_lossless_proof`). Everything else expensive — spectral grade, V0 lineage, audio_corrupt, bad-audio-hash matches — drops on the floor. After D's rekey, the candidate evidence row and the post-import library evidence row are just two `(mb_release_id, fingerprint)` keys pointing at the same audio under two different filenames. Copy the candidate's measurement payload to the new fingerprint instead of re-deriving a weaker subset. Beets-renamed files only: the audio is unchanged, so the measurement is still valid. Beets-transcoded files (FLAC→V0): only `verified_lossless_proof` propagates; spectral and V0 fields refer to the new audio and must be re-measured (or left absent until the importer needs them).
+- **(F)** Dissolve `preimport_decide` into `full_pipeline_decision_from_evidence`. PR #258 (which landed on main between our U4 and the rebase) made `full_pipeline_decision_from_evidence` the single source of truth for quality decisions and explicitly carved out `preimport_decide` to own the four folder/audio-integrity facts: `audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`. That carve-out is hair-splitting — both functions branch on facts already persisted on `AlbumQualityEvidence`, both run in the importer at the same logical moment, both produce reject/accept, and both route through near-duplicate rejection plumbing that denylists peers and cleans the staged dir. Fold the four branches into `full_pipeline_decision_from_evidence` so there is one decision function, one rejection router, one denylist policy. The hard-won invariant from #258 ("Quality decisions live in ONE place") becomes literally true instead of true-with-an-asterisk.
 
-After A+B+C+D+E: `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylist_side_effects`, and `_persist_candidate_evidence_for_reject` are gone. Evidence rows are keyed by content. Owners are FKs. Expensive measurements survive the candidate → library transition instead of being silently discarded. One queue, one measurement, one row per on-disk audio. The framing matches the code.
+After A+B+C+D+E+F: `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylist_side_effects`, `_persist_candidate_evidence_for_reject`, `preimport_decide`, `_route_preimport_decision_reject`, and `_PREIMPORT_REJECT_DENYLIST_REASONS` are gone. Evidence rows are keyed by content. Owners are FKs. Expensive measurements survive the candidate → library transition. The four folder/integrity facts are early branches inside the unified decider, sharing the same rejection routing and denylist policy as every other reject. One queue, one measurement, one row per on-disk audio, **one decision function**. The framing matches the code.
 
 ---
 
@@ -230,6 +231,8 @@ Then `run_preimport_gates`, `_legacy_preimport_decision`, `_apply_legacy_denylis
 | Migration number | `021` (not `020` — `020_recover_stuck_preview_uncertain_jobs.sql` already exists; verified at planning time) | Avoid the numbering collision flagged in review. |
 | Post-import evidence propagation (U10) | After a successful import, build the new library evidence row by copying the candidate evidence row's measurement payload, refreshing the snapshot (new fingerprint + source_path + bitrate/format from `BeetsDB.get_album_info()`), and upserting. Detect transcoded imports (target_format differs from candidate codec) and skip propagation of spectral_grade / V0 lineage in that case — they describe the source audio, not the transcoded output. `verified_lossless_proof` always propagates (it's source classification, codec-agnostic). | Today's `_refresh_current_evidence_after_import` reads `BeetsDB.get_album_info()` (bitrate/format only) and carries `verified_lossless_proof` from the candidate. Everything else (spectral grade, V0 lineage, audio_corrupt, matched_bad_audio_hash_*) drops. Under the rekey, the candidate and library evidence rows are just two keys pointing at audio that's bit-equal in the non-transcoded case. Copying the row is trivial; the mantra ("Importer works on evidence") only holds if evidence outlives the file rename. |
 | Transcoded vs renamed-only detection | Compare candidate evidence `codec` (or `target_format` when conversion was planned) to the library copy's codec read from `BeetsDB.get_album_info()`. Equal → renamed only, propagate the full measurement payload. Different → transcoded, propagate only `verified_lossless_proof` and let spectral/V0 fields stay NULL until the next time a caller needs them | The cratedigger pipeline transcodes FLAC→V0 for certain target formats; spectral grade on FLAC is not the same as spectral grade on V0 derived from that FLAC. The verified-lossless proof IS still valid (it's about source provenance). Implementer's call on the exact predicate; the test scenarios in U10 cover both cases. |
+| One decision function (F) | Fold `preimport_decide`'s four branches (`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) into the top of `full_pipeline_decision_from_evidence` as early-exit rejects. Delete `preimport_decide`. Delete `_route_preimport_decision_reject` — unify with the quality-side rejection helper. Merge `_PREIMPORT_REJECT_DENYLIST_REASONS` into the unified denylist policy that quality-side rejects already share semantically (`spectral_reject` was already in both tables). | PR #258 made `full_pipeline_decision_from_evidence` the single decider for QUALITY but left a parallel `preimport_decide` for "is this folder importable" facts. Both branch on the same persisted evidence, both produce reject/accept, both route through near-identical rejection plumbing with the same denylist policy. The split is artificial — collapse it. The mantra "Quality decisions live in ONE place" becomes literally true. Debugging happens in one function instead of "check both these functions and figure out which one fired". |
+| `lib/preimport.py` rename | After F lands, the module contains only `measure_preimport_state` and its measurement primitives (`spectral_analyze`, `_check_bad_audio_hashes`, `_iter_audio_files`, `inspect_local_files`, `PreimportMeasurement` Struct, `LocalFileInspection` dataclass). The "preimport" name lies — there is no longer a preimport *gate*, only preimport *measurement*. Rename `lib/preimport.py` → `lib/measurement.py` and update imports. | Cosmetic but kills a load-bearing name that no longer describes what the module does. Defensible to defer if the cost of the rename PR isn't worth the clarity. |
 | Commit shape for U2 + U3 | U2 (migration SQL) and U3 (code that reads/writes the new schema) **land in one commit**. The unit split in this plan is documentary — they describe two coherent halves of one atomic change | Between U2 and U3 the suite goes red: schema has dropped `owner_type`, code still references `AlbumQualityEvidenceOwner`. Atomic commit avoids a broken intermediate state for reviewers, CI, and local development. The deploy already runs migrate-before-services; the commit boundary needs the same atomicity. |
 
 ---
@@ -457,11 +460,11 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 
 ---
 
-### U6. (C) Migrate `lib/import_preview.py:977` off the shim
+### U6. (C) Migrate `lib/import_preview.py:993` off the shim — preview measures only
 
-**Goal:** Replace the `run_preimport_gates` call at `lib/import_preview.py:977` with direct `measure_preimport_state` + `preimport_decide` calls. The caller takes over the three side effects the shim used to bundle: (1) persist the measurement as evidence, (2) write the addressing FK on the import_job (post-rekey), (3) when the decision is `bad_audio_hash` or `spectral_reject`, add the offending Soulseek username(s) to the denylist via `PipelineDB.add_curator_ban` / equivalent — replicating what `_apply_legacy_denylist_side_effects` currently does.
+**Goal:** Replace the `run_preimport_gates` call at `lib/import_preview.py:993` (was `:977` pre-rebase) with a call to `measure_preimport_state` only. **Preview must not decide.** The measurement is persisted as `AlbumQualityEvidence` (with the four folder/integrity fact fields populated: `audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`); the import_job's `candidate_evidence_id` FK is set. The decision (and any denylist write) happens at the importer when `full_pipeline_decision_from_evidence` runs against that persisted evidence.
 
-**Requirements:** Resolves part of (C). The non-worker preview path stops bundling decision with measurement.
+**Requirements:** Resolves part of (C). Aligns with the post-#258 mantra "Preview produces evidence. Importer decides."
 
 **Dependencies:** U3 (uses the new evidence write path).
 
@@ -469,25 +472,28 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 - `lib/import_preview.py`
 - `tests/test_import_preview.py` (and any test using this call site)
 
-**Approach:** Mirror the worker code path (the post-#254 pattern that already exists in `_preview_import_from_path_worker_mode` — research located it inline at the worker entry around lines 469–527). Pull the four-call sequence (`measure_preimport_state` → `preimport_decide` → `persist_candidate_evidence_from_measurement` → conditional denylist add) into a tiny shared helper if both U6 and U7 end up open-coding the exact same block; otherwise inline it at each site. The implementer makes the call based on duplication after both sites are migrated. *Do not* keep `_apply_legacy_denylist_side_effects` alive for U6/U7 to call — that defers the shim removal and is exactly the kind of "still alive in tests" trap PR #254 was. Inline the denylist call instead, using `PipelineDB.add_curator_ban` (or whatever method names the shim helper currently uses).
+**Approach:** Mirror the worker code path (the post-#254 pattern that already exists in `_preview_import_from_path_worker_mode`). Two calls: `measure_preimport_state` → `persist_candidate_evidence_from_measurement`. No `preimport_decide`, no denylist add — those live in the importer. If the persisted evidence contains `audio_corrupt=True` (or any of the four facts), the importer will reject when it later reads the evidence and runs the unified decider; the rejection routing + denylist write are the importer's concern.
+
+This is a meaningful change from the pre-#258 plan, which routed `preimport_decide` through both preview and importer. Now preview is purely an evidence producer.
 
 **Test scenarios:**
-- A rejected preview from this code path writes evidence keyed by the new `(mb_release_id, snapshot_fingerprint)` shape and sets `import_jobs.candidate_evidence_id` for the source job.
-- A rejected preview where `decision.reason == 'bad_audio_hash'` adds the candidate's downloading username(s) to the curator-ban denylist. Assert the denylist row exists in `FakePipelineDB` after the call.
-- A rejected preview where `decision.reason == 'spectral_reject'` adds the username(s) to the denylist. Same assertion shape.
-- An accepted preview does NOT touch the denylist.
-- Equivalence test: feed the same fixture to (a) the old `run_preimport_gates` path (before U6 lands) and (b) the new direct-call path, and assert byte-equal `ImportResult` + identical denylist mutations + identical evidence-row contents. This is the regression guard that catches the same class of bug PR #254 caused.
+- A preview that captures `audio_corrupt=True` persists evidence with that field set, sets `import_jobs.candidate_evidence_id`, and does NOT touch the denylist (denylist is importer-side).
+- A preview that captures `bad_audio_hash=True` persists evidence with the matched hash recorded, sets the FK, does NOT touch the denylist.
+- An accepted-by-measurement preview (no facts triggered) persists evidence with all four fact fields clear and proceeds normally.
+- A test that patches `lib.preimport.run_preimport_gates` to detect any residual call site — asserts zero calls after migration.
 - Pyright clean.
 
 **Verification:** Direct unit tests pass. The full test suite stays green.
 
 ---
 
-### U7. (C) Migrate `lib/download.py:1200` off the shim
+### U7. (C) Migrate `lib/download.py:1200` off the shim — measure-then-dispatch
 
-**Goal:** Migrate the auto-import **evidence-missing recovery path** at `lib/download.py:1200` to the same direct-call shape as U6. This path is *not dead* — it's the fallback `_process_finalized_download` falls into when `candidate_evidence_available=False` (i.e. preview-worker evidence is missing at importer dispatch time). It runs rarely in production but it does run, so it has to keep working. Replace the `run_preimport_gates` call with the same four-call sequence: `measure_preimport_state` → `preimport_decide` → `persist_candidate_evidence_from_measurement` → conditional denylist add for `bad_audio_hash` / `spectral_reject`.
+**Goal:** Migrate the auto-import **evidence-missing recovery path** at `lib/download.py:1200` to the post-#258 pattern: `measure_preimport_state` → persist as evidence → set `import_jobs.candidate_evidence_id` → re-enter the importer's normal flow (which will read the just-written evidence and run `full_pipeline_decision_from_evidence` against it). The recovery path stops being a parallel decide-and-act site; it becomes a "make evidence and let the standard importer handle it" path.
 
-**Requirements:** Resolves the remaining call site of (C).
+This path is *not dead* — it's the fallback `_process_finalized_download` falls into when `candidate_evidence_available=False` (preview-worker evidence missing at importer dispatch time). Rare in production but real.
+
+**Requirements:** Resolves the remaining call site of (C). Aligns with the post-#258 mantra "Preview produces evidence. Importer decides." — the recovery path is just a synchronous catch-up of the preview's job.
 
 **Dependencies:** U3.
 
@@ -496,14 +502,13 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 - `tests/test_download.py`
 - `tests/test_force_import_gates.py`
 
-**Approach:** Same shape as U6. If U6's implementation extracted a tiny shared helper, reuse it here. Verify that no production caller of `_process_finalized_download` *expects* the shim's exact return shape — `run_preimport_gates` returns a `PreImportGateResult`, the new direct calls return `(measurement, decision)` separately. The caller's handling of the result needs to adapt; this is in-scope for U7 and should be part of the test scenarios.
+**Approach:** Two calls inline: `measure_preimport_state` → `persist_candidate_evidence_from_measurement`. Set the FK. Then either re-enter the importer's evidence-driven dispatch (preferred — single path) or, if structurally awkward, build the evidence then let the existing `dispatch_import_from_db` resume from the now-populated FK. No `preimport_decide`, no denylist write — both are the importer's concern via the unified decider in U11.
 
 **Test scenarios:**
-- Each test in `tests/test_download.py` currently decorated `@patch('lib.preimport.run_preimport_gates')` is migrated to either (a) patch the two new seams (`measure_preimport_state` + `preimport_decide`) or (b) lift to an integration-slice form using `FakePipelineDB`. Prefer (b) — the integration-slice form is the regression guard that the denylist side effects, the evidence-write, and the decision dispatch all land correctly.
-- A rejected evidence-missing fallback adds the candidate's username(s) to the denylist when the decision is `bad_audio_hash` or `spectral_reject` (mirror U6's coverage).
-- An accepted evidence-missing fallback persists evidence keyed by the new shape, sets `import_jobs.candidate_evidence_id`, and proceeds to import without touching the denylist.
-- Same coverage in `tests/test_force_import_gates.py`.
-- After migration, `grep -rn 'run_preimport_gates' tests/ lib/` returns zero matches (the function definition is still alive at this point — it's deleted in U8 — but no callers remain).
+- Each test in `tests/test_download.py` currently decorated `@patch('lib.preimport.run_preimport_gates')` is migrated to (a) patch `measure_preimport_state` and assert the persist + dispatch flow, or (b) lift to an integration-slice form using `FakePipelineDB`. Prefer (b).
+- Evidence-missing fallback with corrupt audio: writes evidence with `audio_corrupt=True`, sets FK, dispatch sees it on the next pass and the unified decider rejects + routes to the shared rejection helper that handles the denylist (per U11). The test patches the importer's reject path to confirm it fires.
+- Evidence-missing fallback with clean audio: writes evidence with all facts clear, sets FK, normal import proceeds.
+- After migration, `grep -rn 'run_preimport_gates\|preimport_decide' lib/download.py` returns zero matches.
 
 **Verification:** `grep -rn 'run_preimport_gates' tests/` returns zero matches. The full test suite stays green.
 
@@ -526,6 +531,51 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 **Test scenarios:** None new — this unit is a deletion with no behavior change. The post-deletion check is the equivalence proof (tests that previously covered the shim now cover the same behavior through the direct-call shape exercised in U6/U7).
 
 **Verification:** `grep -rn 'run_preimport_gates' lib/ scripts/` returns zero matches. `pyright lib/preimport.py` clean. Suite green.
+
+---
+
+### U11. (F) Fold `preimport_decide` into `full_pipeline_decision_from_evidence`
+
+**Goal:** Make `full_pipeline_decision_from_evidence` the literal single decision function for the importer. Move `preimport_decide`'s four branches (`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) to the top of `full_pipeline_decision_from_evidence` as early-exit rejects. Delete `preimport_decide` (`lib/quality.py:2180`). Delete `_route_preimport_decision_reject` (`lib/import_dispatch.py:447`) — unify the four-fact rejects into the same rejection helper the quality-side rejects already use. Merge `_PREIMPORT_REJECT_DENYLIST_REASONS` into the unified denylist policy.
+
+**Requirements:** Resolves (F). After this unit, there is one decision function, one rejection helper, one denylist policy. CLAUDE.md's "Quality decisions live in ONE place" becomes literally true.
+
+**Dependencies:** U6, U7 (both callers off the shim first, so the shim's parallel `_legacy_preimport_decision` is dead by then). U8 (shim deletion lands; the only remaining decider is `preimport_decide`, which this unit then absorbs).
+
+**Files:**
+- `lib/quality.py` (`full_pipeline_decision_from_evidence` gains four early-exit branches; `preimport_decide` is deleted)
+- `lib/import_dispatch.py` (`_route_preimport_decision_reject` deleted; call site at line 1721-1746 collapses into the existing quality-side dispatch — the unified decider returns either a quality-reject outcome or a folder-integrity-reject outcome, and one rejection helper handles both)
+- `tests/test_quality_decisions.py` and `tests/test_quality_classification.py` (extend the album test set with the four folder/integrity cases through the unified pipeline; this is the parity contract that gates the change)
+- `tests/test_dispatch_*.py` (update the now-unified reject routing tests)
+
+**Approach:** The four facts are already on persisted `AlbumQualityEvidence` (U2+U3 added the schema; #258's preimport_decide reads them from `_build_preimport_measurement_from_evidence`). The unified `full_pipeline_decision_from_evidence` already accepts an evidence row as input — adding the four early branches is a small structural change: branch first on the facts, then fall through to the existing quality branches. The denylist policy merges into a single table keyed on reject reason (`audio_corrupt`, `bad_audio_hash`, `spectral_reject`, etc.). The rejection helper takes one `DispatchAction` shape regardless of which branch fired.
+
+**Test scenarios:**
+- Album test set in `tests/test_quality_classification.py` extended with: `audio_corrupt → reject + denylist`, `bad_audio_hash → reject + denylist`, `nested_layout → reject without denylist`, `empty_fileset → reject without denylist`. All run through `full_pipeline_decision_from_evidence`, asserting decision + denylist intent.
+- A test that calls `preimport_decide` directly (post-deletion) fails to import — explicit proof the symbol is gone.
+- A rejection caused by `audio_corrupt` and one caused by `spectral_reject` go through the SAME rejection helper, set the same denylist row shape (modulo the reason field), and clean up the staged dir the same way. This is the parity proof.
+- Pyright clean across `lib/quality.py`, `lib/import_dispatch.py`.
+
+**Verification:** Targeted tests pass. `grep -rn 'preimport_decide\b' lib/ scripts/` returns zero matches. The full test suite stays green.
+
+---
+
+### U12. Rename `lib/preimport.py` → `lib/measurement.py` (optional cosmetic)
+
+**Goal:** After U11 lands, `lib/preimport.py` contains only measurement functions (`measure_preimport_state`, `inspect_local_files`, `spectral_analyze`, `_check_bad_audio_hashes`, `_iter_audio_files`, the `PreimportMeasurement` Struct, the `LocalFileInspection` dataclass) — no "gates", no "decisions". The "preimport" name encodes a concept that no longer exists. Rename the module to `lib/measurement.py` and update imports across the repo.
+
+**Requirements:** Cosmetic / clarity. Not load-bearing for correctness. Defer if the rename PR isn't worth the cost.
+
+**Dependencies:** U11.
+
+**Files:**
+- `lib/preimport.py` → `lib/measurement.py` (git rename)
+- Every file that imports from `lib.preimport` — grep first, expect ~5–10 sites including `lib/import_preview.py`, `lib/import_dispatch.py`, `lib/download.py`, `lib/quality_evidence.py`, `scripts/import_preview_worker.py`, several tests.
+- `PreimportMeasurement` Struct also worth renaming to `Measurement` or similar — separate sub-decision, implementer's call.
+
+**Test scenarios:** No behavioral change. The full test suite must stay green after the rename + import updates.
+
+**Verification:** `grep -rn 'lib\.preimport\|from lib import preimport' . | grep -v '\.git\|docs/' ` returns zero matches. Pyright clean.
 
 ---
 
@@ -570,9 +620,9 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 
 **Goal:** Run the issue's verification checklist against a fresh deploy and capture the result.
 
-**Requirements:** All of A+B+C+D+E live and observed working.
+**Requirements:** All of A+B+C+D+E+F live and observed working.
 
-**Dependencies:** U1–U8, U10.
+**Dependencies:** U1–U8, U10, U11 (U12 is optional and may land after).
 
 **Files:**
 - None (verification is operational, not code).
@@ -592,6 +642,7 @@ Each unit is dependency-ordered and lands as one logical commit. U-IDs are stabl
 8. **Triage doesn't re-measure:** trigger a fresh wrong-match triage from the web UI on a known `high_distance` reject row that existed *before* the deploy. Confirm in `cratedigger-web` logs that neither `_preview_for_triage` nor `measure_preimport_state` fires — the migration's backfill populated `download_log.candidate_evidence_id` for historical rows. Grep `journalctl -u cratedigger-web --since '1 hour ago'` for any "legacy-evidence-less" WARN entries; these should be rare or absent.
 9. **Fresh reject produces one evidence row:** create a fresh download → reject cycle in production. After it lands, query `pipeline-cli query "SELECT mb_release_id, snapshot_fingerprint, COUNT(*) FROM album_quality_evidence WHERE mb_release_id = '<known release>' GROUP BY mb_release_id, snapshot_fingerprint HAVING COUNT(*) > 1"` and confirm zero duplicate-fingerprint rows.
 10. **Post-import propagation (E):** after the first successful auto-import post-deploy, query `pipeline-cli query "SELECT spectral_grade, spectral_bitrate_kbps, v0_source_lineage, verified_lossless FROM album_quality_evidence ae JOIN album_requests ar ON ar.current_evidence_id = ae.id WHERE ar.id = <known imported request_id>"`. For FLAC-only imports: spectral_grade and V0 fields are populated (propagated from the candidate). For transcoded imports: spectral fields are NULL but `verified_lossless` carries the candidate's value.
+11. **Single decision function (F):** `ssh doc2 'grep -rn "preimport_decide\b\|_route_preimport_decision_reject\b\|_PREIMPORT_REJECT_DENYLIST_REASONS" /nix/store/*/lib/ 2>/dev/null'` returns no matches. Trigger a fresh download that captures `audio_corrupt=True` in preview (or set up a fixture); confirm in the importer logs that the rejection routed through the same helper as a `spectral_reject`, with the same denylist write semantics.
 
 ---
 
