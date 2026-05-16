@@ -389,12 +389,31 @@ def _handle_measurement_failed(
         message=f"Preview measurement failed: {payload.reason}",
     )
     # Step 2: U4's self-healing side effects (download_log, request→wanted).
-    _record_preview_measurement_failed(
-        db,
-        request_id=job.request_id,
-        import_job_id=job.id,
-        payload=payload,
-    )
+    # If this raises, step 1 has already committed status='failed' but
+    # the parent request stays 'downloading' with no download_log row -
+    # exactly the #250 stuck-forever shape. The bug class is rare-rare
+    # (transient PG blip during the helper's writes), but we make it
+    # observable: log loudly with the job + request IDs so operators can
+    # query for orphans via `pipeline-cli` after the fact. The job's
+    # already-failed state means the next worker tick won't re-claim it.
+    try:
+        _record_preview_measurement_failed(
+            db,
+            request_id=job.request_id,
+            import_job_id=job.id,
+            payload=payload,
+        )
+    except Exception:
+        logger.exception(
+            "PREVIEW_SELF_HEAL_PARTIAL_FAILURE: job %s status=failed but "
+            "self-heal step 2 raised - parent request %s may be stuck "
+            "in 'downloading'. Recover with: pipeline-cli query \"UPDATE "
+            "album_requests SET status='wanted' WHERE id=%s AND "
+            "status='downloading'\"",
+            job.id,
+            job.request_id,
+            job.request_id,
+        )
     if updated is not None:
         return updated
     refreshed = getattr(db, "get_import_job", None)
