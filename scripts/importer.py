@@ -16,6 +16,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.import_dispatch import (
+    DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
@@ -68,21 +69,39 @@ def _cleanup_failed_force_import(
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
+    if outcome.code != DISPATCH_CODE_QUALITY_PIPELINE_REJECTED:
+        return {
+            "success": False,
+            "download_log_id": download_log_id,
+            "failed_path_hint": failed_path_hint,
+            "outcome": "skipped_non_quality_pipeline_failure",
+            "skipped": True,
+            "dispatch_code": outcome.code,
+            "dispatch_message": outcome.message,
+        }
     try:
-        from lib.wrong_match_cleanup_service import (
-            OUTCOME_DELETED,
-            cleanup_wrong_match,
-        )
+        from lib.wrong_match_delete_service import delete_wrong_match
 
-        result = cleanup_wrong_match(
+        # Dispatch already made the canonical import decision via
+        # full_pipeline_decision_from_evidence; this step only removes the
+        # reviewed source from Wrong Matches.
+        payload = job.payload or {}
+        source_dirs = payload.get("source_dirs")
+        result = delete_wrong_match(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
+            source_dirs_hint=(
+                source_dirs if isinstance(source_dirs, list) else ()
+            ),
             ignore_import_job_id=job.id,
+            require_visible=False,
         )
         data = result.to_dict()
-        if result.outcome != OUTCOME_DELETED:
-            data["skipped"] = True
+        data["dispatch_code"] = outcome.code
+        data["dispatch_message"] = outcome.message
+        if result.success:
+            data["reason"] = "quality_pipeline_rejected"
         return data
     except Exception as exc:
         logger.exception(

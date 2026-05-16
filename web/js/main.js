@@ -13,7 +13,7 @@ import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, render
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
-import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, forceImportWrongMatch, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold } from './wrong-matches.js';
+import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
 import { toast } from './state.js';
@@ -145,6 +145,8 @@ Object.assign(window, {
   toggleWrongMatchEntry,
   reloadWrongMatchExplorer,
   forceImportWrongMatch,
+  deleteWrongMatch,
+  deleteWrongMatchGroup,
   bulkTriageWrongMatches,
   convergeWrongMatches,
   setWrongMatchConvergeThreshold,

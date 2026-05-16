@@ -43,7 +43,9 @@ def _cfg() -> types.SimpleNamespace:
 
 
 def _make_source(root: str, name: str) -> str:
-    source = os.path.join(root, name)
+    failed_root = os.path.join(root, "failed_imports")
+    os.makedirs(failed_root, exist_ok=True)
+    source = os.path.join(failed_root, name)
     os.mkdir(source)
     with open(os.path.join(source, "01.mp3"), "wb") as handle:
         handle.write(b"audio")

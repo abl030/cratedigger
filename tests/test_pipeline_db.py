@@ -4514,7 +4514,7 @@ class TestActiveImportJobsForWrongMatch(unittest.TestCase):
 
         self.assertEqual(
             {job.id for job in jobs},
-            {by_download_log.id, by_request.id, by_path.id, by_source_dir.id},
+            {by_download_log.id, by_path.id, by_source_dir.id},
         )
 
 

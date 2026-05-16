@@ -12,7 +12,10 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
-from lib.import_dispatch import DispatchOutcome
+from lib.import_dispatch import (
+    DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+    DispatchOutcome,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -79,6 +82,13 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
     assert persisted is not None and persisted.id is not None
     db.set_request_current_evidence(request_id, persisted.id)
     return persisted
+
+
+def _make_failed_import_source() -> tuple[str, str]:
+    root = tempfile.mkdtemp()
+    source = os.path.join(root, "failed_imports", "Album")
+    os.makedirs(source)
+    return root, source
 
 
 class TestAutomationEvidenceReuse(unittest.TestCase):
@@ -558,20 +568,15 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.error, "quality gate rejected")
         self.assertEqual(self._result(updated)["success"], False)
 
-    def test_failed_force_import_job_cleans_wrong_match_source(self):
+    def test_failed_force_import_quality_pipeline_reject_cleans_without_redeciding(self):
         from scripts import importer
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
             log_id = self._log_wrong_match(db, failed_path=source)
-            self._seed_cleanup_reject_evidence(
-                db,
-                log_id=log_id,
-                source_path=source,
-            )
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -588,10 +593,24 @@ class TestImporterWorker(unittest.TestCase):
 
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
-                return_value=DispatchOutcome(False, "Pre-import gate rejected"),
-            ), self._patch_beets_album(source, min_bitrate=245):
-                updated = importer.process_claimed_job(cast(Any, db), claimed)
+                return_value=DispatchOutcome(
+                    False,
+                    "Rejected by persisted quality evidence: downgrade",
+                    code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+                ),
+            ), patch(
+                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+            ) as cleanup_wrong_match:
+                with patch(
+                    "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
+                    side_effect=AssertionError("cleanup must not re-decide"),
+                ), patch(
+                    "lib.quality.full_pipeline_decision_from_evidence",
+                    side_effect=AssertionError("cleanup must not re-decide"),
+                ):
+                    updated = importer.process_claimed_job(cast(Any, db), claimed)
 
+            cleanup_wrong_match.assert_not_called()
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             self.assertFalse(os.path.exists(source))
@@ -600,15 +619,19 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(result["cleanup"]["success"], True)
             self.assertEqual(result["cleanup"]["outcome"], "deleted")
             self.assertEqual(result["cleanup"]["cleared_rows"], 1)
-            self.assertEqual(result["cleanup"]["verdict"], "confident_reject")
+            self.assertEqual(result["cleanup"]["reason"], "quality_pipeline_rejected")
+            self.assertEqual(
+                result["cleanup"]["dispatch_code"],
+                DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+            )
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
-    def test_failed_force_import_job_skips_cleanup_when_fresh_evidence_uncertain(self):
+    def test_failed_force_import_non_pipeline_failure_preserves_wrong_match(self):
         from scripts import importer
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
@@ -642,23 +665,25 @@ class TestImporterWorker(unittest.TestCase):
 
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
-                return_value=DispatchOutcome(False, "Pre-import gate rejected"),
-            ):
+                return_value=DispatchOutcome(False, "beets failed"),
+            ), patch(
+                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+            ) as cleanup_wrong_match:
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
+            cleanup_wrong_match.assert_not_called()
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             self.assertTrue(os.path.isdir(source))
             self.assertEqual(len(db.get_wrong_matches()), 1)
-            result = self._result(updated)
-            self.assertEqual(result["cleanup"]["success"], False)
-            self.assertTrue(result["cleanup"]["skipped"])
+            cleanup = self._result(updated)["cleanup"]
+            self.assertTrue(cleanup["skipped"])
             self.assertEqual(
-                result["cleanup"]["outcome"],
-                "skipped_candidate_evidence_missing",
+                cleanup["outcome"],
+                "skipped_non_quality_pipeline_failure",
             )
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_force_import_requeued_for_preview_does_not_mark_failed(self):
         """U2: when dispatch returns DISPATCH_CODE_REQUEUED_FOR_PREVIEW the
@@ -670,7 +695,7 @@ class TestImporterWorker(unittest.TestCase):
         from lib.import_dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
@@ -725,7 +750,7 @@ class TestImporterWorker(unittest.TestCase):
             if updated is not None:
                 self.assertNotEqual(updated.status, "failed")
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_force_import_requeue_failed_marks_job_failed(self):
         """REL-001: when dispatch returns DISPATCH_CODE_REQUEUE_FAILED (its
@@ -742,7 +767,7 @@ class TestImporterWorker(unittest.TestCase):
         from lib.import_dispatch import DISPATCH_CODE_REQUEUE_FAILED
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
@@ -783,22 +808,17 @@ class TestImporterWorker(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.status, "failed")
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_failed_force_import_job_clears_newer_duplicate_rejection(self):
         from scripts import importer
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             with open(os.path.join(source, "01.mp3"), "wb") as f:
                 f.write(b"audio")
             log_id = self._log_wrong_match(db, failed_path=source, username="old")
-            self._seed_cleanup_reject_evidence(
-                db,
-                log_id=log_id,
-                source_path=source,
-            )
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
@@ -823,12 +843,16 @@ class TestImporterWorker(unittest.TestCase):
                         "failed_path": kwargs["failed_path"],
                     },
                 )
-                return DispatchOutcome(False, "Rejected: quality_downgrade")
+                return DispatchOutcome(
+                    False,
+                    "Rejected by persisted quality evidence: downgrade",
+                    code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+                )
 
             with patch(
                 "lib.import_dispatch.dispatch_import_from_db",
                 side_effect=reject_again,
-            ), self._patch_beets_album(source, min_bitrate=245):
+            ):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             assert updated is not None
@@ -836,13 +860,62 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(self._result(updated)["cleanup"]["cleared_rows"], 2)
             self.assertEqual(db.get_wrong_matches(), [])
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_failed_force_import_quality_reject_skips_cleanup_for_other_active_job(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            self._mark_importable(db, job)
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+            db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                dedupe_key=manual_import_dedupe_key(42, source),
+                payload=manual_import_payload(failed_path=source),
+            )
+
+            with patch(
+                "lib.import_dispatch.dispatch_import_from_db",
+                return_value=DispatchOutcome(
+                    False,
+                    "Rejected by persisted quality evidence: downgrade",
+                    code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+                ),
+            ):
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            cleanup = self._result(updated)["cleanup"]
+            self.assertTrue(cleanup["skipped"])
+            self.assertEqual(cleanup["outcome"], "skipped_active_job")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_manual_import_failure_preserves_source_and_wrong_match(self):
         from scripts import importer
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             self._log_wrong_match(db, failed_path=source)
             job = db.enqueue_import_job(
@@ -867,13 +940,13 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(len(db.get_wrong_matches()), 1)
             self.assertNotIn("cleanup", self._result(updated))
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_deferred_force_import_preserves_source_and_wrong_match(self):
         from scripts import importer
 
         db = FakePipelineDB()
-        source = tempfile.mkdtemp()
+        root, source = _make_failed_import_source()
         try:
             log_id = self._log_wrong_match(db, failed_path=source)
             job = db.enqueue_import_job(
@@ -905,7 +978,7 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(len(db.get_wrong_matches()), 1)
             self.assertNotIn("cleanup", self._result(updated))
         finally:
-            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_startup_requeues_abandoned_running_job_for_retry(self):
         from scripts import importer

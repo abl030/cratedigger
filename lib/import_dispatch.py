@@ -77,6 +77,10 @@ DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
 # misuse. The legacy direct-measurement branch that previously handled
 # this case was deleted in U4 because no production path reaches it.
 DISPATCH_CODE_BAD_REQUEST = "bad_request"
+# Canonical terminal rejection from ``full_pipeline_decision_from_evidence``.
+# Consumers may react to this outcome, but must not re-run a parallel import
+# decision to prove it again.
+DISPATCH_CODE_QUALITY_PIPELINE_REJECTED = "quality_pipeline_rejected"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -819,6 +823,7 @@ def _reject_import_from_evidence_decision(
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",
+        code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     )
 
 

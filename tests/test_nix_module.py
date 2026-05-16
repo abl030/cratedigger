@@ -86,26 +86,27 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
         self.assertIn("WorkingDirectory = cfg.stateDir", text)
 
-    def test_importer_service_does_not_restart_on_switch(self) -> None:
-        """The long-lived importer worker must NOT restart on nixos-rebuild
-        switch — that would kill in-flight beets mutations. The existing
-        requeue_running_import_jobs path covers crashes; deploys should not
-        manufacture them.
+    def test_importer_service_restarts_on_switch(self) -> None:
+        """Deploy should restart the importer worker.
+
+        requeue_running_import_jobs handles mid-job kills at startup; leaving a
+        worker dead after switch-to-configuration is worse than restarting it.
         """
         text = MODULE_NIX.read_text(encoding="utf-8")
-        # Find the importer service block and assert restartIfChanged=false
+        # Find the importer service block and assert restartIfChanged=true
         # appears within it (not just somewhere in the file).
         importer_block_start = text.index("systemd.services.cratedigger-importer")
         importer_block_end = text.index(
             "systemd.services.cratedigger-import-preview-worker"
         )
         importer_block = text[importer_block_start:importer_block_end]
-        self.assertIn("restartIfChanged = false", importer_block)
+        self.assertIn("restartIfChanged = true", importer_block)
 
-    def test_preview_worker_service_does_not_restart_on_switch(self) -> None:
-        """Same rationale as the importer — avoid killing in-flight
-        measurement on deploy. Recovery via requeue_stale_import_preview_jobs
-        exists but skipping the kill is cheaper.
+    def test_preview_worker_service_restarts_on_switch(self) -> None:
+        """Same rationale as the importer worker.
+
+        requeue_stale_import_preview_jobs handles mid-measurement kills at
+        startup; deploy should not leave the preview worker dead.
         """
         text = MODULE_NIX.read_text(encoding="utf-8")
         preview_block_start = text.index(
@@ -114,7 +115,7 @@ class TestImporterServiceContract(unittest.TestCase):
         # The next service definition or end of the systemd.services block
         # bounds the preview-worker block. Use a sentinel that's safe.
         preview_block = text[preview_block_start:preview_block_start + 4000]
-        self.assertIn("restartIfChanged = false", preview_block)
+        self.assertIn("restartIfChanged = true", preview_block)
 
     def test_prestart_renders_config_atomically_for_parallel_services(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")

@@ -566,6 +566,199 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
         self.assertEqual(payload["deleted"], 1)
 
 
+class TestCmdWrongMatchDelete(unittest.TestCase):
+    def test_delete_requires_apply(self):
+        db = MagicMock()
+        args = SimpleNamespace(download_log_id=42, apply=False, json=False)
+        stderr = io.StringIO()
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match"
+        ) as delete, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+
+        self.assertEqual(rc, 2)
+        delete.assert_not_called()
+        self.assertIn("--apply", stderr.getvalue())
+
+    def test_delete_apply_delegates_to_service(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_DELETED,
+            WrongMatchDeleteResult,
+        )
+
+        db = MagicMock()
+        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
+        result = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_DELETED,
+            success=True,
+            cleared_rows=1,
+            deleted_path="/fi/a",
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match",
+            return_value=result,
+        ) as delete, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+
+        self.assertEqual(rc, 0)
+        delete.assert_called_once_with(db, 42, require_visible=True)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["outcome"], OUTCOME_DELETED)
+        self.assertEqual(payload["cleared_rows"], 1)
+
+    def test_delete_active_job_returns_conflict_exit_code(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_ACTIVE_JOB,
+            WrongMatchDeleteResult,
+        )
+
+        db = MagicMock()
+        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
+        result = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_SKIPPED_ACTIVE_JOB,
+            skipped=True,
+            reason="active_import_job",
+        )
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match",
+            return_value=result,
+        ), redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+
+        self.assertEqual(rc, 4)
+
+    def test_delete_missing_row_returns_not_found_exit_code(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_NOT_VISIBLE,
+            WrongMatchDeleteResult,
+        )
+
+        db = MagicMock()
+        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
+        result = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_SKIPPED_NOT_VISIBLE,
+            skipped=True,
+            reason="wrong_match_not_visible",
+        )
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match",
+            return_value=result,
+        ), redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+
+        self.assertEqual(rc, 2)
+
+    def test_delete_locked_returns_transient_exit_code(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_LOCKED,
+            WrongMatchDeleteResult,
+        )
+
+        db = MagicMock()
+        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
+        result = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_SKIPPED_LOCKED,
+            skipped=True,
+            reason="cleanup_lock_unavailable",
+        )
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match",
+            return_value=result,
+        ), redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_delete(db, args)
+
+        self.assertEqual(rc, 5)
+
+
+class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
+    def test_delete_group_requires_apply(self):
+        db = MagicMock()
+        args = SimpleNamespace(request_id=42, apply=False, json=False)
+        stderr = io.StringIO()
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match_group"
+        ) as delete, redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_delete_group(db, args)
+
+        self.assertEqual(rc, 2)
+        delete.assert_not_called()
+        self.assertIn("--apply", stderr.getvalue())
+
+    def test_delete_group_apply_delegates_to_service(self):
+        from lib.wrong_match_delete_service import WrongMatchDeleteSummary
+
+        db = MagicMock()
+        args = SimpleNamespace(request_id=42, apply=True, json=True)
+        summary = WrongMatchDeleteSummary(
+            request_id=42,
+            outcome="deleted",
+            success=True,
+            processed=2,
+            deleted=2,
+            deleted_paths=2,
+            cleared=2,
+            skipped=0,
+            errors=0,
+            remaining=0,
+            group_empty=True,
+            results=(),
+        )
+        stdout = io.StringIO()
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match_group",
+            return_value=summary,
+        ) as delete, redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_delete_group(db, args)
+
+        self.assertEqual(rc, 0)
+        delete.assert_called_once_with(db, 42)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["deleted"], 2)
+        self.assertEqual(payload["cleared"], 2)
+
+    def test_delete_group_active_job_returns_conflict_exit_code(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_ACTIVE_JOB,
+            WrongMatchDeleteResult,
+            WrongMatchDeleteSummary,
+        )
+
+        db = MagicMock()
+        args = SimpleNamespace(request_id=42, apply=True, json=True)
+        result = WrongMatchDeleteResult(
+            download_log_id=100,
+            outcome=OUTCOME_SKIPPED_ACTIVE_JOB,
+            skipped=True,
+            reason="active_import_job",
+        )
+        summary = WrongMatchDeleteSummary(
+            request_id=42,
+            outcome="partial",
+            success=False,
+            processed=1,
+            deleted=0,
+            deleted_paths=0,
+            cleared=0,
+            skipped=1,
+            errors=0,
+            remaining=1,
+            group_empty=False,
+            results=(result,),
+        )
+        with patch(
+            "lib.wrong_match_delete_service.delete_wrong_match_group",
+            return_value=summary,
+        ), redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_delete_group(db, args)
+
+        self.assertEqual(rc, 4)
+
+
 class TestMainExitCodes(unittest.TestCase):
     def test_main_propagates_command_return_code(self):
         argv = [
@@ -583,6 +776,83 @@ class TestMainExitCodes(unittest.TestCase):
                 pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 2)
+        db.close.assert_called_once_with()
+
+    def test_main_routes_wrong_match_delete(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_DELETED,
+            WrongMatchDeleteResult,
+        )
+
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "wrong-match-delete",
+            "42",
+            "--apply",
+            "--json",
+        ]
+        db = MagicMock()
+        result = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_DELETED,
+            success=True,
+            cleared_rows=1,
+        )
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.PipelineDB",
+            return_value=db,
+        ), patch(
+            "lib.wrong_match_delete_service.delete_wrong_match",
+            return_value=result,
+        ) as delete, redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        delete.assert_called_once_with(db, 42, require_visible=True)
+        db.close.assert_called_once_with()
+
+    def test_main_routes_wrong_match_delete_group(self):
+        from lib.wrong_match_delete_service import WrongMatchDeleteSummary
+
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "wrong-match-delete-group",
+            "42",
+            "--apply",
+            "--json",
+        ]
+        db = MagicMock()
+        summary = WrongMatchDeleteSummary(
+            request_id=42,
+            outcome="empty",
+            success=True,
+            processed=0,
+            deleted=0,
+            deleted_paths=0,
+            cleared=0,
+            skipped=0,
+            errors=0,
+            remaining=0,
+            group_empty=True,
+            results=(),
+        )
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.PipelineDB",
+            return_value=db,
+        ), patch(
+            "lib.wrong_match_delete_service.delete_wrong_match_group",
+            return_value=summary,
+        ) as delete, redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        delete.assert_called_once_with(db, 42)
         db.close.assert_called_once_with()
 
 

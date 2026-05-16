@@ -24,6 +24,16 @@ from lib.wrong_match_cleanup_service import (
     cleanup_all_wrong_matches,
     cleanup_wrong_match,
 )
+from lib.wrong_match_delete_service import (
+    OUTCOME_DELETE_FAILED as DELETE_OUTCOME_FAILED,
+    OUTCOME_SKIPPED_ACTIVE_JOB as DELETE_OUTCOME_ACTIVE_JOB,
+    OUTCOME_SKIPPED_INVALID_ROW as DELETE_OUTCOME_INVALID_ROW,
+    OUTCOME_SKIPPED_LOCKED as DELETE_OUTCOME_LOCKED,
+    OUTCOME_SKIPPED_NOT_VISIBLE as DELETE_OUTCOME_NOT_VISIBLE,
+    OUTCOME_SKIPPED_UNSAFE_PATH as DELETE_OUTCOME_UNSAFE_PATH,
+    delete_wrong_match,
+    delete_wrong_match_group,
+)
 from lib.import_preview import (
     ImportPreviewValues,
     preview_import_from_download_log,
@@ -578,6 +588,69 @@ def _delete_wrong_match_row(pdb, log_id: int):
     return cleanup_wrong_match(pdb, log_id)
 
 
+def post_wrong_match_delete(h, body: dict) -> None:
+    """Operator-triggered deletion of one visible Wrong Matches candidate."""
+    raw_id = body.get("download_log_id")
+    try:
+        log_id = int(raw_id)
+    except (TypeError, ValueError):
+        h._error("download_log_id must be an integer")
+        return
+
+    result = delete_wrong_match(_server()._db(), log_id, require_visible=True)
+    if result.success:
+        h._json({"status": "ok", **result.to_dict()})
+        return
+    if result.outcome == DELETE_OUTCOME_ACTIVE_JOB:
+        h._error("active_import_job", 409)
+        return
+    if result.outcome == DELETE_OUTCOME_LOCKED:
+        h._error(result.reason or result.outcome, 503)
+        return
+    if result.outcome in (DELETE_OUTCOME_INVALID_ROW, DELETE_OUTCOME_NOT_VISIBLE):
+        h._error(result.reason or result.outcome, 404)
+        return
+    if result.outcome == DELETE_OUTCOME_UNSAFE_PATH:
+        h._error(result.reason or result.outcome, 422)
+        return
+    h._error(result.error or result.reason or result.outcome, 500)
+
+
+def post_wrong_match_delete_group(h, body: dict) -> None:
+    """Operator-triggered deletion of all current Wrong Matches for a request."""
+    raw_id = body.get("request_id")
+    try:
+        request_id = int(raw_id)
+    except (TypeError, ValueError):
+        h._error("request_id must be an integer")
+        return
+
+    summary = delete_wrong_match_group(_server()._db(), request_id)
+    status = "ok" if summary.success else "partial"
+    h._json(
+        {"status": status, **summary.to_dict()},
+        status=_wrong_match_delete_group_http_status(summary),
+    )
+
+
+def _wrong_match_delete_group_http_status(summary) -> int:
+    """Mirror the CLI status/exit-code precedence for group delete."""
+    if summary.success:
+        return 200
+    outcomes = {result.outcome for result in summary.results}
+    if DELETE_OUTCOME_FAILED in outcomes:
+        return 500
+    if DELETE_OUTCOME_LOCKED in outcomes:
+        return 503
+    if DELETE_OUTCOME_ACTIVE_JOB in outcomes:
+        return 409
+    if DELETE_OUTCOME_UNSAFE_PATH in outcomes:
+        return 422
+    if outcomes & {DELETE_OUTCOME_INVALID_ROW, DELETE_OUTCOME_NOT_VISIBLE}:
+        return 404
+    return 409
+
+
 def post_wrong_match_converge(h, body: dict) -> None:
     """Queue acceptable candidates and delete the rest for the release."""
     request_id = body.get("request_id")
@@ -606,6 +679,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
 
     selected: list[dict[str, object]] = []
     unmatched: list[dict[str, object]] = []
+    green_candidates: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     jobs: list[dict[str, object]] = []
     unmatched_log_ids: list[int] = []
@@ -638,39 +712,16 @@ def post_wrong_match_converge(h, body: dict) -> None:
                 })
                 remaining += 1
                 continue
-            source_username_raw = (
-                row.get("soulseek_username")
-                or vr.get("soulseek_username")
-            )
-            source_username = (
-                str(source_username_raw)
-                if source_username_raw is not None else None
-            )
-            job = pdb.enqueue_import_job(
-                IMPORT_JOB_FORCE,
-                request_id=rid,
-                dedupe_key=force_import_dedupe_key(lid),
-                payload=force_import_payload(
-                    download_log_id=lid,
-                    failed_path=resolved_path,
-                    source_username=source_username,
-                    source_dirs=source_dirs_from_validation_result(vr),
-                ),
-                message=(
-                    f"Force import queued for "
-                    f"{req['artist_name']} - {req['album_title']}"
-                ),
-            )
-            if getattr(job, "deduped", False):
-                deduped += 1
-            jobs.append(_serialize_import_job(job))
-            selected.append({
+            green_candidates.append({
                 "download_log_id": lid,
                 "distance": distance,
-                "job_id": job.id,
-                "deduped": bool(getattr(job, "deduped", False)),
+                "failed_path": resolved_path,
+                "source_username": (
+                    row.get("soulseek_username")
+                    or vr.get("soulseek_username")
+                ),
+                "source_dirs": source_dirs_from_validation_result(vr),
             })
-            remaining += 1
             continue
 
         unmatched.append({
@@ -679,7 +730,40 @@ def post_wrong_match_converge(h, body: dict) -> None:
         })
         unmatched_log_ids.append(lid)
 
-    if selected:
+    for candidate in green_candidates:
+        lid = candidate["download_log_id"]
+        source_username_raw = candidate.get("source_username")
+        source_username = (
+            str(source_username_raw)
+            if source_username_raw is not None else None
+        )
+        job = pdb.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=rid,
+            dedupe_key=force_import_dedupe_key(lid),
+            payload=force_import_payload(
+                download_log_id=lid,
+                failed_path=str(candidate["failed_path"]),
+                source_username=source_username,
+                source_dirs=list(candidate["source_dirs"]),
+            ),
+            message=(
+                f"Force import queued for "
+                f"{req['artist_name']} - {req['album_title']}"
+            ),
+        )
+        if getattr(job, "deduped", False):
+            deduped += 1
+        jobs.append(_serialize_import_job(job))
+        selected.append({
+            "download_log_id": lid,
+            "distance": candidate["distance"],
+            "job_id": job.id,
+            "deduped": bool(getattr(job, "deduped", False)),
+        })
+        remaining += 1
+
+    if green_candidates:
         for lid in unmatched_log_ids:
             result = _delete_wrong_match_row(pdb, lid)
             if result.outcome == OUTCOME_DELETED:
@@ -791,6 +875,8 @@ GET_ROUTES: dict[str, object] = {
 POST_ROUTES: dict[str, object] = {
     "/api/manual-import/import": post_manual_import,
     "/api/import-preview": post_import_preview,
+    "/api/wrong-matches/delete": post_wrong_match_delete,
+    "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
     "/api/wrong-matches/converge": post_wrong_match_converge,
     "/api/wrong-matches/triage": post_wrong_match_triage,
 }

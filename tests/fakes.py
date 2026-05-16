@@ -881,7 +881,6 @@ class FakePipelineDB:
             matches = (
                 payload.get("download_log_id") == download_log_id
                 or str(payload.get("download_log_id")) == str(download_log_id)
-                or (request_id is not None and row.get("request_id") == request_id)
                 or str(payload.get("failed_path") or "") in paths
                 or bool(dirs.intersection(payload_dirs))
             )

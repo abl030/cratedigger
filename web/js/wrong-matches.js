@@ -882,6 +882,7 @@ function renderConvergeControls(g, count, thresholdMilli) {
         <span id="wm-green-count-${g.request_id}" class="badge" style="${greenCountStyle(greenCount)}">${greenCountLabel(greenCount)}</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
+        <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
         <button id="wm-converge-btn-${g.request_id}" class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
       </div>
     </div>`;
@@ -1017,6 +1018,7 @@ function renderEntryDetail(e, job) {
   const active = job && (job.status === 'queued' || job.status === 'running');
   const label = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
   html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${label}</button>`;
+  html += `<button class="p-btn delete" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
 
   return html;
@@ -1133,6 +1135,8 @@ export const __test__ = {
   cleanupSummaryToast,
   convergeRequestBody,
   convergeWrongMatches,
+  deleteWrongMatch,
+  deleteWrongMatchGroup,
   deleteUnmatchedOnConverge,
   formatEntryEvidence,
   greenEntries,
@@ -1222,6 +1226,76 @@ export async function forceImportWrongMatch(logId, btn) {
   } catch (e) {
     btn.textContent = 'Error';
     toast('Force import request failed', true);
+  }
+}
+
+/**
+ * Delete one wrong-match source folder and remove it from review.
+ * @param {number} logId
+ * @param {HTMLButtonElement} btn
+ */
+export async function deleteWrongMatch(logId, btn) {
+  if (!confirm('Delete this wrong-match source folder?')) return;
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/delete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({download_log_id: logId}),
+    });
+    const data = await r.json();
+    if (r.ok && data.status === 'ok') {
+      toast(data.path_missing ? 'Cleared missing wrong match' : 'Deleted wrong match');
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Delete';
+      toast(data.error || data.message || 'Delete failed', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Delete';
+    toast('Delete request failed', true);
+  }
+}
+
+/**
+ * Delete every current wrong-match source folder for one release group.
+ * @param {number} requestId
+ * @param {HTMLButtonElement} btn
+ */
+export async function deleteWrongMatchGroup(requestId, btn) {
+  const group = ((_lastData && Array.isArray(_lastData.groups)) ? _lastData.groups : [])
+    .find((/** @type {any} */ g) => Number(g.request_id) === Number(requestId));
+  const count = group ? (group.pending_count || (group.entries ? group.entries.length : 0)) : 0;
+  if (!confirm(`Delete all ${count} wrong-match candidate source folders for this release?`)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/delete-group`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({request_id: requestId}),
+    });
+    const data = await r.json();
+    if (r.ok && (data.status === 'ok' || data.status === 'partial')) {
+      const skipped = data.skipped ? ` · skipped ${data.skipped}` : '';
+      const errors = data.errors ? ` · errors ${data.errors}` : '';
+      toast(`Deleted ${data.deleted || 0} candidates${skipped}${errors}`);
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+    } else {
+      btn.disabled = false;
+      btn.textContent = `Delete All (${count})`;
+      toast(data.error || data.message || 'Delete all failed', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = `Delete All (${count})`;
+    toast('Delete all request failed', true);
   }
 }
 

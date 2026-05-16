@@ -2561,7 +2561,7 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
 
 
 class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
-    def test_matches_by_download_log_request_path_or_source_dir(self):
+    def test_matches_by_download_log_path_or_source_dir(self):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
 
         db = FakePipelineDB()
@@ -2618,7 +2618,7 @@ class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
 
         self.assertEqual(
             {job.id for job in rows},
-            {by_log.id, by_request.id, by_path.id, by_dir.id},
+            {by_log.id, by_path.id, by_dir.id},
         )
 
 

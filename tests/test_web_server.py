@@ -994,6 +994,8 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/import-preview",
         "/api/wrong-matches",
         "/api/wrong-matches/audio",
+        "/api/wrong-matches/delete",
+        "/api/wrong-matches/delete-group",
         "/api/wrong-matches/converge",
         "/api/wrong-matches/triage",
         "/api/wrong-matches/explorer",
@@ -5967,6 +5969,7 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     def setUp(self) -> None:
         self.mock_db.get_request.return_value = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
+        self.mock_db.get_wrong_matches.side_effect = None
         self.mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
         self.mock_db.get_download_log_entry.reset_mock()
         self.mock_db.get_download_log_entry.side_effect = None
@@ -5980,6 +5983,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.mock_db.enqueue_import_job.return_value = self._job(
             77, 100, 42, "/mnt/virtio/music/slskd/failed_imports/Test")
         self.mock_db.get_download_history_batch.return_value = {}
+        self.mock_db.list_active_import_jobs_for_wrong_match.return_value = []
         # Default: treat every failed_path as existing so the group survives
         # filtering. Individual tests override this to exercise missing-file
         # and mixed-existence cases. Converge deletion is service-backed.
@@ -5987,11 +5991,23 @@ class TestWrongMatchesContract(unittest.TestCase):
             "web.routes.imports.cleanup_wrong_match",
             side_effect=lambda _db, lid: self._cleanup_result(lid),
         )
+        manual_cleanup_patch = patch(
+            "web.routes.imports.delete_wrong_match",
+            side_effect=lambda _db, lid, **_kwargs: self._manual_cleanup_result(lid),
+        )
+        manual_group_cleanup_patch = patch(
+            "web.routes.imports.delete_wrong_match_group",
+            side_effect=lambda _db, rid: self._manual_group_cleanup_result(rid),
+        )
         resolve_patch = patch("web.routes.imports.resolve_failed_path",
                               side_effect=lambda p: p if p else None)
         self.mock_cleanup = cleanup_patch.start()
+        self.mock_manual_cleanup = manual_cleanup_patch.start()
+        self.mock_manual_group_cleanup = manual_group_cleanup_patch.start()
         self.mock_resolve_failed_path = resolve_patch.start()
         self.addCleanup(cleanup_patch.stop)
+        self.addCleanup(manual_cleanup_patch.stop)
+        self.addCleanup(manual_group_cleanup_patch.stop)
         self.addCleanup(resolve_patch.stop)
 
     GROUP_REQUIRED_FIELDS = {
@@ -6014,6 +6030,17 @@ class TestWrongMatchesContract(unittest.TestCase):
         # values are None when the underlying row lacks evidence.
         "spectral_grade", "spectral_bitrate",
         "v0_probe_kind", "v0_probe_avg_bitrate",
+    }
+    DELETE_RESULT_REQUIRED_FIELDS = {
+        "status", "download_log_id", "outcome", "success", "request_id",
+        "entry_found", "visible", "raw_failed_path", "failed_path_hint",
+        "resolved_path", "deleted_path", "path_missing", "cleared_rows",
+        "skipped", "reason", "error",
+    }
+    DELETE_GROUP_REQUIRED_FIELDS = {
+        "status", "request_id", "outcome", "success", "processed", "deleted",
+        "deleted_paths", "cleared", "skipped", "errors", "remaining",
+        "group_empty", "results",
     }
 
     GROUP_FIELD_TYPES = {
@@ -6102,6 +6129,47 @@ class TestWrongMatchesContract(unittest.TestCase):
             verdict="confident_reject" if outcome == OUTCOME_DELETED else "uncertain",
             cleanup_eligible=outcome == OUTCOME_DELETED,
             cleared_rows=1 if outcome == OUTCOME_DELETED else 0,
+        )
+
+    def _manual_cleanup_result(self, log_id: int):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_DELETED,
+            WrongMatchDeleteResult,
+        )
+
+        return WrongMatchDeleteResult(
+            download_log_id=log_id,
+            outcome=OUTCOME_DELETED,
+            success=True,
+            entry_found=True,
+            visible=True,
+            request_id=42,
+            raw_failed_path="/mnt/virtio/music/slskd/failed_imports/Test",
+            resolved_path="/mnt/virtio/music/slskd/failed_imports/Test",
+            deleted_path="/mnt/virtio/music/slskd/failed_imports/Test",
+            cleared_rows=1,
+        )
+
+    def _manual_group_cleanup_result(self, request_id: int):
+        from lib.wrong_match_delete_service import WrongMatchDeleteSummary
+
+        results = (
+            self._manual_cleanup_result(100),
+            self._manual_cleanup_result(101),
+        )
+        return WrongMatchDeleteSummary(
+            request_id=request_id,
+            outcome="deleted",
+            success=True,
+            processed=2,
+            deleted=2,
+            deleted_paths=2,
+            cleared=2,
+            skipped=0,
+            errors=0,
+            remaining=0,
+            group_empty=True,
+            results=results,
         )
 
     def test_response_has_groups(self):
@@ -6667,10 +6735,144 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(entry["failed_path"],
                          "/mnt/virtio/music/slskd/failed_imports/Test")
 
-    def test_legacy_delete_routes_are_removed(self):
-        for path in (
+    def test_manual_delete_route_deletes_single_wrong_match(self):
+        status, data = self._post(
             "/api/wrong-matches/delete",
+            {"download_log_id": 42},
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self,
+            data,
+            self.DELETE_RESULT_REQUIRED_FIELDS,
+            "wrong-match delete response",
+        )
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["success"])
+        self.assertEqual(data["deleted_path"],
+                         "/mnt/virtio/music/slskd/failed_imports/Test")
+        self.mock_manual_cleanup.assert_called_once_with(
+            self.mock_db,
+            42,
+            require_visible=True,
+        )
+
+    def test_manual_delete_route_blocks_active_import_job(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_ACTIVE_JOB,
+            WrongMatchDeleteResult,
+        )
+
+        self.mock_manual_cleanup.side_effect = None
+        self.mock_manual_cleanup.return_value = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_SKIPPED_ACTIVE_JOB,
+            skipped=True,
+            reason="active_import_job",
+        )
+
+        status, data = self._post(
+            "/api/wrong-matches/delete",
+            {"download_log_id": 42},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "active_import_job")
+        self.mock_manual_cleanup.assert_called_once_with(
+            self.mock_db,
+            42,
+            require_visible=True,
+        )
+
+    def test_manual_delete_route_reports_lock_contention_as_retryable(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_LOCKED,
+            WrongMatchDeleteResult,
+        )
+
+        self.mock_manual_cleanup.side_effect = None
+        self.mock_manual_cleanup.return_value = WrongMatchDeleteResult(
+            download_log_id=42,
+            outcome=OUTCOME_SKIPPED_LOCKED,
+            skipped=True,
+            reason="cleanup_lock_unavailable",
+        )
+
+        status, data = self._post(
+            "/api/wrong-matches/delete",
+            {"download_log_id": 42},
+        )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data["error"], "cleanup_lock_unavailable")
+
+    def test_manual_delete_group_deletes_request_rows(self):
+        status, data = self._post(
             "/api/wrong-matches/delete-group",
+            {"request_id": 42},
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self,
+            data,
+            self.DELETE_GROUP_REQUIRED_FIELDS,
+            "wrong-match delete-group response",
+        )
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["success"])
+        self.assertEqual(data["processed"], 2)
+        self.assertEqual(data["deleted"], 2)
+        self.assertEqual(data["cleared"], 2)
+        self.assertEqual(data["deleted_paths"], 2)
+        self.assertTrue(data["group_empty"])
+        self.mock_manual_group_cleanup.assert_called_once_with(self.mock_db, 42)
+
+    def test_manual_delete_group_reports_partial_when_rows_are_skipped(self):
+        from lib.wrong_match_delete_service import (
+            OUTCOME_SKIPPED_ACTIVE_JOB,
+            WrongMatchDeleteResult,
+            WrongMatchDeleteSummary,
+        )
+
+        skipped = WrongMatchDeleteResult(
+            download_log_id=100,
+            outcome=OUTCOME_SKIPPED_ACTIVE_JOB,
+            success=False,
+            request_id=42,
+            skipped=True,
+            reason="active_import_job",
+        )
+        self.mock_manual_group_cleanup.side_effect = None
+        self.mock_manual_group_cleanup.return_value = WrongMatchDeleteSummary(
+            request_id=42,
+            outcome="partial",
+            success=False,
+            processed=1,
+            deleted=0,
+            deleted_paths=0,
+            cleared=0,
+            skipped=1,
+            errors=0,
+            remaining=1,
+            group_empty=False,
+            results=(skipped,),
+        )
+
+        status, data = self._post(
+            "/api/wrong-matches/delete-group",
+            {"request_id": 42},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["status"], "partial")
+        self.assertFalse(data["success"])
+        self.assertEqual(data["skipped"], 1)
+        self.assertEqual(data["remaining"], 1)
+
+    def test_retired_heuristic_delete_routes_are_removed(self):
+        for path in (
             "/api/wrong-matches/delete-transparent-non-flac",
             "/api/wrong-matches/delete-lossless-opus",
         ):
@@ -6737,6 +6939,13 @@ class TestWrongMatchesContract(unittest.TestCase):
             self._job(900, 42, 100, "/fi/a"),
             self._job(901, 42, 101, "/fi/b"),
         ]
+        self.mock_cleanup.side_effect = None
+
+        def cleanup_after_enqueue(_db, log_id):
+            self.assertEqual(self.mock_db.enqueue_import_job.call_count, 2)
+            return self._cleanup_result(log_id)
+
+        self.mock_cleanup.side_effect = cleanup_after_enqueue
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,

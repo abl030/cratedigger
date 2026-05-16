@@ -169,7 +169,8 @@ console.log('renderWrongMatches() shows threshold controls and green state');
   assert(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'converge button includes count');
   assert(!dom.wrongMatches.innerHTML.includes('remove all wrong matches when converging'), 'cleanup checkbox is gone');
   assert(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup action');
-  assert(!dom.wrongMatches.innerHTML.includes('Delete All'), 'per-group delete-all action is gone');
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (3)'), 'renders per-group delete-all action');
+  assert(dom.wrongMatches.innerHTML.includes('deleteWrongMatch(100'), 'renders per-entry delete action');
 
   __test__.setWrongMatchConvergeThreshold(42, 230);
   assert(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit updates green count');
@@ -270,6 +271,165 @@ console.log('convergeWrongMatches() posts selected threshold and removes row in 
   assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole wrong-matches pane');
   assert(dom.toast.textContent.includes('Queued 2 candidates'), 'toasts converge result');
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes the emptied group locally');
+}
+
+console.log('deleteWrongMatch() posts one row and refreshes');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const calls = [];
+  globalThis.confirm = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete') {
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          success: true,
+          deleted_path: '/fi/a',
+          cleared_rows: 1,
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return {
+        ok: true,
+        json: async () => ({ groups: [] }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: false, textContent: 'Delete', style: {} };
+  await __test__.deleteWrongMatch(100, btn);
+  assertEqual(calls[0].url, '/api/wrong-matches/delete', 'posts to row delete endpoint');
+  assertDeepEqual(
+    JSON.parse(calls[0].options.body),
+    { download_log_id: 100 },
+    'posts selected download log id',
+  );
+  assert(calls.some(call => call.url === '/api/wrong-matches'), 'refreshes after row delete');
+  assert(dom.toast.textContent.includes('Deleted wrong match'), 'toasts row delete result');
+}
+
+console.log('deleteWrongMatchGroup() posts request id and refreshes');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const calls = [];
+  globalThis.confirm = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete-group') {
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          processed: 3,
+          deleted: 3,
+          skipped: 0,
+          errors: 0,
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return {
+        ok: true,
+        json: async () => ({ groups: [] }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: false, textContent: 'Delete All (3)', style: {} };
+  await __test__.deleteWrongMatchGroup(42, btn);
+  assertEqual(calls[0].url, '/api/wrong-matches/delete-group', 'posts to group delete endpoint');
+  assertDeepEqual(
+    JSON.parse(calls[0].options.body),
+    { request_id: 42 },
+    'posts selected request id',
+  );
+  assert(calls.some(call => call.url === '/api/wrong-matches'), 'refreshes after group delete');
+  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts group delete result');
+}
+
+console.log('delete controls handle cancel and failures');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+
+  let calls = [];
+  globalThis.confirm = () => false;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const cancelBtn = { disabled: false, textContent: 'Delete', style: {} };
+  await __test__.deleteWrongMatch(100, cancelBtn);
+  assertEqual(calls.length, 0, 'row delete cancel does not fetch');
+  assertEqual(cancelBtn.disabled, false, 'row delete cancel leaves button enabled');
+
+  globalThis.confirm = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete') {
+      return {
+        ok: false,
+        json: async () => ({ error: 'active_import_job' }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const failBtn = { disabled: false, textContent: 'Delete', style: {} };
+  await __test__.deleteWrongMatch(100, failBtn);
+  assertEqual(failBtn.disabled, false, 'row delete API failure restores button enabled');
+  assertEqual(failBtn.textContent, 'Delete', 'row delete API failure restores button text');
+  assertEqual(dom.toast.className, 'toast error', 'row delete API failure shows error toast');
+
+  globalThis.fetch = async () => {
+    throw new Error('network down');
+  };
+  const errorBtn = { disabled: false, textContent: 'Delete', style: {} };
+  await __test__.deleteWrongMatch(100, errorBtn);
+  assertEqual(errorBtn.disabled, false, 'row delete fetch exception restores button enabled');
+  assertEqual(errorBtn.textContent, 'Delete', 'row delete fetch exception restores button text');
+
+  calls = [];
+  globalThis.confirm = () => false;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const cancelGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
+  await __test__.deleteWrongMatchGroup(42, cancelGroupBtn);
+  assertEqual(calls.length, 0, 'group delete cancel does not fetch');
+
+  globalThis.confirm = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete-group') {
+      return {
+        ok: false,
+        json: async () => ({ error: 'cleanup_lock_unavailable' }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const failGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
+  await __test__.deleteWrongMatchGroup(42, failGroupBtn);
+  assertEqual(failGroupBtn.disabled, false, 'group delete API failure restores button enabled');
+  assertEqual(failGroupBtn.textContent, 'Delete All (3)', 'group delete API failure restores button text');
+  assertEqual(dom.toast.className, 'toast error', 'group delete API failure shows error toast');
+
+  globalThis.fetch = async () => {
+    throw new Error('network down');
+  };
+  const errorGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
+  await __test__.deleteWrongMatchGroup(42, errorGroupBtn);
+  assertEqual(errorGroupBtn.disabled, false, 'group delete fetch exception restores button enabled');
+  assertEqual(errorGroupBtn.textContent, 'Delete All (3)', 'group delete fetch exception restores button text');
 }
 
 console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshes');
