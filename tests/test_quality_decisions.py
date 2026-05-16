@@ -64,7 +64,7 @@ from lib.quality import (
 class TestSpectralGateTrigger(unittest.TestCase):
     """Test the pre-analysis "would spectral run?" decision (issue #93).
 
-    Mirrors the live gate in lib.preimport._needs_spectral_check. Delivers
+    Mirrors the live gate in lib.measurement._needs_spectral_check. Delivers
     the input the UI Decisions tab and pipeline-cli quality simulator need
     to explain which files go through spectral vs. skip.
     """
@@ -993,7 +993,7 @@ EXPECTED_PARAMS = {
     "candidate_v0_probe_kind", "existing_v0_probe_kind",
     "supported_lossless_source",
     # Preimport gate inputs (issue #91) — keep the simulator's picture of the
-    # pipeline in sync with lib.preimport.measure_preimport_state + preimport_decide.
+    # pipeline in sync with lib.measurement.measure_preimport_state + preimport_decide.
     "audio_check_mode", "audio_corrupt",
     "import_mode", "has_nested_audio",
 }
@@ -1254,7 +1254,7 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
 class TestPreimportAudioGate(unittest.TestCase):
     """Pure decision tests for the preimport audio-integrity gate (issue #91).
 
-    Models the first gate in ``lib.preimport.measure_preimport_state``
+    Models the first gate in ``lib.measurement.measure_preimport_state``
     (validate_audio). The simulator must treat ``audio_check_mode=off`` as
     a distinct outcome from a passing check so operators can see when the
     gate is disabled in config.
@@ -1833,7 +1833,7 @@ class TestFullPipelineContract(unittest.TestCase):
     def test_decision_tree_mp3_gate_exposes_threshold(self):
         """The new mp3_spectral_gate stage must surface the VBR threshold
         (issue #93) so the UI Decisions tab shows the same cutoff as the
-        live production gate in lib/preimport._needs_spectral_check."""
+        live production gate in lib/measurement._needs_spectral_check."""
         tree = get_decision_tree()
         stage_map = {s["id"]: s for s in tree["stages"]}
         self.assertIn("mp3_spectral_gate", stage_map,

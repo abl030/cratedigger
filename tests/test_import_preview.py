@@ -12,7 +12,7 @@ from lib.import_preview import (
     preview_import_from_path,
     preview_import_from_values,
 )
-from lib.preimport import LocalFileInspection, PreimportMeasurement
+from lib.measurement import LocalFileInspection, PreimportMeasurement
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -556,11 +556,11 @@ class TestImportPreviewPath(unittest.TestCase):
     def test_preview_legacy_path_does_not_call_run_preimport_gates(self):
         """U6/U8 anti-regression: the legacy ``run_preimport_gates`` shim
         was deleted in U8. If a future change reintroduces it (in
-        lib.preimport or as a re-export from lib.import_preview), this
+        lib.measurement or as a re-export from lib.import_preview), this
         guard fires.
         """
         import lib.import_preview as ip
-        import lib.preimport as pi
+        import lib.measurement as pi
         self.assertFalse(
             hasattr(ip, "run_preimport_gates"),
             "lib.import_preview must not re-export run_preimport_gates — "
@@ -568,7 +568,7 @@ class TestImportPreviewPath(unittest.TestCase):
         )
         self.assertFalse(
             hasattr(pi, "run_preimport_gates"),
-            "lib.preimport must not export run_preimport_gates — the shim "
+            "lib.measurement must not export run_preimport_gates — the shim "
             "was deleted in U8",
         )
 

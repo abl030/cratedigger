@@ -26,7 +26,7 @@ from lib.quality import (
 )
 
 if TYPE_CHECKING:
-    from lib.preimport import PreimportMeasurement
+    from lib.measurement import PreimportMeasurement
 
 
 _AUDIO_EXTENSIONS = {

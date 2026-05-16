@@ -814,7 +814,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         responsibility, not this gate's.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -830,7 +830,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             side_effect=[
                 SimpleNamespace(
                     grade="suspect",
@@ -896,7 +896,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         read ``spectral {x}kbps <= existing {x}kbps`` with equal numbers.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -913,7 +913,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             return_value=SimpleNamespace(
                 grade="suspect",
                 estimated_bitrate_kbps=128,
@@ -957,7 +957,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         full pipeline then sees 280 vs container 256 and imports.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -973,7 +973,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             return_value=SimpleNamespace(
                 grade="suspect",
                 estimated_bitrate_kbps=280,
@@ -1021,7 +1021,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
     def test_accept_suspect_upgrade_still_persists_spectral(self):
         """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1040,7 +1040,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             side_effect=[
                 # download: suspect at 256 (upgrade over existing at 96)
                 SimpleNamespace(
@@ -1087,7 +1087,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
     def test_accept_import_no_exist_still_persists_spectral(self):
         """Accept (suspect grade, no existing on disk) → spectral state propagates the download's spectral."""
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1097,7 +1097,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             return_value=SimpleNamespace(
                 grade="suspect",
                 estimated_bitrate_kbps=192,
@@ -2705,7 +2705,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
                 db_request_id=None,
             )
 
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             with patch("lib.download.music_tag.load_file", return_value=MagicMock()), \
                  patch("lib.beets.beets_validate", return_value=ValidationResult(
                      valid=True,
@@ -2903,7 +2903,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
         from lib.audio_hash import hash_audio_content
         from lib.config import CratediggerConfig
         from lib.pipeline_db import BadAudioHashInput
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -2954,7 +2954,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
         no calls to ``hash_audio_content`` or ``lookup_bad_audio_hash``."""
         from pathlib import Path
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -2964,9 +2964,9 @@ class TestBadAudioHashSlice(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch("lib.preimport.hash_audio_content") as hashfn, \
+        with patch("lib.measurement.hash_audio_content") as hashfn, \
              patch.object(db, "lookup_bad_audio_hash") as lookup, \
-             patch("lib.preimport._needs_spectral_check", return_value=False):
+             patch("lib.measurement._needs_spectral_check", return_value=False):
             measurement = measure_preimport_state(
                 path=str(fixture_dir),
                 mb_release_id="mbid-empty",
@@ -6719,7 +6719,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         ``evidence_persist_failed`` and re-queued forever. After U8 the
         shim is gone; preview only measures.
         """
-        from lib.preimport import PreimportMeasurement
+        from lib.measurement import PreimportMeasurement
         from lib.quality import SpectralMeasurement
         from scripts import import_preview_worker
 
@@ -6846,7 +6846,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         accepts (suspect upgrade). The importer continues to the quality
         gate and import path. Beets actually runs.
         """
-        from lib.preimport import PreimportMeasurement
+        from lib.measurement import PreimportMeasurement
         from lib.quality import SpectralMeasurement
         from scripts import import_preview_worker
 
@@ -6918,7 +6918,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         """Audio corrupt: ffmpeg rc!=0. Preview persists evidence with
         audio_corrupt=True; importer's preimport_decide rejects on
         audio_corrupt before ever invoking beets."""
-        from lib.preimport import PreimportMeasurement
+        from lib.measurement import PreimportMeasurement
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -7126,7 +7126,7 @@ class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
 
             with self._patch_beets_no_album(), \
                     self._patch_cfg(), \
-                    patch("lib.preimport.measure_preimport_state") as mp, \
+                    patch("lib.measurement.measure_preimport_state") as mp, \
                     patch(
                         "lib.wrong_match_triage._preview_for_triage"
                     ) as cold:

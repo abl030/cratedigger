@@ -2035,7 +2035,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
             ) as preview, patch(
-                "lib.preimport.measure_preimport_state",
+                "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
                 "lib.spectral_check.analyze_album",
             ) as spectral:
@@ -2080,7 +2080,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
             ) as preview, patch(
-                "lib.preimport.measure_preimport_state",
+                "lib.measurement.measure_preimport_state",
             ) as preimport:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
@@ -2137,7 +2137,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
             ) as preview, patch(
-                "lib.preimport.measure_preimport_state",
+                "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
                 "lib.download._materialize_processing_dir",
             ) as materialize:

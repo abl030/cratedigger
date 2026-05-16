@@ -2031,7 +2031,7 @@ def spectral_gate_trigger(
 ) -> str:
     """Decide whether the preimport spectral gate would run on this file.
 
-    Mirrors ``lib.preimport._needs_spectral_check`` but operates on the
+    Mirrors ``lib.measurement._needs_spectral_check`` but operates on the
     simulator's booleans (``is_flac`` / ``is_cbr``) instead of a filetype
     string, so ``full_pipeline_decision`` and the web UI Decisions tab can
     explain why the gate fired (or didn't) for a given file.
@@ -2064,7 +2064,7 @@ def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
     """Decide the outcome of the preimport audio-integrity gate.
 
     Mirrors the audio-integrity check that ``measure_preimport_state``
-    performs in ``lib.preimport``: ``validate_audio`` runs an ffmpeg
+    performs in ``lib.measurement``: ``validate_audio`` runs an ffmpeg
     full-decode pass unless the operator has set
     ``[Beets Validation] audio_check = off``.
 
@@ -3241,7 +3241,7 @@ def get_decision_tree(
                 "path": "preimport",
                 "function": "preimport_audio_gate",
                 "when": "Every import path, before any FLAC/MP3 branching "
-                        "(lib.preimport.measure_preimport_state audio gate)",
+                        "(lib.measurement.measure_preimport_state audio gate)",
                 "inputs": ["cfg.audio_check_mode", "validate_audio() result"],
                 "rules": [
                     {"condition": "audio_check_mode = off",
@@ -3759,7 +3759,7 @@ def full_pipeline_decision(
         return result
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
-    # Mirrors lib.preimport._needs_spectral_check. Tells the operator
+    # Mirrors lib.measurement._needs_spectral_check. Tells the operator
     # whether the preimport spectral gate would even run on this file,
     # so a VBR MP3 transcode masquerading as V0 (avg < threshold) is
     # distinguishable from genuine V0 in simulator output.

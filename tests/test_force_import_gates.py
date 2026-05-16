@@ -1,4 +1,4 @@
-"""Pre-import gate coverage at the ``lib.preimport`` boundary.
+"""Pre-import gate coverage at the ``lib.measurement`` boundary.
 
 Historically this module's dispatch-via-legacy-branch tests asserted that
 ``dispatch_import_from_db`` ran the spectral/audio gates inline. After the
@@ -12,7 +12,7 @@ spectral-gated) still holds — preview now enforces it. Coverage for the
 preview/importer pipeline shape lives in ``tests/test_import_queue.py``
 and ``tests/test_integration_slices.py``. After U8 the legacy
 ``run_preimport_gates`` shim has been deleted; the remaining tests here
-cover the pure ``lib.preimport`` helpers (``inspect_local_files``,
+cover the pure ``lib.measurement`` helpers (``inspect_local_files``,
 ``measure_preimport_state``, ``repair_mp3_headers``) that both preview
 and auto-import still use.
 
@@ -65,7 +65,7 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
     branch-selection logic stays covered without re-introducing the old
     SpectralContext plumbing.
 
-    Signature (see lib/preimport.py::_needs_spectral_check):
+    Signature (see lib/measurement.py::_needs_spectral_check):
         _needs_spectral_check(filetype, is_vbr, avg_bitrate_kbps,
                               vbr_threshold_kbps) -> bool
 
@@ -78,7 +78,7 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
     THRESHOLD = 210
 
     def _run(self, filetype, is_vbr, avg_kbps=None, threshold=None):
-        from lib.preimport import _needs_spectral_check
+        from lib.measurement import _needs_spectral_check
         return _needs_spectral_check(
             filetype, is_vbr,
             avg_bitrate_kbps=avg_kbps,
@@ -141,7 +141,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
     def test_multi_disc_layout_detects_mp3(self):
         """Audio files under a subdirectory must be discovered."""
         import os
-        from lib.preimport import inspect_local_files
+        from lib.measurement import inspect_local_files
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -168,7 +168,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.preimport import inspect_local_files
+        from lib.measurement import inspect_local_files
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -205,7 +205,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
     def test_inspect_avg_bitrate_none_when_no_mp3(self):
         """Non-MP3 downloads leave avg_bitrate_bps=None (no mutagen walk)."""
         import os
-        from lib.preimport import inspect_local_files
+        from lib.measurement import inspect_local_files
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -288,7 +288,7 @@ class TestAutoPathPreservesSpectralPropagation(unittest.TestCase):
     """
 
     def test_auto_path_propagates_download_spectral(self):
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -301,7 +301,7 @@ class TestAutoPathPreservesSpectralPropagation(unittest.TestCase):
             album_path="/Beets/NonexistentPath")
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch("lib.preimport.spectral_analyze",
+        with patch("lib.measurement.spectral_analyze",
                    return_value=_analyze_result("suspect", 192, 80.0, 5)), \
              patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
             measure_preimport_state(
@@ -400,7 +400,7 @@ class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
     """
 
     def test_stored_spectral_used_when_beets_lookup_empty(self):
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         # Request row has stored spectral: on-disk is actually a 128 transcode,
@@ -419,7 +419,7 @@ class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
             album_path="/Beets/NonexistentPath")
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch("lib.preimport.spectral_analyze",
+        with patch("lib.measurement.spectral_analyze",
                    return_value=_analyze_result(
                        "likely_transcode", 192, 80.0, 5)), \
              patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
@@ -456,15 +456,15 @@ class TestPreimportRepairsEvenWhenAudioCheckOff(unittest.TestCase):
     def test_repair_runs_with_audio_check_off(self):
         import os
         from unittest.mock import patch
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         cfg = CratediggerConfig(audio_check_mode="off")
         tmpdir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
                 f.write(b"x")
-            with patch("lib.preimport.repair_mp3_headers") as mock_repair, \
-                 patch("lib.preimport.spectral_analyze",
+            with patch("lib.measurement.repair_mp3_headers") as mock_repair, \
+                 patch("lib.measurement.spectral_analyze",
                        return_value=_analyze_result("genuine", None)):
                 measure_preimport_state(
                     path=tmpdir,
@@ -496,7 +496,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """is_vbr=None → filesystem inspection fills it in → spectral runs."""
         import os
         from unittest.mock import patch
-        from lib.preimport import LocalFileInspection, measure_preimport_state
+        from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
@@ -508,9 +508,9 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 f.write(b"x")
             inspected = LocalFileInspection(
                 filetype="mp3", min_bitrate_bps=320_000, is_vbr=False)
-            with patch("lib.preimport.inspect_local_files",
+            with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
-                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                 patch("lib.measurement.spectral_analyze") as mock_spectral:
                 mock_spectral.return_value = SimpleNamespace(
                     grade="genuine", estimated_bitrate_kbps=None,
                     suspect_pct=0.0, tracks=[])
@@ -544,7 +544,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.preimport import LocalFileInspection, measure_preimport_state
+        from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
@@ -561,9 +561,9 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 avg_bitrate_bps=182_000,
                 is_vbr=True,
             )
-            with patch("lib.preimport.inspect_local_files",
+            with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
-                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                 patch("lib.measurement.spectral_analyze") as mock_spectral:
                 mock_spectral.return_value = SimpleNamespace(
                     grade="likely_transcode",
                     estimated_bitrate_kbps=96,
@@ -604,7 +604,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.preimport import LocalFileInspection, measure_preimport_state
+        from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
@@ -620,9 +620,9 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 avg_bitrate_bps=245_000,   # genuine V0 range
                 is_vbr=True,
             )
-            with patch("lib.preimport.inspect_local_files",
+            with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
-                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                 patch("lib.measurement.spectral_analyze") as mock_spectral:
                 measure_preimport_state(
                     path=tmpdir,
                     mb_release_id="",
@@ -651,7 +651,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
-        from lib.preimport import LocalFileInspection, measure_preimport_state
+        from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
@@ -667,9 +667,9 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 avg_bitrate_bps=None,   # mutagen couldn't read
                 is_vbr=True,
             )
-            with patch("lib.preimport.inspect_local_files",
+            with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
-                 patch("lib.preimport.spectral_analyze") as mock_spectral:
+                 patch("lib.measurement.spectral_analyze") as mock_spectral:
                 mock_spectral.return_value = SimpleNamespace(
                     grade="genuine", estimated_bitrate_kbps=None,
                     suspect_pct=0.0, tracks=[])
@@ -701,16 +701,16 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         upload through the gate is cheap and safe.
         """
         from unittest.mock import patch
-        from lib.preimport import LocalFileInspection, measure_preimport_state
+        from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch("lib.preimport.inspect_local_files",
+        with patch("lib.measurement.inspect_local_files",
                    return_value=LocalFileInspection(
                        filetype="mp3", is_vbr=None)), \
-             patch("lib.preimport.spectral_analyze") as mock_spectral:
+             patch("lib.measurement.spectral_analyze") as mock_spectral:
             mock_spectral.return_value = SimpleNamespace(
                 grade="genuine", estimated_bitrate_kbps=None,
                 suspect_pct=0.0, tracks=[])
@@ -740,7 +740,7 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
     """
 
     def test_no_beets_album_means_no_fallback(self):
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         # Request row has leftover state from a prior import that no longer
@@ -767,7 +767,7 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
         # existing_spectral from stale 128. With the fallback correctly
         # skipped (beets has no album → nothing on disk), the measurement
         # leaves existing_* unset for the importer to read as "no existing".
-        with patch("lib.preimport.spectral_analyze",
+        with patch("lib.measurement.spectral_analyze",
                    return_value=_analyze_result(
                        "likely_transcode", 192, 80.0, 5)), \
              patch("lib.beets_db.BeetsDB", _mock_beets_db_no_album()):

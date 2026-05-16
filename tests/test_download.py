@@ -5,7 +5,7 @@ downloads_all_done, poll_active_downloads, grab_most_wanted.
 
 Pre-import measurement behavior (audio integrity + spectral analysis) is
 shared with the force/manual import paths and tested directly against
-``lib.preimport.measure_preimport_state`` in ``tests/test_preimport.py``
+``lib.measurement.measure_preimport_state`` in ``tests/test_measurement.py``
 and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
@@ -1446,7 +1446,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
                 audio_file_count=1,
@@ -1616,7 +1616,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
                 audio_file_count=1,
@@ -1720,7 +1720,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
                 audio_file_count=1,
@@ -1805,7 +1805,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
                 audio_file_count=1,
@@ -1866,7 +1866,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
             mock_mt.load_file.return_value = MagicMock()
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
                 audio_file_count=1,
@@ -1935,7 +1935,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            from lib.preimport import PreimportMeasurement
+            from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
                 audio_file_count=1,

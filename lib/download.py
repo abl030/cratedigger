@@ -46,7 +46,7 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
 )
-from lib.preimport import measure_preimport_state
+from lib.measurement import measure_preimport_state
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -1151,7 +1151,7 @@ def _process_beets_validation(
     evidence, and the importer runs ``full_pipeline_decision_from_evidence``
     downstream. The legacy non-queue fallback (CLI / test callers with no
     ``import_job_id`` or no DB) instead measures inline via
-    ``lib.preimport.measure_preimport_state`` and surfaces only the two
+    ``lib.measurement.measure_preimport_state`` and surfaces only the two
     folder/audio-integrity facts (``audio_corrupt`` and ``bad_audio_hash``)
     — quality decisions belong to the unified importer decider in U11.
 

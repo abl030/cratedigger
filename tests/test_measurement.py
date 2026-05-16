@@ -1,4 +1,4 @@
-"""Unit tests for ``lib.preimport`` helpers — focus: bad-audio-hash gate (U5).
+"""Unit tests for ``lib.measurement`` helpers — focus: bad-audio-hash gate (U5).
 
 Slice-level coverage for ``measure_preimport_state`` lives in
 ``tests/test_integration_slices.py::TestBadAudioHashSlice``. These tests
@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from lib.preimport import _check_bad_audio_hashes, _iter_audio_files
+from lib.measurement import _check_bad_audio_hashes, _iter_audio_files
 from tests.fakes import FakePipelineDB
 
 
@@ -86,7 +86,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
         db = FakePipelineDB()
         # Direct lookup mock; never reached because hashing always fails.
         with patch(
-            "lib.preimport.hash_audio_content",
+            "lib.measurement.hash_audio_content",
             side_effect=AudioHashError("boom"),
         ), patch.object(db, "lookup_bad_audio_hash") as lookup:
             match = _check_bad_audio_hashes(
@@ -109,7 +109,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
     def test_skips_paths_without_extensions(self):
         """A path without an extension is skipped (not hashed)."""
         db = FakePipelineDB()
-        with patch("lib.preimport.hash_audio_content") as h:
+        with patch("lib.measurement.hash_audio_content") as h:
             match = _check_bad_audio_hashes(
                 [Path("/tmp/no_extension")], db,  # type: ignore[arg-type]
             )
@@ -148,7 +148,7 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
 
     def test_empty_table_skips_hashing_and_lookup(self):
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         db = MagicMock()
         db.has_any_bad_audio_hashes.return_value = False
@@ -157,8 +157,8 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
 
         # Bypass spectral and existing-album lookups so we isolate the
         # bad-hash gate's fast-path skip.
-        with patch("lib.preimport.hash_audio_content") as hashfn, \
-             patch("lib.preimport._needs_spectral_check", return_value=False):
+        with patch("lib.measurement.hash_audio_content") as hashfn, \
+             patch("lib.measurement._needs_spectral_check", return_value=False):
             measure_preimport_state(
                 path=str(FIXTURE_DIR),
                 mb_release_id="mbid-empty",
@@ -188,7 +188,7 @@ class TestMeasurePreimportState(unittest.TestCase):
         """audio_corrupt=True must flow through; spectral / file counts
         short-circuit, but the audio facts must be intact."""
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
         from lib.util import AudioValidationResult
 
         db = MagicMock()
@@ -198,8 +198,8 @@ class TestMeasurePreimportState(unittest.TestCase):
             valid=False, error="decode failed",
             failed_files=[("track01.mp3", "decode error")],
         )
-        with patch("lib.preimport.validate_audio", return_value=bad_result), \
-             patch("lib.preimport.repair_mp3_headers"):
+        with patch("lib.measurement.validate_audio", return_value=bad_result), \
+             patch("lib.measurement.repair_mp3_headers"):
             m = measure_preimport_state(
                 path="/tmp/does-not-exist",
                 mb_release_id="mbid-corrupt",
@@ -219,12 +219,12 @@ class TestMeasurePreimportState(unittest.TestCase):
     def test_empty_directory_reports_zero_file_count(self):
         """No audio files → audio_file_count=0, layout='flat'."""
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         cfg = CratediggerConfig(audio_check_mode="off")
-        with patch("lib.preimport.repair_mp3_headers"), \
-             patch("lib.preimport._iter_audio_files", return_value=[]), \
-             patch("lib.preimport._needs_spectral_check", return_value=False):
+        with patch("lib.measurement.repair_mp3_headers"), \
+             patch("lib.measurement._iter_audio_files", return_value=[]), \
+             patch("lib.measurement._needs_spectral_check", return_value=False):
             m = measure_preimport_state(
                 path="/tmp/empty",
                 mb_release_id="mbid-empty",
@@ -243,7 +243,7 @@ class TestMeasurePreimportState(unittest.TestCase):
         """has_nested_audio=True in the inspection → folder_layout='nested'."""
         from pathlib import Path
         from lib.config import CratediggerConfig
-        from lib.preimport import LocalFileInspection, measure_preimport_state
+        from lib.measurement import LocalFileInspection, measure_preimport_state
 
         cfg = CratediggerConfig(audio_check_mode="off")
         # Precomputed inspection signaling nested layout.
@@ -251,13 +251,13 @@ class TestMeasurePreimportState(unittest.TestCase):
             filetype="mp3", min_bitrate_bps=320_000,
             avg_bitrate_bps=320_000, is_vbr=False, has_nested_audio=True,
         )
-        with patch("lib.preimport.repair_mp3_headers"), \
+        with patch("lib.measurement.repair_mp3_headers"), \
              patch(
-                 "lib.preimport._iter_audio_files",
+                 "lib.measurement._iter_audio_files",
                  return_value=[Path("/tmp/album/CD1/01.mp3"),
                                Path("/tmp/album/CD2/01.mp3")],
              ), \
-             patch("lib.preimport._needs_spectral_check", return_value=False):
+             patch("lib.measurement._needs_spectral_check", return_value=False):
             m = measure_preimport_state(
                 path="/tmp/album",
                 mb_release_id="mbid-nested",
@@ -274,12 +274,12 @@ class TestMeasurePreimportState(unittest.TestCase):
     def test_filetype_band_and_bitrate_in_kbps(self):
         """filetype_band lowercased; min_bitrate_kbps in kbps not bps."""
         from lib.config import CratediggerConfig
-        from lib.preimport import measure_preimport_state
+        from lib.measurement import measure_preimport_state
 
         cfg = CratediggerConfig(audio_check_mode="off")
-        with patch("lib.preimport.repair_mp3_headers"), \
-             patch("lib.preimport._iter_audio_files", return_value=[]), \
-             patch("lib.preimport._needs_spectral_check", return_value=False):
+        with patch("lib.measurement.repair_mp3_headers"), \
+             patch("lib.measurement._iter_audio_files", return_value=[]), \
+             patch("lib.measurement._needs_spectral_check", return_value=False):
             m = measure_preimport_state(
                 path="/tmp/album",
                 mb_release_id="mbid-x",

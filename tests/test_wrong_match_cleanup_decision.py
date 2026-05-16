@@ -165,7 +165,7 @@ class TestEvidenceFromDownloadLogFK(_Base):
         preview_builder = MagicMock(name="preview_builder")
 
         with self._patch_beets_album_info_none(), \
-                patch("lib.preimport.measure_preimport_state") as mp:
+                patch("lib.measurement.measure_preimport_state") as mp:
             decision = decide_wrong_match_cleanup(
                 self.db,
                 self.log_id,
@@ -211,7 +211,7 @@ class TestEvidenceFromSiblingImportJobFK(_Base):
         preview_builder = MagicMock(name="preview_builder")
 
         with self._patch_beets_album_info_none(), \
-                patch("lib.preimport.measure_preimport_state") as mp:
+                patch("lib.measurement.measure_preimport_state") as mp:
             decision = decide_wrong_match_cleanup(
                 self.db,
                 self.log_id,
@@ -300,7 +300,7 @@ class TestMostRecentImportJobWinsCrossWalk(_Base):
 
         # download_log FK is NULL → must cross-walk; should pick new_stored.
         with self._patch_beets_album_info_none(), \
-                patch("lib.preimport.measure_preimport_state") as mp:
+                patch("lib.measurement.measure_preimport_state") as mp:
             decision = decide_wrong_match_cleanup(
                 self.db,
                 self.log_id,

@@ -17,7 +17,7 @@ from typing import Any
 import msgspec
 
 from lib.import_dispatch import run_import_one
-from lib.preimport import (
+from lib.measurement import (
     inspect_local_files,
     measure_preimport_state,
 )
