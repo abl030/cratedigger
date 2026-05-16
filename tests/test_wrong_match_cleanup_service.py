@@ -214,6 +214,54 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(stale_source))
         self.assertTrue(os.path.isdir(missing_source))
 
+    def test_final_outcomes_persist_recents_triage_audit(self) -> None:
+        delete_source = _make_source(self.tmp, "audit-delete-source")
+        keep_source = _make_source(self.tmp, "audit-keep-source")
+
+        delete_id = _log_wrong_match(self.db, 1, delete_source)
+        self.db.set_download_log_candidate_evidence(
+            delete_id,
+            _store_evidence(
+                self.db,
+                _evidence(
+                    delete_source,
+                    mb_release_id="audit-delete",
+                    audio_corrupt=True,
+                ),
+            ),
+        )
+
+        keep_id = _log_wrong_match(self.db, 1, keep_source)
+        self.db.set_download_log_candidate_evidence(
+            keep_id,
+            _store_evidence(
+                self.db,
+                _evidence(keep_source, mb_release_id="audit-keep"),
+            ),
+        )
+
+        cleanup_all_wrong_matches(
+            self.db,
+            confirm_all_wrong_matches=True,
+            cfg=_cfg(),
+        )
+
+        by_id = {row.id: row for row in self.db.download_logs}
+        deleted_triage = by_id[delete_id].validation_result["wrong_match_triage"]
+        kept_triage = by_id[keep_id].validation_result["wrong_match_triage"]
+
+        self.assertEqual(deleted_triage["action"], "deleted_reject")
+        self.assertEqual(deleted_triage["outcome"], OUTCOME_DELETED)
+        self.assertEqual(deleted_triage["preview_verdict"], "confident_reject")
+        self.assertEqual(deleted_triage["preview_decision"], "audio_corrupt")
+        self.assertIn("preimport_audio:reject_corrupt",
+                      deleted_triage["stage_chain"])
+
+        self.assertEqual(kept_triage["action"], OUTCOME_KEPT_WOULD_IMPORT)
+        self.assertEqual(kept_triage["preview_verdict"], "would_import")
+        self.assertFalse(os.path.exists(delete_source))
+        self.assertTrue(os.path.isdir(keep_source))
+
     def test_active_matching_import_job_skips_before_delete(self) -> None:
         source = _make_source(self.tmp, "active-source")
         log_id = _log_wrong_match(self.db, 1, source)

@@ -89,6 +89,14 @@ console.log('recentsLogUrl() requests enough history for triage labels');
     'filtered recents keeps outcome filter and expanded limit');
 }
 
+console.log('triageLabelText() restores the old recents label wording');
+{
+  assertContains(__test__.triageLabelText('kept: would import'), 'triage - kept would import',
+    'kept would import label uses old wording');
+  assertContains(__test__.triageLabelText('deleted: spectral reject'), 'triage - deleted spectral reject',
+    'deleted spectral reject label uses old wording');
+}
+
 console.log('renderRecentsItems() shows match rates beside the first date header');
 {
   const html = __test__.renderRecentsItems([
@@ -301,8 +309,10 @@ console.log('renderRecentsItems() shows wrong-match triage audit chip');
   }]);
   assertContains(html, 'Wrong match (dist 0.190) · moundsofass',
     'original wrong-match summary remains visible');
-  assertContains(html, 'triage: deleted: spectral reject',
-    'triage chip rendered next to rejected badge');
+  assertContains(html, 'triage - deleted spectral reject',
+    'triage label rendered in recents metadata');
+  assertContains(html, 'recents-triage-label',
+    'triage label uses the visible yellow recents style');
   assertContains(html, 'mp3_spectral:reject',
     'triage detail appears in hover text');
 }

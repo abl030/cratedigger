@@ -2890,6 +2890,29 @@ class PipelineDB:
         self.conn.commit()
         return cur.rowcount
 
+    def record_wrong_match_triage(
+        self,
+        log_id: int,
+        triage_result: dict[str, object],
+    ) -> bool:
+        """Persist cleanup audit details on a download_log row."""
+        cur = self._execute("""
+            UPDATE download_log
+            SET validation_result = jsonb_set(
+                CASE
+                    WHEN jsonb_typeof(validation_result) = 'object'
+                    THEN validation_result
+                    ELSE '{}'::jsonb
+                END,
+                '{wrong_match_triage}',
+                %s::jsonb,
+                true
+            )
+            WHERE id = %s
+        """, (json.dumps(triage_result), log_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     # -- Search log -----------------------------------------------------------
 
     def log_search(self, request_id: int, query: str | None = None,

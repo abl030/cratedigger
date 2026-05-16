@@ -2741,6 +2741,24 @@ class FakePipelineDB:
             cleared += 1
         return cleared
 
+    def record_wrong_match_triage(
+        self,
+        log_id: int,
+        triage_result: dict[str, object],
+    ) -> bool:
+        for entry in self.download_logs:
+            if entry.id != log_id:
+                continue
+            vr = self._validation_result_dict(entry.validation_result) or {}
+            new_vr = dict(vr)
+            new_vr["wrong_match_triage"] = dict(triage_result)
+            if isinstance(entry.validation_result, str):
+                entry.validation_result = json.dumps(new_vr)
+            else:
+                entry.validation_result = new_vr
+            return True
+        return False
+
     @staticmethod
     def _validation_result_dict(vr: Any) -> dict[str, Any] | None:
         if isinstance(vr, dict):

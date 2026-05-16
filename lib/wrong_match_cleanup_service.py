@@ -55,6 +55,13 @@ OUTCOME_KEYS: tuple[str, ...] = (
     OUTCOME_DELETE_FAILED,
 )
 
+FINAL_AUDIT_OUTCOMES: frozenset[str] = frozenset({
+    OUTCOME_DELETED,
+    OUTCOME_KEPT_WOULD_IMPORT,
+    OUTCOME_KEPT_UNCERTAIN,
+    OUTCOME_DELETE_FAILED,
+})
+
 
 class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
     download_log_id: int
@@ -142,13 +149,15 @@ def cleanup_wrong_match(
 ) -> WrongMatchCleanupOutcome:
     """Evaluate and possibly delete one Wrong Matches source row."""
     try:
-        return _cleanup_wrong_match(
+        result = _cleanup_wrong_match(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
             ignore_import_job_id=ignore_import_job_id,
             cfg=cfg,
         )
+        _persist_cleanup_audit(db, result)
+        return result
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "wrong_match_cleanup.operational_failure download_log_id=%s",
@@ -598,3 +607,76 @@ def _result(
         path_missing=path_missing,
         error=error,
     )
+
+def _audit_action(outcome: str) -> str:
+    if outcome == OUTCOME_DELETED:
+        return "deleted_reject"
+    return outcome
+
+
+def _stage_chain_from_decision(decision: dict[str, Any]) -> list[str]:
+    chain: list[str] = []
+    for key in (
+        "preimport_audio",
+        "preimport_bad_hash",
+        "preimport_nested",
+        "preimport_empty_fileset",
+        "stage0_spectral_gate",
+        "stage1_spectral",
+        "stage2_import",
+        "stage3_quality_gate",
+    ):
+        value = decision.get(key)
+        if isinstance(value, str) and value:
+            chain.append(f"{key}:{value}")
+    return chain
+
+
+def _cleanup_audit_payload(
+    result: WrongMatchCleanupOutcome,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": _audit_action(result.outcome),
+        "success": result.success,
+        "outcome": result.outcome,
+    }
+    if result.reason is not None:
+        payload["reason"] = result.reason
+    if result.verdict is not None:
+        payload["preview_verdict"] = result.verdict
+    if result.preview_decision is not None:
+        payload["preview_decision"] = result.preview_decision
+    if result.cleanup_eligible:
+        payload["cleanup_eligible"] = True
+    if result.source_path is not None:
+        payload["source_path"] = result.source_path
+    stage_chain = _stage_chain_from_decision(result.decision)
+    if stage_chain:
+        payload["stage_chain"] = stage_chain
+    if result.cleared_rows:
+        payload["cleared_rows"] = result.cleared_rows
+    if result.deleted_path is not None:
+        payload["deleted_path"] = result.deleted_path
+    if result.path_missing:
+        payload["path_missing"] = True
+    if result.error is not None:
+        payload["error"] = result.error
+    return payload
+
+
+def _persist_cleanup_audit(
+    db: Any,
+    result: WrongMatchCleanupOutcome,
+) -> None:
+    if result.outcome not in FINAL_AUDIT_OUTCOMES:
+        return
+    recorder = getattr(db, "record_wrong_match_triage", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(result.download_log_id, _cleanup_audit_payload(result))
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "wrong_match_cleanup.audit_persist_failed download_log_id=%s",
+            result.download_log_id,
+        )

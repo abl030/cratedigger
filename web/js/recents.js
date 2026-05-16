@@ -40,6 +40,11 @@ function recentsLogUrl() {
   return `${API}/api/pipeline/log?${params.toString()}`;
 }
 
+function triageLabelText(summary) {
+  const normalized = String(summary || '').replace(/:/g, '').replace(/\s+/g, ' ').trim();
+  return normalized ? `triage - ${normalized}` : '';
+}
+
 /**
  * Render recents items grouped by date.
  * @param {Array<Object>} items
@@ -82,8 +87,8 @@ export function renderRecentsItems(items, matchRates = null) {
       const badExtChip = badExtensions.length
         ? `<span class="badge badge-warn" title="${esc(badExtensions.join(', '))}">bad ext: ${badExtensions.length}</span>`
         : '';
-      const triageChip = triageSummary
-        ? `<span class="badge badge-warn" title="${esc(triageDetail)}">triage: ${esc(triageSummary)}</span>`
+      const triageLabel = triageSummary
+        ? `<span class="recents-triage-label" title="${esc(triageDetail)}">${esc(triageLabelText(triageSummary))}</span>`
         : '';
 
       // Search-plan inspector button — Recents rows always render the
@@ -95,12 +100,13 @@ export function renderRecentsItems(items, matchRates = null) {
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}${triageChip}</div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span>${disambigChip}${badExtChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
             <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>
           </div>
           <div class="p-meta">
+            ${triageLabel}
             <span>${esc(summary)}</span>
           </div>
         </div>
@@ -462,6 +468,7 @@ export const __test__ = {
   hasMatchRates,
   matchRatesFromDashboardWindows,
   recentsLogUrl,
+  triageLabelText,
   renderDownloadingItems,
   renderImportQueueItems,
   renderRecentsCounts,
