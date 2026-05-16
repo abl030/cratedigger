@@ -7085,5 +7085,169 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             self.assertIn(("rejected", "audio_corrupt"), outcomes)
 
 
+class TestPersistEvidenceOnRejectSlice(unittest.TestCase):
+    """Auto-import reject persists candidate evidence so Wrong Matches triage is instant.
+
+    Pre-fix behavior: ``_handle_rejected_result`` wrote the download_log row
+    but never persisted ``album_quality_evidence`` with
+    ``owner_type='download_log_candidate'``. First Wrong Matches triage
+    interaction with that row fell back to ``_preview_for_triage`` →
+    full re-measurement (snapshot + validate_audio + spectral_analyze +
+    V0 probe), 10-30s per album.
+
+    Post-fix: ``_persist_candidate_evidence_for_reject`` runs measurement
+    once at reject time and persists the evidence row. Triage then finds
+    the row via ``ensure_candidate_evidence_for_action`` and returns
+    ``candidate_status='reused'`` without firing the preview fallback.
+    """
+
+    def test_reject_persists_candidate_evidence_for_owner_download_log(self):
+        from lib.quality import AlbumQualityEvidenceOwner
+        from lib.preimport import PreimportMeasurement
+        from lib.download import _persist_candidate_evidence_for_reject
+        from lib.import_evidence import ensure_candidate_evidence_for_action
+        from tests.helpers import make_grab_list_entry, make_download_file
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        # Seed a download_log row first so the FakePipelineDB's owner-validation
+        # check accepts the download_log_candidate evidence upsert (real PG has
+        # the same FK constraint).
+        download_log_id = db.log_download(
+            request_id=42,
+            outcome="rejected",
+            beets_scenario="high_distance",
+            beets_detail="distance 0.5 above threshold",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_path = os.path.join(tmpdir, "Artist - Album")
+            os.makedirs(failed_path)
+            track_path = os.path.join(failed_path, "01 - Track.mp3")
+            with open(track_path, "wb") as f:
+                f.write(b"FAKE_MP3_DATA")
+
+            measurement = PreimportMeasurement(
+                corrupt_files=[],
+                audio_corrupt=False,
+                matched_bad_hash_id=None,
+                matched_bad_track_path=None,
+                download_spectral=SimpleNamespace(
+                    grade="suspect",
+                    bitrate_kbps=128,
+                    suspect_pct=80.0,
+                ),
+                existing_spectral=SimpleNamespace(
+                    grade="genuine",
+                    bitrate_kbps=320,
+                    suspect_pct=0.0,
+                ),
+                existing_min_bitrate=320,
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
+                min_bitrate_kbps=192,
+                is_vbr=False,
+            )
+
+            ctx = SimpleNamespace(
+                cfg=SimpleNamespace(
+                    beets_harness_path=_HARNESS,
+                    beets_distance_threshold=0.15,
+                    quality_ranks=None,
+                    audio_check_mode="off",
+                    beets_directory="",
+                ),
+            )
+            album_data = make_grab_list_entry(
+                artist="Artist",
+                title="Album",
+                mb_release_id="mbid-42",
+                db_request_id=42,
+                files=[make_download_file(filename="01 - Track.mp3")],
+            )
+            dl_info = SimpleNamespace(
+                filetype="mp3",
+                bitrate=192000,
+                is_vbr=False,
+            )
+            bv_result = SimpleNamespace(
+                failed_path=failed_path,
+            )
+
+            with patch(
+                "lib.preimport.measure_preimport_state",
+                return_value=measurement,
+            ):
+                _persist_candidate_evidence_for_reject(
+                    db=db,
+                    ctx=ctx,  # type: ignore[arg-type]
+                    album_data=album_data,
+                    dl_info=dl_info,  # type: ignore[arg-type]
+                    bv_result=bv_result,  # type: ignore[arg-type]
+                    download_log_id=download_log_id,
+                )
+
+            # Evidence persisted with download_log_candidate owner.
+            owner = AlbumQualityEvidenceOwner(
+                owner_type="download_log_candidate",
+                owner_id=download_log_id,
+            )
+            evidence = db.load_album_quality_evidence(owner)
+            self.assertIsNotNone(evidence)
+            assert evidence is not None  # type narrowing for pyright
+            self.assertEqual(evidence.measurement.spectral_grade, "suspect")
+            self.assertEqual(evidence.measurement.spectral_bitrate_kbps, 128)
+            self.assertEqual(evidence.audio_file_count, 1)
+            self.assertEqual(evidence.folder_layout, "flat")
+
+            # Triage's fast-path lookup finds the row.
+            triage_result = ensure_candidate_evidence_for_action(
+                db,
+                source_path=failed_path,
+                download_log_id=download_log_id,
+            )
+            self.assertTrue(triage_result.available)
+            self.assertEqual(
+                triage_result.provenance.candidate_status,
+                "reused",
+            )
+
+    def test_persist_helper_is_defensive_when_inputs_are_missing(self):
+        """Helper must not crash when db is None, dl_id is non-int, or path is missing."""
+        from lib.download import _persist_candidate_evidence_for_reject
+        from tests.helpers import make_grab_list_entry
+
+        # None db: silent no-op.
+        _persist_candidate_evidence_for_reject(
+            db=None,
+            ctx=SimpleNamespace(cfg=SimpleNamespace()),  # type: ignore[arg-type]
+            album_data=make_grab_list_entry(artist="A", title="B"),
+            dl_info=SimpleNamespace(filetype="mp3", bitrate=192000, is_vbr=False),  # type: ignore[arg-type]
+            bv_result=SimpleNamespace(failed_path="/tmp/nonexistent"),  # type: ignore[arg-type]
+            download_log_id=1,
+        )
+
+        # MagicMock dl_id (the pre-fix bug): silent no-op.
+        _persist_candidate_evidence_for_reject(
+            db=FakePipelineDB(),
+            ctx=SimpleNamespace(cfg=SimpleNamespace()),  # type: ignore[arg-type]
+            album_data=make_grab_list_entry(artist="A", title="B"),
+            dl_info=SimpleNamespace(filetype="mp3", bitrate=192000, is_vbr=False),  # type: ignore[arg-type]
+            bv_result=SimpleNamespace(failed_path="/tmp/nonexistent"),  # type: ignore[arg-type]
+            download_log_id=MagicMock(),  # type: ignore[arg-type]
+        )
+
+        # Empty failed_path: silent no-op.
+        _persist_candidate_evidence_for_reject(
+            db=FakePipelineDB(),
+            ctx=SimpleNamespace(cfg=SimpleNamespace()),  # type: ignore[arg-type]
+            album_data=make_grab_list_entry(artist="A", title="B"),
+            dl_info=SimpleNamespace(filetype="mp3", bitrate=192000, is_vbr=False),  # type: ignore[arg-type]
+            bv_result=SimpleNamespace(failed_path=""),  # type: ignore[arg-type]
+            download_log_id=1,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
