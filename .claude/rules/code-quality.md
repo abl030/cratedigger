@@ -4,29 +4,38 @@
 
 **`full_pipeline_decision_from_evidence`** in `lib/quality.py` (and its
 flat-kwargs simulator twin `full_pipeline_decision`) is the single source of
-truth for every quality decision: spectral, codec rank, V0 probe, provisional
-lossless, verified lossless, transcode detection, quality gate. **Never
-re-create quality decisions elsewhere.** If a code path needs to know "should
-this be imported", it must call the full pipeline — not invent its own
-narrower spectral / rank / bitrate comparison.
+truth for every importer decision: the four folder/audio-integrity facts
+(`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) AND
+quality (spectral, codec rank, V0 probe, provisional lossless, verified
+lossless, transcode detection, quality gate). **Never re-create import
+decisions elsewhere.** If a code path needs to know "should this be
+imported", it must call the full pipeline — not invent its own narrower
+check.
 
-This bit us in PR #257: U6 wired a parallel `preimport_decide` spectral branch
-upstream of the full pipeline. The narrower decider fell back to existing
-container bitrate when spectral evidence was missing on one side, rejecting
-legitimate FLAC provisional-lossless upgrades (request 4514). The fix was to
-delete the parallel decision. Don't reintroduce.
+This bit us twice. First (PR #257): a parallel `preimport_decide` spectral
+branch fell back to existing container bitrate when spectral evidence was
+missing on one side, rejecting legitimate FLAC provisional-lossless upgrades
+(request 4514). Second (evidence-canonical-cleanup, U11): `preimport_decide`
+still owned four folder/audio-integrity branches alongside the full
+pipeline. That asterisk on "quality decisions live in ONE place" was
+hair-splitting; the branches were folded into
+`full_pipeline_decision_from_evidence` as early exits.
 
 **Preview produces evidence. Importer decides.** The two-worker contract:
 
-- **Preview worker** (`lib/import_preview.py`): measures, persists
+- **Preview worker** (`lib/import_preview.py`): measures via
+  `measure_preimport_state` (in `lib/measurement.py`), persists
   `AlbumQualityEvidence`, marks the job `evidence_ready` or
   `measurement_failed`. Never emits a verdict. Never decides accept/reject.
+  Never writes the denylist.
 - **Importer worker** (`lib/import_dispatch.py::dispatch_import_from_db`):
   reads persisted evidence, decides via `full_pipeline_decision_from_evidence`.
-  Sole production caller of `preimport_decide` — which now owns ONLY
-  folder/audio-integrity facts (`audio_corrupt`, `bad_audio_hash`,
-  `nested_layout`, `empty_fileset`). Spectral, codec rank, and quality-gate
-  decisions go through the full pipeline.
+  All rejects route through one helper
+  (`_reject_import_from_evidence_decision`) with one denylist policy. The
+  four folder/audio-integrity reject reasons are listed in
+  `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset gives them the
+  "always self-heal back to wanted" invariant (force/manual paths normally
+  pass `requeue_on_failure=False`, but the four facts override).
 
 **The album test set is the contract.** Live-bug scenarios go in
 `tests/test_quality_classification.py::TestLiveBugReproductions` (one test
@@ -99,7 +108,7 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - The simulator must show the full rejection cycle: import/reject decision → spectral propagation → backfill decision → next search tiers. Not just the import decision in isolation.
 
 ## Pipeline Bug Reproduction — Red/Green on Real Code Paths
-- When a live pipeline bug involves **interactions between components** (spectral propagation → decision function → DB write → rejection), don't just test the pure decision function in isolation — write a unit test that calls the actual orchestration function (e.g. `lib.preimport.run_preimport_gates`) with mocked state matching the live scenario.
+- When a live pipeline bug involves **interactions between components** (spectral propagation → decision function → DB write → rejection), don't just test the pure decision function in isolation — write a unit test that calls the actual orchestration function (e.g. `lib.measurement.measure_preimport_state` + `dispatch_import_from_db`) with mocked state matching the live scenario.
 - **RED first**: reproduce the exact live scenario as a test. Mock up the album state from `pipeline-cli show <id>` (status, spectral fields, min_bitrate). Run the test and confirm it fails with the same symptom as production.
 - **GREEN**: fix the production code, confirm the test passes.
 - **Guard both directions**: add a test for the fixed case AND a test that the original valid behavior still works (e.g. propagation still works when an album IS on disk but lacks spectral data).
@@ -200,7 +209,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
   - `TestDispatchThroughQualityGate` — runs dispatch_import_core → real parse_import_result → real _check_quality_gate_core
   - `TestQualityGateVerifiedLosslessBypass`, `TestQualityGateSpectralOverride`
   - `TestDispatchNoJsonResult`, `TestForceImportSlice`
-  - `TestSpectralPropagationSlice` — runs `run_preimport_gates` end-to-end (audio + spectral)
+  - `TestSpectralPropagationSlice` — runs `measure_preimport_state` end-to-end (audio + spectral)
 - **Required for every new high-risk orchestration boundary.** If you add a new pipeline path (a new dispatch decision, a new quality gate branch, a new spectral state transition), add a slice that exercises it with real code.
 
 ### Shared test infrastructure inventory
