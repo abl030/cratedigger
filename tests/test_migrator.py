@@ -772,5 +772,472 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
+@requires_postgres
+class TestPreviewEvidenceFactsSchema(unittest.TestCase):
+    """Migration 019 adds preview-decision evidence facts + widens two CHECKs.
+
+    Validates:
+    - new columns on album_quality_evidence (audio_corrupt, folder_layout,
+      audio_file_count, filetype_band, matched_bad_audio_hash_id +path) with
+      conservative defaults
+    - new per-file decode_ok column with TRUE default
+    - download_log.outcome CHECK accepts 'measurement_failed'
+    - import_jobs.preview_status CHECK accepts 'measurement_failed'
+    - folder_layout CHECK rejects values not in ('flat', 'nested')
+    - bad_audio_hash FK cascade-to-NULL on delete
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_schema_migrations_records_019(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 19"
+        )
+        self.assertEqual(rows, [(19,)])
+
+    def test_album_quality_evidence_has_new_preview_fact_columns(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'album_quality_evidence'
+              AND column_name IN (
+                'audio_corrupt', 'folder_layout', 'audio_file_count',
+                'filetype_band', 'matched_bad_audio_hash_id',
+                'matched_bad_audio_hash_path'
+              )
+        """)
+        by_col = {r[0]: (r[1], r[2], r[3]) for r in rows}
+        self.assertIn("audio_corrupt", by_col)
+        self.assertEqual(by_col["audio_corrupt"][0], "NO")
+        self.assertEqual(by_col["audio_corrupt"][1], "boolean")
+        self.assertIn("false", (by_col["audio_corrupt"][2] or "").lower())
+        self.assertIn("folder_layout", by_col)
+        self.assertEqual(by_col["folder_layout"][0], "NO")
+        self.assertEqual(by_col["folder_layout"][1], "text")
+        self.assertIn("'flat'", by_col["folder_layout"][2] or "")
+        self.assertIn("audio_file_count", by_col)
+        self.assertEqual(by_col["audio_file_count"][0], "NO")
+        self.assertEqual(by_col["audio_file_count"][1], "integer")
+        self.assertIn("filetype_band", by_col)
+        self.assertEqual(by_col["filetype_band"][0], "NO")
+        self.assertEqual(by_col["filetype_band"][1], "text")
+        # FK pair is nullable (optional reference + paired path)
+        self.assertIn("matched_bad_audio_hash_id", by_col)
+        self.assertEqual(by_col["matched_bad_audio_hash_id"][0], "YES")
+        self.assertEqual(by_col["matched_bad_audio_hash_id"][1], "bigint")
+        self.assertIn("matched_bad_audio_hash_path", by_col)
+        self.assertEqual(by_col["matched_bad_audio_hash_path"][0], "YES")
+
+    def test_album_quality_evidence_files_has_decode_ok_column(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'album_quality_evidence_files'
+              AND column_name = 'decode_ok'
+        """)
+        self.assertEqual(len(rows), 1)
+        _, is_nullable, data_type, default = rows[0]
+        self.assertEqual(is_nullable, "NO")
+        self.assertEqual(data_type, "boolean")
+        self.assertIn("true", (default or "").lower())
+
+    def test_folder_layout_check_rejects_unknown_values(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('mig019-folder-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("mig019-folder-mbid",),
+        )[0][0]
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO album_quality_evidence (
+                        owner_type, owner_id, measured_at, format,
+                        verified_lossless, folder_layout
+                    )
+                    VALUES ('request_current', %s, NOW(), 'flac', FALSE, 'tree')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_download_log_outcome_check_accepts_measurement_failed(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('mig019-dl-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("mig019-dl-mbid",),
+        )[0][0]
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, outcome)
+                VALUES (%s, 'measurement_failed')
+            """, (rid,))
+            rows = self._query(
+                "SELECT outcome FROM download_log WHERE request_id = %s",
+                (rid,),
+            )
+            self.assertIn(("measurement_failed",), rows)
+            # Unknown outcomes still rejected.
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO download_log (request_id, outcome)
+                    VALUES (%s, 'definitely_not_a_real_outcome')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_import_jobs_preview_status_check_accepts_measurement_failed(self):
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('mig019-job-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("mig019-job-mbid",),
+        )[0][0]
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload, preview_status
+                )
+                VALUES (
+                    'manual_import', 'queued', %s, '{}'::jsonb,
+                    'measurement_failed'
+                )
+            """, (rid,))
+            rows = self._query(
+                "SELECT preview_status FROM import_jobs WHERE request_id = %s",
+                (rid,),
+            )
+            self.assertEqual(rows, [("measurement_failed",)])
+            # Unknown preview_status still rejected.
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, status, request_id, payload, preview_status
+                    )
+                    VALUES (
+                        'manual_import', 'queued', %s, '{}'::jsonb,
+                        'not_a_real_preview_status'
+                    )
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_matched_bad_audio_hash_fk_cascade_to_null(self):
+        # Insert a parent request + an album_quality_evidence row referencing
+        # a bad_audio_hashes row. Delete the hash row; the FK should null out
+        # the evidence column without error.
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('mig019-fk-mbid', 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """)
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            ("mig019-fk-mbid",),
+        )[0][0]
+        try:
+            self._exec("""
+                INSERT INTO bad_audio_hashes (hash_value, audio_format, request_id)
+                VALUES (decode('deadbeef', 'hex'), 'flac', %s)
+                ON CONFLICT DO NOTHING
+            """, (rid,))
+            bad_id_rows = self._query("""
+                SELECT id FROM bad_audio_hashes
+                WHERE hash_value = decode('deadbeef', 'hex')
+                  AND audio_format = 'flac'
+            """)
+            bad_id = bad_id_rows[0][0]
+            self._exec("""
+                INSERT INTO album_quality_evidence (
+                    owner_type, owner_id, measured_at, format,
+                    verified_lossless, matched_bad_audio_hash_id,
+                    matched_bad_audio_hash_path
+                )
+                VALUES (
+                    'request_current', %s, NOW(), 'flac', FALSE, %s,
+                    '01 - Track.flac'
+                )
+            """, (rid, bad_id))
+            self._exec("DELETE FROM bad_audio_hashes WHERE id = %s", (bad_id,))
+            rows = self._query("""
+                SELECT matched_bad_audio_hash_id, matched_bad_audio_hash_path
+                FROM album_quality_evidence
+                WHERE owner_type = 'request_current' AND owner_id = %s
+            """, (rid,))
+            self.assertEqual(len(rows), 1)
+            self.assertIsNone(rows[0][0])
+            # The paired path column is NOT touched by the FK cascade — it
+            # remains populated so the audit trail survives the hash delete.
+            # The Struct validation enforces "set together or both NULL" only
+            # on writes, not on the cascade-NULL aftermath.
+            self.assertEqual(rows[0][1], "01 - Track.flac")
+        finally:
+            self._exec("""
+                DELETE FROM album_quality_evidence
+                WHERE owner_type = 'request_current' AND owner_id = %s
+            """, (rid,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
+# ---------------------------------------------------------------------------
+# Migration 020 — recovery sweep for preview_status='uncertain'
+# ---------------------------------------------------------------------------
+
+@requires_postgres
+class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
+    """Migration 020 sweeps stuck ``preview_status='uncertain'`` rows back
+    to ``'waiting'`` so the preview worker re-claims them under the new
+    preview-never-decides contract.
+
+    Validates:
+    - schema_migrations records 020
+    - the canonical UPDATE flips ``status='queued' AND preview_status='uncertain'``
+      rows to ``preview_status='waiting'`` and clears the lifecycle columns
+    - idempotent: re-running the UPDATE on a clean DB flips zero rows
+    - rows in other preview_status values (``evidence_ready``, ``error``,
+      ``measurement_failed``) are untouched
+    """
+
+    # The exact UPDATE statement shipped in
+    # ``migrations/020_recover_stuck_preview_uncertain_jobs.sql``. Tests run
+    # this statement directly against test-seeded rows because conftest.py
+    # already applied migration 020 at session start (so there's no stuck
+    # 'uncertain' row in the live test DB to observe).
+    _RECOVERY_SWEEP_SQL = """
+        UPDATE import_jobs
+        SET preview_status = 'waiting',
+            preview_result = NULL,
+            preview_message = 'Recovered by preview-never-decides refactor (020)',
+            preview_error = NULL,
+            preview_worker_id = NULL,
+            preview_started_at = NULL,
+            preview_heartbeat_at = NULL,
+            preview_completed_at = NULL,
+            importable_at = NULL,
+            updated_at = NOW()
+        WHERE status = 'queued'
+          AND preview_status = 'uncertain'
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _exec_with_rowcount(self, sql: str, params: tuple = ()) -> int:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.rowcount
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def _cleanup_request(self, rid: int) -> None:
+        # CASCADE on album_requests.id → import_jobs cleans up associated jobs.
+        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_schema_migrations_records_020(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 20"
+        )
+        self.assertEqual(rows, [(20,)])
+
+    def test_recovery_sweep_flips_uncertain_to_waiting_and_clears_lifecycle(self):
+        """A stuck uncertain row flips to waiting with the lifecycle cleared."""
+        rid = self._make_request("mig020-flip-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload,
+                    preview_status, preview_result, preview_message,
+                    preview_error, preview_worker_id,
+                    preview_started_at, preview_heartbeat_at,
+                    preview_completed_at, importable_at
+                )
+                VALUES (
+                    'automation_import', 'queued', %s, '{}'::jsonb,
+                    'uncertain', '{"verdict": "uncertain"}'::jsonb,
+                    'pre-U7 stuck reason',
+                    'pre-U7 stuck error', 'pre-U7-worker',
+                    NOW(), NOW(),
+                    NOW(), NOW()
+                )
+            """, (rid,))
+            affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(affected, 1)
+            rows = self._query("""
+                SELECT preview_status, preview_result, preview_message,
+                       preview_error, preview_worker_id,
+                       preview_started_at, preview_heartbeat_at,
+                       preview_completed_at, importable_at
+                FROM import_jobs WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(len(rows), 1)
+            (preview_status, preview_result, preview_message,
+             preview_error, preview_worker_id, preview_started_at,
+             preview_heartbeat_at, preview_completed_at,
+             importable_at) = rows[0]
+            self.assertEqual(preview_status, "waiting")
+            self.assertIsNone(preview_result)
+            self.assertEqual(
+                preview_message,
+                "Recovered by preview-never-decides refactor (020)",
+            )
+            self.assertIsNone(preview_error)
+            self.assertIsNone(preview_worker_id)
+            self.assertIsNone(preview_started_at)
+            self.assertIsNone(preview_heartbeat_at)
+            self.assertIsNone(preview_completed_at)
+            self.assertIsNone(importable_at)
+        finally:
+            self._cleanup_request(rid)
+
+    def test_recovery_sweep_is_idempotent(self):
+        """Re-running the sweep on a row already flipped touches nothing."""
+        rid = self._make_request("mig020-idem-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload, preview_status
+                )
+                VALUES (
+                    'automation_import', 'queued', %s, '{}'::jsonb, 'uncertain'
+                )
+            """, (rid,))
+            first = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(first, 1)
+            second = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(
+                second, 0,
+                "Second run of the recovery sweep must be a no-op",
+            )
+        finally:
+            self._cleanup_request(rid)
+
+    def test_recovery_sweep_leaves_other_preview_statuses_untouched(self):
+        """Rows in other preview_status values are untouched."""
+        rid = self._make_request("mig020-untouched-mbid")
+        try:
+            # Seed three jobs in distinct non-uncertain preview_status values.
+            # Use a heartbeat timestamp the sweep would have nulled, to prove
+            # those fields are untouched.
+            for preview_status in ("evidence_ready", "measurement_failed",
+                                   "error"):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, status, request_id, payload,
+                        preview_status, preview_message,
+                        preview_heartbeat_at
+                    )
+                    VALUES (
+                        'manual_import', 'queued', %s, '{}'::jsonb,
+                        %s, 'pre-existing message',
+                        '2026-05-15 00:00:00+00'
+                    )
+                """, (rid, preview_status))
+
+            affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(affected, 0)
+
+            rows = self._query("""
+                SELECT preview_status, preview_message, preview_heartbeat_at
+                FROM import_jobs WHERE request_id = %s
+                ORDER BY id ASC
+            """, (rid,))
+            self.assertEqual(len(rows), 3)
+            statuses = {r[0] for r in rows}
+            self.assertEqual(
+                statuses,
+                {"evidence_ready", "measurement_failed", "error"},
+            )
+            for _, message, heartbeat in rows:
+                self.assertEqual(message, "pre-existing message")
+                self.assertIsNotNone(heartbeat)
+        finally:
+            self._cleanup_request(rid)
+
+    def test_recovery_sweep_only_targets_queued_jobs(self):
+        """A non-queued ``uncertain`` row is left alone — the WHERE guard
+        gates on ``status='queued'`` so completed/failed legacy rows are
+        not retro-resurrected."""
+        rid = self._make_request("mig020-failed-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload,
+                    preview_status, preview_message
+                )
+                VALUES (
+                    'manual_import', 'failed', %s, '{}'::jsonb,
+                    'uncertain', 'historical failed job'
+                )
+            """, (rid,))
+            affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
+            self.assertEqual(affected, 0)
+            rows = self._query("""
+                SELECT status, preview_status, preview_message
+                FROM import_jobs WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(rows, [("failed", "uncertain",
+                                     "historical failed job")])
+        finally:
+            self._cleanup_request(rid)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,13 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.import_preview import ImportPreviewResult, preview_import_from_path
+from lib.import_dispatch import _record_preview_measurement_failed
+from lib.import_preview import (
+    PREVIEW_VERDICT_EVIDENCE_READY,
+    PREVIEW_VERDICT_MEASUREMENT_FAILED,
+    ImportPreviewResult,
+    preview_import_from_path,
+)
 from lib.import_evidence import (
     CANDIDATE_STATUS_REUSED,
     ensure_candidate_evidence_for_action,
@@ -31,7 +37,11 @@ from lib.import_queue import (
     ImportJob,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
-from lib.quality import ActiveDownloadState, AlbumQualityEvidence
+from lib.quality import (
+    ActiveDownloadState,
+    AlbumQualityEvidence,
+    MeasurementFailure,
+)
 from lib.quality_evidence import (
     EvidenceBuildResult,
     load_candidate_evidence_for_source,
@@ -42,7 +52,6 @@ STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry q
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(hours=1)
-PREVIEW_FAILURE_STATUS = "uncertain"
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
@@ -326,34 +335,91 @@ def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
         db,
         import_job_id=job.id,
         persist_candidate_evidence=True,
+        worker_mode=True,
         **preview_input,
     )
 
 
-def _mark_automation_preview_blocked(
+def _handle_measurement_failed(
     db: Any,
     job: ImportJob,
-    *,
-    preview_status: str,
-    reason: str,
-    preview_payload: dict[str, Any],
+    result: ImportPreviewResult,
 ) -> ImportJob | None:
-    blocker = getattr(db, "mark_import_job_preview_blocked", None)
-    if callable(blocker):
-        return cast(ImportJob | None, blocker(
-            job.id,
-            preview_status=preview_status,
-            error=reason,
-            preview_result=preview_payload,
-            message=f"Preview blocked automation import: {reason}",
-        ))
-    return db.mark_import_job_preview_failed(
+    """Route a ``verdict='measurement_failed'`` result through U4's self-healer.
+
+    Two-step ownership:
+
+      1. ``mark_import_job_preview_failed`` writes the preview-side fields
+         (``preview_status='measurement_failed'``, ``preview_result``,
+         ``preview_error``, ``preview_message``) AND flips ``status='failed'``.
+         This is the operator-facing surface — the recents UI grep-classifies
+         on ``preview_status`` to render the badge.
+      2. ``_record_preview_measurement_failed`` (U4) writes the
+         ``download_log`` row with ``outcome='measurement_failed'``,
+         finalizes the parent request to ``wanted``, and (if a denylist rule
+         applied) writes the denylist. Its internal ``mark_import_job_failed``
+         call is a no-op because step 1 already set ``status='failed'`` — the
+         WHERE clause requires ``status IN ('queued', 'running')``.
+
+    Returns the refreshed ``ImportJob`` row.
+
+    ``denylist_username`` is currently always None — the per-user 5-strikes
+    rule lives in the importer-side reject path (U6). Preview measurement
+    failures are infrastructure-class failures (source vanished, snapshot
+    stale, crashed); the user isn't responsible for the source going away
+    mid-measure, so we do not denylist here.
+    """
+    payload = result.failure
+    if payload is None:
+        # Defensive: every measurement_failed result must carry a payload.
+        # Synthesize one from the result fields so we never fall through
+        # without firing the self-heal.
+        payload = MeasurementFailure(
+            reason="measurement_crashed",
+            detail=result.detail or result.reason or "measurement_failed",
+            source_path=result.source_path or "",
+        )
+    # Step 1: surface preview-side fields for the operator UI.
+    preview_payload = _preview_result_dict(result)
+    updated = db.mark_import_job_preview_failed(
         job.id,
-        preview_status=preview_status,
-        error=reason,
+        preview_status=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+        error=payload.reason,
         preview_result=preview_payload,
-        message=f"Preview blocked automation import: {reason}",
+        message=f"Preview measurement failed: {payload.reason}",
     )
+    # Step 2: U4's self-healing side effects (download_log, request→wanted).
+    # If this raises, step 1 has already committed status='failed' but
+    # the parent request stays 'downloading' with no download_log row -
+    # exactly the #250 stuck-forever shape. The bug class is rare-rare
+    # (transient PG blip during the helper's writes), but we make it
+    # observable: log loudly with the job + request IDs so operators can
+    # query for orphans via `pipeline-cli` after the fact. The job's
+    # already-failed state means the next worker tick won't re-claim it.
+    try:
+        _record_preview_measurement_failed(
+            db,
+            request_id=job.request_id,
+            import_job_id=job.id,
+            payload=payload,
+        )
+    except Exception:
+        logger.exception(
+            "PREVIEW_SELF_HEAL_PARTIAL_FAILURE: job %s status=failed but "
+            "self-heal step 2 raised - parent request %s may be stuck "
+            "in 'downloading'. Recover with: pipeline-cli query \"UPDATE "
+            "album_requests SET status='wanted' WHERE id=%s AND "
+            "status='downloading'\"",
+            job.id,
+            job.request_id,
+            job.request_id,
+        )
+    if updated is not None:
+        return updated
+    refreshed = getattr(db, "get_import_job", None)
+    if callable(refreshed):
+        return cast(ImportJob | None, refreshed(job.id))
+    return None
 
 
 def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
@@ -387,47 +453,89 @@ def process_claimed_preview_job(db: Any, job: ImportJob) -> ImportJob | None:
         result = execute_preview_job(db, job)
     except Exception as exc:
         logger.exception("Import job %s preview crashed", job.id)
-        return db.mark_import_job_preview_failed(
-            job.id,
-            preview_status="error",
-            error=type(exc).__name__,
-            preview_result={
-                "verdict": "error",
-                "reason": type(exc).__name__,
-                "detail": str(exc),
-            },
-            message=f"Preview failed: {exc}",
+        # Worker-mode preview should not raise — but if it does, route the
+        # crash through the same self-healing helper so the parent request
+        # gets finalized to ``wanted`` and the job is marked failed.
+        crash_payload = MeasurementFailure(
+            reason="measurement_crashed",
+            detail=f"{type(exc).__name__}: {exc}",
+            source_path="",
         )
-
-    preview_payload = _preview_result_dict(result)
-    evidence_ready, evidence_reason = _candidate_evidence_ready_for_job(
-        db,
-        job,
-        result,
-    )
-    if evidence_ready:
-        return db.mark_import_job_preview_importable(
-            job.id,
-            preview_result=preview_payload,
-            message=f"Evidence ready for final check: {_preview_reason(result)}",
+        crash_result = ImportPreviewResult(
+            mode="path",
+            verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+            uncertain=False,
+            decision="measurement_crashed",
+            reason="measurement_crashed",
+            detail=f"{type(exc).__name__}: {exc}",
+            request_id=job.request_id,
+            failure=crash_payload,
         )
+        return _handle_measurement_failed(db, job, crash_result)
 
-    reason = _preview_reason(result) or evidence_reason
-    if job.job_type == IMPORT_JOB_AUTOMATION:
-        return _mark_automation_preview_blocked(
+    if result.verdict == PREVIEW_VERDICT_MEASUREMENT_FAILED:
+        return _handle_measurement_failed(db, job, result)
+
+    if result.verdict == PREVIEW_VERDICT_EVIDENCE_READY:
+        preview_payload = _preview_result_dict(result)
+        # Belt-and-braces: confirm candidate evidence is actually
+        # persisted on disk before marking importable. If the
+        # persistence stage was skipped or partial, fall back to
+        # measurement_failed so the parent request still self-heals.
+        evidence_ready, evidence_reason = _candidate_evidence_ready_for_job(
             db,
             job,
-            preview_status=PREVIEW_FAILURE_STATUS,
-            reason=reason,
-            preview_payload=preview_payload,
+            result,
         )
-    return db.mark_import_job_preview_failed(
+        if evidence_ready:
+            return db.mark_import_job_preview_importable(
+                job.id,
+                preview_result=preview_payload,
+                message=f"Evidence ready for final check: {_preview_reason(result)}",
+            )
+        fallback_payload = MeasurementFailure(
+            reason="evidence_persist_failed",
+            detail=evidence_reason or "candidate evidence unavailable",
+            source_path=result.source_path or "",
+        )
+        fallback_result = ImportPreviewResult(
+            mode=result.mode,
+            verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+            decision="evidence_persist_failed",
+            reason="evidence_persist_failed",
+            detail=evidence_reason,
+            source_path=result.source_path,
+            request_id=result.request_id,
+            download_log_id=result.download_log_id,
+            failure=fallback_payload,
+        )
+        return _handle_measurement_failed(db, job, fallback_result)
+
+    # Defensive: anything else (including legacy verdicts in case of bugs)
+    # routes through measurement_failed so the parent request self-heals
+    # rather than getting stuck.
+    logger.warning(
+        "Import job %s preview returned unexpected verdict %r; treating as measurement_failed",
         job.id,
-        preview_status=PREVIEW_FAILURE_STATUS,
-        error=reason,
-        preview_result=preview_payload,
-        message=f"Preview failed: {reason}",
+        result.verdict,
     )
+    fallback_payload = MeasurementFailure(
+        reason="measurement_crashed",
+        detail=f"unexpected verdict: {result.verdict}",
+        source_path=result.source_path or "",
+    )
+    fallback_result = ImportPreviewResult(
+        mode=result.mode,
+        verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+        decision="unexpected_verdict",
+        reason=result.verdict,
+        detail=f"unexpected verdict: {result.verdict}",
+        source_path=result.source_path,
+        request_id=result.request_id,
+        download_log_id=result.download_log_id,
+        failure=fallback_payload,
+    )
+    return _handle_measurement_failed(db, job, fallback_result)
 
 
 def preview_heartbeat_loop(

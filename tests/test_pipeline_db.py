@@ -889,6 +889,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNotNone(marked.importable_at)
 
     def test_preview_rejection_fails_job_with_audit(self):
+        """Post-U5: preview failures use ``preview_status='measurement_failed'``.
+
+        ``'uncertain'`` is no longer in ``IMPORT_JOB_PREVIEW_FAILURE_STATUSES``;
+        production code writes ``'measurement_failed'`` via the U4 self-healing
+        helper.
+        """
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
         queued = self.db.enqueue_import_job(
@@ -900,15 +906,15 @@ class TestImportJobQueueAPI(unittest.TestCase):
 
         failed = self.db.mark_import_job_preview_failed(
             queued.id,
-            preview_status="uncertain",
+            preview_status="measurement_failed",
             error="path_missing",
-            preview_result={"verdict": "uncertain", "reason": "path_missing"},
+            preview_result={"verdict": "measurement_failed", "reason": "path_missing"},
             message="Preview failed: path_missing",
         )
         assert failed is not None
         assert failed.preview_result is not None
         self.assertEqual(failed.status, "failed")
-        self.assertEqual(failed.preview_status, "uncertain")
+        self.assertEqual(failed.preview_status, "measurement_failed")
         self.assertEqual(failed.preview_error, "path_missing")
         self.assertEqual(failed.preview_result["reason"], "path_missing")
         self.assertEqual(failed.message, "Preview failed: path_missing")
@@ -2898,6 +2904,174 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         reasons = loaded.policy_incomplete_reasons()
         self.assertIn("measurement.format is required", reasons)
         self.assertIn("at least one measurement bitrate metric is required", reasons)
+
+    def test_round_trip_preview_evidence_facts_with_every_new_field(self):
+        """U1: new preview-evidence fields round-trip through upsert/load."""
+        import msgspec
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+        )
+
+        # Seed a bad_audio_hashes row to reference; matched_bad_audio_hash_id
+        # is an optional FK.
+        cur = self.db._execute(
+            """
+            INSERT INTO bad_audio_hashes (hash_value, audio_format, request_id)
+            VALUES (decode('abcd1234', 'hex'), 'mp3', %s)
+            RETURNING id
+            """,
+            (self.req_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        bad_id = int(row["id"])
+
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01 - Track.mp3",
+                    size_bytes=12345,
+                    mtime_ns=10,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                    decode_ok=False,
+                ),
+            ],
+        )
+        evidence = msgspec.structs.replace(
+            evidence,
+            audio_corrupt=True,
+            folder_layout="nested",
+            audio_file_count=1,
+            filetype_band="mp3",
+            matched_bad_audio_hash_id=bad_id,
+            matched_bad_audio_hash_path="01 - Track.mp3",
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        )
+
+        assert loaded is not None
+        self.assertTrue(loaded.audio_corrupt)
+        self.assertEqual(loaded.folder_layout, "nested")
+        self.assertEqual(loaded.audio_file_count, 1)
+        self.assertEqual(loaded.filetype_band, "mp3")
+        self.assertEqual(loaded.matched_bad_audio_hash_id, bad_id)
+        self.assertEqual(loaded.matched_bad_audio_hash_path, "01 - Track.mp3")
+        self.assertEqual(len(loaded.files), 1)
+        self.assertFalse(loaded.files[0].decode_ok)
+
+    def test_round_trip_with_default_values_preserves_safe_shape(self):
+        """U1: legacy-style evidence (no new fields supplied) loads with safe defaults."""
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        # make_album_quality_evidence doesn't set the new fields — they default.
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        )
+
+        assert loaded is not None
+        self.assertFalse(loaded.audio_corrupt)
+        self.assertEqual(loaded.folder_layout, "flat")
+        self.assertEqual(loaded.audio_file_count, 0)
+        self.assertEqual(loaded.filetype_band, "")
+        self.assertIsNone(loaded.matched_bad_audio_hash_id)
+        self.assertIsNone(loaded.matched_bad_audio_hash_path)
+        # decode_ok defaults to TRUE for every file we didn't override.
+        for file in loaded.files:
+            self.assertTrue(file.decode_ok)
+
+    def test_empty_fileset_is_storable_when_audio_file_count_is_zero(self):
+        """U1 AE4: audio_file_count=0 + files=[] round-trips without validation error."""
+        import msgspec
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceOwner,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+            files=[],
+        )
+        evidence = msgspec.structs.replace(evidence, audio_file_count=0)
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.load_album_quality_evidence(
+            AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=self.req_id,
+            )
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.audio_file_count, 0)
+        self.assertEqual(loaded.files, [])
+
+    def test_non_empty_files_with_audio_file_count_zero_inconsistency_still_storable(
+        self,
+    ):
+        """U1: files=[] with audio_file_count!=0 raises (consistency guard)."""
+        import msgspec
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+            files=[],
+        )
+        # audio_file_count default is 0; force the inconsistency to trigger
+        # the "at least one snapshot file is required" branch.
+        evidence = msgspec.structs.replace(evidence, audio_file_count=2)
+        with self.assertRaisesRegex(ValueError, "at least one snapshot file is required"):
+            self.db.upsert_album_quality_evidence(evidence)
+
+    def test_matched_bad_audio_hash_id_and_path_must_pair(self):
+        """U1: hash FK and paired path must be set together or both NULL."""
+        import msgspec
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+        )
+
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=self.req_id,
+        )
+        # id set without path.
+        bad_pair = msgspec.structs.replace(
+            evidence, matched_bad_audio_hash_id=1, matched_bad_audio_hash_path=None,
+        )
+        with self.assertRaisesRegex(ValueError, "must be set together or both NULL"):
+            self.db.upsert_album_quality_evidence(bad_pair)
+        # path set without id.
+        bad_pair2 = msgspec.structs.replace(
+            evidence,
+            matched_bad_audio_hash_id=None,
+            matched_bad_audio_hash_path="a.mp3",
+        )
+        with self.assertRaisesRegex(ValueError, "must be set together or both NULL"):
+            self.db.upsert_album_quality_evidence(bad_pair2)
 
 
 @requires_postgres

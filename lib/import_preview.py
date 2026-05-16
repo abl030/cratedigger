@@ -30,6 +30,8 @@ from lib.quality_evidence import (
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
+    MeasurementFailure,
+    MeasurementFailureReason,
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QualityRankConfig,
     classify_full_pipeline_decision,
@@ -39,6 +41,17 @@ from lib.quality import (
     quality_gate_decision,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
+
+# Verdict values for `ImportPreviewResult.verdict`. After U5 the preview worker
+# emits only the two new verdicts (`evidence_ready` / `measurement_failed`) when
+# called in `worker_mode=True`; legacy callers (CLI inspector, wrong_match
+# triage, values-mode synthetic preview) still receive `would_import` /
+# `confident_reject` / `uncertain` from the classifier.
+PREVIEW_VERDICT_WOULD_IMPORT = "would_import"
+PREVIEW_VERDICT_CONFIDENT_REJECT = "confident_reject"
+PREVIEW_VERDICT_UNCERTAIN = "uncertain"
+PREVIEW_VERDICT_EVIDENCE_READY = "evidence_ready"
+PREVIEW_VERDICT_MEASUREMENT_FAILED = "measurement_failed"
 
 
 class ImportPreviewValues(msgspec.Struct, frozen=True):
@@ -77,7 +90,18 @@ class ImportPreviewValues(msgspec.Struct, frozen=True):
 
 
 class ImportPreviewResult(msgspec.Struct):
-    """Common preview result returned by CLI/API/triage code."""
+    """Common preview result returned by CLI/API/triage code.
+
+    U5 added two new verdicts: ``evidence_ready`` and ``measurement_failed``.
+    The preview worker (``scripts/import_preview_worker.py``) emits only these
+    two in production after U5; legacy callers (CLI inspector, wrong-match
+    triage, values-mode synthetic preview) continue to receive
+    ``would_import`` / ``confident_reject`` / ``uncertain`` from the classifier.
+
+    When ``verdict='measurement_failed'``, ``failure`` carries the typed
+    ``MeasurementFailure`` payload that the preview worker passes to
+    ``_record_preview_measurement_failed`` for self-healing finalize.
+    """
 
     mode: str
     verdict: str
@@ -94,6 +118,7 @@ class ImportPreviewResult(msgspec.Struct):
     source_path: str | None = None
     import_result: ImportResult | None = None
     simulation: dict[str, Any] | None = None
+    failure: MeasurementFailure | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return msgspec.to_builtins(self)  # type: ignore[no-any-return]
@@ -116,10 +141,11 @@ def _preview_result(
     import_result: ImportResult | None = None,
     simulation: dict[str, Any] | None = None,
     cleanup_eligible: bool = False,
+    failure: MeasurementFailure | None = None,
 ) -> ImportPreviewResult:
-    would_import = verdict == "would_import"
-    confident_reject = verdict == "confident_reject"
-    uncertain = verdict == "uncertain"
+    would_import = verdict == PREVIEW_VERDICT_WOULD_IMPORT
+    confident_reject = verdict == PREVIEW_VERDICT_CONFIDENT_REJECT
+    uncertain = verdict == PREVIEW_VERDICT_UNCERTAIN
     return ImportPreviewResult(
         mode=mode,
         verdict=verdict,
@@ -136,6 +162,72 @@ def _preview_result(
         source_path=source_path,
         import_result=import_result,
         simulation=simulation,
+        failure=failure,
+    )
+
+
+def _measurement_failed_result(
+    *,
+    mode: str,
+    reason: MeasurementFailureReason,
+    decision: str,
+    detail: str,
+    source_path: str | None = None,
+    request_id: int | None = None,
+    download_log_id: int | None = None,
+    import_result: ImportResult | None = None,
+    stage_chain: list[str] | None = None,
+) -> ImportPreviewResult:
+    """Build a ``verdict='measurement_failed'`` preview result with typed payload."""
+    payload = MeasurementFailure(
+        reason=reason,
+        detail=detail,
+        source_path=source_path or "",
+    )
+    return _preview_result(
+        mode=mode,
+        verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+        decision=decision,
+        reason=reason,
+        detail=detail,
+        stage_chain=stage_chain,
+        request_id=request_id,
+        download_log_id=download_log_id,
+        source_path=source_path,
+        import_result=import_result,
+        failure=payload,
+    )
+
+
+def _evidence_ready_result(
+    *,
+    mode: str,
+    decision: str,
+    reason: str | None = None,
+    detail: str | None = None,
+    stage_chain: list[str] | None = None,
+    request_id: int | None = None,
+    download_log_id: int | None = None,
+    source_path: str | None = None,
+    import_result: ImportResult | None = None,
+) -> ImportPreviewResult:
+    """Build a ``verdict='evidence_ready'`` preview result.
+
+    Used by the worker-mode entry point when preview successfully measured the
+    candidate and persisted evidence. The importer (U6) reads the persisted
+    evidence and decides accept/reject via ``preimport_decide``.
+    """
+    return _preview_result(
+        mode=mode,
+        verdict=PREVIEW_VERDICT_EVIDENCE_READY,
+        decision=decision,
+        reason=reason or decision,
+        detail=detail,
+        stage_chain=stage_chain,
+        request_id=request_id,
+        download_log_id=download_log_id,
+        source_path=source_path,
+        import_result=import_result,
     )
 
 
@@ -263,17 +355,36 @@ def preview_import_from_path(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
     persist_candidate_evidence: bool = False,
+    worker_mode: bool = False,
 ) -> ImportPreviewResult:
     """Preview a real source folder without mutating source files or beets.
 
     DB evidence persistence is opt-in for the async preview worker. Ad-hoc
     preview and cleanup authorization callers receive an audit/UI verdict only.
+
+    When ``worker_mode=True`` (the preview-worker entry point), failed exits
+    return ``verdict='measurement_failed'`` with a typed ``MeasurementFailure``
+    payload, and successful exits return ``verdict='evidence_ready'``. The
+    importer then reads the persisted evidence and decides. Legacy callers
+    (CLI, wrong-match triage) keep ``worker_mode=False`` and receive the
+    classifier's ``would_import`` / ``confident_reject`` / ``uncertain``
+    verdicts unchanged.
     """
     req = db.get_request(request_id)
     if not req:
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="path",
+                reason="request_not_found",
+                decision="request_not_found",
+                detail=f"Request {request_id} not found",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
         return _preview_result(
             mode="path",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="request_not_found",
             reason=f"Request {request_id} not found",
             request_id=request_id,
@@ -283,9 +394,19 @@ def preview_import_from_path(
 
     mbid = str(req.get("mb_release_id") or "")
     if not mbid:
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="path",
+                reason="missing_release_id",
+                decision="missing_release_id",
+                detail="No MusicBrainz release ID",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
         return _preview_result(
             mode="path",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="missing_release_id",
             reason="No MusicBrainz release ID",
             request_id=request_id,
@@ -293,9 +414,19 @@ def preview_import_from_path(
             source_path=path,
         )
     if not os.path.isdir(path):
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="path",
+                reason="source_vanished",
+                decision="path_missing",
+                detail=f"Path not found: {path}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
         return _preview_result(
             mode="path",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="path_missing",
             reason=f"Path not found: {path}",
             request_id=request_id,
@@ -311,9 +442,19 @@ def preview_import_from_path(
         try:
             source_snapshot = snapshot_audio_files(path)
         except OSError as exc:
+            if worker_mode:
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="snapshot_stale",
+                    decision="evidence_snapshot_failed",
+                    detail=str(exc),
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
             return _preview_result(
                 mode="path",
-                verdict="uncertain",
+                verdict=PREVIEW_VERDICT_UNCERTAIN,
                 decision="evidence_snapshot_failed",
                 reason="evidence_snapshot_failed",
                 detail=str(exc),
@@ -322,9 +463,25 @@ def preview_import_from_path(
                 source_path=path,
             )
         if not source_snapshot:
+            # Empty source snapshot: in worker mode we still want to persist
+            # the empty-fileset fact and let the importer reject — but evidence
+            # persistence requires at least one file. For now mark
+            # measurement_failed; U6 will pick this up via the evidence facts
+            # once persist_candidate_evidence_from_import_result is extended
+            # to allow zero-file snapshots.
+            if worker_mode:
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="source_vanished",
+                    decision="evidence_empty_fileset",
+                    detail="no audio files found",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
             return _preview_result(
                 mode="path",
-                verdict="uncertain",
+                verdict=PREVIEW_VERDICT_UNCERTAIN,
                 decision="evidence_empty_fileset",
                 reason="evidence_empty_fileset",
                 detail="no audio files found",
@@ -350,9 +507,39 @@ def preview_import_from_path(
                 "Audio files are in subdirectories — flatten the folder "
                 "before import."
             )
+            if worker_mode:
+                # In worker mode the importer (U6) decides reject from the
+                # persisted ``folder_layout='nested'`` fact. The evidence
+                # persistence pipeline will populate that field. We surface
+                # ``evidence_ready`` here so the importer claims the job;
+                # without persistence (no source_snapshot), we cannot write
+                # evidence and the importer would have no facts — fall back
+                # to ``measurement_failed`` in that subcase.
+                if persist_candidate_evidence and source_snapshot:
+                    # Persist nested-layout evidence and mark evidence_ready.
+                    return _evidence_ready_result(
+                        mode="path",
+                        decision="nested_layout",
+                        reason="nested_layout",
+                        detail=detail,
+                        stage_chain=["preimport_nested:reject_nested"],
+                        request_id=request_id,
+                        download_log_id=download_log_id,
+                        source_path=path,
+                    )
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="materialization_error",
+                    decision="nested_layout",
+                    detail=detail,
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    stage_chain=["preimport_nested:reject_nested"],
+                )
             return _preview_result(
                 mode="path",
-                verdict="confident_reject",
+                verdict=PREVIEW_VERDICT_CONFIDENT_REJECT,
                 decision="nested_layout",
                 reason="nested_layout",
                 detail=detail,
@@ -379,9 +566,36 @@ def preview_import_from_path(
         )
         if not preimport.valid:
             scenario = preimport.scenario or "preimport_reject"
+            if worker_mode:
+                # Preview no longer makes the reject decision. Persist the
+                # measurement facts; the importer (U6) reads the evidence and
+                # invokes ``preimport_decide`` to reject. We mark evidence_ready
+                # when persistence is plausible; otherwise surface
+                # measurement_failed so the parent request self-heals.
+                if persist_candidate_evidence and source_snapshot:
+                    return _evidence_ready_result(
+                        mode="path",
+                        decision=scenario,
+                        reason=scenario,
+                        detail=preimport.detail,
+                        stage_chain=[f"preimport:{scenario}"],
+                        request_id=request_id,
+                        download_log_id=download_log_id,
+                        source_path=path,
+                    )
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="measurement_crashed",
+                    decision=scenario,
+                    detail=preimport.detail or scenario,
+                    stage_chain=[f"preimport:{scenario}"],
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
             return _preview_result(
                 mode="path",
-                verdict="confident_reject",
+                verdict=PREVIEW_VERDICT_CONFIDENT_REJECT,
                 decision=scenario,
                 reason=scenario,
                 detail=preimport.detail,
@@ -460,12 +674,24 @@ def preview_import_from_path(
         evidence_reason: str | None = None
         if persist_candidate_evidence:
             if source_snapshot is None or not audio_snapshot_matches(path, source_snapshot):
+                detail = "source files changed while preview was running"
+                if worker_mode:
+                    return _measurement_failed_result(
+                        mode="path",
+                        reason="snapshot_stale",
+                        decision="source_changed_during_preview",
+                        detail=detail,
+                        request_id=request_id,
+                        download_log_id=download_log_id,
+                        source_path=path,
+                        import_result=run.import_result,
+                    )
                 return _preview_result(
                     mode="path",
-                    verdict="uncertain",
+                    verdict=PREVIEW_VERDICT_UNCERTAIN,
                     decision="source_changed_during_preview",
                     reason="source_changed_during_preview",
-                    detail="source files changed while preview was running",
+                    detail=detail,
                     request_id=request_id,
                     download_log_id=download_log_id,
                     source_path=path,
@@ -487,9 +713,20 @@ def preview_import_from_path(
                 evidence_status = "failed"
                 evidence_reason = f"{type(exc).__name__}: {exc}"
             if evidence_status != "ready":
+                if worker_mode:
+                    return _measurement_failed_result(
+                        mode="path",
+                        reason="evidence_persist_failed",
+                        decision=f"evidence_{evidence_status}",
+                        detail=evidence_reason or f"evidence_{evidence_status}",
+                        request_id=request_id,
+                        download_log_id=download_log_id,
+                        source_path=path,
+                        import_result=run.import_result,
+                    )
                 return _preview_result(
                     mode="path",
-                    verdict="uncertain",
+                    verdict=PREVIEW_VERDICT_UNCERTAIN,
                     decision=f"evidence_{evidence_status}",
                     reason=f"evidence_{evidence_status}",
                     detail=evidence_reason,
@@ -498,20 +735,70 @@ def preview_import_from_path(
                     source_path=path,
                     import_result=run.import_result,
                 )
+        final_decision = (
+            run.import_result.decision if run.import_result else reason
+        )
+        final_detail = (
+            run.import_result.error
+            if run.import_result and run.import_result.error
+            else evidence_reason
+            if evidence_status in {"failed", "incomplete", "empty_fileset"}
+            else "import_one.py emitted no JSON"
+            if run.import_result is None
+            else None
+        )
+        if worker_mode:
+            # Worker mode: only emit evidence_ready or measurement_failed.
+            # ``_classify_import_result`` returns "uncertain" when the
+            # harness emitted no JSON OR when conversion failed — both are
+            # measurement failures (the harness blew up). Anything else
+            # (would_import / confident_reject) means the harness produced
+            # facts we already persisted as evidence; the importer decides.
+            if run.import_result is None:
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="measurement_crashed",
+                    decision=final_decision or "no_json_result",
+                    detail=final_detail or "import_one.py emitted no JSON",
+                    stage_chain=chain,
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
+            if verdict == PREVIEW_VERDICT_UNCERTAIN:
+                # conversion_failed / target_conversion_failed
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="measurement_crashed",
+                    decision=final_decision or reason or "uncertain",
+                    detail=final_detail or reason or "measurement uncertain",
+                    stage_chain=chain,
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
+            # Both would_import and confident_reject map to evidence_ready
+            # under the new contract; the importer reads the persisted
+            # evidence and decides.
+            return _evidence_ready_result(
+                mode="path",
+                decision=final_decision or reason or "evidence_ready",
+                reason=reason,
+                detail=final_detail,
+                stage_chain=chain,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
         return _preview_result(
             mode="path",
             verdict=verdict,
-            decision=run.import_result.decision if run.import_result else reason,
+            decision=final_decision,
             reason=reason,
-            detail=(
-                run.import_result.error
-                if run.import_result and run.import_result.error
-                else evidence_reason
-                if evidence_status in {"failed", "incomplete", "empty_fileset"}
-                else "import_one.py emitted no JSON"
-                if run.import_result is None
-                else None
-            ),
+            detail=final_detail,
             stage_chain=chain,
             request_id=request_id,
             download_log_id=download_log_id,
@@ -528,22 +815,45 @@ def preview_import_from_download_log(
     download_log_id: int,
     *,
     persist_candidate_evidence: bool = False,
+    worker_mode: bool = False,
 ) -> ImportPreviewResult:
-    """Preview the failed source referenced by one download_log row."""
+    """Preview the failed source referenced by one download_log row.
+
+    When ``worker_mode=True`` (force/manual-import preview-worker entry), the
+    four sanity-check exits return ``verdict='measurement_failed'`` with a
+    typed payload. Legacy callers (wrong-match triage, ad-hoc CLI inspection)
+    keep ``worker_mode=False`` and receive the legacy verdicts.
+    """
     entry = db.get_download_log_entry(download_log_id)
     if not entry:
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="download_log",
+                reason="download_log_not_found",
+                decision="download_log_not_found",
+                detail=f"Download log entry {download_log_id} not found",
+                download_log_id=download_log_id,
+            )
         return _preview_result(
             mode="download_log",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="download_log_not_found",
             reason=f"Download log entry {download_log_id} not found",
             download_log_id=download_log_id,
         )
     request_id_raw = entry.get("request_id")
     if not isinstance(request_id_raw, int):
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="download_log",
+                reason="request_not_found",
+                decision="missing_request_id",
+                detail="Download log row has no request_id",
+                download_log_id=download_log_id,
+            )
         return _preview_result(
             mode="download_log",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="missing_request_id",
             reason="Download log row has no request_id",
             download_log_id=download_log_id,
@@ -551,9 +861,18 @@ def preview_import_from_download_log(
     vr = _validation_result_dict(entry.get("validation_result"))
     raw_path = vr.get("failed_path")
     if not isinstance(raw_path, str) or not raw_path:
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="download_log",
+                reason="missing_failed_path",
+                decision="missing_failed_path",
+                detail="Download log row has no failed_path",
+                request_id=request_id_raw,
+                download_log_id=download_log_id,
+            )
         return _preview_result(
             mode="download_log",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="missing_failed_path",
             reason="Download log row has no failed_path",
             request_id=request_id_raw,
@@ -561,9 +880,19 @@ def preview_import_from_download_log(
         )
     resolved = resolve_failed_path(raw_path)
     if resolved is None:
+        if worker_mode:
+            return _measurement_failed_result(
+                mode="download_log",
+                reason="source_vanished",
+                decision="path_missing",
+                detail=f"Path not found: {raw_path}",
+                request_id=request_id_raw,
+                download_log_id=download_log_id,
+                source_path=raw_path,
+            )
         return _preview_result(
             mode="download_log",
-            verdict="uncertain",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
             decision="path_missing",
             reason=f"Path not found: {raw_path}",
             request_id=request_id_raw,
@@ -578,4 +907,5 @@ def preview_import_from_download_log(
         source_username=entry.get("soulseek_username"),
         download_log_id=download_log_id,
         persist_candidate_evidence=persist_candidate_evidence,
+        worker_mode=worker_mode,
     )

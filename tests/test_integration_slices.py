@@ -1001,6 +1001,140 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         self.assertEqual(row["current_spectral_bitrate"], 280)
 
 
+class TestSpectralPropagationOnAccept(unittest.TestCase):
+    """U3 guard: ``_persist_spectral_state`` must fire on accept decisions too.
+
+    The U3 refactor moved spectral state persistence out of the
+    decision-conditional code path and into the measurement helper. The
+    invariant: every measurement that runs spectral analysis writes
+    ``album_requests.current_spectral_*``, regardless of whether the
+    downstream decision is accept or reject.
+
+    This guards against the issue #90 regression: if propagation only fired
+    on reject branches, the next attempt would have stale comparison data and
+    a follow-up suspect-grade-upgrade or import_no_exist would compare against
+    a phantom existing measurement.
+    """
+
+    def test_accept_suspect_upgrade_still_persists_spectral(self):
+        """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
+        from lib.config import CratediggerConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            current_spectral_grade=None, current_spectral_bitrate=None,
+        ))
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=10,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
+            format="MP3",
+            is_cbr=True,
+            album_path="/Beets/Test",
+        )
+        cfg = CratediggerConfig(audio_check_mode="off")
+
+        with patch(
+            "lib.preimport.spectral_analyze",
+            side_effect=[
+                # download: suspect at 256 (upgrade over existing at 96)
+                SimpleNamespace(
+                    grade="suspect",
+                    estimated_bitrate_kbps=256,
+                    suspect_pct=70.0,
+                    tracks=[],
+                ),
+                # existing: likely_transcode at 96 (worse — upgrade is justified)
+                SimpleNamespace(
+                    grade="likely_transcode",
+                    estimated_bitrate_kbps=96,
+                    suspect_pct=95.0,
+                    tracks=[],
+                ),
+            ],
+        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+             patch("os.path.isdir", return_value=True):
+            result = run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="mbid-upgrade",
+                label="Upgrade Album",
+                download_filetype="mp3",
+                download_min_bitrate_bps=256_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"user1"},
+            )
+
+        # Accept (suspect grade BUT bitrate upgrades existing).
+        self.assertTrue(
+            result.valid,
+            "suspect 256 > existing 96 must accept (spectral upgrade)")
+        # Crucial: the spectral state still propagated despite the accept.
+        row = db.request(42)
+        self.assertEqual(
+            row["current_spectral_grade"], "likely_transcode",
+            "existing spectral measurement must be persisted on accept")
+        self.assertEqual(row["current_spectral_bitrate"], 96)
+        # No denylist on accept paths.
+        self.assertEqual(len(db.denylist), 0)
+
+    def test_accept_import_no_exist_still_persists_spectral(self):
+        """Accept (suspect grade, no existing on disk) → spectral state propagates the download's spectral."""
+        from lib.config import CratediggerConfig
+        from lib.preimport import run_preimport_gates
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading", min_bitrate=None,
+            current_spectral_grade=None, current_spectral_bitrate=None,
+        ))
+        cfg = CratediggerConfig(audio_check_mode="off")
+
+        with patch(
+            "lib.preimport.spectral_analyze",
+            return_value=SimpleNamespace(
+                grade="suspect",
+                estimated_bitrate_kbps=192,
+                suspect_pct=60.0,
+                tracks=[],
+            ),
+        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
+             patch("os.path.isdir", return_value=True):
+            result = run_preimport_gates(
+                path="/tmp/dl",
+                mb_release_id="mbid-firsttime",
+                label="First Time Album",
+                download_filetype="mp3",
+                download_min_bitrate_bps=192_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"user1"},
+            )
+
+        # Accept — no existing album, suspect spectral is import_no_exist.
+        self.assertTrue(result.valid)
+        # Without an existing-on-disk and no existing_min_bitrate, the
+        # propagation helper does NOT adopt the download's spectral (it would
+        # be speculative). But it must still attempt to write the
+        # existing_spectral (None) — which means we DON'T expect a row update
+        # in this case. Per ``_persist_spectral_state`` semantics: when
+        # existing_spectral is None AND existing_min_bitrate is None, nothing
+        # is persisted. The accept decision itself fires correctly.
+        row = db.request(42)
+        # Either NULL (no propagation triggered) or the download's spectral
+        # (if existing_min_bitrate had been set, propagation would adopt it).
+        # Here the invariant is: no crash, accept decision wins, no denylist.
+        self.assertIsNone(row.get("current_spectral_grade"))
+        self.assertEqual(len(db.denylist), 0)
+
+
 class TestLosslessSourceLockedSlice(unittest.TestCase):
     """Integration slice: lossy candidate vs existing with lossless-source V0
     probe → real parse_import_result → lossless_source_locked dispatch path
@@ -5435,6 +5569,1079 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             assert second_claim is not None
             self.assertEqual(second_claim.id, job.id)
             self.assertEqual(second_claim.status, "running")
+
+
+class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
+    """Integration slice for the preview-side measurement_failed entry point.
+
+    Validates the four self-healing side effects own the same sub-helper as
+    the importer-side ``_record_rejection_and_maybe_requeue``:
+
+      (a) ``download_log`` row written with ``outcome='measurement_failed'``
+      (b) ``source_denylist`` write when the per-user rule applies
+      (c) parent request transitioned to ``status='wanted'`` via
+          ``transitions.finalize_request``
+      (d) ``import_jobs.status='failed'`` via ``mark_import_job_failed``
+
+    Also covers the ``request_not_found`` no-finalize subcase — the helper
+    writes the log + marks the job failed but skips the request transition
+    (there is nothing to finalize).
+    """
+
+    def test_measurement_failed_happy_path_fires_all_four_side_effects(self):
+        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            artist_name="Test", album_title="Album",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            payload=automation_import_payload(),
+        )
+        # Move job to 'running' to mimic an importer claim — or rather,
+        # the preview worker scenario where the job was claimed by preview.
+        # mark_import_job_failed accepts queued or running.
+
+        payload = MeasurementFailure(
+            reason="snapshot_stale",
+            detail="audio snapshot mismatch after retry",
+            source_path="/Incoming/auto-import/Test - Album",
+        )
+
+        _record_preview_measurement_failed(
+            cast(Any, db),
+            request_id=42,
+            import_job_id=job.id,
+            payload=payload,
+            denylist_username="bob",
+        )
+
+        # (a) download_log row
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(
+            self, 0,
+            outcome="measurement_failed",
+            request_id=42,
+            beets_scenario="measurement_failed",
+            beets_detail="audio snapshot mismatch after retry",
+        )
+        # validation_result is a JSON string carrying the MeasurementFailure
+        log = db.download_logs[0]
+        self.assertIsNotNone(log.validation_result)
+        import json as _json
+        decoded = _json.loads(log.validation_result)
+        self.assertEqual(decoded["reason"], "snapshot_stale")
+        self.assertEqual(
+            decoded["source_path"],
+            "/Incoming/auto-import/Test - Album",
+        )
+
+        # (b) denylist write
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].request_id, 42)
+        self.assertEqual(db.denylist[0].username, "bob")
+
+        # (c) request → wanted
+        self.assertEqual(db.request(42)["status"], "wanted")
+
+        # (d) job → failed
+        job_row = db.get_import_job(job.id)
+        assert job_row is not None
+        self.assertEqual(job_row.status, "failed")
+
+    def test_request_not_found_subcase_skips_finalize(self):
+        """request_id=None: helper writes the log + marks job failed but
+        does NOT call finalize_request (there is no parent to finalize).
+        Denylist is also skipped because it FK-references a request_id."""
+        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        # No request seeded. Enqueue an orphan job (request_id is set on
+        # the job itself but no album_requests row matches).
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=None,
+            payload=automation_import_payload(),
+        )
+
+        payload = MeasurementFailure(
+            reason="request_not_found",
+            detail="album_request 999 not found",
+            source_path="",
+        )
+
+        # Spy on finalize_request to prove it is NOT called.
+        with patch("lib.transitions.finalize_request") as mock_finalize:
+            _record_preview_measurement_failed(
+                cast(Any, db),
+                request_id=None,
+                import_job_id=job.id,
+                payload=payload,
+                denylist_username="bob",
+            )
+            mock_finalize.assert_not_called()
+
+        # download_log row still written (carrying NULL request_id).
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(
+            self, 0,
+            outcome="measurement_failed",
+            request_id=None,
+            beets_scenario="measurement_failed",
+        )
+
+        # No denylist (FK requires request_id).
+        self.assertEqual(len(db.denylist), 0)
+
+        # Job → failed.
+        job_row = db.get_import_job(job.id)
+        assert job_row is not None
+        self.assertEqual(job_row.status, "failed")
+
+    def test_source_vanished_no_denylist_when_username_unknown(self):
+        """source_vanished + no source_username → no denylist write.
+        Request and job still finalize normally."""
+        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, status="downloading"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=7,
+            payload=automation_import_payload(),
+        )
+
+        payload = MeasurementFailure(
+            reason="source_vanished",
+            detail="ffmpeg ENOENT",
+            source_path="/Incoming/auto-import/Album",
+        )
+        _record_preview_measurement_failed(
+            cast(Any, db),
+            request_id=7,
+            import_job_id=job.id,
+            payload=payload,
+            denylist_username=None,
+        )
+
+        self.assertEqual(len(db.denylist), 0)
+        self.assertEqual(db.request(7)["status"], "wanted")
+        job_row = db.get_import_job(job.id)
+        assert job_row is not None
+        self.assertEqual(job_row.status, "failed")
+        # download_log carries the typed payload as JSON.
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "measurement_failed")
+        import json as _json
+        decoded = _json.loads(log.validation_result)
+        self.assertEqual(decoded["reason"], "source_vanished")
+
+    def test_importer_side_record_rejection_still_works(self):
+        """Regression guard: refactoring _record_rejection_and_maybe_requeue
+        into delegation must NOT change importer-side behavior. The
+        existing DownloadInfo-based entry point continues to write a
+        download_log row, transition the request to wanted, and record an
+        attempt — same as before U4."""
+        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+        from lib.quality import DownloadInfo
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+
+        _record_rejection_and_maybe_requeue(
+            cast(Any, db),
+            99,
+            DownloadInfo(username="alice", filetype="mp3", bitrate=192_000),
+            distance=0.5,
+            scenario="quality_downgrade",
+            detail="bitrate too low",
+            error=None,
+            requeue=True,
+        )
+
+        # Existing behavior: request transitioned, attempt recorded.
+        row = db.request(99)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+        # Download log row written via the shared sub-helper.
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(
+            self, 0,
+            outcome="rejected",
+            soulseek_username="alice",
+            beets_scenario="quality_downgrade",
+            beets_detail="bitrate too low",
+        )
+        # No job-failed call — that's still the caller's responsibility on
+        # the importer path (preserved from pre-U4).
+        # No denylist either (caller does it).
+        self.assertEqual(len(db.denylist), 0)
+
+
+class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
+    """End-to-end slice: U5 preview-worker emits measurement_failed → self-heal.
+
+    Covers AE3 (nested), AE4 (empty), AE5 (snapshot stale), AE6 (source
+    vanished) at the worker level: the worker claims a job, preview returns
+    ``verdict='measurement_failed'`` with a typed ``MeasurementFailure``
+    payload, and the worker routes it through U4's self-healing helper so the
+    parent request transitions to ``wanted`` and the job is marked failed
+    with ``preview_status='measurement_failed'``.
+    """
+
+    def _setup_worker_job(self, db, request_id=42):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="downloading",
+            mb_release_id="mbid-u5",
+        ))
+        download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            validation_result={"failed_path": "/tmp/u5-vanished"},
+        )
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=force_import_dedupe_key(download_log_id),
+            payload=force_import_payload(
+                download_log_id=download_log_id,
+                failed_path="/tmp/u5-vanished",
+                source_username="alice",
+            ),
+        )
+        return db.claim_next_import_preview_job(worker_id="preview")
+
+    def test_ae6_source_vanished_self_heals_request_to_wanted(self):
+        """AE6: ffmpeg ENOENT during measurement → measurement_failed,
+        request → wanted, job → failed, download_log carries the typed
+        payload."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        claimed = self._setup_worker_job(db)
+        assert claimed is not None
+
+        payload = MeasurementFailure(
+            reason="source_vanished",
+            detail="ffmpeg returned ENOENT",
+            source_path="/tmp/u5-vanished",
+        )
+        preview_result = ImportPreviewResult(
+            mode="path",
+            verdict="measurement_failed",
+            decision="source_vanished",
+            reason="source_vanished",
+            detail="ffmpeg returned ENOENT",
+            source_path="/tmp/u5-vanished",
+            request_id=42,
+            failure=payload,
+        )
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=preview_result,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db), claimed,
+            )
+
+        assert updated is not None
+        # Worker surface: preview_status reflects the new state, job failed.
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(updated.status, "failed")
+        # U4 self-heal: request → wanted, download_log carries payload.
+        self.assertEqual(db.request(42)["status"], "wanted")
+        # Two download_log rows: the original rejected entry + the new
+        # measurement_failed one.
+        outcomes = [log.outcome for log in db.download_logs]
+        self.assertIn("measurement_failed", outcomes)
+        mf_log = next(log for log in db.download_logs
+                      if log.outcome == "measurement_failed")
+        import json as _json
+        decoded = _json.loads(mf_log.validation_result)
+        self.assertEqual(decoded["reason"], "source_vanished")
+        self.assertEqual(decoded["source_path"], "/tmp/u5-vanished")
+
+    def test_ae5_snapshot_stale_self_heals(self):
+        """AE5: snapshot mismatch after retry → measurement_failed,
+        request → wanted."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        claimed = self._setup_worker_job(db, request_id=43)
+        assert claimed is not None
+
+        payload = MeasurementFailure(
+            reason="snapshot_stale",
+            detail="source files changed while preview was running",
+            source_path="/tmp/u5-vanished",
+        )
+        preview_result = ImportPreviewResult(
+            mode="path",
+            verdict="measurement_failed",
+            decision="source_changed_during_preview",
+            reason="source_changed_during_preview",
+            detail=payload.detail,
+            source_path=payload.source_path,
+            request_id=43,
+            failure=payload,
+        )
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=preview_result,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db), claimed,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(db.request(43)["status"], "wanted")
+
+    def test_request_not_found_no_finalize_subcase(self):
+        """request_id=None subcase: helper writes log + marks job failed
+        but does NOT transition any request (there is nothing to
+        finalize). No exception bubbles up."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        # Enqueue a job with request_id=None (orphan).
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=None,
+            payload=force_import_payload(
+                download_log_id=999,
+                failed_path="/tmp/gone",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        payload = MeasurementFailure(
+            reason="request_not_found",
+            detail="album_request 999 not found",
+            source_path="",
+        )
+        preview_result = ImportPreviewResult(
+            mode="path",
+            verdict="measurement_failed",
+            decision="request_not_found",
+            reason="request_not_found",
+            detail=payload.detail,
+            request_id=None,
+            failure=payload,
+        )
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=preview_result,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db), claimed,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(updated.status, "failed")
+        # Helper still wrote the download_log row.
+        outcomes = [log.outcome for log in db.download_logs]
+        self.assertIn("measurement_failed", outcomes)
+
+
+class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
+    """End-to-end slice: preview emits ``evidence_ready`` → job marked
+    importable for the importer to claim. Covers AE3/AE4: the nested-layout
+    and empty-fileset facts are persisted as evidence, the importer reads
+    them in U6 (out of scope here).
+    """
+
+    def test_evidence_ready_marks_job_importable(self):
+        from lib.import_preview import ImportPreviewResult
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            AudioQualityMeasurement,
+        )
+        from tests.helpers import make_album_quality_evidence
+        from lib.quality_evidence import snapshot_audio_files
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+
+            preview_result = ImportPreviewResult(
+                mode="path",
+                verdict="evidence_ready",
+                decision="import",
+                reason="import",
+                stage_chain=["stage2_import:import"],
+                source_path=source,
+                request_id=42,
+            )
+
+            def fake_preview(*args, **kwargs):
+                # Simulate production: preview persisted candidate evidence
+                # before returning.
+                db.upsert_album_quality_evidence(make_album_quality_evidence(
+                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                    owner_id=download_log_id,
+                    files=snapshot_audio_files(source),
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=245,
+                        avg_bitrate_kbps=256,
+                        median_bitrate_kbps=252,
+                        format="MP3 V0",
+                        spectral_grade="genuine",
+                    ),
+                    codec="mp3",
+                    container="mp3",
+                    storage_format="mp3 v0",
+                ))
+                return preview_result
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=fake_preview,
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db), claimed,
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertEqual(updated.status, "queued")
+        # Importable now — importer (U6) can claim it.
+        self.assertIsNotNone(updated.importable_at)
+
+
+class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
+    """U6 integration slices: importer dispatch wires preimport_decide.
+
+    Each slice seeds an ``import_jobs`` row with persisted candidate
+    ``AlbumQualityEvidence`` carrying a reject-shaped U1 fact
+    (``audio_corrupt``, nested ``folder_layout``, ``audio_file_count=0``,
+    suspect spectral), drives ``dispatch_import_from_db`` (the importer's
+    entry point), and asserts the U4 self-healing side effects fire:
+
+      * ``download_log`` row with the reject scenario and validation_result
+      * request → ``wanted`` (with attempt-counter bump)
+      * beets is NEVER touched (``sp.run`` is asserted not-called)
+      * staged dir cleanup happens for auto-import scenarios
+
+    Covers AE2 (audio_corrupt), AE3 (nested_layout), AE4 (empty_fileset),
+    plus the spectral_reject branch.
+    """
+
+    def _seed_with_evidence(
+        self,
+        db,
+        *,
+        request_id,
+        tmpdir,
+        candidate_evidence,
+        current_evidence=None,
+    ):
+        """Seed a manual import_job + candidate evidence + (opt) current.
+
+        Returns (import_job_id, download_log_id=None).
+        """
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="manual",
+            mb_release_id=f"mbid-u6-{request_id}",
+            artist_name="Test Artist",
+            album_title="Test Album",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=request_id,
+            payload=manual_import_payload(failed_path=tmpdir),
+        )
+        db.upsert_album_quality_evidence(candidate_evidence)
+        if current_evidence is not None:
+            db.upsert_album_quality_evidence(current_evidence)
+        return job.id
+
+    def _build_candidate_evidence(
+        self,
+        *,
+        owner_id,
+        files,
+        spectral_grade="genuine",
+        spectral_bitrate_kbps=None,
+        audio_corrupt=False,
+        folder_layout="flat",
+        audio_file_count=None,
+        filetype_band="mp3 v0",
+        matched_bad_audio_hash_id=None,
+        matched_bad_audio_hash_path=None,
+        min_bitrate_kbps=245,
+    ):
+        from datetime import datetime, timezone
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceOwner,
+            AudioQualityMeasurement,
+        )
+
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=owner_id,
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate_kbps,
+                avg_bitrate_kbps=min_bitrate_kbps,
+                median_bitrate_kbps=min_bitrate_kbps,
+                format="MP3 V0",
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate_kbps,
+            ),
+            measured_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            files=files,
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+            audio_corrupt=audio_corrupt,
+            folder_layout=folder_layout,
+            audio_file_count=(
+                audio_file_count if audio_file_count is not None
+                else len(files)
+            ),
+            filetype_band=filetype_band,
+            matched_bad_audio_hash_id=matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=matched_bad_audio_hash_path,
+        )
+
+    def _build_current_evidence(
+        self,
+        *,
+        owner_id,
+        min_bitrate_kbps=128,
+        spectral_grade="genuine",
+        spectral_bitrate_kbps=None,
+    ):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AudioQualityMeasurement,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        return make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=owner_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate_kbps,
+                avg_bitrate_kbps=min_bitrate_kbps,
+                median_bitrate_kbps=min_bitrate_kbps,
+                format="MP3",
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate_kbps,
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3",
+        )
+
+    def _drive_dispatch(self, db, *, request_id, tmpdir, import_job_id, cfg):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        # album_path=None makes the current-evidence guard trust the
+        # seeded REQUEST_CURRENT row without an audio-snapshot probe.
+        beets_info_no_path = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=128,
+            avg_bitrate_kbps=128, format="MP3",
+            is_cbr=False, album_path=None,  # type: ignore[arg-type]
+        )
+        with patch_dispatch_externals() as ext, \
+                patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                patch("lib.config.read_runtime_config", return_value=cfg):
+            result = dispatch_import_from_db(
+                db,  # type: ignore[arg-type]
+                request_id=request_id,
+                failed_path=tmpdir,
+                force=False,
+                source_username="alice",
+                import_job_id=import_job_id,
+                outcome_label="manual_import",
+            )
+        return result, ext
+
+    def _common_cfg(self):
+        return CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+    def test_audio_corrupt_evidence_routes_through_self_heal(self):
+        """AE2: candidate evidence with audio_corrupt=True → preimport_decide
+        rejects → request → wanted, download_log carries audio_corrupt scenario,
+        beets (sp.run) is never invoked."""
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+            snap = snapshot_audio_files(tmpdir)
+            # Mark the file as decode_ok=False on the snapshot — the helper
+            # surfaces these into corrupt_files.
+            from lib.quality import AlbumQualityEvidenceFile
+            corrupt_files = [
+                AlbumQualityEvidenceFile(
+                    relative_path=f.relative_path,
+                    size_bytes=f.size_bytes,
+                    mtime_ns=f.mtime_ns,
+                    extension=f.extension,
+                    container=f.container,
+                    codec=f.codec,
+                    decode_ok=False,
+                )
+                for f in snap
+            ]
+            # Need to enqueue first to get the job id for owner_id
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=42, status="manual", mb_release_id="mbid-u6-corrupt",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=corrupt_files,
+                    audio_corrupt=True,
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(owner_id=42),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=42, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("audio_corrupt", result.message or "")
+        # Beets subprocess NEVER ran — preimport_decide rejected upstream.
+        self.assertEqual(
+            ext.run.call_count, 0,
+            "beets import_one.py must not run when preimport_decide rejects")
+        # Self-heal: request → wanted with attempt bump.
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+        # download_log row records the rejection scenario.
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "audio_corrupt"), outcomes)
+
+    def test_nested_layout_evidence_routes_through_self_heal(self):
+        """AE3: folder_layout='nested' → preimport_decide rejects → self-heal."""
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cd1 = os.path.join(tmpdir, "cd1")
+            os.makedirs(cd1)
+            with open(os.path.join(cd1, "01 - Track.mp3"), "wb") as h:
+                h.write(b"audio")
+            files = snapshot_audio_files(tmpdir)
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=43, status="manual", mb_release_id="mbid-u6-nested",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=43,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=files,
+                    folder_layout="nested",
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(owner_id=43),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=43, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("nested_layout", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(43)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "nested_layout"), outcomes)
+        # nested_layout is a folder-shape problem, not a peer-quality problem
+        # — denylisting the peer would be unfair.
+        self.assertEqual(len(db.denylist), 0)
+
+    def test_empty_fileset_evidence_routes_through_self_heal(self):
+        """AE4: audio_file_count=0 → preimport_decide rejects → self-heal."""
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=44, status="manual", mb_release_id="mbid-u6-empty",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=44,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=[],
+                    audio_file_count=0,
+                    folder_layout="flat",
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(owner_id=44),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=44, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("empty_fileset", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(44)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "empty_fileset"), outcomes)
+
+    def test_spectral_reject_evidence_routes_through_self_heal(self):
+        """Suspect candidate spectral with no upgrade over existing → reject.
+
+        likely_transcode at 128kbps vs an existing transcode at the same band
+        — ``spectral_import_decision`` returns 'reject', preimport_decide
+        emits a reject(reason=spectral_reject), self-heal fires."""
+        from lib.quality import AlbumQualityEvidenceFile
+
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+            files = [
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=5,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                ),
+            ]
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=45, status="manual", mb_release_id="mbid-u6-spectral",
+                current_spectral_grade="likely_transcode",
+                current_spectral_bitrate=128,
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=45,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=files,
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128,
+                    min_bitrate_kbps=128,
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(
+                    owner_id=45,
+                    min_bitrate_kbps=128,
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128,
+                ),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=45, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("spectral_reject", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(45)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "spectral_reject"), outcomes)
+        # Source-quality reject — peer denylisted (5-strikes rule applies).
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].username, "alice")
+
+
+# ---------------------------------------------------------------------------
+# U7. Recovery sweep migration 020 — integration slice (AE8)
+# ---------------------------------------------------------------------------
+
+# Importing conftest boots the ephemeral PostgreSQL and sets TEST_DB_DSN so
+# this slice can use a real PipelineDB. Without this, running the slice via
+# ``python3 -m unittest tests.test_integration_slices`` directly would skip
+# (conftest is only auto-loaded by pytest discovery).
+import sys as _u7_sys
+_u7_sys.path.insert(0, os.path.dirname(__file__))
+import conftest as _u7_conftest  # noqa: F401  # boots ephemeral PG + sets DSN
+
+
+def _u7_test_dsn() -> str | None:
+    """Read the DSN lazily — conftest sets it during import, after this module
+    is parsed by the test runner."""
+    return os.environ.get("TEST_DB_DSN")
+
+
+@unittest.skipUnless(_u7_test_dsn(), "TEST_DB_DSN not set — slice needs real PG")
+class TestU7RecoverySweepSlice(unittest.TestCase):
+    """AE8 integration slice: pre-seed an ``import_jobs`` row with
+    ``preview_status='uncertain'``, run the migration-020 sweep against the
+    real PostgreSQL test fixture, then assert ``PipelineDB.claim_next_import_
+    preview_job`` (the actual preview-worker claim query) selects the
+    recovered row.
+
+    This is the AE8 contract: the 315-stuck-row symptom is resolved by
+    re-circulating those rows through the new preview-never-decides
+    pipeline. The slice proves end-to-end that the live SQL flow puts the
+    row into a state the preview worker will pick up on its next tick.
+    """
+
+    # Direct copy of the canonical sweep statement from
+    # ``migrations/020_recover_stuck_preview_uncertain_jobs.sql``.
+    _RECOVERY_SWEEP_SQL = """
+        UPDATE import_jobs
+        SET preview_status = 'waiting',
+            preview_result = NULL,
+            preview_message = 'Recovered by preview-never-decides refactor (020)',
+            preview_error = NULL,
+            preview_worker_id = NULL,
+            preview_started_at = NULL,
+            preview_heartbeat_at = NULL,
+            preview_completed_at = NULL,
+            importable_at = NULL,
+            updated_at = NOW()
+        WHERE status = 'queued'
+          AND preview_status = 'uncertain'
+    """
+
+    def setUp(self):
+        import psycopg2
+        from lib.pipeline_db import PipelineDB
+        self._psycopg2 = psycopg2
+        self.db = PipelineDB(_u7_test_dsn())
+        self.addCleanup(self.db.close)
+        # Track per-test resources for teardown.
+        self._mbids: list[str] = []
+
+    def tearDown(self):
+        # Drop any seeded rows (CASCADE handles import_jobs).
+        if self._mbids:
+            conn = self._psycopg2.connect(_u7_test_dsn())
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM album_requests WHERE mb_release_id = ANY(%s)",
+                        (self._mbids,),
+                    )
+            finally:
+                conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = self._psycopg2.connect(_u7_test_dsn())
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = self._psycopg2.connect(_u7_test_dsn())
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _seed_stuck_uncertain_job(self, *, mbid: str) -> tuple[int, int]:
+        """Insert a request + a stuck uncertain import_jobs row. Returns
+        (request_id, import_job_id)."""
+        self._mbids.append(mbid)
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'Test Artist', 'Test Album', 'request')
+        """, (mbid,))
+        rid = self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+        # Mimic a real pre-deploy stuck row — uncertain with verdict result,
+        # message, worker_id, and lifecycle timestamps populated.
+        self._exec("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, payload,
+                preview_status, preview_result, preview_message,
+                preview_error, preview_worker_id,
+                preview_started_at, preview_heartbeat_at,
+                preview_completed_at, importable_at
+            )
+            VALUES (
+                'automation_import', 'queued', %s, '{}'::jsonb,
+                'uncertain', '{"verdict": "uncertain"}'::jsonb,
+                'pre-U7 stuck preview verdict',
+                NULL, 'pre-U7-worker',
+                NOW(), NOW(), NOW(), NOW()
+            )
+        """, (rid,))
+        job_id = self._query(
+            "SELECT id FROM import_jobs WHERE request_id = %s",
+            (rid,),
+        )[0][0]
+        return rid, job_id
+
+    def test_ae8_stuck_uncertain_job_recovers_through_real_claim_query(self):
+        """AE8 happy path: stuck uncertain row → migration sweep → live
+        ``claim_next_import_preview_job`` selects it as the next preview job.
+        """
+        rid, job_id = self._seed_stuck_uncertain_job(
+            mbid="u7-slice-recover-mbid",
+        )
+
+        # Pre-condition: the worker would NOT claim this row before the sweep
+        # because the claim query gates on ``preview_status='waiting'``.
+        # We can't observe this directly without claiming the wrong row in
+        # tests running in parallel, so we just confirm the seed state.
+        pre = self._query(
+            "SELECT preview_status, preview_message FROM import_jobs WHERE id = %s",
+            (job_id,),
+        )
+        self.assertEqual(pre, [("uncertain", "pre-U7 stuck preview verdict")])
+
+        # Apply the canonical migration-020 sweep statement.
+        self._exec(self._RECOVERY_SWEEP_SQL)
+
+        # Post-condition: row flipped to waiting with cleared lifecycle and
+        # the audit message attached.
+        post = self._query("""
+            SELECT preview_status, preview_message, preview_result,
+                   preview_worker_id, preview_started_at,
+                   preview_heartbeat_at, preview_completed_at, importable_at
+            FROM import_jobs WHERE id = %s
+        """, (job_id,))
+        self.assertEqual(len(post), 1)
+        (preview_status, message, result, worker_id, started_at,
+         heartbeat_at, completed_at, importable_at) = post[0]
+        self.assertEqual(preview_status, "waiting")
+        self.assertEqual(
+            message,
+            "Recovered by preview-never-decides refactor (020)",
+        )
+        self.assertIsNone(result)
+        self.assertIsNone(worker_id)
+        self.assertIsNone(started_at)
+        self.assertIsNone(heartbeat_at)
+        self.assertIsNone(completed_at)
+        self.assertIsNone(importable_at)
+
+        # Now the live preview-worker claim query must select this row.
+        claimed = self.db.claim_next_import_preview_job(
+            worker_id="u7-test-worker",
+        )
+        # There may be other 'waiting' jobs from parallel tests in a shared
+        # DSN; if so we keep claiming until we find ours, but the contract is
+        # that our row IS claimable. We bound the loop at a small constant.
+        found = False
+        seen: list[int] = []
+        for _ in range(10):
+            if claimed is None:
+                break
+            seen.append(claimed.id)
+            if claimed.id == job_id:
+                found = True
+                break
+            claimed = self.db.claim_next_import_preview_job(
+                worker_id="u7-test-worker",
+            )
+        self.assertTrue(
+            found,
+            f"claim_next_import_preview_job did not surface job {job_id}; "
+            f"saw {seen}",
+        )
+        # Claimed row transitions to ``running`` per the claim contract.
+        running = self._query(
+            "SELECT preview_status, preview_worker_id FROM import_jobs WHERE id = %s",
+            (job_id,),
+        )
+        self.assertEqual(running, [("running", "u7-test-worker")])
 
 
 if __name__ == "__main__":

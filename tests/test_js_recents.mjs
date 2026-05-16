@@ -135,6 +135,28 @@ console.log('renderImportQueueItems() shows uncertain preview failures without n
   assertExcludes(html, 'next check', 'uncertain rows are not marked next');
 }
 
+console.log('renderImportQueueItems() renders measurement_failed badge and red border');
+{
+  // Post-U5: preview emits preview_status='measurement_failed' instead of
+  // 'uncertain'. The badge must be present (no blank pill) and the border
+  // must be the same red as 'confident_reject' so operators see the failure
+  // at a glance.
+  const html = __test__.renderImportQueueItems([{
+    id: 79,
+    job_type: 'force_import',
+    status: 'failed',
+    preview_status: 'measurement_failed',
+    artist_name: 'Slowdive',
+    album_title: 'Souvlaki',
+    preview_message: 'Preview measurement failed: snapshot_stale',
+  }]);
+  assertContains(html, 'measurement failed', 'measurement_failed badge rendered');
+  assertContains(html, '#a33', 'measurement_failed uses confident_reject red border');
+  assertContains(html, 'Preview measurement failed: snapshot_stale',
+    'measurement failure message rendered');
+  assertExcludes(html, 'next check', 'measurement_failed rows are not marked next');
+}
+
 console.log('renderImportQueueItems() prefers terminal import messages over stale preview messages');
 {
   const html = __test__.renderImportQueueItems([{

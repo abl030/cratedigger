@@ -14,13 +14,15 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Sequence, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 import msgspec
 
 from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
-                         ImportResult, SpectralMeasurement, V0ProbeEvidence,
+                         ImportResult, MeasurementFailure,
+                         PreimportDecision,
+                         SpectralMeasurement, V0ProbeEvidence,
                          ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          AlbumQualityEvidence,
                          AlbumQualityEvidenceDecisionFacts,
@@ -32,7 +34,9 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          full_pipeline_decision_from_evidence,
                          narrow_override_on_downgrade,
                          override_bitrate_from_current_evidence,
+                         preimport_decide,
                          rejection_backfill_override)
+from lib.preimport import PreimportMeasurement
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     legacy_current_lossless_v0_probe_from_request,
@@ -335,6 +339,189 @@ def _download_info_from_candidate_evidence(
             measurement.spectral_bitrate_kbps,
         ),
         v0_probe=lossless_source_v0_probe_from_metric(candidate.v0_metric),
+    )
+
+
+def _build_preimport_measurement_from_evidence(
+    candidate: AlbumQualityEvidence,
+    current: AlbumQualityEvidence | None,
+) -> PreimportMeasurement:
+    """Build a ``PreimportMeasurement`` Struct from persisted evidence (U6).
+
+    Pure: reads typed facts off the candidate ``AlbumQualityEvidence`` (the
+    U1 fields ``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
+    ``filetype_band``, ``matched_bad_audio_hash_*``) and the candidate /
+    current ``AudioQualityMeasurement`` spectral fields. No DB writes,
+    no I/O.
+
+    The pure decision function ``lib.quality.preimport_decide`` consumes
+    the returned Struct + ``QualityRankConfig`` + the current evidence
+    and returns a ``PreimportDecision`` (accept / reject + reason).
+
+    Maps the persisted U1 facts onto the pre-import decision inputs:
+
+      * ``audio_corrupt`` / ``corrupt_files`` ← ``candidate.audio_corrupt`` and
+        the set of per-file ``decode_ok=False`` paths (when any present).
+      * ``matched_bad_hash_id`` / ``matched_bad_track_path`` ←
+        ``candidate.matched_bad_audio_hash_*``.
+      * ``folder_layout`` / ``audio_file_count`` / ``filetype_band`` ← direct.
+      * ``download_spectral`` ← candidate measurement's
+        ``spectral_grade`` + ``spectral_bitrate_kbps`` (when either set).
+      * ``existing_spectral`` ← current measurement's spectral fields.
+      * ``existing_min_bitrate`` ← current measurement's
+        ``min_bitrate_kbps``. Mirrors the legacy ``_analyze_existing``
+        behavior in ``lib.preimport`` (which reads
+        ``existing_info.min_bitrate_kbps`` from beets); under the new
+        contract that fact is persisted into the current
+        ``AlbumQualityEvidence`` row by the evidence-refresh path
+        (see ``_refresh_current_evidence_after_import``).
+      * ``min_bitrate_kbps`` / ``is_vbr`` ← candidate measurement.
+    """
+    cand_m = candidate.measurement
+    corrupt_files = [
+        f.relative_path for f in candidate.files if not f.decode_ok
+    ]
+    # If audio_corrupt is True but no per-file flags are set (legacy rows
+    # decoding under the SQL default), surface the bool fact without an
+    # empty file list misleading downstream consumers.
+    audio_corrupt = bool(candidate.audio_corrupt) or bool(corrupt_files)
+
+    download_spectral = SpectralMeasurement.from_parts(
+        cand_m.spectral_grade, cand_m.spectral_bitrate_kbps,
+    )
+
+    existing_spectral: SpectralMeasurement | None = None
+    existing_min_bitrate: int | None = None
+    if current is not None:
+        existing_spectral = SpectralMeasurement.from_parts(
+            current.measurement.spectral_grade,
+            current.measurement.spectral_bitrate_kbps,
+        )
+        existing_min_bitrate = current.measurement.min_bitrate_kbps
+
+    layout = candidate.folder_layout
+    if layout not in ("flat", "nested"):
+        layout = "flat"
+
+    # SQL defaults for U1 fields (migration 019) are
+    # ``audio_corrupt=FALSE``, ``folder_layout='flat'``,
+    # ``audio_file_count=0``, ``filetype_band=''``. Legacy rows decode
+    # under these defaults, so we cannot treat ``audio_file_count == 0``
+    # as the "no audio files" signal alone — it can also mean "we never
+    # wrote this fact." Reconcile against the snapshot ``files`` list:
+    # when files are present, derive the count; only the
+    # explicit-and-corroborated "zero files" case (count=0 AND no
+    # snapshot files) should produce the empty_fileset reject. The
+    # production write path (preview's evidence persistence) sets both
+    # consistently; this branch keeps legacy rows safe.
+    audio_file_count = candidate.audio_file_count
+    if candidate.files:
+        audio_file_count = len(candidate.files)
+
+    return PreimportMeasurement(
+        corrupt_files=corrupt_files,
+        audio_corrupt=audio_corrupt,
+        matched_bad_hash_id=candidate.matched_bad_audio_hash_id,
+        matched_bad_track_path=candidate.matched_bad_audio_hash_path,
+        download_spectral=download_spectral,
+        existing_spectral=existing_spectral,
+        existing_min_bitrate=existing_min_bitrate,
+        folder_layout=layout,  # type: ignore[arg-type]
+        audio_file_count=audio_file_count,
+        filetype_band=candidate.filetype_band,
+        min_bitrate_kbps=cand_m.min_bitrate_kbps,
+        is_vbr=(not cand_m.is_cbr) if cand_m.min_bitrate_kbps is not None else None,
+    )
+
+
+_PREIMPORT_REJECT_DENYLIST_REASONS = {
+    "audio_corrupt": "audio decode failures",
+    "bad_audio_hash": "matched curated bad audio hash",
+    "spectral_reject": "spectral analysis rejected the source",
+    # nested_layout / empty_fileset are folder-shape problems, not source-
+    # quality problems — denylisting the peer would be unfair. Callers
+    # treat absence here as "no denylist".
+}
+
+
+def _route_preimport_decision_reject(
+    *,
+    db: "PipelineDB",
+    request_id: int,
+    decision: PreimportDecision,
+    dl_info: DownloadInfo,
+    distance: float,
+    files: Sequence[object] | None,
+    cooled_down_users: set[str] | None,
+    staged_path: str,
+    source_path_cleanup_scenario: str,
+    source_dirs: list[str],
+) -> DispatchOutcome:
+    """Route a ``preimport_decide`` reject through the shared rejection helper.
+
+    U6 entry point: builds a ``ValidationResult`` from the typed
+    ``PreimportDecision``, delegates the four self-healing side effects
+    to ``_record_rejection_and_maybe_requeue``, applies the per-user
+    5-strikes denylist when the reject reason warrants it (mirrors today's
+    importer denylist rule for source-quality rejects), and cleans the
+    staged directory when safe.
+    """
+    reason = decision.reason or "preimport_reject"
+    detail = decision.detail or reason
+    validation_json = ValidationResult(
+        distance=distance,
+        scenario=reason,
+        detail=detail,
+        source_dirs=source_dirs,
+    ).to_json()
+    # U6 invariant: preimport_decide rejects always self-heal the parent
+    # request back to ``wanted``. The candidate failed at the
+    # measurement-stage gate (audio decode / hash / layout / spectral) —
+    # the album itself is still desired, only this specific source is bad.
+    # This matches U5's preview-side measurement_failed contract (the
+    # mirror image on the preview side). Force/manual paths use
+    # ``requeue_on_failure=False`` for *beets-time* rejections (where the
+    # operator chose to act on this specific source), but a preimport
+    # gate-failure is upstream of any operator intent and should free
+    # the request to retry.
+    _record_rejection_and_maybe_requeue(
+        db,
+        request_id,
+        dl_info,
+        distance=distance,
+        scenario=reason,
+        detail=detail,
+        error=None,
+        requeue=True,
+        outcome_label="rejected",
+        validation_result=validation_json,
+        staged_path=staged_path,
+    )
+    denylist_reason = _PREIMPORT_REJECT_DENYLIST_REASONS.get(reason)
+    if denylist_reason is not None:
+        usernames = extract_usernames(files or [])
+        if dl_info.username:
+            usernames.add(dl_info.username)
+        for username in usernames:
+            db.add_denylist(request_id, username, denylist_reason)
+            if cooled_down_users is not None:
+                if db.check_and_apply_cooldown(username):
+                    cooled_down_users.add(username)
+    # Source cleanup: safe only when the path is a disposable staging
+    # directory (auto-import). Force/manual paths point at the user's
+    # only copy of the source and are skipped via ``_should_cleanup_path``.
+    # Synthetic ``DispatchAction`` mirrors the rejection shape used by
+    # post-import dispatch (``denylist`` + ``cleanup`` semantics).
+    synthetic_action = DispatchAction(
+        mark_done=False,
+        denylist=denylist_reason is not None,
+        cleanup=True,
+    )
+    if _should_cleanup_path(source_path_cleanup_scenario, synthetic_action):
+        _cleanup_staged_dir(staged_path)
+    return DispatchOutcome(
+        success=False,
+        message=f"Rejected by preimport_decide: {reason}",
     )
 
 
@@ -847,6 +1034,86 @@ def _do_mark_done(
     )
 
 
+def _finalize_request_and_log_rejection(
+    db: "PipelineDB",
+    request_id: int | None,
+    log_download_kwargs: dict[str, Any],
+    *,
+    requeue_to_wanted: bool,
+    search_filetype_override: str | None = None,
+    record_validation_attempt: bool = True,
+    import_job_id: int | None = None,
+    import_job_error: str = "",
+    import_job_message: str | None = None,
+    import_job_result: dict[str, Any] | None = None,
+    denylist_username: str | None = None,
+    denylist_reason: str | None = None,
+) -> int:
+    """Sole writer of the four self-healing rejection side effects (U4).
+
+    The single source of truth for "a candidate was rejected; clean up
+    state so the parent request can advance." Both the importer-side
+    ``_record_rejection_and_maybe_requeue`` (with full ``DownloadInfo``
+    context) and the preview-side ``_record_preview_measurement_failed``
+    (without slskd context) delegate here. Grep for this function name to
+    find every call site — there should be exactly two production callers.
+
+    Side effects, in order:
+
+      1. Optional request → ``wanted`` transition via
+         ``transitions.finalize_request`` (skipped when ``request_id is
+         None`` or ``requeue_to_wanted=False``). When the transition
+         fires and ``record_validation_attempt=True``, also bumps the
+         validation attempt counter — matches pre-U4 importer behavior.
+      2. ``download_log`` row write via ``db.log_download(**log_download_kwargs)``.
+         Always fires. Returns the new row id.
+      3. ``source_denylist`` write when ``denylist_username`` is supplied
+         AND ``request_id is not None`` (denylist FK-references a
+         request). The importer-side entry point currently passes None
+         here and handles denylist externally; the preview-side path
+         passes a username when the 5-strikes rule applies.
+      4. ``import_jobs.status='failed'`` via ``mark_import_job_failed``
+         when ``import_job_id`` is supplied. The importer-side caller
+         leaves this to the worker (``scripts/importer.py``) so it
+         continues to pass None here; the preview-side caller fires it
+         so the poll loop's active-import-job guard releases.
+
+    Returns the new ``download_log`` row id. The ``request_not_found``
+    subcase (``request_id is None``) writes the log + marks the job
+    failed but skips finalize_request and denylist.
+    """
+    if requeue_to_wanted and request_id is not None:
+        transition_kwargs: dict[str, object] = {}
+        if search_filetype_override is not None:
+            transition_kwargs["search_filetype_override"] = search_filetype_override
+        transitions.finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_wanted_fields(
+                fields=transition_kwargs),
+        )
+        if record_validation_attempt:
+            db.record_attempt(request_id, "validation")
+
+    download_log_id = db.log_download(
+        request_id=request_id,
+        **log_download_kwargs,
+    )
+
+    if denylist_username and request_id is not None:
+        db.add_denylist(request_id, denylist_username, reason=denylist_reason)
+
+    if import_job_id is not None:
+        db.mark_import_job_failed(
+            import_job_id,
+            error=import_job_error,
+            message=import_job_message,
+            result=import_job_result,
+        )
+
+    return download_log_id
+
+
 def _record_rejection_and_maybe_requeue(
     db: "PipelineDB",
     request_id: int,
@@ -861,60 +1128,132 @@ def _record_rejection_and_maybe_requeue(
     search_filetype_override: str | None = None,
     validation_result: str | None = None,
     staged_path: str | None = None,
-) -> None:
-    """Record a rejected import and optionally requeue the request.
+) -> int:
+    """Importer-side rejection entry point.
 
-    When requeue=True (auto-import): transitions to "wanted", records attempt.
-    When requeue=False (force/manual import): only logs to download_log.
+    Builds the ``log_download`` kwargs from ``DownloadInfo`` (slskd context:
+    username, bitrate, spectral, V0 probe, etc.) and delegates to
+    ``_finalize_request_and_log_rejection``. Behavior is preserved from
+    pre-U4: optional requeue-to-wanted with attempt bump, mandatory
+    download_log row, no denylist (caller handles via ``action.denylist``
+    in ``dispatch_import_core``), no job-failed mark (caller in
+    ``scripts/importer.py`` handles it on the outer return).
 
-    Note: denylisting and cooldown are handled by the caller (dispatch_import_core)
-    via action.denylist, not here.
+    When ``requeue=True`` (auto-import): transitions to "wanted", records
+    attempt. When ``requeue=False`` (force/manual import): only logs to
+    download_log.
+
+    Returns the new ``download_log`` row id — captured by the
+    auto-import path for downstream Wrong Matches triage.
     """
-    if requeue:
-        transition_kwargs: dict[str, object] = {}
-        if search_filetype_override is not None:
-            transition_kwargs["search_filetype_override"] = search_filetype_override
-        transitions.finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted_fields(
-                fields=transition_kwargs),
-        )
-        db.record_attempt(request_id, "validation")
+    log_download_kwargs: dict[str, Any] = {
+        "soulseek_username": dl_info.username,
+        "filetype": dl_info.filetype,
+        "beets_distance": distance,
+        "beets_scenario": scenario,
+        "beets_detail": detail,
+        "outcome": outcome_label,
+        "staged_path": staged_path,
+        "error_message": error,
+        "bitrate": dl_info.bitrate,
+        "sample_rate": dl_info.sample_rate,
+        "bit_depth": dl_info.bit_depth,
+        "is_vbr": dl_info.is_vbr,
+        "was_converted": dl_info.was_converted,
+        "original_filetype": dl_info.original_filetype,
+        "slskd_filetype": dl_info.slskd_filetype,
+        "slskd_bitrate": dl_info.slskd_bitrate,
+        "actual_filetype": dl_info.actual_filetype,
+        "actual_min_bitrate": dl_info.actual_min_bitrate,
+        "spectral_grade": (dl_info.download_spectral.grade
+                           if dl_info.download_spectral else None),
+        "spectral_bitrate": (dl_info.download_spectral.bitrate_kbps
+                             if dl_info.download_spectral else None),
+        "existing_min_bitrate": dl_info.existing_min_bitrate,
+        "existing_spectral_bitrate": (dl_info.current_spectral.bitrate_kbps
+                                      if dl_info.current_spectral else None),
+        "import_result": dl_info.import_result,
+        "validation_result": (validation_result
+                              if validation_result is not None
+                              else dl_info.validation_result),
+    }
+    log_download_kwargs.update(_v0_probe_log_fields(dl_info))
+    return _finalize_request_and_log_rejection(
+        db,
+        request_id,
+        log_download_kwargs,
+        requeue_to_wanted=requeue,
+        search_filetype_override=search_filetype_override,
+        record_validation_attempt=True,
+        # Importer-side leaves job-failed + denylist to its caller.
+        import_job_id=None,
+        denylist_username=None,
+    )
 
-    db.log_download(
-        request_id=request_id,
-        soulseek_username=dl_info.username,
-        filetype=dl_info.filetype,
-        beets_distance=distance,
-        beets_scenario=scenario,
-        beets_detail=detail,
-        outcome=outcome_label,
-        staged_path=staged_path,
-        error_message=error,
-        bitrate=dl_info.bitrate,
-        sample_rate=dl_info.sample_rate,
-        bit_depth=dl_info.bit_depth,
-        is_vbr=dl_info.is_vbr,
-        was_converted=dl_info.was_converted,
-        original_filetype=dl_info.original_filetype,
-        slskd_filetype=dl_info.slskd_filetype,
-        slskd_bitrate=dl_info.slskd_bitrate,
-        actual_filetype=dl_info.actual_filetype,
-        actual_min_bitrate=dl_info.actual_min_bitrate,
-        spectral_grade=dl_info.download_spectral.grade if dl_info.download_spectral else None,
-        spectral_bitrate=(
-            dl_info.download_spectral.bitrate_kbps if dl_info.download_spectral else None
-        ),
-        existing_min_bitrate=dl_info.existing_min_bitrate,
-        existing_spectral_bitrate=(
-            dl_info.current_spectral.bitrate_kbps if dl_info.current_spectral else None
-        ),
-        import_result=dl_info.import_result,
-        validation_result=(validation_result
-                           if validation_result is not None
-                           else dl_info.validation_result),
-        **_v0_probe_log_fields(dl_info),
+
+def _record_preview_measurement_failed(
+    db: "PipelineDB",
+    *,
+    request_id: int | None,
+    import_job_id: int,
+    payload: MeasurementFailure,
+    denylist_username: str | None = None,
+    denylist_reason: str | None = None,
+) -> int:
+    """Preview-side measurement_failed entry point (U4).
+
+    Called when preview cannot produce evidence — measurement crashed, the
+    source folder vanished, the snapshot went stale after retry, or one of
+    the pre-claim sanity checks failed (request_not_found, missing MBID,
+    etc.). Has no slskd context because no transfer is in flight; the
+    ``download_log`` row carries NULL for username/bitrate/filetype/spectral
+    columns and the typed ``MeasurementFailure`` payload as its
+    ``validation_result`` JSONB.
+
+    Delegates to ``_finalize_request_and_log_rejection`` for the four
+    self-healing side effects:
+
+      * ``download_log`` row written with ``outcome='measurement_failed'``,
+        ``beets_scenario='measurement_failed'``, and the
+        ``MeasurementFailure`` JSON as ``validation_result``.
+      * Parent request → ``wanted`` via ``transitions.finalize_request``
+        (skipped when ``request_id is None`` — the
+        ``reason='request_not_found'`` subcase).
+      * Optional denylist write when ``denylist_username`` is supplied.
+      * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
+        the poll loop's active-import-job guard releases on the next tick.
+
+    Returns the new ``download_log`` row id.
+    """
+    requeue = request_id is not None
+    validation_json = msgspec.json.encode(payload).decode("utf-8")
+    log_download_kwargs: dict[str, Any] = {
+        # NULL for all slskd-only fields — preview has no transfer context.
+        "soulseek_username": None,
+        "filetype": None,
+        "beets_distance": None,
+        "beets_scenario": "measurement_failed",
+        "beets_detail": payload.detail,
+        "outcome": "measurement_failed",
+        "staged_path": payload.source_path or None,
+        "error_message": None,
+        "validation_result": validation_json,
+    }
+    job_result = msgspec.to_builtins(payload)
+    assert isinstance(job_result, dict), \
+        "msgspec.to_builtins on a Struct returns a dict"
+    return _finalize_request_and_log_rejection(
+        db,
+        request_id,
+        log_download_kwargs,
+        requeue_to_wanted=requeue,
+        record_validation_attempt=False,  # preview failures aren't validation attempts
+        import_job_id=import_job_id,
+        import_job_error=payload.reason,
+        import_job_message=payload.detail,
+        import_job_result=job_result,
+        denylist_username=denylist_username,
+        denylist_reason=denylist_reason,
     )
 
 
@@ -1372,6 +1711,39 @@ def dispatch_import_core(
                 )
 
             if evidence_gate.candidate is not None:
+                # U6: ``preimport_decide`` runs upstream of the existing
+                # quality-gate-from-evidence. The importer is now the sole
+                # caller of ``preimport_decide`` in production; preview never
+                # decides (U5). On reject we route through the shared U4
+                # self-healing helper. On accept we fall through to the
+                # existing evidence-pipeline decision below.
+                preimport_decision = preimport_decide(
+                    _build_preimport_measurement_from_evidence(
+                        evidence_gate.candidate,
+                        evidence_gate.current,
+                    ),
+                    cfg.quality_ranks if cfg is not None else None,  # type: ignore[arg-type]
+                    evidence_gate.current,
+                )
+                if preimport_decision.decision == "reject":
+                    logger.info(
+                        f"{mode} PREIMPORT REJECT: {label} "
+                        f"reason={preimport_decision.reason} "
+                        f"detail={preimport_decision.detail}"
+                    )
+                    return _route_preimport_decision_reject(
+                        db=db,
+                        request_id=request_id,
+                        decision=preimport_decision,
+                        dl_info=dl_info,
+                        distance=distance,
+                        files=files,
+                        cooled_down_users=cooled_down_users,
+                        staged_path=path,
+                        source_path_cleanup_scenario=scenario,
+                        source_dirs=source_dirs,
+                    )
+
                 facts = AlbumQualityEvidenceDecisionFacts(
                     import_mode=(
                         "force"

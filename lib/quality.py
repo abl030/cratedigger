@@ -774,6 +774,12 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
     extension: str
     container: str
     codec: str | None = None
+    # decode_ok is per-file evidence that the measurement helper produces:
+    # True if ffmpeg returned rc=0 against this file's audio stream, False
+    # otherwise. Migration 019 default is TRUE so legacy rows decoded into
+    # this Struct shape are non-corrupt by default — the decision function
+    # only rejects when at least one file's ``decode_ok`` is False.
+    decode_ok: bool = True
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
@@ -858,6 +864,17 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     target_format: str | None = None
     v0_metric: AlbumQualityV0Metric | None = None
     verified_lossless_proof: VerifiedLosslessProof | None = None
+    # U1 (migration 019) preview-evidence facts. The pure decision function
+    # ``preimport_decide`` reads these as typed facts — never derives them
+    # from snapshot files. SQL defaults (FALSE, 'flat', 0, '') keep legacy
+    # rows decoding into a safe shape that the decision function rejects
+    # only when explicit reject-shaped facts are present.
+    audio_corrupt: bool = False
+    folder_layout: str = "flat"
+    audio_file_count: int = 0
+    filetype_band: str = ""
+    matched_bad_audio_hash_id: int | None = None
+    matched_bad_audio_hash_path: str | None = None
 
     def sorted_for_storage(self) -> "AlbumQualityEvidence":
         return AlbumQualityEvidence(
@@ -871,14 +888,36 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             target_format=self.target_format,
             v0_metric=self.v0_metric,
             verified_lossless_proof=self.verified_lossless_proof,
+            audio_corrupt=self.audio_corrupt,
+            folder_layout=self.folder_layout,
+            audio_file_count=self.audio_file_count,
+            filetype_band=self.filetype_band,
+            matched_bad_audio_hash_id=self.matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=self.matched_bad_audio_hash_path,
         )
 
     def storage_validation_errors(self) -> list[str]:
         errors = self.owner.validation_errors()
         if self.measured_at is None:
             errors.append("measured_at is required")
-        if not self.files:
+        # Empty snapshot is a storable fact ONLY when audio_file_count=0
+        # (the explicit empty-inventory signal). When a fileset is present
+        # but ``files`` is empty, the evidence row is incomplete.
+        if not self.files and self.audio_file_count != 0:
             errors.append("at least one snapshot file is required")
+        if self.folder_layout not in ("flat", "nested"):
+            errors.append(
+                f"folder_layout must be 'flat' or 'nested': {self.folder_layout!r}"
+            )
+        if not isinstance(self.audio_file_count, int) or self.audio_file_count < 0:
+            errors.append("audio_file_count must be >= 0")
+        if (self.matched_bad_audio_hash_id is None) != (
+            self.matched_bad_audio_hash_path is None
+        ):
+            errors.append(
+                "matched_bad_audio_hash_id and matched_bad_audio_hash_path "
+                "must be set together or both NULL"
+            )
         relative_paths: set[str] = set()
         for file in self.files:
             errors.extend(file.validation_errors())
@@ -2076,6 +2115,168 @@ def preimport_nested_gate(import_mode: str, has_nested_audio: bool) -> str:
     if import_mode == "auto":
         return "skipped_auto"
     return "reject_nested" if has_nested_audio else "pass"
+
+
+# ---------------------------------------------------------------------------
+# MeasurementFailure — U4 wire-boundary type for preview measurement failures
+# ---------------------------------------------------------------------------
+
+MeasurementFailureReason = Literal[
+    "snapshot_stale",          # source folder changed after retry (AE5)
+    "source_vanished",         # ENOENT mid-measure (AE6); also covers
+                               # path-missing pre-claim and force-import
+                               # failed_path-no-longer-on-disk cases
+    "materialization_error",   # tempdir copy / shutil failure during measure
+    "measurement_crashed",     # ffmpeg / sox / mutagen blew up
+    "evidence_persist_failed", # DB write failed after measurement completed
+    "request_not_found",       # parent album_request gone (no-finalize subcase)
+    "missing_release_id",      # request has no mb_release_id
+    "download_log_not_found",  # force/manual UI: download_log row gone
+    "missing_failed_path",     # force/manual UI: download_log lacks failed_path
+]
+
+
+class MeasurementFailure(msgspec.Struct, frozen=True):
+    """Typed wire-boundary payload for preview-side measurement failures.
+
+    Carried through ``import_jobs.preview_result`` (JSONB) and
+    ``download_log.validation_result`` (JSONB). The Recents UI grep-classifies
+    on ``reason`` to render the appropriate badge.
+
+    ``reason`` is a coarse ``Literal`` tag drawn from the
+    ``MeasurementFailureReason`` taxonomy — callers can switch on it
+    without parsing free text. ``detail`` is a short human-readable string
+    for logs and the audit trail; do not parse it. ``source_path`` is the
+    folder/file the measurement attempted, when known (``""`` when the
+    failure happened before any path was resolved — e.g. ``request_not_found``).
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` § "Wire-boundary
+    types" — encode via ``msgspec.json.encode`` / ``msgspec.to_builtins``,
+    decode via ``msgspec.convert``. Strict validation at the boundary catches
+    drift between the Struct's declared taxonomy and what the producer wrote.
+    Mirrors the precedent set by ``lib.beets_album_op.BeetsOpFailure``.
+    """
+    reason: MeasurementFailureReason
+    detail: str
+    source_path: str = ""
+
+
+# ---------------------------------------------------------------------------
+# preimport_decide — U3 pure decision function
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PreimportDecision:
+    """Pure-function output of ``preimport_decide``.
+
+    The decision function consumes a ``PreimportMeasurement`` (facts collected
+    by the measurement helper in ``lib.preimport``) plus the runtime
+    ``QualityRankConfig`` and optional existing-album evidence, and returns
+    one of two decisions:
+
+      * ``decision='accept'`` — the candidate passes every pre-import gate.
+        Reason is None.
+      * ``decision='reject'`` — the candidate fails a gate. ``reason`` is a
+        machine-readable taxonomy (``audio_corrupt``, ``bad_audio_hash``,
+        ``nested_layout``, ``empty_fileset``, ``spectral_reject``); ``detail``
+        is a human-readable diagnostic.
+
+    The previous ``PreImportGateResult.scenario`` strings map 1:1 onto
+    ``reason``. The legacy ``run_preimport_gates`` shim derives ``scenario``
+    from ``reason`` and ``valid`` from ``decision``.
+    """
+    decision: str = "accept"  # Literal["accept", "reject"]
+    reason: str | None = None
+    detail: str | None = None
+
+
+def preimport_decide(
+    measurement,  # lib.preimport.PreimportMeasurement
+    cfg: "QualityRankConfig",
+    existing_evidence: "AlbumQualityEvidence | None" = None,
+) -> PreimportDecision:
+    """Decide accept/reject from a measurement + cfg + existing-album evidence.
+
+    Pure function — no DB writes, no denylist mutations, no filesystem
+    side effects. Mirror of the decision branches that previously lived inline
+    inside ``lib.preimport.run_preimport_gates`` (U3 split).
+
+    Decision order matches the legacy gate pipeline:
+      1. ``audio_corrupt`` — any decode failure → reject.
+      2. ``bad_audio_hash`` — track matches a curator-reported bad hash → reject.
+      3. ``nested_layout`` — audio in subdirectories → reject.
+      4. ``empty_fileset`` — no audio files found → reject.
+      5. ``spectral_reject`` — ``spectral_import_decision`` says "reject" → reject.
+
+    Everything else is ``accept``.
+    """
+    # 1. audio integrity
+    if measurement.audio_corrupt:
+        n = len(measurement.corrupt_files)
+        return PreimportDecision(
+            decision="reject",
+            reason="audio_corrupt",
+            detail=f"{n} files failed ffmpeg decode" if n else "audio_corrupt",
+        )
+
+    # 2. bad audio hash
+    if measurement.matched_bad_hash_id is not None:
+        track = measurement.matched_bad_track_path or "<unknown>"
+        return PreimportDecision(
+            decision="reject",
+            reason="bad_audio_hash",
+            detail=(
+                f"matched bad audio hash {measurement.matched_bad_hash_id} on "
+                f"track {track}"
+            ),
+        )
+
+    # 3. nested layout
+    if measurement.folder_layout == "nested":
+        return PreimportDecision(
+            decision="reject",
+            reason="nested_layout",
+            detail="audio files found in subdirectories",
+        )
+
+    # 4. empty fileset
+    if measurement.audio_file_count == 0:
+        return PreimportDecision(
+            decision="reject",
+            reason="empty_fileset",
+            detail="no audio files found",
+        )
+
+    # 5. spectral
+    download_spectral = measurement.download_spectral
+    existing_spectral = measurement.existing_spectral
+    if download_spectral is not None:
+        dl_grade = download_spectral.grade
+        dl_bitrate = download_spectral.bitrate_kbps
+        existing_cliff_bitrate = (
+            existing_spectral.bitrate_kbps
+            if existing_spectral is not None else None
+        )
+        verdict = spectral_import_decision(
+            dl_grade,
+            dl_bitrate,
+            existing_cliff_bitrate,
+            existing_min_bitrate=measurement.existing_min_bitrate,
+        )
+        if verdict == "reject":
+            effective_existing = (
+                existing_cliff_bitrate or measurement.existing_min_bitrate or 0
+            )
+            return PreimportDecision(
+                decision="reject",
+                reason="spectral_reject",
+                detail=(
+                    f"spectral {dl_bitrate}kbps <= existing "
+                    f"{effective_existing}kbps"
+                ),
+            )
+
+    return PreimportDecision(decision="accept")
 
 
 def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate,

@@ -1400,9 +1400,39 @@ class TestImportPreviewWorker(unittest.TestCase):
         reason: str | None = None,
         source_path: str | None = None,
     ) -> ImportPreviewResult:
+        """Build a preview result for worker tests.
+
+        After U5 the worker emits only ``evidence_ready`` and
+        ``measurement_failed``. For backward-compat with existing tests we
+        translate the legacy verdict labels:
+
+          * ``would_import`` / ``confident_reject`` → ``evidence_ready`` (the
+            importer would have read these and decided; in U5 onward, the
+            importer reads the persisted evidence instead).
+          * ``uncertain`` → ``measurement_failed`` (preview could not produce
+            evidence; self-healing finalize fires).
+
+        Explicit ``evidence_ready`` / ``measurement_failed`` callers get those
+        verdicts unchanged.
+        """
+        from lib.quality import MeasurementFailure
+
+        if verdict in ("would_import", "evidence_ready"):
+            translated = "evidence_ready"
+            failure = None
+        elif verdict in ("uncertain", "confident_reject", "measurement_failed"):
+            translated = "measurement_failed"
+            failure = MeasurementFailure(
+                reason="measurement_crashed",
+                detail=reason or verdict,
+                source_path=source_path or "",
+            )
+        else:
+            translated = verdict
+            failure = None
         return ImportPreviewResult(
             mode="path",
-            verdict=verdict,
+            verdict=translated,
             would_import=verdict == "would_import",
             confident_reject=verdict == "confident_reject",
             uncertain=verdict == "uncertain",
@@ -1410,6 +1440,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             reason=reason,
             stage_chain=[f"preview:{reason or verdict}"],
             source_path=source_path,
+            failure=failure,
         )
 
     def _seed_job_candidate_evidence(
@@ -1483,12 +1514,13 @@ class TestImportPreviewWorker(unittest.TestCase):
             download_log_id=7,
             import_job_id=claimed.id,
             persist_candidate_evidence=True,
+            worker_mode=True,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
         assert updated.preview_result is not None
-        self.assertEqual(updated.preview_result["verdict"], "would_import")
+        self.assertEqual(updated.preview_result["verdict"], "evidence_ready")
         self.assertIsNotNone(updated.importable_at)
 
     def test_manual_job_preview_uses_non_force_semantics(self):
@@ -1535,6 +1567,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             download_log_id=None,
             import_job_id=claimed.id,
             persist_candidate_evidence=True,
+            worker_mode=True,
         )
         assert updated is not None
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -1595,6 +1628,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 download_log_id=None,
                 import_job_id=claimed.id,
                 persist_candidate_evidence=True,
+                worker_mode=True,
             )
             assert updated is not None
             self.assertEqual(updated.preview_status, "evidence_ready")
@@ -1778,6 +1812,14 @@ class TestImportPreviewWorker(unittest.TestCase):
         )
 
     def test_confident_reject_fails_job_without_denylisting_source(self):
+        """Post-U5: legacy ``confident_reject`` translates to ``measurement_failed``.
+
+        The ``_preview`` helper translates ``confident_reject`` → ``measurement_failed``;
+        the worker routes it through U4's self-healing helper, marking the job
+        ``status='failed'`` with ``preview_status='measurement_failed'``. No
+        denylist write fires (preview measurement failures are infrastructure-
+        class, not user-induced).
+        """
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -1802,11 +1844,16 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.preview_status, "uncertain")
-        self.assertEqual(updated.preview_error, "spectral_reject")
+        self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(db.get_denylisted_users(42), [])
 
     def test_uncertain_preview_fails_without_denylisting(self):
+        """Post-U5: legacy ``uncertain`` translates to ``measurement_failed``.
+
+        U4's self-healing helper writes a ``download_log`` row with
+        ``outcome='measurement_failed'`` and finalizes the parent request to
+        ``wanted`` so the poll loop's active-import-job guard releases.
+        """
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -1831,8 +1878,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.preview_status, "uncertain")
-        self.assertEqual(updated.preview_error, "path_missing")
+        self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(db.get_denylisted_users(42), [])
 
     def test_threaded_worker_exits_nonzero_when_worker_thread_crashes(self):
@@ -2097,10 +2143,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             # No evidence seeded → front-gate misses → measurement runs.
 
+            # Post-U5: worker-mode preview emits ``evidence_ready`` (not the
+            # legacy ``would_import``); the importer reads the evidence and
+            # decides.
             preview_result = ImportPreviewResult(
                 mode="path",
-                verdict="would_import",
-                would_import=True,
+                verdict="evidence_ready",
                 decision="import",
                 reason="import",
                 stage_chain=["preview:import"],
@@ -2173,10 +2221,10 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 )],
             ))
 
+            # Post-U5: worker-mode preview emits ``evidence_ready``.
             preview_result = ImportPreviewResult(
                 mode="path",
-                verdict="would_import",
-                would_import=True,
+                verdict="evidence_ready",
                 decision="import",
                 reason="import",
                 stage_chain=["preview:import"],
