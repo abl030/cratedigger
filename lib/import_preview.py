@@ -29,7 +29,6 @@ from lib.quality_evidence import (
     lossless_source_v0_probe_from_metric,
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
-    request_current_owner,
     snapshot_audio_files,
 )
 from lib.quality import (
@@ -46,6 +45,23 @@ from lib.quality import (
     quality_gate_decision,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
+
+
+def _load_current_evidence_by_request(
+    db: Any, request_id: int
+) -> Any:
+    """U3 FK reader: load current evidence via ``album_requests.current_evidence_id``.
+
+    Replaces the old ``db.load_album_quality_evidence(request_current_owner(rid))``
+    pattern which queried by ``(owner_type, owner_id)`` before the U2 rekey
+    removed those columns. The post-rekey addressing path is
+    ``album_requests.current_evidence_id → album_quality_evidence.id``.
+    """
+    evidence_id = db.get_request_current_evidence_id(request_id)
+    if evidence_id is None:
+        return None
+    return db.load_album_quality_evidence_by_id(evidence_id)
+
 
 # Verdict values for `ImportPreviewResult.verdict`. After U5 the preview worker
 # emits only the two new verdicts (`evidence_ready` / `measurement_failed`) when
@@ -561,8 +577,8 @@ def _preview_import_from_path_worker_mode(
         existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
         current_evidence = None
         try:
-            current_evidence = db.load_album_quality_evidence(
-                request_current_owner(request_id)
+            current_evidence = _load_current_evidence_by_request(
+                db, request_id
             )
         except Exception:
             current_evidence = None
@@ -1039,8 +1055,8 @@ def preview_import_from_path(
         )
         current_evidence = None
         try:
-            current_evidence = db.load_album_quality_evidence(
-                request_current_owner(request_id)
+            current_evidence = _load_current_evidence_by_request(
+                db, request_id
             )
         except Exception:
             current_evidence = None
