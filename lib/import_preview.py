@@ -17,13 +17,18 @@ from typing import Any
 import msgspec
 
 from lib.import_dispatch import run_import_one
-from lib.preimport import inspect_local_files, run_preimport_gates
+from lib.preimport import (
+    inspect_local_files,
+    measure_preimport_state,
+    run_preimport_gates,
+)
 from lib.quality_evidence import (
     audio_snapshot_matches,
     legacy_current_lossless_v0_probe_from_request,
     load_or_backfill_current_evidence,
     lossless_source_v0_probe_from_metric,
     persist_candidate_evidence_from_import_result,
+    persist_candidate_evidence_from_measurement,
     request_current_owner,
     snapshot_audio_files,
 )
@@ -345,6 +350,408 @@ def _request_label(req: dict[str, Any]) -> str:
     return f"{req.get('artist_name', '')} - {req.get('album_title', '')}".strip(" -")
 
 
+def _preview_import_from_path_worker_mode(
+    db: Any,
+    *,
+    request_id: int,
+    path: str,
+    force: bool,
+    download_log_id: int | None,
+    import_job_id: int | None,
+) -> ImportPreviewResult:
+    """Worker-mode preview path: measure facts, persist evidence, never decide.
+
+    Replaces the legacy ``run_preimport_gates`` pipeline that bundled the
+    accept/reject decision with the measurement. The preview worker is now
+    purely a fact-gathering surface; the importer (``preimport_decide``) reads
+    the persisted ``AlbumQualityEvidence`` row and makes the import decision.
+
+    Flow:
+      1. Validate request / mbid / path inputs (return measurement_failed on
+         any sanity-check failure).
+      2. Snapshot source files via ``snapshot_audio_files`` for the candidate
+         evidence ``files`` column AND the post-measurement stale-source guard.
+      3. Materialize into a temp copy so the harness has an isolated working
+         dir (matches existing preview behavior).
+      4. Inspect the temp copy for filetype / bitrate / vbr hints.
+      5. Call ``measure_preimport_state`` (the pure measurement helper — no
+         denylist writes, no decision branches). This runs the audio integrity
+         gate, bad-hash gate, spectral gate, and persists on-disk spectral
+         state to ``album_requests`` per issue #90 propagation.
+      6. If the measurement carries an importer-rejecting fact (audio_corrupt,
+         bad_audio_hash, nested layout, empty fileset), persist evidence
+         straight from the measurement (no harness call) and return
+         ``evidence_ready``. The importer's ``preimport_decide`` rejects on
+         those facts upstream of the quality gate.
+      7. Otherwise, run ``run_import_one`` in dry-run mode to produce an
+         ``ImportResult`` with ``new_measurement``. Persist evidence built
+         from both the measurement (U1 facts) and the import result (audio
+         measurement, spectral, V0 probe).
+      8. Return ``evidence_ready`` when persistence succeeded; otherwise
+         ``measurement_failed`` with the appropriate ``MeasurementFailureReason``.
+    """
+    from lib.config import read_runtime_config
+
+    # --- Sanity checks ---
+    req = db.get_request(request_id)
+    if not req:
+        return _measurement_failed_result(
+            mode="path",
+            reason="request_not_found",
+            decision="request_not_found",
+            detail=f"Request {request_id} not found",
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+
+    mbid = str(req.get("mb_release_id") or "")
+    if not mbid:
+        return _measurement_failed_result(
+            mode="path",
+            reason="missing_release_id",
+            decision="missing_release_id",
+            detail="No MusicBrainz release ID",
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+
+    if not os.path.isdir(path):
+        return _measurement_failed_result(
+            mode="path",
+            reason="source_vanished",
+            decision="path_missing",
+            detail=f"Path not found: {path}",
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+
+    # --- Snapshot for freshness guard + evidence files column ---
+    try:
+        source_snapshot = snapshot_audio_files(path)
+    except OSError as exc:
+        return _measurement_failed_result(
+            mode="path",
+            reason="snapshot_stale",
+            decision="evidence_snapshot_failed",
+            detail=str(exc),
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+
+    cfg = read_runtime_config()
+
+    temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
+    try:
+        preview_path = os.path.join(
+            temp_root,
+            os.path.basename(os.path.abspath(path)) or "album",
+        )
+        try:
+            shutil.copytree(path, preview_path)
+        except OSError as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="materialization_error",
+                decision="materialization_failed",
+                detail=f"shutil.copytree failed: {exc}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+        inspection = inspect_local_files(preview_path)
+
+        # --- Run the pure measurement helper (no decision) ---
+        try:
+            measurement = measure_preimport_state(
+                path=preview_path,
+                mb_release_id=mbid,
+                label=_request_label(req),
+                download_filetype=inspection.filetype,
+                download_min_bitrate_bps=inspection.min_bitrate_bps,
+                download_is_vbr=inspection.is_vbr,
+                cfg=cfg,
+                # db=None / request_id=None: spectral propagation happens
+                # later via the persisted AlbumQualityEvidence row that the
+                # importer reads. Preview is now a pure measurement surface.
+                db=None,
+                request_id=None,
+                propagate_download_to_existing=False,
+                precomputed_inspection=inspection,
+            )
+        except Exception as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="measurement_crashed",
+                detail=f"{type(exc).__name__}: {exc}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+
+        # --- Measurement-only evidence path ---
+        # When the measurement carries any importer-rejecting fact, skip the
+        # harness (it would either fail or produce misleading state) and
+        # persist evidence straight from the measurement. preimport_decide
+        # on the importer side will reject on these facts.
+        measurement_rejecting = (
+            measurement.audio_corrupt
+            or measurement.matched_bad_hash_id is not None
+            or measurement.folder_layout == "nested"
+            or (measurement.audio_file_count == 0 and not source_snapshot)
+        )
+        if measurement_rejecting:
+            if not audio_snapshot_matches(path, source_snapshot):
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="snapshot_stale",
+                    decision="source_changed_during_preview",
+                    detail="source files changed while preview was running",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
+            try:
+                evidence_result = persist_candidate_evidence_from_measurement(
+                    db,
+                    source_path=path,
+                    measurement=measurement,
+                    download_log_id=download_log_id,
+                    import_job_id=import_job_id,
+                    target_format=req.get("target_format"),
+                    files=source_snapshot,
+                )
+            except Exception as exc:
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="evidence_persist_failed",
+                    decision="evidence_persist_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
+            if evidence_result.status != "ready":
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="evidence_persist_failed",
+                    decision=f"evidence_{evidence_result.status}",
+                    detail=evidence_result.reason or f"evidence_{evidence_result.status}",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                )
+            decision_hint = _measurement_decision_hint(measurement)
+            return _evidence_ready_result(
+                mode="path",
+                decision=decision_hint,
+                reason=decision_hint,
+                detail=f"measurement persisted: {decision_hint}",
+                stage_chain=[f"measure_preimport:{decision_hint}"],
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+
+        # --- Harness path: measurement allows continuing ---
+        existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
+        current_evidence = None
+        try:
+            current_evidence = db.load_album_quality_evidence(
+                request_current_owner(request_id)
+            )
+        except Exception:
+            current_evidence = None
+        if current_evidence is None:
+            try:
+                current_result = load_or_backfill_current_evidence(
+                    db,
+                    request_id=request_id,
+                    mb_release_id=mbid,
+                    quality_ranks=cfg.quality_ranks,
+                    beets_library_root=getattr(cfg, "beets_directory", ""),
+                )
+                current_evidence = current_result.evidence
+            except Exception:
+                current_evidence = None
+        existing_spectral = measurement.existing_spectral
+        existing_grade = (
+            existing_spectral.grade if existing_spectral else req.get("current_spectral_grade")
+        )
+        existing_bitrate = (
+            existing_spectral.bitrate_kbps
+            if existing_spectral is not None
+            else req.get("current_spectral_bitrate")
+        )
+        if current_evidence is not None:
+            current_m = current_evidence.measurement
+            existing_grade = current_m.spectral_grade
+            existing_bitrate = current_m.spectral_bitrate_kbps
+            if current_evidence.v0_metric is not None:
+                existing_v0_probe = lossless_source_v0_probe_from_metric(
+                    current_evidence.v0_metric
+                )
+        override_min_bitrate = compute_effective_override_bitrate(
+            (
+                current_evidence.measurement.min_bitrate_kbps
+                if current_evidence is not None
+                else req.get("min_bitrate")
+            ),
+            existing_bitrate if isinstance(existing_bitrate, int) else None,
+            existing_grade if isinstance(existing_grade, str) else None,
+        )
+
+        try:
+            run = run_import_one(
+                path=preview_path,
+                mb_release_id=mbid,
+                request_id=None,
+                force=force,
+                preserve_source=True,
+                dry_run=True,
+                override_min_bitrate=override_min_bitrate,
+                target_format=req.get("target_format"),
+                verified_lossless_target=cfg.verified_lossless_target,
+                beets_harness_path=cfg.beets_harness_path,
+                quality_rank_config_json=cfg.quality_ranks.to_json(),
+                existing_v0_probe=existing_v0_probe,
+            )
+        except Exception as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="harness_crashed",
+                detail=f"{type(exc).__name__}: {exc}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+
+        if run.import_result is None:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="no_json_result",
+                detail="import_one.py emitted no JSON",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
+        if run.import_result.decision in (
+            "conversion_failed",
+            "target_conversion_failed",
+        ):
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision=run.import_result.decision,
+                detail=run.import_result.error or run.import_result.decision,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
+        if run.import_result.new_measurement is None:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision=run.import_result.decision or "missing_new_measurement",
+                detail="ImportResult missing new_measurement",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
+
+        # --- Snapshot freshness guard (post-measurement) ---
+        if not audio_snapshot_matches(path, source_snapshot):
+            return _measurement_failed_result(
+                mode="path",
+                reason="snapshot_stale",
+                decision="source_changed_during_preview",
+                detail="source files changed while preview was running",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
+
+        # --- Persist candidate evidence ---
+        try:
+            evidence_result = persist_candidate_evidence_from_import_result(
+                db,
+                source_path=path,
+                import_result=run.import_result,
+                download_log_id=download_log_id,
+                import_job_id=import_job_id,
+                target_format=req.get("target_format"),
+                files=source_snapshot,
+                measurement=measurement,
+            )
+        except Exception as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="evidence_persist_failed",
+                decision="evidence_persist_failed",
+                detail=f"{type(exc).__name__}: {exc}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
+        if evidence_result.status != "ready":
+            return _measurement_failed_result(
+                mode="path",
+                reason="evidence_persist_failed",
+                decision=f"evidence_{evidence_result.status}",
+                detail=evidence_result.reason or f"evidence_{evidence_result.status}",
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
+
+        return _evidence_ready_result(
+            mode="path",
+            decision=run.import_result.decision or "evidence_ready",
+            reason=run.import_result.decision,
+            detail=run.import_result.error,
+            stage_chain=[
+                f"measure_preimport:ok",
+                f"stage2_import:{run.import_result.decision}",
+            ],
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+            import_result=run.import_result,
+        )
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def _measurement_decision_hint(measurement: Any) -> str:
+    """Derive a short label for measurement-only evidence_ready returns.
+
+    Used purely for log/decision-string display — the importer's
+    ``preimport_decide`` makes the actual reject call from the persisted
+    evidence. Order mirrors ``preimport_decide``'s evaluation order.
+    """
+    if measurement.audio_corrupt:
+        return "audio_corrupt"
+    if measurement.matched_bad_hash_id is not None:
+        return "bad_audio_hash"
+    if measurement.folder_layout == "nested":
+        return "nested_layout"
+    if measurement.audio_file_count == 0:
+        return "empty_fileset"
+    return "evidence_ready"
+
+
 def preview_import_from_path(
     db: Any,
     *,
@@ -369,7 +776,24 @@ def preview_import_from_path(
     (CLI, wrong-match triage) keep ``worker_mode=False`` and receive the
     classifier's ``would_import`` / ``confident_reject`` / ``uncertain``
     verdicts unchanged.
+
+    worker_mode contract: this function MUST NOT call ``run_preimport_gates``
+    in that branch. ``run_preimport_gates`` bundles the decision (reject on
+    audio_corrupt / bad_hash / spectral) with the measurement; the preview
+    worker must only measure. Worker_mode collects facts via
+    ``measure_preimport_state``, runs the harness when the facts allow it
+    (skipping it on audio_corrupt / bad_hash / nested / empty), persists
+    evidence, and lets the importer call ``preimport_decide``.
     """
+    if worker_mode:
+        return _preview_import_from_path_worker_mode(
+            db,
+            request_id=request_id,
+            path=path,
+            force=force,
+            download_log_id=download_log_id,
+            import_job_id=import_job_id,
+        )
     req = db.get_request(request_id)
     if not req:
         if worker_mode:

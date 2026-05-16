@@ -6644,5 +6644,446 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
         self.assertEqual(running, [("running", "u7-test-worker")])
 
 
+class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
+    """Hotfix coverage: ``preview_import_from_path(worker_mode=True)`` must
+    NEVER call ``run_preimport_gates``. The worker collects facts via
+    ``measure_preimport_state``, persists evidence, and lets the importer's
+    ``preimport_decide`` make the accept/reject call.
+
+    Reproduces the Boards-of-Canada production bug: previously preview ran
+    the legacy shim which made a ``spectral_reject`` decision, early-returned
+    ``evidence_ready`` WITHOUT persisting evidence, and the importer's
+    front-gate then fired ``evidence_persist_failed`` and re-queued the
+    request forever.
+    """
+
+    def _seed_force_job(self, db, *, request_id, source_path):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="downloading",
+            mb_release_id=f"mbid-bocfix-{request_id}",
+            artist_name="Boards of Canada",
+            album_title="Geogaddi",
+        ))
+        log_id = db.log_download(request_id, outcome="rejected")
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=force_import_dedupe_key(log_id),
+            payload=force_import_payload(
+                download_log_id=log_id,
+                failed_path=source_path,
+                source_username="alice",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+        return claimed, log_id
+
+    def _seed_current_evidence(self, db, *, request_id, min_bitrate_kbps, spectral_grade="genuine", spectral_bitrate_kbps=None):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidenceFile,
+        )
+        from tests.helpers import make_album_quality_evidence
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="01 - Old.mp3",
+                size_bytes=1000,
+                mtime_ns=1_700_000_000_000_000_000,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            ),
+        ]
+        evidence = make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=request_id,
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate_kbps,
+                avg_bitrate_kbps=min_bitrate_kbps,
+                median_bitrate_kbps=min_bitrate_kbps,
+                format="MP3",
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate_kbps,
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+    def test_boc_geogaddi_suspect_96k_persists_evidence_and_importer_rejects(self):
+        """Production BoC bug: suspect 96kbps MP3 download vs existing 192kbps.
+
+        Pre-fix: preview's legacy shim ran ``_legacy_preimport_decision``,
+        returned ``spectral_reject``, early-returned without persisting,
+        importer's front-gate then fired ``evidence_persist_failed`` and
+        re-queued forever.
+
+        Post-fix: preview collects facts via ``measure_preimport_state``,
+        runs the harness (which also measures spectral as suspect@96kbps),
+        persists evidence, importer's ``preimport_decide`` reads the
+        persisted spectral facts and rejects with ``spectral_reject``.
+        Self-heal: request → wanted.
+        """
+        from lib.preimport import PreimportMeasurement
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            SpectralMeasurement,
+        )
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+
+            claimed, download_log_id = self._seed_force_job(
+                db, request_id=42, source_path=source,
+            )
+            # Existing album in beets at 192kbps; the importer compares
+            # download_spectral (suspect@96) against this and rejects.
+            self._seed_current_evidence(
+                db, request_id=42, min_bitrate_kbps=192,
+            )
+
+            # Build the measurement facts the preview path would collect.
+            measured_facts = PreimportMeasurement(
+                corrupt_files=[],
+                audio_corrupt=False,
+                download_spectral=SpectralMeasurement.from_parts("suspect", 96),
+                existing_spectral=None,
+                existing_min_bitrate=None,
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
+                min_bitrate_kbps=96,
+                is_vbr=False,
+            )
+            # Build the ImportResult the harness would emit. The harness ALSO
+            # runs spectral and stamps the new_measurement; in production
+            # both the measurement facts and the harness see suspect@96.
+            harness_ir = ImportResult(
+                decision="import",
+                new_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=96,
+                    avg_bitrate_kbps=96,
+                    median_bitrate_kbps=96,
+                    format="MP3",
+                    is_cbr=True,
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=96,
+                ),
+            )
+
+            sentinels = {"shim_called": False}
+
+            def _shim_sentinel(*args, **kwargs):
+                sentinels["shim_called"] = True
+                raise AssertionError(
+                    "worker_mode must NOT call run_preimport_gates"
+                )
+
+            with patch(
+                "lib.preimport.run_preimport_gates",
+                side_effect=_shim_sentinel,
+            ), patch(
+                "lib.import_preview.run_preimport_gates",
+                side_effect=_shim_sentinel,
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=measured_facts,
+            ), patch(
+                "lib.import_preview.run_import_one",
+                return_value=SimpleNamespace(import_result=harness_ir),
+            ), patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path=_HARNESS,
+                    pipeline_db_enabled=True,
+                ),
+            ):
+                updated_job = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db), claimed,
+                )
+
+            # The shim must not have been invoked.
+            self.assertFalse(sentinels["shim_called"])
+
+            # Preview marked the job evidence_ready.
+            assert updated_job is not None
+            self.assertEqual(updated_job.preview_status, "evidence_ready")
+            self.assertEqual(updated_job.status, "queued")
+
+            # Candidate evidence was persisted with the correct facts.
+            from lib.quality import AlbumQualityEvidenceOwner
+            owner = AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=download_log_id,
+            )
+            persisted = db.load_album_quality_evidence(owner)
+            assert persisted is not None
+            self.assertFalse(persisted.audio_corrupt)
+            self.assertEqual(persisted.measurement.spectral_grade, "suspect")
+            self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 96)
+            self.assertEqual(persisted.folder_layout, "flat")
+            self.assertEqual(persisted.audio_file_count, 1)
+
+            # Now drive the importer side: dispatch_import_from_db should
+            # read the persisted evidence, call preimport_decide, see the
+            # suspect@96 vs existing min 192 case, and reject.
+            from lib.import_dispatch import dispatch_import_from_db
+            beets_info_no_path = AlbumInfo(
+                album_id=1, track_count=10, min_bitrate_kbps=192,
+                avg_bitrate_kbps=192, format="MP3", is_cbr=False,
+                album_path=None,  # type: ignore[arg-type]
+            )
+            with patch_dispatch_externals() as ext, \
+                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                    patch("lib.config.read_runtime_config",
+                          return_value=CratediggerConfig(
+                              beets_harness_path=_HARNESS,
+                              pipeline_db_enabled=True,
+                          )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    failed_path=source,
+                    force=True,
+                    source_username="alice",
+                    import_job_id=updated_job.id,
+                    download_log_id=download_log_id,
+                    outcome_label="force_import",
+                )
+
+            self.assertFalse(result.success)
+            self.assertIn("spectral_reject", result.message or "")
+            # Beets NEVER ran.
+            self.assertEqual(ext.run.call_count, 0)
+            # Self-heal: request → wanted.
+            self.assertEqual(db.request(42)["status"], "wanted")
+            # download_log rejection scenario.
+            outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+            self.assertIn(("rejected", "spectral_reject"), outcomes)
+
+    def test_clean_upgrade_persists_evidence_and_importer_accepts(self):
+        """Happy path: suspect spectral but a clear bitrate upgrade.
+
+        Download: suspect@256kbps. Existing min: 192kbps. preimport_decide
+        accepts (suspect upgrade). The importer continues to the quality
+        gate and import path. Beets actually runs.
+        """
+        from lib.preimport import PreimportMeasurement
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            SpectralMeasurement,
+        )
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+
+            claimed, download_log_id = self._seed_force_job(
+                db, request_id=43, source_path=source,
+            )
+            self._seed_current_evidence(
+                db, request_id=43, min_bitrate_kbps=192,
+            )
+
+            measured_facts = PreimportMeasurement(
+                corrupt_files=[],
+                audio_corrupt=False,
+                download_spectral=SpectralMeasurement.from_parts("suspect", 256),
+                existing_spectral=None,
+                existing_min_bitrate=None,
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
+                min_bitrate_kbps=256,
+                is_vbr=True,
+            )
+            harness_ir = ImportResult(
+                decision="import",
+                new_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=256,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=256,
+                    format="mp3 v0",
+                    is_cbr=False,
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=256,
+                ),
+            )
+
+            sentinels = {"shim_called": False}
+
+            def _shim_sentinel(*args, **kwargs):
+                sentinels["shim_called"] = True
+                raise AssertionError(
+                    "worker_mode must NOT call run_preimport_gates"
+                )
+
+            with patch(
+                "lib.preimport.run_preimport_gates",
+                side_effect=_shim_sentinel,
+            ), patch(
+                "lib.import_preview.run_preimport_gates",
+                side_effect=_shim_sentinel,
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=measured_facts,
+            ), patch(
+                "lib.import_preview.run_import_one",
+                return_value=SimpleNamespace(import_result=harness_ir),
+            ), patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path=_HARNESS,
+                    pipeline_db_enabled=True,
+                ),
+            ):
+                updated_job = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db), claimed,
+                )
+
+            self.assertFalse(sentinels["shim_called"])
+            assert updated_job is not None
+            self.assertEqual(updated_job.preview_status, "evidence_ready")
+
+            from lib.quality import AlbumQualityEvidenceOwner
+            owner = AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=download_log_id,
+            )
+            persisted = db.load_album_quality_evidence(owner)
+            assert persisted is not None
+            self.assertEqual(persisted.measurement.spectral_grade, "suspect")
+            self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 256)
+
+    def test_corrupt_audio_persists_evidence_and_importer_rejects(self):
+        """Audio corrupt: ffmpeg rc!=0. Preview persists evidence with
+        audio_corrupt=True; importer's preimport_decide rejects on
+        audio_corrupt before ever invoking beets."""
+        from lib.preimport import PreimportMeasurement
+        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+
+            claimed, download_log_id = self._seed_force_job(
+                db, request_id=44, source_path=source,
+            )
+            self._seed_current_evidence(
+                db, request_id=44, min_bitrate_kbps=192,
+            )
+
+            measured_facts = PreimportMeasurement(
+                corrupt_files=["01.mp3"],
+                audio_corrupt=True,
+                download_spectral=None,
+                existing_spectral=None,
+                existing_min_bitrate=None,
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
+                min_bitrate_kbps=192,
+                is_vbr=False,
+            )
+
+            sentinels = {"shim_called": False, "harness_called": False}
+
+            def _shim_sentinel(*args, **kwargs):
+                sentinels["shim_called"] = True
+                raise AssertionError(
+                    "worker_mode must NOT call run_preimport_gates"
+                )
+
+            def _harness_sentinel(*args, **kwargs):
+                sentinels["harness_called"] = True
+                raise AssertionError(
+                    "harness must not run on corrupt audio in worker_mode"
+                )
+
+            with patch(
+                "lib.preimport.run_preimport_gates",
+                side_effect=_shim_sentinel,
+            ), patch(
+                "lib.import_preview.run_preimport_gates",
+                side_effect=_shim_sentinel,
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=measured_facts,
+            ), patch(
+                "lib.import_preview.run_import_one",
+                side_effect=_harness_sentinel,
+            ), patch(
+                "lib.config.read_runtime_config",
+                return_value=CratediggerConfig(
+                    beets_harness_path=_HARNESS,
+                    pipeline_db_enabled=True,
+                ),
+            ):
+                updated_job = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db), claimed,
+                )
+
+            self.assertFalse(sentinels["shim_called"])
+            self.assertFalse(sentinels["harness_called"])
+            assert updated_job is not None
+            self.assertEqual(updated_job.preview_status, "evidence_ready")
+            from lib.quality import AlbumQualityEvidenceOwner
+            owner = AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                owner_id=download_log_id,
+            )
+            persisted = db.load_album_quality_evidence(owner)
+            assert persisted is not None
+            self.assertTrue(persisted.audio_corrupt)
+
+            # Drive the importer and assert reject + self-heal.
+            from lib.import_dispatch import dispatch_import_from_db
+            beets_info_no_path = AlbumInfo(
+                album_id=1, track_count=10, min_bitrate_kbps=192,
+                avg_bitrate_kbps=192, format="MP3", is_cbr=False,
+                album_path=None,  # type: ignore[arg-type]
+            )
+            with patch_dispatch_externals() as ext, \
+                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                    patch("lib.config.read_runtime_config",
+                          return_value=CratediggerConfig(
+                              beets_harness_path=_HARNESS,
+                              pipeline_db_enabled=True,
+                          )):
+                result = dispatch_import_from_db(
+                    db,  # type: ignore[arg-type]
+                    request_id=44,
+                    failed_path=source,
+                    force=True,
+                    source_username="alice",
+                    import_job_id=updated_job.id,
+                    download_log_id=download_log_id,
+                    outcome_label="force_import",
+                )
+
+            self.assertFalse(result.success)
+            self.assertIn("audio_corrupt", result.message or "")
+            self.assertEqual(ext.run.call_count, 0)
+            self.assertEqual(db.request(44)["status"], "wanted")
+            outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+            self.assertIn(("rejected", "audio_corrupt"), outcomes)
+
+
 if __name__ == "__main__":
     unittest.main()
