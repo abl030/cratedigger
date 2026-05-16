@@ -990,11 +990,11 @@ def load_candidate_evidence_for_source(
 ) -> EvidenceBuildResult:
     """Load stored candidate evidence via the FK chain and verify freshness.
 
-    Walks ``download_log.candidate_evidence_id``, then falls back to the most
-    recent ``import_jobs.candidate_evidence_id`` for the same request via
-    cross-walk through ``download_log.request_id``. Once a candidate evidence
-    row is found, ``audio_snapshot_matches`` confirms it still describes the
-    audio at ``source_path``.
+    Walks explicit ownership only: ``import_jobs.candidate_evidence_id`` when
+    ``import_job_id`` is provided, then ``download_log.candidate_evidence_id``.
+    It never falls back to another job on the same request. Once a candidate
+    evidence row is found, ``audio_snapshot_matches`` confirms it still
+    describes the audio at ``source_path``.
     """
 
     if download_log_id is None and import_job_id is None:
@@ -1005,11 +1005,6 @@ def load_candidate_evidence_for_source(
         evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
     if evidence_id is None and download_log_id is not None:
         evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
-        if evidence_id is None:
-            # Cross-walk via request_id → most recent import_job
-            evidence_id = db.get_request_latest_import_job_evidence_id_from_dl(
-                download_log_id
-            )
 
     if evidence_id is None:
         return EvidenceBuildResult(

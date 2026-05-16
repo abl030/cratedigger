@@ -99,6 +99,25 @@ class TestWrongMatchCleanup(unittest.TestCase):
         self.assertEqual(result.cleared_rows, 1)
         self.assertEqual(db.get_wrong_matches(), [])
 
+    def test_missing_directory_can_preserve_pointer_for_service_policy(self):
+        from lib.wrong_matches import cleanup_wrong_match_source
+
+        db = self._make_db()
+        source = tempfile.mkdtemp()
+        shutil.rmtree(source)
+        log_id = self._log_rejected(db, failed_path=source)
+
+        result = cleanup_wrong_match_source(
+            db,
+            log_id,
+            clear_missing=False,
+        )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.path_missing)
+        self.assertEqual(result.cleared_rows, 0)
+        self.assertEqual(len(db.get_wrong_matches()), 1)
+
     def test_delete_race_still_clears_stale_pointer(self):
         from lib.wrong_matches import cleanup_wrong_match_source
 

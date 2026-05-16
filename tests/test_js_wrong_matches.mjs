@@ -153,7 +153,7 @@ console.log('converge helpers classify green candidates');
   assert(!__test__.isConvergeGreen({ distance: 0.226 }, 180), '0.226 is not green at 180');
   assert(!__test__.isConvergeGreen({ distance: null }, 180), 'missing distance is not green');
   assertDeepEqual(
-    __test__.convergeRequestBody('42', '180', false),
+    __test__.convergeRequestBody('42', '180'),
     { request_id: 42, threshold_milli: 180, delete_unmatched: true },
     'converge always asks the API to delete non-green rows',
   );
@@ -168,7 +168,8 @@ console.log('renderWrongMatches() shows threshold controls and green state');
   assert(dom.wrongMatches.innerHTML.includes('2 green'), 'renders default green count');
   assert(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'converge button includes count');
   assert(!dom.wrongMatches.innerHTML.includes('remove all wrong matches when converging'), 'cleanup checkbox is gone');
-  assert(dom.wrongMatches.innerHTML.includes('Delete All (3)'), 'keeps delete-all action');
+  assert(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup action');
+  assert(!dom.wrongMatches.innerHTML.includes('Delete All'), 'per-group delete-all action is gone');
 
   __test__.setWrongMatchConvergeThreshold(42, 230);
   assert(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit updates green count');
@@ -191,37 +192,6 @@ console.log('renderWrongMatches() keeps converge usable with active import jobs'
   assert(!dom.wrongMatches.innerHTML.includes('Import Active'), 'does not replace converge with Import Active');
   assert(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'keeps converge label with active jobs');
   assert(!/id="wm-converge-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML), 'active jobs do not disable converge');
-}
-
-console.log('transparent non-FLAC bulk cleanup targets only transparent on-disk non-FLAC groups');
-{
-  const data = wrongMatchesData();
-  data.groups[0].quality_rank = 'transparent';
-  const flacGroup = JSON.parse(JSON.stringify(data.groups[0]));
-  flacGroup.request_id = 43;
-  flacGroup.entries[0].local_items = [{ path: '01.flac', format: 'FLAC' }];
-  const poorGroup = JSON.parse(JSON.stringify(data.groups[0]));
-  poorGroup.request_id = 44;
-  poorGroup.quality_rank = 'poor';
-
-  const targets = __test__.transparentNonFlacGroups([data.groups[0], flacGroup, poorGroup]);
-  assertDeepEqual(targets.map(g => g.request_id), [42], 'only transparent groups with non-FLAC downloads are targeted');
-}
-
-console.log('lossless-Opus bulk cleanup targets only verified-lossless Opus groups');
-{
-  const data = wrongMatchesData();
-  data.groups[0].verified_lossless = true;
-  data.groups[0].format = 'Opus';
-  const mp3Group = JSON.parse(JSON.stringify(data.groups[0]));
-  mp3Group.request_id = 43;
-  mp3Group.format = 'MP3';
-  const unverifiedGroup = JSON.parse(JSON.stringify(data.groups[0]));
-  unverifiedGroup.request_id = 44;
-  unverifiedGroup.verified_lossless = false;
-
-  const targets = __test__.losslessOpusGroups([data.groups[0], mp3Group, unverifiedGroup]);
-  assertDeepEqual(targets.map(g => g.request_id), [42], 'only verified-lossless Opus groups are targeted');
 }
 
 console.log('setWrongMatchConvergeThreshold() updates expanded group in place');
@@ -266,7 +236,6 @@ console.log('convergeWrongMatches() posts selected threshold and removes row in 
   const dom = installDom();
   __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   __test__.setWrongMatchConvergeThreshold(42, 180);
-  __test__.setWrongMatchConvergeCleanup(false);
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
@@ -303,26 +272,36 @@ console.log('convergeWrongMatches() posts selected threshold and removes row in 
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes the emptied group locally');
 }
 
-console.log('deleteTransparentNonFlacWrongMatches() posts one bulk delete and removes rows in place');
+console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshes');
 {
   installStorage();
   const dom = installDom();
   const data = wrongMatchesData();
-  data.groups[0].quality_rank = 'transparent';
   __test__.renderWrongMatches(data, dom.wrongMatches);
-  assert(dom.wrongMatches.innerHTML.includes('Delete transparent non-FLAC (3)'), 'renders top-level cleanup button');
+  assert(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup button');
   const calls = [];
   globalThis.confirm = () => true;
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
-    if (url === '/api/wrong-matches/delete-transparent-non-flac') {
+    if (url === '/api/wrong-matches/triage') {
       return {
         ok: true,
         json: async () => ({
           status: 'ok',
-          deleted: 3,
-          groups_deleted: 1,
-          deleted_request_ids: [42],
+          processed: 3,
+          deleted: 2,
+          kept_would_import: 1,
+          kept_uncertain: 0,
+          skipped_candidate_evidence_missing: 0,
+          skipped_candidate_evidence_stale: 0,
+          skipped_current_evidence_missing: 0,
+          skipped_current_evidence_stale: 0,
+          skipped_active_job: 0,
+          skipped_invalid_row: 0,
+          skipped_missing_path: 0,
+          skipped_operational: 0,
+          delete_failed: 0,
+          results: [],
         }),
       };
     }
@@ -334,52 +313,17 @@ console.log('deleteTransparentNonFlacWrongMatches() posts one bulk delete and re
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const btn = { disabled: false, textContent: 'Delete transparent non-FLAC (3)', style: {} };
-  await __test__.deleteTransparentNonFlacWrongMatches(btn);
-  assertEqual(calls[0].url, '/api/wrong-matches/delete-transparent-non-flac', 'posts to transparent cleanup endpoint');
-  assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole pane after bulk cleanup');
-  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts bulk cleanup result');
-  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes cleaned groups locally');
-}
-
-console.log('deleteLosslessOpusWrongMatches() posts one bulk delete and removes rows in place');
-{
-  installStorage();
-  const dom = installDom();
-  const data = wrongMatchesData();
-  data.groups[0].verified_lossless = true;
-  data.groups[0].format = 'Opus';
-  __test__.renderWrongMatches(data, dom.wrongMatches);
-  assert(dom.wrongMatches.innerHTML.includes('Delete lossless-Opus (3)'), 'renders top-level lossless-Opus cleanup button');
-  const calls = [];
-  globalThis.confirm = () => true;
-  globalThis.fetch = async (url, options = {}) => {
-    calls.push({ url, options });
-    if (url === '/api/wrong-matches/delete-lossless-opus') {
-      return {
-        ok: true,
-        json: async () => ({
-          status: 'ok',
-          deleted: 3,
-          groups_deleted: 1,
-          deleted_request_ids: [42],
-        }),
-      };
-    }
-    if (url === '/api/wrong-matches') {
-      return {
-        ok: true,
-        json: async () => ({ groups: [] }),
-      };
-    }
-    throw new Error(`unexpected fetch: ${url}`);
-  };
-  const btn = { disabled: false, textContent: 'Delete lossless-Opus (3)', style: {} };
-  await __test__.deleteLosslessOpusWrongMatches(btn);
-  assertEqual(calls[0].url, '/api/wrong-matches/delete-lossless-opus', 'posts to lossless-Opus cleanup endpoint');
-  assert(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole pane after lossless-Opus cleanup');
-  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts lossless-Opus bulk cleanup result');
-  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes cleaned lossless-Opus groups locally');
+  const btn = { disabled: false, textContent: 'Cleanup Wrong Matches (3)', style: {} };
+  await __test__.bulkTriageWrongMatches(btn);
+  assertEqual(calls[0].url, '/api/wrong-matches/triage', 'posts to cleanup endpoint');
+  assertDeepEqual(
+    JSON.parse(calls[0].options.body),
+    { confirm_all_wrong_matches: true },
+    'posts explicit full-queue confirmation',
+  );
+  assert(calls.some(call => call.url === '/api/wrong-matches'), 'refetches the full pane after cleanup');
+  assert(dom.toast.textContent.includes('Deleted 2 candidates'), 'toasts cleanup result');
+  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'renders refreshed empty state');
 }
 
 console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells');
@@ -605,69 +549,23 @@ console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
   assertEqual(calls.length, 1, 'reopening an entry reuses the loaded explorer state');
 }
 
-console.log('formatLosslessOpusToastBody() reports spectral-suspect skips');
+console.log('cleanupSummaryToast() reports kept, skipped, and delete failures');
 {
-  // Covers R6 surfacing: server reports both deletes and the new
-  // groups_skipped_spectral_suspect counter. The toast must break out
-  // the spectral-suspect count separately from the existing summary.
-  let body = __test__.formatLosslessOpusToastBody({
-    deleted: 1,
-    groups_deleted: 1,
-    eligible_groups: 2,
-    groups_skipped_spectral_suspect: 1,
-    skipped: [
-      { reason: 'spectral_suspect', request_id: 71 },
-      { reason: 'spectral_suspect', request_id: 71 },
-    ],
+  const body = __test__.cleanupSummaryToast({
+    deleted: 2,
+    kept_would_import: 1,
+    kept_uncertain: 3,
+    skipped_candidate_evidence_missing: 1,
+    skipped_candidate_evidence_stale: 1,
+    skipped_current_evidence_missing: 0,
+    skipped_current_evidence_stale: 0,
+    skipped_active_job: 1,
+    skipped_invalid_row: 0,
+    skipped_missing_path: 1,
+    skipped_operational: 0,
+    delete_failed: 1,
   });
-  assert(body.toLowerCase().includes('1') && body.toLowerCase().includes('release'),
-    'reports the deleted-release count');
-  assert(body.toLowerCase().includes('skipped') && body.toLowerCase().includes('spectral'),
-    'reports spectral-suspect skips by name');
-
-  // All-blocked worst case: 0 deleted, every eligible group blocked.
-  body = __test__.formatLosslessOpusToastBody({
-    deleted: 0,
-    groups_deleted: 0,
-    eligible_groups: 3,
-    groups_skipped_spectral_suspect: 3,
-    skipped: [
-      { reason: 'spectral_suspect', request_id: 1 },
-      { reason: 'spectral_suspect', request_id: 2 },
-      { reason: 'spectral_suspect', request_id: 3 },
-      { reason: 'spectral_suspect', request_id: 3 },
-    ],
-  });
-  assert(body.toLowerCase().includes('0'), 'reports the zero-delete case');
-  assert(body.toLowerCase().includes('3') && body.toLowerCase().includes('skipped'),
-    'reports the 3 skipped groups even when nothing was deleted');
-  assert(body.length > 0, 'toast is never blank when all groups are blocked');
-
-  // Forwards-compat fallback: server omits the new sibling field; the
-  // count is derivable from skipped[] by deduplicating request_id.
-  body = __test__.formatLosslessOpusToastBody({
-    deleted: 0,
-    groups_deleted: 0,
-    eligible_groups: 1,
-    skipped: [
-      { reason: 'spectral_suspect', request_id: 5 },
-      { reason: 'spectral_suspect', request_id: 5 },
-    ],
-  });
-  assert(body.toLowerCase().includes('1') && body.toLowerCase().includes('skipped'),
-    'fallback derives one skipped group from deduplicated request_id');
-
-  // Regression: empty skipped[] + zero counter → today's behaviour, no
-  // spectral mention.
-  body = __test__.formatLosslessOpusToastBody({
-    deleted: 3,
-    groups_deleted: 1,
-    eligible_groups: 1,
-    groups_skipped_spectral_suspect: 0,
-    skipped: [],
-  });
-  assert(!body.toLowerCase().includes('spectral'),
-    'no spectral mention when nothing was skipped');
+  assertEqual(body, 'Deleted 2 candidates, kept 4, skipped 5', 'summarizes cleanup outcomes');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

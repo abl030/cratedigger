@@ -59,6 +59,7 @@ namespace, second is the per-lock key.
 | Per-release pipeline | `ADVISORY_LOCK_NAMESPACE_RELEASE` | `0x52454C45` | "RELE" | `release_id_to_lock_key(mb_release_id)` | Cross-process same-MBID serialisation |
 | Importer worker | `ADVISORY_LOCK_NAMESPACE_IMPORTER` | `0x51554555` | "QUEU" | `1` | One importer process drains the beets-mutating lane |
 | Per-request plan | `ADVISORY_LOCK_NAMESPACE_PLAN` | `0x504C414E` | "PLAN" | `request_id` | Search-plan generation / supersession serialisation |
+| Wrong-match cleanup | `ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP` | `0x574D434C` | "WMCL" | `wrong_match_cleanup_lock_key(request_id, download_log_id, source_path)` | Serialise deletion of one wrong-match source |
 
 The ASCII-visible hex lets `pg_locks` rows be interpreted at a glance
 during debugging:
@@ -68,6 +69,7 @@ SELECT classid, objid FROM pg_locks WHERE locktype = 'advisory';
 -- classid=0x46494D50 → force/manual-import lock
 -- classid=0x52454C45 → release-level lock
 -- classid=0x51554555 → importer-worker singleton lock
+-- classid=0x574D434C → wrong-match cleanup lock
 ```
 
 ### IMPORT — per-request lock
@@ -144,6 +146,24 @@ claim another queued job in parallel, and it must not requeue a live worker's
 before it requeues abandoned `running` jobs or claims new jobs.
 
 **Key**: Constant `1`. There is only one logical importer lane.
+
+### WMCL — wrong-match cleanup lock
+
+**Why**: Wrong Matches cleanup may be triggered from the web bulk cleanup, CLI
+bulk cleanup, post-rejection download path, Converge, and failed force-import
+cleanup. All of these can target the same source folder. The cleanup service
+checks active import jobs before deletion, then takes this lock and checks active
+jobs again before deleting the folder.
+
+**Scope**: Held by `lib.wrong_match_cleanup_service.cleanup_wrong_match` only
+around the final active-job recheck and filesystem delete/DB clear. Evaluation
+against existing evidence happens before the lock so unrelated rows are not
+blocked by quality classification work.
+
+**Key**: `wrong_match_cleanup_lock_key(request_id, download_log_id,
+source_path)` hashes the exact source path with the row/request identifiers.
+This protects one source folder without serialising the whole Wrong Matches
+queue.
 
 ## Acquisition order
 
@@ -321,6 +341,7 @@ session and returns False — revisit the ordering rules.
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
 | Import queue dedupe | `lib/pipeline_db.py` | `enqueue_import_job` | unique index | `dedupe_key` |
 | Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |
+| Wrong-match cleanup | `lib/wrong_match_cleanup_service.py` | `cleanup_wrong_match` | WMCL | `wrong_match_cleanup_lock_key(request_id, download_log_id, resolved_path)` |
 
 Plan generation acquires the PLAN lock before reading the request,
 building the snapshot, invoking the generator, and persisting the
@@ -386,3 +407,5 @@ To add a new lock:
   subprocess, transitioning status, or firing cooldowns (fast-fail).
 - `tests/test_fakes.py` — `FakePipelineDB.advisory_lock` records calls
   and lets tests flip acquisition results per-`(namespace, key)`.
+- `tests/test_wrong_match_cleanup_service.py` — cleanup lock contention returns
+  `skipped_active_job` and keeps the source folder and wrong-match pointer.

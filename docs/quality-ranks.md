@@ -323,11 +323,11 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
   `--values --values-json '{...}'` for typed simulator inputs. Real-folder
   preview may run audio validation, spectral analysis, and temp-workspace
   conversion; it is not a metadata-only check.
-- New Wrong Matches rows created by the download import path run the same
-  preview-backed triage immediately. Confident cleanup-eligible rejects are
-  deleted and cleared; would-import and uncertain candidates remain visible.
-  The triage action and reason are persisted under
-  `download_log.validation_result.wrong_match_triage` for audit.
+- Wrong Matches cleanup consumes already-persisted evidence only. Confident
+  cleanup-eligible force-mode rejects are deleted and cleared; would-import,
+  uncertain, missing-evidence, and stale-evidence candidates remain visible.
+  Historical `download_log.validation_result.wrong_match_triage` blobs are
+  still rendered as display-only audit, but new cleanup does not write them.
 - `/api/pipeline/constants` (web) — surfaces `rank_gate_min_rank` and
   `rank_bitrate_metric` alongside other constants for the Decisions tab UI.
 - `/api/pipeline/simulate?...` (web) — accepts the same params as

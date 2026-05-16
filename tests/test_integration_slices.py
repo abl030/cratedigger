@@ -2738,156 +2738,6 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         )
 
 
-class TestWrongMatchTriageMeasurementRoundTrip(unittest.TestCase):
-    """End-to-end pin from preview measurement → triage → DB → row read.
-
-    PR #181 wired the four candidate-evidence keys onto the wrong-matches
-    entry payload reading from flat ``download_log`` columns. The plan
-    that ships those columns from triage's preview lives in
-    ``docs/plans/2026-04-28-002``. This slice is the cross-layer proof
-    that would have caught yesterday's drop-on-the-floor bug:
-    ``triage_wrong_match`` runs end-to-end against ``FakePipelineDB``
-    with a stubbed preview, and the row's flat columns must surface in
-    the next ``get_wrong_matches`` read.
-    """
-
-    def _seed_wrong_match(self, source: str) -> tuple[FakePipelineDB, int]:
-        from tests.helpers import make_request_row as _make_req
-        db = FakePipelineDB()
-        db.seed_request(_make_req(
-            id=1, status="manual", mb_release_id="mbid-1"))
-        db.log_download(
-            1,
-            outcome="rejected",
-            validation_result={
-                "scenario": "wrong_match",
-                "failed_path": source,
-            },
-        )
-        return db, db.download_logs[-1].id
-
-    def _measured_preview(self, source: str):
-        from lib.import_preview import ImportPreviewResult
-        from lib.quality import V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence
-        return ImportPreviewResult(
-            mode="download_log",
-            verdict="would_import",
-            would_import=True,
-            decision="import",
-            reason="import",
-            source_path=source,
-            import_result=ImportResult(
-                decision="import",
-                new_measurement=AudioQualityMeasurement(
-                    spectral_grade="genuine",
-                    spectral_bitrate_kbps=950,
-                ),
-                v0_probe=V0ProbeEvidence(
-                    kind=V0_PROBE_LOSSLESS_SOURCE,
-                    avg_bitrate_kbps=265,
-                ),
-            ),
-        )
-
-    def test_auto_triage_round_trip_populates_get_wrong_matches(self):
-        """Covers AE1: post-rejection triage path → row read returns the
-        four candidate-evidence keys with values."""
-        from lib.wrong_match_triage import triage_wrong_match
-        from lib.wrong_match_cleanup_decision import WrongMatchCleanupDecision
-        source = tempfile.mkdtemp()
-        try:
-            db, log_id = self._seed_wrong_match(source)
-            preview = self._measured_preview(source)
-            decision = WrongMatchCleanupDecision(
-                download_log_id=log_id,
-                delete_allowed=False,
-                uncertain=False,
-                provenance="album_quality_evidence",
-                verdict="would_import",
-                confident_reject=False,
-                cleanup_eligible=False,
-                preview_decision=preview.decision,
-                reason=preview.reason,
-                request_id=1,
-                source_path=source,
-                stage_chain=tuple(preview.stage_chain),
-                import_result=preview.import_result,
-            )
-            with patch(
-                "lib.wrong_match_triage.decide_wrong_match_cleanup",
-                return_value=decision,
-            ):
-                triage_wrong_match(db, log_id)
-
-            rows = db.get_wrong_matches()
-            self.assertEqual(len(rows), 1)
-            row = rows[0]
-            self.assertEqual(row["spectral_grade"], "genuine")
-            self.assertEqual(row["spectral_bitrate"], 950)
-            self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
-            self.assertEqual(row["v0_probe_avg_bitrate"], 265)
-        finally:
-            import shutil
-            shutil.rmtree(source, ignore_errors=True)
-
-    def test_backfill_round_trip_populates_get_wrong_matches(self):
-        """Covers AE2: operator-initiated backfill produces the same
-        outcome as post-rejection auto-triage."""
-        from lib.wrong_match_triage import backfill_wrong_match_previews
-        source = tempfile.mkdtemp()
-        try:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            db, _log_id = self._seed_wrong_match(source)
-            with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=self._measured_preview(source),
-            ):
-                summary = backfill_wrong_match_previews(db)
-
-            self.assertEqual(summary["previewed"], 1)
-            row = db.get_wrong_matches()[0]
-            self.assertEqual(row["spectral_grade"], "genuine")
-            self.assertEqual(row["spectral_bitrate"], 950)
-            self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
-            self.assertEqual(row["v0_probe_avg_bitrate"], 265)
-        finally:
-            import shutil
-            shutil.rmtree(source, ignore_errors=True)
-
-    def test_early_reject_keeps_row_dashed(self):
-        """Covers AE3 / R5: a row whose preview legitimately produced no
-        measurement (e.g. nested_layout that isn't cleanup-eligible)
-        keeps NULL flat columns, so the UI renders a dash."""
-        from lib.import_preview import ImportPreviewResult
-        from lib.wrong_match_triage import triage_wrong_match
-        source = tempfile.mkdtemp()
-        try:
-            db, log_id = self._seed_wrong_match(source)
-            with patch(
-                "lib.wrong_match_triage.preview_import_from_download_log",
-                return_value=ImportPreviewResult(
-                    mode="download_log",
-                    verdict="uncertain",
-                    uncertain=True,
-                    decision="conversion_failed",
-                    reason="conversion_failed",
-                    source_path=source,
-                    import_result=None,
-                ),
-            ):
-                triage_wrong_match(db, log_id)
-
-            row = db.get_wrong_matches()[0]
-            for col in ("spectral_grade", "spectral_bitrate",
-                        "v0_probe_kind", "v0_probe_avg_bitrate"):
-                self.assertIsNone(row[col],
-                                  f"{col} must remain None when preview produced no measurement")
-        finally:
-            import shutil
-            shutil.rmtree(source, ignore_errors=True)
-
-
 class TestBadAudioHashSlice(unittest.TestCase):
     """Integration slice: bad-audio-hash gate inside ``measure_preimport_state``.
 
@@ -7013,17 +6863,13 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             self.assertIn(("rejected", "audio_corrupt"), outcomes)
 
 
-class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
-    """U4 regression guard: triage's happy path skips cold-path measurement.
+class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
+    """Regression guard: cleanup's happy path skips cold-path measurement.
 
     When evidence is reachable through the FK chain
-    (``download_log.candidate_evidence_id`` direct, or via the cross-walk
-    through ``import_jobs``), ``triage_wrong_match`` must NOT trigger
-    ``measure_preimport_state``. The preview-worker contract (PR #254)
-    owns the only legitimate path that measures candidates; triage just
-    reads. This slice patches the measurement seam and asserts zero
-    calls — the regression that bit PR #256 was exactly this kind of
-    duplicate measurement on the rejection path.
+    (``download_log.candidate_evidence_id`` direct), cleanup must NOT trigger
+    ``measure_preimport_state``. Preview/backfill owns measurement; cleanup
+    reads existing evidence or skips.
     """
 
     def _seed(self, source: str) -> tuple[FakePipelineDB, int]:
@@ -7084,14 +6930,6 @@ class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
             folder_layout="flat",
         )
 
-    def _patch_beets_no_album(self):
-        """Stub BeetsDB so wrong-match cleanup runs without a real beets lib."""
-        ctx = MagicMock()
-        ctx.__enter__ = MagicMock(return_value=ctx)
-        ctx.__exit__ = MagicMock(return_value=False)
-        ctx.get_album_info.return_value = None
-        return patch("lib.beets_db.BeetsDB", return_value=ctx)
-
     def _patch_cfg(self):
         """Pin the runtime-config loader so the test doesn't read disk."""
         from lib.quality import QualityRankConfig
@@ -7106,9 +6944,9 @@ class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
             return_value=cfg,
         )
 
-    def test_triage_with_fk_evidence_does_not_measure(self) -> None:
-        """Happy path: evidence reachable via FK chain → zero measurement."""
-        from lib.wrong_match_triage import triage_wrong_match
+    def test_cleanup_with_download_log_fk_evidence_does_not_measure(self) -> None:
+        """Happy path: evidence reachable via explicit row FK → zero measurement."""
+        from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
         source = tempfile.mkdtemp()
         try:
@@ -7124,19 +6962,13 @@ class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
             assert stored is not None and stored.id is not None
             db.set_download_log_candidate_evidence(log_id, stored.id)
 
-            with self._patch_beets_no_album(), \
-                    self._patch_cfg(), \
-                    patch("lib.measurement.measure_preimport_state") as mp, \
-                    patch(
-                        "lib.wrong_match_triage._preview_for_triage"
-                    ) as cold:
-                result = triage_wrong_match(db, log_id)
+            with self._patch_cfg(), \
+                    patch("lib.measurement.measure_preimport_state") as mp:
+                result = cleanup_wrong_match(db, log_id)
 
             mp.assert_not_called()
-            cold.assert_not_called()
-            self.assertTrue(result.success)
-            # Verdict resolved without ever calling the cold-path preview.
-            self.assertIsNotNone(result.preview)
+            self.assertEqual(result.outcome, "kept_would_import")
+            self.assertEqual(result.verdict, "would_import")
         finally:
             import shutil as _shutil
             _shutil.rmtree(source, ignore_errors=True)

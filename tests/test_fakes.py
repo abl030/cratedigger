@@ -151,30 +151,6 @@ class TestFakePipelineDB(unittest.TestCase):
 
         self.assertEqual(db.get_request_current_evidence_id(42), persisted.id)
 
-    def test_album_quality_evidence_cross_walk_via_request(self):
-        """Cross-walk: download_log → request_id → most recent import_job FK."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42))
-        job = db.enqueue_import_job(
-            "manual_import",
-            request_id=42,
-            payload={"failed_path": "/tmp/x"},
-        )
-        log_id = db.log_download(request_id=42, outcome="rejected")
-        evidence = make_album_quality_evidence(mb_release_id="mb-walk-1")
-        db.upsert_album_quality_evidence(evidence)
-        persisted = db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert persisted is not None and persisted.id is not None
-        db.set_import_job_candidate_evidence(job.id, persisted.id)
-
-        self.assertEqual(
-            db.get_request_latest_import_job_evidence_id_from_dl(log_id),
-            persisted.id,
-        )
-
     def test_album_quality_evidence_dedupes_by_content_key(self):
         """Upserting the same (mbid, fingerprint) twice keeps one row."""
         db = FakePipelineDB()
@@ -2582,6 +2558,68 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         assert result is not None
         # Most recent by id
         self.assertEqual(result["id"], max(first.id, second.id))
+
+
+class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
+    def test_matches_by_download_log_request_path_or_source_dir(self):
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = FakePipelineDB()
+        by_log = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=1,
+            payload=force_import_payload(download_log_id=10, failed_path="/other"),
+        )
+        by_request = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload=force_import_payload(download_log_id=11, failed_path="/other"),
+        )
+        by_path = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=2,
+            payload=force_import_payload(download_log_id=12, failed_path="/failed/a"),
+        )
+        by_dir = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=3,
+            payload=force_import_payload(
+                download_log_id=13,
+                failed_path="/other",
+                source_dirs=["alice\\Album"],
+            ),
+        )
+        ignored = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload=force_import_payload(download_log_id=14, failed_path="/failed/a"),
+        )
+        completed = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload=force_import_payload(download_log_id=15, failed_path="/failed/a"),
+        )
+        db.mark_import_job_preview_importable(
+            completed.id,
+            preview_result={"verdict": "would_import"},
+            message="ok",
+        )
+        claimed = db.claim_next_import_job(worker_id="w")
+        assert claimed is not None
+        db.mark_import_job_completed(claimed.id, result={"ok": True})
+
+        rows = db.list_active_import_jobs_for_wrong_match(
+            download_log_id=10,
+            request_id=42,
+            failed_paths=["/failed/a"],
+            source_dirs=["alice\\Album"],
+            ignore_import_job_id=ignored.id,
+        )
+
+        self.assertEqual(
+            {job.id for job in rows},
+            {by_log.id, by_request.id, by_path.id, by_dir.id},
+        )
 
 
 def _public_methods(cls: type) -> set[str]:
