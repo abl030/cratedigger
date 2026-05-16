@@ -882,6 +882,20 @@ def _rejection_verdict(entry: LogEntry) -> str:
     if scenario == "spectral_reject":
         # Spectral scenario — spectral_bitrate IS the right field here
         old_kbps = entry.existing_spectral_bitrate or entry.existing_min_bitrate
+        # New preimport_decide path (post 2026-05-16 hotfix #254) writes the
+        # bitrate numbers into beets_detail (e.g. "spectral 128kbps <= existing
+        # 192kbps") but leaves the typed spectral_bitrate / existing_spectral_*
+        # columns NULL on the row, because _route_preimport_decision_reject's
+        # synthesized DownloadInfo doesn't carry spectral facts. When the
+        # typed columns are absent but beets_detail has a real string, render
+        # that directly — the importer already wrote a good human-readable
+        # reason.
+        if (
+            entry.spectral_bitrate is None
+            and old_kbps is None
+            and entry.beets_detail
+        ):
+            return f"Spectral: {entry.beets_detail}"
         return _comparison_verdict(
             entry.spectral_bitrate, old_kbps, prefix="Spectral:")
 
