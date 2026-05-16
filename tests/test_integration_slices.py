@@ -6054,5 +6054,390 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
         self.assertIsNotNone(updated.importable_at)
 
 
+class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
+    """U6 integration slices: importer dispatch wires preimport_decide.
+
+    Each slice seeds an ``import_jobs`` row with persisted candidate
+    ``AlbumQualityEvidence`` carrying a reject-shaped U1 fact
+    (``audio_corrupt``, nested ``folder_layout``, ``audio_file_count=0``,
+    suspect spectral), drives ``dispatch_import_from_db`` (the importer's
+    entry point), and asserts the U4 self-healing side effects fire:
+
+      * ``download_log`` row with the reject scenario and validation_result
+      * request → ``wanted`` (with attempt-counter bump)
+      * beets is NEVER touched (``sp.run`` is asserted not-called)
+      * staged dir cleanup happens for auto-import scenarios
+
+    Covers AE2 (audio_corrupt), AE3 (nested_layout), AE4 (empty_fileset),
+    plus the spectral_reject branch.
+    """
+
+    def _seed_with_evidence(
+        self,
+        db,
+        *,
+        request_id,
+        tmpdir,
+        candidate_evidence,
+        current_evidence=None,
+    ):
+        """Seed a manual import_job + candidate evidence + (opt) current.
+
+        Returns (import_job_id, download_log_id=None).
+        """
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="manual",
+            mb_release_id=f"mbid-u6-{request_id}",
+            artist_name="Test Artist",
+            album_title="Test Album",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=request_id,
+            payload=manual_import_payload(failed_path=tmpdir),
+        )
+        db.upsert_album_quality_evidence(candidate_evidence)
+        if current_evidence is not None:
+            db.upsert_album_quality_evidence(current_evidence)
+        return job.id
+
+    def _build_candidate_evidence(
+        self,
+        *,
+        owner_id,
+        files,
+        spectral_grade="genuine",
+        spectral_bitrate_kbps=None,
+        audio_corrupt=False,
+        folder_layout="flat",
+        audio_file_count=None,
+        filetype_band="mp3 v0",
+        matched_bad_audio_hash_id=None,
+        matched_bad_audio_hash_path=None,
+        min_bitrate_kbps=245,
+    ):
+        from datetime import datetime, timezone
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceOwner,
+            AudioQualityMeasurement,
+        )
+
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=owner_id,
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate_kbps,
+                avg_bitrate_kbps=min_bitrate_kbps,
+                median_bitrate_kbps=min_bitrate_kbps,
+                format="MP3 V0",
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate_kbps,
+            ),
+            measured_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            files=files,
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+            audio_corrupt=audio_corrupt,
+            folder_layout=folder_layout,
+            audio_file_count=(
+                audio_file_count if audio_file_count is not None
+                else len(files)
+            ),
+            filetype_band=filetype_band,
+            matched_bad_audio_hash_id=matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=matched_bad_audio_hash_path,
+        )
+
+    def _build_current_evidence(
+        self,
+        *,
+        owner_id,
+        min_bitrate_kbps=128,
+        spectral_grade="genuine",
+        spectral_bitrate_kbps=None,
+    ):
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AudioQualityMeasurement,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        return make_album_quality_evidence(
+            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            owner_id=owner_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate_kbps,
+                avg_bitrate_kbps=min_bitrate_kbps,
+                median_bitrate_kbps=min_bitrate_kbps,
+                format="MP3",
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate_kbps,
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3",
+        )
+
+    def _drive_dispatch(self, db, *, request_id, tmpdir, import_job_id, cfg):
+        from lib.import_dispatch import dispatch_import_from_db
+
+        # album_path=None makes the current-evidence guard trust the
+        # seeded REQUEST_CURRENT row without an audio-snapshot probe.
+        beets_info_no_path = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=128,
+            avg_bitrate_kbps=128, format="MP3",
+            is_cbr=False, album_path=None,  # type: ignore[arg-type]
+        )
+        with patch_dispatch_externals() as ext, \
+                patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info_no_path)), \
+                patch("lib.config.read_runtime_config", return_value=cfg):
+            result = dispatch_import_from_db(
+                db,  # type: ignore[arg-type]
+                request_id=request_id,
+                failed_path=tmpdir,
+                force=False,
+                source_username="alice",
+                import_job_id=import_job_id,
+                outcome_label="manual_import",
+            )
+        return result, ext
+
+    def _common_cfg(self):
+        return CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+    def test_audio_corrupt_evidence_routes_through_self_heal(self):
+        """AE2: candidate evidence with audio_corrupt=True → preimport_decide
+        rejects → request → wanted, download_log carries audio_corrupt scenario,
+        beets (sp.run) is never invoked."""
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+            snap = snapshot_audio_files(tmpdir)
+            # Mark the file as decode_ok=False on the snapshot — the helper
+            # surfaces these into corrupt_files.
+            from lib.quality import AlbumQualityEvidenceFile
+            corrupt_files = [
+                AlbumQualityEvidenceFile(
+                    relative_path=f.relative_path,
+                    size_bytes=f.size_bytes,
+                    mtime_ns=f.mtime_ns,
+                    extension=f.extension,
+                    container=f.container,
+                    codec=f.codec,
+                    decode_ok=False,
+                )
+                for f in snap
+            ]
+            # Need to enqueue first to get the job id for owner_id
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=42, status="manual", mb_release_id="mbid-u6-corrupt",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=42,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=corrupt_files,
+                    audio_corrupt=True,
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(owner_id=42),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=42, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("audio_corrupt", result.message or "")
+        # Beets subprocess NEVER ran — preimport_decide rejected upstream.
+        self.assertEqual(
+            ext.run.call_count, 0,
+            "beets import_one.py must not run when preimport_decide rejects")
+        # Self-heal: request → wanted with attempt bump.
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+        # download_log row records the rejection scenario.
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "audio_corrupt"), outcomes)
+
+    def test_nested_layout_evidence_routes_through_self_heal(self):
+        """AE3: folder_layout='nested' → preimport_decide rejects → self-heal."""
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cd1 = os.path.join(tmpdir, "cd1")
+            os.makedirs(cd1)
+            with open(os.path.join(cd1, "01 - Track.mp3"), "wb") as h:
+                h.write(b"audio")
+            files = snapshot_audio_files(tmpdir)
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=43, status="manual", mb_release_id="mbid-u6-nested",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=43,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=files,
+                    folder_layout="nested",
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(owner_id=43),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=43, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("nested_layout", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(43)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "nested_layout"), outcomes)
+        # nested_layout is a folder-shape problem, not a peer-quality problem
+        # — denylisting the peer would be unfair.
+        self.assertEqual(len(db.denylist), 0)
+
+    def test_empty_fileset_evidence_routes_through_self_heal(self):
+        """AE4: audio_file_count=0 → preimport_decide rejects → self-heal."""
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=44, status="manual", mb_release_id="mbid-u6-empty",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=44,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=[],
+                    audio_file_count=0,
+                    folder_layout="flat",
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(owner_id=44),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=44, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("empty_fileset", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(44)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "empty_fileset"), outcomes)
+
+    def test_spectral_reject_evidence_routes_through_self_heal(self):
+        """Suspect candidate spectral with no upgrade over existing → reject.
+
+        likely_transcode at 128kbps vs an existing transcode at the same band
+        — ``spectral_import_decision`` returns 'reject', preimport_decide
+        emits a reject(reason=spectral_reject), self-heal fires."""
+        from lib.quality import AlbumQualityEvidenceFile
+
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as h:
+                h.write(b"audio")
+            files = [
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=5,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                ),
+            ]
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=45, status="manual", mb_release_id="mbid-u6-spectral",
+                current_spectral_grade="likely_transcode",
+                current_spectral_bitrate=128,
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=45,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            db.upsert_album_quality_evidence(
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=files,
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128,
+                    min_bitrate_kbps=128,
+                )
+            )
+            db.upsert_album_quality_evidence(
+                self._build_current_evidence(
+                    owner_id=45,
+                    min_bitrate_kbps=128,
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128,
+                ),
+            )
+
+            result, ext = self._drive_dispatch(
+                db, request_id=45, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("spectral_reject", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(45)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "spectral_reject"), outcomes)
+        # Source-quality reject — peer denylisted (5-strikes rule applies).
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].username, "alice")
+
+
 if __name__ == "__main__":
     unittest.main()
