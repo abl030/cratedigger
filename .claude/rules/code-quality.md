@@ -1,5 +1,48 @@
 # Code Quality Standards
 
+## Quality decisions live in ONE place
+
+**`full_pipeline_decision_from_evidence`** in `lib/quality.py` (and its
+flat-kwargs simulator twin `full_pipeline_decision`) is the single source of
+truth for every quality decision: spectral, codec rank, V0 probe, provisional
+lossless, verified lossless, transcode detection, quality gate. **Never
+re-create quality decisions elsewhere.** If a code path needs to know "should
+this be imported", it must call the full pipeline — not invent its own
+narrower spectral / rank / bitrate comparison.
+
+This bit us in PR #257: U6 wired a parallel `preimport_decide` spectral branch
+upstream of the full pipeline. The narrower decider fell back to existing
+container bitrate when spectral evidence was missing on one side, rejecting
+legitimate FLAC provisional-lossless upgrades (request 4514). The fix was to
+delete the parallel decision. Don't reintroduce.
+
+**Preview produces evidence. Importer decides.** The two-worker contract:
+
+- **Preview worker** (`lib/import_preview.py`): measures, persists
+  `AlbumQualityEvidence`, marks the job `evidence_ready` or
+  `measurement_failed`. Never emits a verdict. Never decides accept/reject.
+- **Importer worker** (`lib/import_dispatch.py::dispatch_import_from_db`):
+  reads persisted evidence, decides via `full_pipeline_decision_from_evidence`.
+  Sole production caller of `preimport_decide` — which now owns ONLY
+  folder/audio-integrity facts (`audio_corrupt`, `bad_audio_hash`,
+  `nested_layout`, `empty_fileset`). Spectral, codec rank, and quality-gate
+  decisions go through the full pipeline.
+
+**The album test set is the contract.** Live-bug scenarios go in
+`tests/test_quality_classification.py::TestLiveBugReproductions` (one test
+per real-world album that exercised a quality decision). Every scenario MUST
+also be exercised through the production decider via
+`TestLiveBugReproductionsThroughEvidencePipeline` — the parity contract is
+that the simulator and the evidence pipeline produce the same outcome on the
+same album. If you change quality policy, update the album test set first;
+the live code follows.
+
+**Red flag phrases that mean you're about to re-invent the decision:** "let me
+add a quick spectral check here", "the importer needs to handle this case
+upstream", "I'll just compare bitrates before calling the pipeline", "this
+gate should reject obviously-bad candidates early". All of these are wrong.
+Call the full pipeline.
+
 ## Type Safety
 - All new dataclasses, functions, and module-level code must pass pyright with 0 errors
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries

@@ -209,13 +209,57 @@ If you only need the capability from one surface in this PR, expose it on both a
 
 ## Decision architecture
 
-Quality policy should stay pure where possible: facts in, decision out, no I/O,
-database, or filesystem side effects. Key entries in `lib/quality.py` include
-`spectral_import_decision`, `import_quality_decision`,
-`transcode_detection`, `quality_gate_decision`,
+**Quality decisions live in ONE place.** `full_pipeline_decision_from_evidence`
+in `lib/quality.py` (and its flat-kwargs simulator twin `full_pipeline_decision`)
+is the single source of truth for every quality decision: spectral, codec rank,
+V0 probe, provisional lossless, verified lossless, transcode detection, quality
+gate. **Never re-create quality decisions elsewhere.** If a code path needs to
+know "should this be imported", it must call the full pipeline — not invent its
+own narrower spectral / rank / bitrate comparison.
+
+This bit us once already (PR #257): U6 wired a parallel `preimport_decide`
+spectral branch in front of `full_pipeline_decision_from_evidence`. The
+narrower decider fell back to existing container bitrate when spectral evidence
+was missing on one side, rejecting legitimate FLAC provisional-lossless
+upgrades (request 4514). The fix was to delete the parallel decision and let
+the full pipeline own it. **Don't reintroduce parallel quality deciders.**
+
+**Preview produces evidence. Importer decides.** The two-worker contract:
+
+- **Preview worker** (`lib/import_preview.py`): measures via
+  `measure_preimport_state` + `run_import_one`, persists
+  `AlbumQualityEvidence`, marks the job `evidence_ready` (or
+  `measurement_failed`). Never emits a verdict. Never decides accept/reject.
+- **Importer worker** (`lib/import_dispatch.py::dispatch_import_from_db`):
+  reads persisted evidence and decides via `full_pipeline_decision_from_evidence`.
+  Sole production caller of `preimport_decide`, which now owns only
+  folder/audio-integrity facts (`audio_corrupt`, `bad_audio_hash`,
+  `nested_layout`, `empty_fileset`) — quality decisions go through the full
+  pipeline.
+
+If you find yourself writing a new function that compares spectral / bitrate
+/ codec ranks, stop. Either call `full_pipeline_decision_from_evidence` or
+extend the pure decision helpers it already composes (`spectral_import_decision`,
+`measured_import_decision`, `provisional_lossless_decision`,
+`quality_gate_decision`). The function does NOT accept container-bitrate
+fallback — spectral compares to spectral evidence only (invariant of #257).
+
+**The album test set is what defines behavior.** Live-bug scenarios go in
+`tests/test_quality_classification.py::TestLiveBugReproductions` (Bride,
+Flux, Taboo, Tyler Lambert, BoC, Heretic Pride, etc.). Every scenario MUST
+also be exercised through the production decider via
+`TestLiveBugReproductionsThroughEvidencePipeline` — the parity contract is
+that the simulator and the evidence pipeline reach the same outcome on the
+same album. If you change quality policy, update the album test set first;
+the live code follows.
+
+Pure decision helpers in `lib/quality.py`: `spectral_import_decision`,
+`import_quality_decision`, `transcode_detection`, `quality_gate_decision`,
 `determine_verified_lossless`, `dispatch_action`,
 `compute_effective_override_bitrate`, `verify_filetype`, `should_cooldown`,
-and `get_decision_tree` (feeds the web UI Decisions tab).
+`provisional_lossless_decision`, `measured_import_decision`,
+`preimport_decide` (folder/audio-integrity only), and `get_decision_tree`
+(feeds the web UI Decisions tab).
 
 The importer queue is the beets-mutating ownership boundary. Web, CLI, and the
 automation poller enqueue import jobs; `cratedigger-importer` drains them

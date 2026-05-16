@@ -34,8 +34,7 @@ from lib.audio_hash import AudioHashError, hash_audio_content
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (SPECTRAL_TRANSCODE_GRADES, PreimportDecision,
-                         SpectralMeasurement, preimport_decide,
-                         spectral_import_decision)
+                         SpectralMeasurement)
 from lib.util import repair_mp3_headers, validate_audio
 
 if TYPE_CHECKING:
@@ -756,46 +755,6 @@ def run_preimport_gates(
             request_id=request_id,
             usernames=usernames,
         )
-        # Operator-visible reject log — preserved from pre-U3 behavior.
-        if decision.reason == "spectral_reject":
-            dl_bitrate = (
-                measurement.download_spectral.bitrate_kbps
-                if measurement.download_spectral is not None else None
-            )
-            effective_existing = (
-                (measurement.existing_spectral.bitrate_kbps
-                 if measurement.existing_spectral is not None else None)
-                or measurement.existing_min_bitrate or 0
-            )
-            logger.warning(
-                f"SPECTRAL REJECT: {label} "
-                f"new spectral {dl_bitrate}kbps <= existing "
-                f"{effective_existing}kbps")
-    else:
-        # Operator-visible accept log for spectral upgrades / no-exist (pre-U3
-        # behavior). Only fires when spectral actually ran.
-        ds = measurement.download_spectral
-        if ds is not None:
-            dl_bitrate = ds.bitrate_kbps
-            verdict = spectral_import_decision(
-                ds.grade, dl_bitrate,
-                (measurement.existing_spectral.bitrate_kbps
-                 if measurement.existing_spectral is not None else None),
-                existing_min_bitrate=measurement.existing_min_bitrate,
-            )
-            effective_existing = (
-                (measurement.existing_spectral.bitrate_kbps
-                 if measurement.existing_spectral is not None else None)
-                or measurement.existing_min_bitrate or 0
-            )
-            if verdict == "import_upgrade":
-                logger.info(
-                    f"SPECTRAL UPGRADE: {label} suspect at {dl_bitrate}kbps "
-                    f"but > existing {effective_existing}kbps, importing")
-            elif verdict == "import_no_exist":
-                logger.info(
-                    f"SPECTRAL: {label} suspect at {dl_bitrate}kbps "
-                    f"but no existing album, importing")
 
     return result
 
@@ -803,13 +762,20 @@ def run_preimport_gates(
 def _legacy_preimport_decision(
     measurement: PreimportMeasurement,
 ) -> PreimportDecision:
-    """Subset of ``preimport_decide`` matching pre-U3 ``run_preimport_gates`` gates.
+    """Pre-U3 ``run_preimport_gates`` decision shim — folder/audio facts only.
 
-    Only audio_corrupt → bad_audio_hash → spectral_reject. ``nested_layout``
-    and ``empty_fileset`` are intentionally excluded so this shim is bit-for-bit
+    Owns the same two reject reasons preimport_decide owns for legacy callers
+    (``audio_corrupt``, ``bad_audio_hash``). ``nested_layout`` and
+    ``empty_fileset`` are intentionally excluded so this shim is bit-for-bit
     backward compatible with pre-U3 callers (preview filters nested itself;
-    auto path never checked file count). U6 wires the full ``preimport_decide``
-    into the importer where the broader gate set is correct.
+    auto path never checked file count).
+
+    Quality decisions (spectral / codec rank / provisional lossless) are NOT
+    made here. The importer's evidence pipeline
+    (``full_pipeline_decision_from_evidence``) is the single decider for
+    quality — the same function the album test set pins. Re-litigating
+    spectral here bypasses the FLAC provisional pathway and violates
+    evidence-set parity.
     """
     if measurement.audio_corrupt:
         n = len(measurement.corrupt_files)
@@ -828,29 +794,6 @@ def _legacy_preimport_decision(
                 f"track {track}"
             ),
         )
-    ds = measurement.download_spectral
-    if ds is not None:
-        existing_cliff_bitrate = (
-            measurement.existing_spectral.bitrate_kbps
-            if measurement.existing_spectral is not None else None
-        )
-        verdict = spectral_import_decision(
-            ds.grade, ds.bitrate_kbps,
-            existing_cliff_bitrate,
-            existing_min_bitrate=measurement.existing_min_bitrate,
-        )
-        if verdict == "reject":
-            effective_existing = (
-                existing_cliff_bitrate or measurement.existing_min_bitrate or 0
-            )
-            return PreimportDecision(
-                decision="reject",
-                reason="spectral_reject",
-                detail=(
-                    f"spectral {ds.bitrate_kbps}kbps <= existing "
-                    f"{effective_existing}kbps"
-                ),
-            )
     return PreimportDecision(decision="accept")
 
 
@@ -862,13 +805,12 @@ def _apply_legacy_denylist_side_effects(
     request_id: int | None,
     usernames: set[str] | None,
 ) -> None:
-    """Denylist side effects preserved during the U3 → U6 transition.
+    """Denylist side effects for the legacy preimport gate shim.
 
-    Bad-hash and spectral-reject scenarios denylist the Soulseek users who
-    served the bad source so the search executor doesn't ask them again on the
-    next attempt. U6 moves this into the shared rejection-finalize helper;
-    until then the shim continues to do it inline to keep behavior identical
-    to pre-U3.
+    Only ``bad_audio_hash`` denylists peers from this gate — that's a
+    source-quality decision the curator/operator has already made. Spectral
+    no longer rejects here (see ``_legacy_preimport_decision``); quality-side
+    denylisting is owned by the importer's evidence-pipeline reject helper.
     """
     if db is None or request_id is None or not usernames:
         return
@@ -886,23 +828,3 @@ def _apply_legacy_denylist_side_effects(
         logger.info(
             f"  Denylisted {usernames} for request {request_id}")
         return
-    if decision.reason == "spectral_reject":
-        dl_bitrate = (
-            measurement.download_spectral.bitrate_kbps
-            if measurement.download_spectral is not None else None
-        )
-        effective_existing = (
-            (measurement.existing_spectral.bitrate_kbps
-             if measurement.existing_spectral is not None else None)
-            or measurement.existing_min_bitrate or 0
-        )
-        for username in usernames:
-            try:
-                db.add_denylist(
-                    request_id, username,
-                    f"spectral: {dl_bitrate}kbps <= existing "
-                    f"{effective_existing}kbps")
-            except Exception:
-                logger.exception(
-                    f"Failed to denylist {username} for request {request_id}")
-        logger.info(f"  Denylisted {usernames} for request {request_id}")

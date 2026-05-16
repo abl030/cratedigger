@@ -475,22 +475,19 @@ class TestPreimportRepairsEvenWhenAudioCheckOff(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
-    """The persisted-spectral fallback must be grade-aware: a stored
-    ``current_spectral_grade='genuine', current_spectral_bitrate=96`` is
-    stale (genuine files have no cliff). Feeding that 96 kbps into
-    spectral_import_decision would let real transcodes be imported as
-    "upgrades". Matches compute_effective_override_bitrate and
-    load_quality_gate_state — only transcode grades are authoritative.
+class TestPreimportGateDoesNotDecideQuality(unittest.TestCase):
+    """The preimport gate is folder/audio-integrity only; quality decisions
+    (spectral vs container, transcode upgrade, etc.) belong to the importer's
+    evidence pipeline (``full_pipeline_decision_from_evidence``). This guards
+    against any future reintroduction of a stale-spectral or container-fallback
+    footgun inside ``run_preimport_gates``.
     """
 
-    def test_genuine_stored_spectral_ignored(self):
+    def test_likely_transcode_alone_does_not_reject_at_preimport(self):
         from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
         db = FakePipelineDB()
-        # Stored grade=genuine, bitrate=96 — a stale leftover from prior runs.
-        # Not a transcode grade, so the bitrate must NOT be used as authoritative.
         db.seed_request(make_request_row(
             id=42,
             min_bitrate=320,
@@ -503,10 +500,9 @@ class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
             album_path="/Beets/NonexistentPath")
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        # Download is a suspect 192kbps transcode. If the fallback used the
-        # stored grade=genuine/bitrate=96 verbatim, 192 > 96 would wrongly
-        # import the transcode. With grade-aware handling, the 96 is ignored
-        # and decision falls back to min_bitrate=320 → reject.
+        # Even when the candidate spectrally looks like a transcode at 192kbps
+        # against an existing 320kbps album, the preimport gate must NOT reject.
+        # The importer's evidence pipeline owns that comparison.
         with patch("lib.preimport.spectral_analyze",
                    return_value=_analyze_result(
                        "likely_transcode", 192, 80.0, 5)), \
@@ -525,11 +521,11 @@ class TestFallbackIgnoresNonTranscodeStoredSpectral(unittest.TestCase):
                 propagate_download_to_existing=False,
             )
 
-        self.assertFalse(
+        self.assertTrue(
             result.valid,
-            "stale genuine stored spectral must not be used to import a 192kbps "
-            "transcode over a 320kbps on-disk album")
-        self.assertEqual(result.scenario, "spectral_reject")
+            "preimport gate must not reject on quality grounds — quality "
+            "decisions live in full_pipeline_decision_from_evidence")
+        self.assertIsNone(result.scenario)
 
 
 class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
