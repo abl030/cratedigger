@@ -759,7 +759,17 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     consistently regardless of caller.
     """
 
-    def test_suspect_download_updates_current_spectral_and_denylists(self):
+    def test_suspect_download_persists_existing_spectral_state(self):
+        """Issue #90: when run_preimport_gates measures spectral on both the
+        download and the existing album, it must persist the *existing*
+        spectral state to ``album_requests.current_spectral_*`` so subsequent
+        attempts can compare evidence-to-evidence.
+
+        Spectral comparison itself is owned by the importer's evidence
+        pipeline (``full_pipeline_decision_from_evidence``) — preimport just
+        accepts and lets the importer decide. Denylisting on quality grounds
+        is the importer's responsibility, not this gate's.
+        """
         from lib.config import CratediggerConfig
         from lib.preimport import run_preimport_gates
 
@@ -794,30 +804,32 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ],
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            with self.assertLogs("cratedigger", level="WARNING") as logs:
-                result = run_preimport_gates(
-                    path="/tmp/download",
-                    mb_release_id="mbid-123",
-                    label="Test Artist - Test Album",
-                    download_filetype="mp3",
-                    download_min_bitrate_bps=320_000,
-                    download_is_vbr=False,
-                    cfg=cfg,
-                    db=db,  # type: ignore[arg-type]
-                    request_id=42,
-                    usernames={"user1"},
-                )
+            result = run_preimport_gates(
+                path="/tmp/download",
+                mb_release_id="mbid-123",
+                label="Test Artist - Test Album",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                usernames={"user1"},
+            )
 
+        # Preimport accepts — quality decisions live in
+        # full_pipeline_decision_from_evidence.
+        self.assertTrue(result.valid)
+        self.assertIsNone(result.scenario)
+        self.assertEqual(len(db.denylist), 0,
+                         "preimport must not denylist on quality grounds")
+
+        # Spectral state for the *existing* album was persisted so the
+        # importer's evidence pipeline can compare spectral-to-spectral on
+        # the next attempt.
         row = db.request(42)
-        self.assertIn("SPECTRAL REJECT", "\n".join(logs.output))
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertEqual(row["current_spectral_bitrate"], 320)
-        self.assertFalse(result.valid)
-        self.assertEqual(result.scenario, "spectral_reject")
-        self.assertEqual(len(db.denylist), 1)
-        self.assertEqual(db.denylist[0].username, "user1")
-        self.assertIn("spectral: 128kbps <= existing 320kbps",
-                      db.denylist[0].reason or "")
 
     def test_stale_album_path_does_not_self_compare(self):
         """Issue #90: when BeetsDB returns an album whose on-disk path has
@@ -890,59 +902,6 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                                 "spectral 128kbps <= existing 128kbps",
                                 "self-compare bug: download compared against "
                                 "a propagated copy of its own spectral")
-
-    def test_stale_album_path_rejects_against_container_bitrate(self):
-        """Issue #90 regression guard: when beets path is stale, the spectral
-        decision must fall back to the container's min_bitrate (320), not
-        the download's own spectral. So a suspect 128kbps download rejects
-        against 320kbps (a real comparison) and the detail string reflects
-        that — not the self-compare "128 <= 128" the old code produced.
-        """
-        from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        beets_info = AlbumInfo(
-            album_id=1,
-            track_count=10,
-            min_bitrate_kbps=320,
-            avg_bitrate_kbps=320,
-            format="MP3",
-            is_cbr=True,
-            album_path="/Beets/Test",
-        )
-        cfg = CratediggerConfig(audio_check_mode="off")
-
-        with patch(
-            "lib.preimport.spectral_analyze",
-            return_value=SimpleNamespace(
-                grade="suspect",
-                estimated_bitrate_kbps=128,
-                suspect_pct=90.0,
-                tracks=[],
-            ),
-        ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-             patch("os.path.isdir", return_value=False):
-            result = run_preimport_gates(
-                path="/tmp/download",
-                mb_release_id="mbid-123",
-                label="Test Artist - Test Album",
-                download_filetype="mp3",
-                download_min_bitrate_bps=320_000,
-                download_is_vbr=False,
-                cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-                usernames={"user1"},
-                propagate_download_to_existing=True,
-            )
-
-        self.assertFalse(result.valid, "suspect 128 < container 320 should reject")
-        self.assertEqual(result.scenario, "spectral_reject")
-        self.assertEqual(result.detail, "spectral 128kbps <= existing 320kbps",
-                         "reject must compare against stale container's 320kbps, "
-                         "not a propagated copy of the download's 128kbps")
 
     def test_stale_album_path_imports_when_download_beats_container(self):
         """Issue #90 correctness: suspect download above the container
@@ -6370,12 +6329,16 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "empty_fileset"), outcomes)
 
-    def test_spectral_reject_evidence_routes_through_self_heal(self):
-        """Suspect candidate spectral with no upgrade over existing → reject.
+    def test_spectral_reject_evidence_routes_through_evidence_pipeline(self):
+        """likely_transcode candidate spectral matches existing transcode
+        spectral → ``full_pipeline_decision_from_evidence`` rejects at
+        stage1_spectral (spectral evidence vs spectral evidence). The
+        importer routes the reject through ``_reject_import_from_evidence_decision``;
+        beets never runs and the download_log records the rejection.
 
-        likely_transcode at 128kbps vs an existing transcode at the same band
-        — ``spectral_import_decision`` returns 'reject', preimport_decide
-        emits a reject(reason=spectral_reject), self-heal fires."""
+        Spectral comparison lives in the full pipeline (the same function
+        the album test set pins) — not in ``preimport_decide``, which only
+        owns folder/audio-integrity facts."""
         from lib.quality import AlbumQualityEvidenceFile
 
         db = FakePipelineDB()
@@ -6429,14 +6392,10 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertIn("spectral_reject", result.message or "")
+        # Beets subprocess NEVER ran — evidence pipeline rejected upstream.
         self.assertEqual(ext.run.call_count, 0)
-        row = db.request(45)
-        self.assertEqual(row["status"], "wanted")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "spectral_reject"), outcomes)
-        # Source-quality reject — peer denylisted (5-strikes rule applies).
-        self.assertEqual(len(db.denylist), 1)
-        self.assertEqual(db.denylist[0].username, "alice")
 
 
 # ---------------------------------------------------------------------------
@@ -6722,16 +6681,18 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
     def test_boc_geogaddi_suspect_96k_persists_evidence_and_importer_rejects(self):
         """Production BoC bug: suspect 96kbps MP3 download vs existing 192kbps.
 
+        Preview collects facts via ``measure_preimport_state`` and runs the
+        harness (which measures spectral as suspect@96kbps), then persists
+        evidence. The importer reads the persisted evidence and routes it
+        through ``full_pipeline_decision_from_evidence``. The candidate is
+        a clear codec-rank downgrade (MP3 96 vs existing MP3 192) — the
+        full pipeline returns ``downgrade`` and the importer rejects via
+        the evidence pipeline.
+
         Pre-fix: preview's legacy shim ran ``_legacy_preimport_decision``,
         returned ``spectral_reject``, early-returned without persisting,
         importer's front-gate then fired ``evidence_persist_failed`` and
         re-queued forever.
-
-        Post-fix: preview collects facts via ``measure_preimport_state``,
-        runs the harness (which also measures spectral as suspect@96kbps),
-        persists evidence, importer's ``preimport_decide`` reads the
-        persisted spectral facts and rejects with ``spectral_reject``.
-        Self-heal: request → wanted.
         """
         from lib.preimport import PreimportMeasurement
         from lib.quality import (
@@ -6864,14 +6825,15 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 )
 
             self.assertFalse(result.success)
-            self.assertIn("spectral_reject", result.message or "")
+            # The full pipeline returns ``downgrade`` for this codec-rank
+            # comparison (MP3 96 vs MP3 192); the importer rejects via the
+            # evidence pipeline rather than reinventing the comparison.
+            self.assertIn("downgrade", result.message or "")
             # Beets NEVER ran.
             self.assertEqual(ext.run.call_count, 0)
-            # Self-heal: request → wanted.
-            self.assertEqual(db.request(42)["status"], "wanted")
-            # download_log rejection scenario.
+            # download_log rejection scenario reflects the actual decision.
             outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
-            self.assertIn(("rejected", "spectral_reject"), outcomes)
+            self.assertIn(("rejected", "downgrade"), outcomes)
 
     def test_clean_upgrade_persists_evidence_and_importer_accepts(self):
         """Happy path: suspect spectral but a clear bitrate upgrade.

@@ -134,42 +134,57 @@ class TestSpectralGateTrigger(unittest.TestCase):
 
 
 class TestSpectralImportDecision(unittest.TestCase):
-    """Test pre-import spectral decision (MP3/CBR path)."""
+    """Test pre-import spectral decision (MP3/CBR path).
+
+    Spectral compares to spectral evidence only — never to container bitrate.
+    Absence of an existing spectral measurement means "we haven't measured it
+    yet", not "it's genuine". The decision returns import_no_exist when only
+    one side has spectral evidence.
+    """
 
     CASES = [
-        # desc, grade, bitrate, existing_spectral, existing_min, expected
-        ("genuine imports", "genuine", None, None, None, "import"),
-        ("genuine ignores bitrates", "genuine", 128, 256, None, "import"),
-        ("marginal imports", "marginal", 192, 256, None, "import"),
-        ("marginal no bitrates", "marginal", None, None, None, "import"),
-        ("suspect equal rejects", "suspect", 128, 128, None, "reject"),
-        ("suspect worse rejects", "suspect", 96, 128, None, "reject"),
-        ("likely transcode equal rejects", "likely_transcode", 160, 160, None, "reject"),
-        ("suspect better upgrades", "suspect", 192, 128, None, "import_upgrade"),
-        ("likely transcode better upgrades", "likely_transcode", 192, 96, None, "import_upgrade"),
-        ("suspect no existing zero", "suspect", 128, 0, None, "import_no_exist"),
-        ("suspect no existing none", "suspect", 128, None, None, "import_no_exist"),
-        ("likely transcode no existing", "likely_transcode", 96, None, None, "import_no_exist"),
-        ("suspect no new no existing", "suspect", None, None, None, "import_no_exist"),
-        ("suspect no new with existing", "suspect", None, 128, None, "import"),
-        ("fallback rejects", "likely_transcode", 96, None, 128, "reject"),
-        ("fallback upgrades", "suspect", 192, None, 128, "import_upgrade"),
-        ("spectral beats fallback", "suspect", 192, 128, 64, "import_upgrade"),
-        ("no spectral or container existing", "likely_transcode", 96, None, None, "import_no_exist"),
+        # desc, grade, bitrate, existing_spectral, expected
+        ("genuine imports", "genuine", None, None, "import"),
+        ("genuine ignores bitrates", "genuine", 128, 256, "import"),
+        ("marginal imports", "marginal", 192, 256, "import"),
+        ("marginal no bitrates", "marginal", None, None, "import"),
+        ("suspect equal rejects", "suspect", 128, 128, "reject"),
+        ("suspect worse rejects", "suspect", 96, 128, "reject"),
+        ("likely transcode equal rejects", "likely_transcode", 160, 160, "reject"),
+        ("suspect better upgrades", "suspect", 192, 128, "import_upgrade"),
+        ("likely transcode better upgrades", "likely_transcode", 192, 96, "import_upgrade"),
+        ("suspect no existing zero", "suspect", 128, 0, "import_no_exist"),
+        ("suspect no existing none", "suspect", 128, None, "import_no_exist"),
+        ("likely transcode no existing", "likely_transcode", 96, None, "import_no_exist"),
+        ("suspect no new no existing", "suspect", None, None, "import_no_exist"),
+        ("suspect no new with existing", "suspect", None, 128, "import"),
+        ("no spectral or container existing", "likely_transcode", 96, None, "import_no_exist"),
     ]
 
     def test_spectral_import_decisions(self):
-        for desc, grade, bitrate, existing_spectral, existing_min, expected in self.CASES:
+        for desc, grade, bitrate, existing_spectral, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(
                     spectral_import_decision(
                         grade,
                         bitrate,
                         existing_spectral,
-                        existing_min_bitrate=existing_min,
                     ),
                     expected,
                 )
+
+    def test_signature_has_no_container_fallback(self):
+        """Invariant: spectral_import_decision must compare spectral to
+        spectral. The signature must not accept ``existing_min_bitrate`` —
+        that footgun produces cross-evidence comparisons (e.g. a 160kbps
+        spectral cliff being rejected by a 320kbps MP3 container nominal
+        bitrate with no spectral measured)."""
+        import inspect
+        sig = inspect.signature(spectral_import_decision)
+        self.assertNotIn(
+            "existing_min_bitrate", sig.parameters,
+            "spectral_import_decision must not accept a container-bitrate "
+            "fallback parameter — see lib/quality.py for the rationale")
 
 
 # ============================================================================
@@ -265,8 +280,55 @@ class TestPreimportDecide(unittest.TestCase):
         self.assertEqual(result.decision, "reject")
         self.assertEqual(result.reason, "empty_fileset")
 
-    def test_spectral_reject_no_upgrade(self):
-        """likely_transcode + no improvement over existing → reject."""
+    # ------------------------------------------------------------------
+    # Spectral is NOT a preimport gate.
+    #
+    # The preimport gate owns folder/audio-integrity facts only:
+    # audio_corrupt, bad_audio_hash, nested_layout, empty_fileset.
+    # Spectral, codec rank, V0 probe, provisional lossless, verified
+    # lossless, and quality-gate decisions all live in
+    # ``full_pipeline_decision_from_evidence`` (the same function the
+    # album test set in tests/test_quality_classification.py pins).
+    #
+    # Previously, preimport_decide ran its own narrower spectral
+    # comparison that fell back to ``existing_min_bitrate`` (container
+    # bitrate) when ``existing_spectral_bitrate`` was None — violating
+    # evidence-set parity ("a 320 kbps MP3 container with no spectral
+    # run on it" outranking "a freshly measured 160 kbps cliff") AND
+    # short-circuiting the provisional-lossless pathway for FLAC sources
+    # before the full pipeline could fire. Both regressions are now
+    # impossible by construction: there is no spectral branch here.
+    # ------------------------------------------------------------------
+
+    def test_spectral_suspect_with_existing_lossy_no_spectral_accepts(self):
+        """Request 4514 shape: candidate FLAC source measured suspect at
+        160kbps cliff vs existing MP3 320 container with no spectral.
+        Preimport must NOT reject — that's the full pipeline's call."""
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            download_spectral=("suspect", 160),
+            existing_spectral=None,
+            existing_min_bitrate=320,
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "accept")
+        self.assertIsNone(result.reason)
+
+    def test_spectral_likely_transcode_with_lossy_no_spectral_accepts(self):
+        """likely_transcode candidate vs existing MP3 320 container with
+        no spectral — still accept. Evidence-set parity invariant."""
+        from lib.quality import preimport_decide
+        m = self._measurement(
+            download_spectral=("likely_transcode", 128),
+            existing_spectral=None,
+            existing_min_bitrate=320,
+        )
+        result = preimport_decide(m, self._cfg(), None)
+        self.assertEqual(result.decision, "accept")
+
+    def test_spectral_likely_transcode_with_lossless_existing_accepts(self):
+        """Even with existing spectral evidence, preimport accepts —
+        the full pipeline owns the quality comparison."""
         from lib.quality import preimport_decide
         m = self._measurement(
             download_spectral=("likely_transcode", 128),
@@ -274,9 +336,7 @@ class TestPreimportDecide(unittest.TestCase):
             existing_min_bitrate=320,
         )
         result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "reject")
-        self.assertEqual(result.reason, "spectral_reject")
-        self.assertIn("128", result.detail or "")
+        self.assertEqual(result.decision, "accept")
 
     def test_spectral_upgrade_accepts(self):
         """suspect grade BUT bitrate improves on existing → accept."""
@@ -310,6 +370,21 @@ class TestPreimportDecide(unittest.TestCase):
         )
         result = preimport_decide(m, self._cfg(), None)
         self.assertEqual(result.decision, "accept")
+
+    def test_preimport_never_emits_spectral_reject(self):
+        """Reason taxonomy: preimport_decide must never return
+        ``reason='spectral_reject'``. Quality decisions live elsewhere."""
+        import inspect
+        from lib import quality
+        src = inspect.getsource(quality.preimport_decide)
+        self.assertNotIn(
+            "spectral_reject", src,
+            "preimport_decide must not emit spectral_reject — "
+            "spectral is owned by full_pipeline_decision_from_evidence")
+        self.assertNotIn(
+            "spectral_import_decision", src,
+            "preimport_decide must not call spectral_import_decision — "
+            "that's a quality decision, not a preimport gate")
 
     def test_decision_function_has_no_side_effect_imports(self):
         """preimport_decide is pure: no db, denylist, filesystem references."""
@@ -1053,8 +1128,7 @@ class TestSpectralContext(unittest.TestCase):
             grade="suspect", bitrate=192,
             existing_spectral_bitrate=128)
         result = spectral_import_decision(
-            ctx.grade, ctx.bitrate, ctx.existing_spectral_bitrate or 0,
-            existing_min_bitrate=ctx.existing_min_bitrate)
+            ctx.grade, ctx.bitrate, ctx.existing_spectral_bitrate or 0)
         self.assertEqual(result, "import_upgrade")
 
     def test_no_check_needed(self):

@@ -2195,20 +2195,30 @@ def preimport_decide(
     cfg: "QualityRankConfig",
     existing_evidence: "AlbumQualityEvidence | None" = None,
 ) -> PreimportDecision:
-    """Decide accept/reject from a measurement + cfg + existing-album evidence.
+    """Decide accept/reject for the *pre-import folder/audio gate*.
 
     Pure function — no DB writes, no denylist mutations, no filesystem
-    side effects. Mirror of the decision branches that previously lived inline
-    inside ``lib.preimport.run_preimport_gates`` (U3 split).
+    side effects. Owns only the facts ``full_pipeline_decision_from_evidence``
+    does not model: "is this folder even usable to run a quality decision
+    against?". Quality (spectral, codec rank, V0 probe, provisional lossless,
+    verified lossless, quality-gate) is owned by
+    ``full_pipeline_decision_from_evidence`` — the same function the album
+    test set in ``tests/test_quality_classification.py`` pins.
 
-    Decision order matches the legacy gate pipeline:
+    Decision order:
       1. ``audio_corrupt`` — any decode failure → reject.
       2. ``bad_audio_hash`` — track matches a curator-reported bad hash → reject.
       3. ``nested_layout`` — audio in subdirectories → reject.
       4. ``empty_fileset`` — no audio files found → reject.
-      5. ``spectral_reject`` — ``spectral_import_decision`` says "reject" → reject.
 
-    Everything else is ``accept``.
+    Everything else is ``accept`` — even when spectral evidence is present.
+    Spectral comparisons live in ``full_pipeline_decision`` /
+    ``full_pipeline_decision_from_evidence``; routing them through this gate
+    bypasses the FLAC provisional-lossless pathway and violates evidence-set
+    parity (it would let an existing MP3 320 container with no spectral run
+    outrank a freshly measured candidate cliff). The ``existing_evidence``
+    parameter is retained for callers that still pass it; this gate ignores
+    it.
     """
     # 1. audio integrity
     if measurement.audio_corrupt:
@@ -2247,44 +2257,16 @@ def preimport_decide(
             detail="no audio files found",
         )
 
-    # 5. spectral
-    download_spectral = measurement.download_spectral
-    existing_spectral = measurement.existing_spectral
-    if download_spectral is not None:
-        dl_grade = download_spectral.grade
-        dl_bitrate = download_spectral.bitrate_kbps
-        existing_cliff_bitrate = (
-            existing_spectral.bitrate_kbps
-            if existing_spectral is not None else None
-        )
-        verdict = spectral_import_decision(
-            dl_grade,
-            dl_bitrate,
-            existing_cliff_bitrate,
-            existing_min_bitrate=measurement.existing_min_bitrate,
-        )
-        if verdict == "reject":
-            effective_existing = (
-                existing_cliff_bitrate or measurement.existing_min_bitrate or 0
-            )
-            return PreimportDecision(
-                decision="reject",
-                reason="spectral_reject",
-                detail=(
-                    f"spectral {dl_bitrate}kbps <= existing "
-                    f"{effective_existing}kbps"
-                ),
-            )
-
     return PreimportDecision(decision="accept")
 
 
-def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate,
-                             existing_min_bitrate=None):
+def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate):
     """Decide whether to import a download based on spectral analysis.
 
-    Called in process_completed_album() for non-FLAC downloads after
-    spectral analysis runs on the downloaded files.
+    Pure comparison of spectral evidence against spectral evidence. Container
+    bitrate is intentionally NOT consulted — that violates evidence-set parity
+    (absence of an existing spectral measurement is not evidence the existing
+    file is genuine, only that we haven't measured it yet).
 
     Returns one of:
         "import"          — spectral says genuine/marginal, proceed
@@ -2296,16 +2278,12 @@ def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral
         spectral_grade:             "genuine" | "marginal" | "suspect" | "likely_transcode"
         spectral_bitrate:           estimated bitrate from cliff detection (kbps), or None
         existing_spectral_bitrate:  spectral estimate of what's already in beets (kbps), or 0/None
-        existing_min_bitrate:       container bitrate from beets (kbps), fallback when
-                                    existing files are genuine (no spectral estimate)
     """
     if spectral_grade not in ("suspect", "likely_transcode"):
         return "import"
 
     new_q = spectral_bitrate or 0
-    # Fall back to container bitrate when existing files have no spectral estimate
-    # (genuine files have no cliff → no estimated bitrate)
-    existing_q = existing_spectral_bitrate or existing_min_bitrate or 0
+    existing_q = existing_spectral_bitrate or 0
 
     if new_q and existing_q and new_q <= existing_q:
         return "reject"

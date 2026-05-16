@@ -721,6 +721,56 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertTrue(r["keep_searching"])
 
 
+    def test_live_mountain_goats_flux_flac_source_vs_lossy_no_spectral(self):
+        """Mountain Goats - The Life of the World in Flux / AnderMachines.
+
+        Request 4514, 2026-05-16 14:47 AWST. FLAC source with a suspect
+        spectral cliff at 160 kbps (one-track cliff, 69% suspect grade).
+        Lossless-source V0 probe: avg=211, min=198, median=214 — well
+        above the V0 floor, so a strong provisional-lossless signal.
+
+        Existing in beets: MP3 320 CBR, no spectral measurement.
+
+        Pre-fix bug: the importer's ``preimport_decide`` ran a parallel
+        spectral comparison that fell back to the existing container
+        bitrate (320 kbps) when no existing spectral was measured. The
+        candidate's 160 kbps cliff was compared against 320 kbps and
+        rejected as ``spectral_reject`` — bypassing the full pipeline's
+        FLAC provisional-lossless pathway entirely.
+
+        Correct behavior: provisional_lossless_upgrade. The full pipeline
+        owns spectral, codec rank, and the provisional lossless path —
+        ``preimport_decide`` only owns folder/audio-integrity facts.
+        """
+        r = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            converted_count=13,
+            post_conversion_min_bitrate=198,
+            candidate_v0_probe_avg=211,
+            candidate_v0_probe_min=198,
+            existing_min_bitrate=320,
+            existing_avg_bitrate=320,
+            existing_format="MP3",
+            existing_is_cbr=True,
+        )
+
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_flac",
+                         "FLAC skips the preimport spectral gate")
+        # Stage 1 is informational; existing has no spectral → import_no_exist
+        # (NOT 'reject' — spectral compares to spectral, not container).
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
+        # Stage 2 owns the FLAC provisional-lossless pathway. The V0 probe
+        # (lossless-source min=198) outranks the suspect spectral cliff.
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["final_status"], "wanted")
+
     def test_heretic_pride_one_bad_track_infinite_requeue(self):
         """BUG: 13/14 tracks at 320kbps + 1 track at 192kbps → infinite requeue.
 
@@ -766,6 +816,256 @@ class TestLiveBugReproductions(unittest.TestCase):
         # BUG: keep_searching=True means it will try AGAIN → infinite loop
         # When fixed, system should detect same-quality loop and accept
         self.assertTrue(r2["keep_searching"])
+
+
+class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
+    """Every TestLiveBugReproductions scenario must produce the same outcome
+    when run through ``full_pipeline_decision_from_evidence`` — the function
+    the importer actually calls in production.
+
+    The simulator (``full_pipeline_decision``) and the evidence pipeline
+    (``full_pipeline_decision_from_evidence``) are two entry points into
+    the SAME decision logic. Quality decisions live in exactly one place;
+    the simulator is a thin flat-kwargs adapter. This class proves the
+    parity contract — if you can describe an album scenario with the
+    simulator, you can describe it as evidence rows, and the outcome
+    matches.
+
+    See CLAUDE.md § "Quality decisions live in one place" for the rule.
+    """
+
+    def _build_candidate(
+        self,
+        *,
+        is_flac: bool,
+        min_bitrate: int,
+        is_cbr: bool,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+        post_conversion_min_bitrate: int | None = None,
+        candidate_v0_probe_avg: int | None = None,
+        candidate_v0_probe_min: int | None = None,
+    ):
+        """Build an ``AlbumQualityEvidence`` candidate row matching the
+        simulator's flat-kwargs shape."""
+        from datetime import datetime, timezone
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+        )
+
+        # For a FLAC source post-conversion, the candidate measurement
+        # reflects the V0 output the importer compares against.
+        if is_flac and post_conversion_min_bitrate is not None:
+            fmt = "MP3"
+            container = "flac"
+            codec = "flac"
+            storage_format = "flac"
+            measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=post_conversion_min_bitrate,
+                avg_bitrate_kbps=candidate_v0_probe_avg or post_conversion_min_bitrate,
+                median_bitrate_kbps=candidate_v0_probe_avg or post_conversion_min_bitrate,
+                format=fmt,
+                is_cbr=False,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+                was_converted_from="flac",
+            )
+        elif is_flac:
+            container = codec = "flac"
+            storage_format = "flac"
+            measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate or 900,
+                avg_bitrate_kbps=min_bitrate or 900,
+                median_bitrate_kbps=min_bitrate or 900,
+                format="FLAC",
+                is_cbr=False,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+            )
+        else:
+            container = codec = "mp3"
+            storage_format = "mp3 v0" if not is_cbr else "mp3 320"
+            measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=min_bitrate,
+                median_bitrate_kbps=min_bitrate,
+                format="MP3",
+                is_cbr=is_cbr,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+            )
+
+        v0_metric = None
+        if candidate_v0_probe_avg is not None or candidate_v0_probe_min is not None:
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=candidate_v0_probe_min,
+                avg_bitrate_kbps=candidate_v0_probe_avg,
+                median_bitrate_kbps=candidate_v0_probe_avg,
+                source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+                source_provenance="neutral_album_quality_evidence",
+            )
+
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
+                owner_id=1,
+            ),
+            measurement=measurement,
+            measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            files=[AlbumQualityEvidenceFile(
+                relative_path=f"01.{container}",
+                size_bytes=1, mtime_ns=1,
+                extension=container, container=container, codec=codec,
+            )],
+            codec=codec,
+            container=container,
+            storage_format=storage_format,
+            v0_metric=v0_metric,
+        )
+
+    def _build_current(
+        self,
+        *,
+        min_bitrate: int | None,
+        avg_bitrate: int | None = None,
+        format: str = "MP3",
+        is_cbr: bool = False,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+    ):
+        if min_bitrate is None:
+            return None
+        from datetime import datetime, timezone
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
+            AlbumQualityEvidenceOwner,
+            AudioQualityMeasurement,
+        )
+
+        container = format.lower().split()[0]
+        return AlbumQualityEvidence(
+            owner=AlbumQualityEvidenceOwner(
+                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
+                owner_id=1,
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
+                median_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
+                format=format,
+                is_cbr=is_cbr,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+            ),
+            measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            files=[AlbumQualityEvidenceFile(
+                relative_path=f"01.{container}",
+                size_bytes=1, mtime_ns=1,
+                extension=container, container=container, codec=container,
+            )],
+            codec=container,
+            container=container,
+            storage_format=format.lower(),
+        )
+
+    def test_mountain_goats_flux_provisional_lossless_via_evidence(self):
+        """Request 4514 shape, but routed through the production decider."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="suspect",
+            spectral_bitrate=160,
+            post_conversion_min_bitrate=198,
+            candidate_v0_probe_avg=211,
+            candidate_v0_probe_min=198,
+        )
+        current = self._build_current(
+            min_bitrate=320, avg_bitrate=320,
+            format="MP3", is_cbr=True,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade",
+                         "evidence pipeline must reach the same decision as "
+                         "the simulator — FLAC source + V0 probe + existing "
+                         "lossy = provisional_lossless_upgrade")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_mountain_goats_bride_provisional_via_evidence(self):
+        """test_live_mountain_goats_bride_first_provisional_source_import
+        — same scenario through the evidence pipeline."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="likely_transcode",
+            post_conversion_min_bitrate=214,
+            candidate_v0_probe_avg=214,
+        )
+        current = self._build_current(
+            min_bitrate=320, avg_bitrate=320,
+            format="MP3", is_cbr=True,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                import_mode="auto",
+                verified_lossless_target="opus 128",
+            ),
+        )
+
+        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertTrue(r["imported"])
+
+    def test_heretic_pride_downgrade_via_evidence(self):
+        """test_heretic_pride second-pass downgrade case via the evidence
+        pipeline — MP3 192 vs existing MP3 192."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=192, is_cbr=False,
+            spectral_grade="genuine",
+        )
+        current = self._build_current(
+            min_bitrate=192, avg_bitrate=192,
+            format="MP3", is_cbr=False,
+            spectral_grade="genuine",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
 
 
 # ============================================================================
