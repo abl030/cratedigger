@@ -5571,5 +5571,221 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             self.assertEqual(second_claim.status, "running")
 
 
+class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
+    """Integration slice for the preview-side measurement_failed entry point.
+
+    Validates the four self-healing side effects own the same sub-helper as
+    the importer-side ``_record_rejection_and_maybe_requeue``:
+
+      (a) ``download_log`` row written with ``outcome='measurement_failed'``
+      (b) ``source_denylist`` write when the per-user rule applies
+      (c) parent request transitioned to ``status='wanted'`` via
+          ``transitions.finalize_request``
+      (d) ``import_jobs.status='failed'`` via ``mark_import_job_failed``
+
+    Also covers the ``request_not_found`` no-finalize subcase — the helper
+    writes the log + marks the job failed but skips the request transition
+    (there is nothing to finalize).
+    """
+
+    def test_measurement_failed_happy_path_fires_all_four_side_effects(self):
+        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            artist_name="Test", album_title="Album",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            payload=automation_import_payload(),
+        )
+        # Move job to 'running' to mimic an importer claim — or rather,
+        # the preview worker scenario where the job was claimed by preview.
+        # mark_import_job_failed accepts queued or running.
+
+        payload = MeasurementFailure(
+            reason="snapshot_stale",
+            detail="audio snapshot mismatch after retry",
+            source_path="/Incoming/auto-import/Test - Album",
+        )
+
+        _record_preview_measurement_failed(
+            cast(Any, db),
+            request_id=42,
+            import_job_id=job.id,
+            payload=payload,
+            denylist_username="bob",
+        )
+
+        # (a) download_log row
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(
+            self, 0,
+            outcome="measurement_failed",
+            request_id=42,
+            beets_scenario="measurement_failed",
+            beets_detail="audio snapshot mismatch after retry",
+        )
+        # validation_result is a JSON string carrying the MeasurementFailure
+        log = db.download_logs[0]
+        self.assertIsNotNone(log.validation_result)
+        import json as _json
+        decoded = _json.loads(log.validation_result)
+        self.assertEqual(decoded["reason"], "snapshot_stale")
+        self.assertEqual(
+            decoded["source_path"],
+            "/Incoming/auto-import/Test - Album",
+        )
+
+        # (b) denylist write
+        self.assertEqual(len(db.denylist), 1)
+        self.assertEqual(db.denylist[0].request_id, 42)
+        self.assertEqual(db.denylist[0].username, "bob")
+
+        # (c) request → wanted
+        self.assertEqual(db.request(42)["status"], "wanted")
+
+        # (d) job → failed
+        job_row = db.get_import_job(job.id)
+        assert job_row is not None
+        self.assertEqual(job_row.status, "failed")
+
+    def test_request_not_found_subcase_skips_finalize(self):
+        """request_id=None: helper writes the log + marks job failed but
+        does NOT call finalize_request (there is no parent to finalize).
+        Denylist is also skipped because it FK-references a request_id."""
+        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        # No request seeded. Enqueue an orphan job (request_id is set on
+        # the job itself but no album_requests row matches).
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=None,
+            payload=automation_import_payload(),
+        )
+
+        payload = MeasurementFailure(
+            reason="request_not_found",
+            detail="album_request 999 not found",
+            source_path="",
+        )
+
+        # Spy on finalize_request to prove it is NOT called.
+        with patch("lib.transitions.finalize_request") as mock_finalize:
+            _record_preview_measurement_failed(
+                cast(Any, db),
+                request_id=None,
+                import_job_id=job.id,
+                payload=payload,
+                denylist_username="bob",
+            )
+            mock_finalize.assert_not_called()
+
+        # download_log row still written (carrying NULL request_id).
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(
+            self, 0,
+            outcome="measurement_failed",
+            request_id=None,
+            beets_scenario="measurement_failed",
+        )
+
+        # No denylist (FK requires request_id).
+        self.assertEqual(len(db.denylist), 0)
+
+        # Job → failed.
+        job_row = db.get_import_job(job.id)
+        assert job_row is not None
+        self.assertEqual(job_row.status, "failed")
+
+    def test_source_vanished_no_denylist_when_username_unknown(self):
+        """source_vanished + no source_username → no denylist write.
+        Request and job still finalize normally."""
+        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, status="downloading"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=7,
+            payload=automation_import_payload(),
+        )
+
+        payload = MeasurementFailure(
+            reason="source_vanished",
+            detail="ffmpeg ENOENT",
+            source_path="/Incoming/auto-import/Album",
+        )
+        _record_preview_measurement_failed(
+            cast(Any, db),
+            request_id=7,
+            import_job_id=job.id,
+            payload=payload,
+            denylist_username=None,
+        )
+
+        self.assertEqual(len(db.denylist), 0)
+        self.assertEqual(db.request(7)["status"], "wanted")
+        job_row = db.get_import_job(job.id)
+        assert job_row is not None
+        self.assertEqual(job_row.status, "failed")
+        # download_log carries the typed payload as JSON.
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "measurement_failed")
+        import json as _json
+        decoded = _json.loads(log.validation_result)
+        self.assertEqual(decoded["reason"], "source_vanished")
+
+    def test_importer_side_record_rejection_still_works(self):
+        """Regression guard: refactoring _record_rejection_and_maybe_requeue
+        into delegation must NOT change importer-side behavior. The
+        existing DownloadInfo-based entry point continues to write a
+        download_log row, transition the request to wanted, and record an
+        attempt — same as before U4."""
+        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+        from lib.quality import DownloadInfo
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+
+        _record_rejection_and_maybe_requeue(
+            cast(Any, db),
+            99,
+            DownloadInfo(username="alice", filetype="mp3", bitrate=192_000),
+            distance=0.5,
+            scenario="quality_downgrade",
+            detail="bitrate too low",
+            error=None,
+            requeue=True,
+        )
+
+        # Existing behavior: request transitioned, attempt recorded.
+        row = db.request(99)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+        # Download log row written via the shared sub-helper.
+        self.assertEqual(len(db.download_logs), 1)
+        db.assert_log(
+            self, 0,
+            outcome="rejected",
+            soulseek_username="alice",
+            beets_scenario="quality_downgrade",
+            beets_detail="bitrate too low",
+        )
+        # No job-failed call — that's still the caller's responsibility on
+        # the importer path (preserved from pre-U4).
+        # No denylist either (caller does it).
+        self.assertEqual(len(db.denylist), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

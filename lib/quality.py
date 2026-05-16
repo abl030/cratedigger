@@ -2118,6 +2118,50 @@ def preimport_nested_gate(import_mode: str, has_nested_audio: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# MeasurementFailure — U4 wire-boundary type for preview measurement failures
+# ---------------------------------------------------------------------------
+
+MeasurementFailureReason = Literal[
+    "snapshot_stale",          # source folder changed after retry (AE5)
+    "source_vanished",         # ENOENT mid-measure (AE6); also covers
+                               # path-missing pre-claim and force-import
+                               # failed_path-no-longer-on-disk cases
+    "materialization_error",   # tempdir copy / shutil failure during measure
+    "measurement_crashed",     # ffmpeg / sox / mutagen blew up
+    "evidence_persist_failed", # DB write failed after measurement completed
+    "request_not_found",       # parent album_request gone (no-finalize subcase)
+    "missing_release_id",      # request has no mb_release_id
+    "download_log_not_found",  # force/manual UI: download_log row gone
+    "missing_failed_path",     # force/manual UI: download_log lacks failed_path
+]
+
+
+class MeasurementFailure(msgspec.Struct, frozen=True):
+    """Typed wire-boundary payload for preview-side measurement failures.
+
+    Carried through ``import_jobs.preview_result`` (JSONB) and
+    ``download_log.validation_result`` (JSONB). The Recents UI grep-classifies
+    on ``reason`` to render the appropriate badge.
+
+    ``reason`` is a coarse ``Literal`` tag drawn from the
+    ``MeasurementFailureReason`` taxonomy — callers can switch on it
+    without parsing free text. ``detail`` is a short human-readable string
+    for logs and the audit trail; do not parse it. ``source_path`` is the
+    folder/file the measurement attempted, when known (``""`` when the
+    failure happened before any path was resolved — e.g. ``request_not_found``).
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` § "Wire-boundary
+    types" — encode via ``msgspec.json.encode`` / ``msgspec.to_builtins``,
+    decode via ``msgspec.convert``. Strict validation at the boundary catches
+    drift between the Struct's declared taxonomy and what the producer wrote.
+    Mirrors the precedent set by ``lib.beets_album_op.BeetsOpFailure``.
+    """
+    reason: MeasurementFailureReason
+    detail: str
+    source_path: str = ""
+
+
+# ---------------------------------------------------------------------------
 # preimport_decide — U3 pure decision function
 # ---------------------------------------------------------------------------
 

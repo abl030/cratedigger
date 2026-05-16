@@ -14,13 +14,14 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Sequence, TYPE_CHECKING
+from typing import Any, Sequence, TYPE_CHECKING
 
 import msgspec
 
 from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
-                         ImportResult, SpectralMeasurement, V0ProbeEvidence,
+                         ImportResult, MeasurementFailure,
+                         SpectralMeasurement, V0ProbeEvidence,
                          ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          AlbumQualityEvidence,
                          AlbumQualityEvidenceDecisionFacts,
@@ -847,6 +848,86 @@ def _do_mark_done(
     )
 
 
+def _finalize_request_and_log_rejection(
+    db: "PipelineDB",
+    request_id: int | None,
+    log_download_kwargs: dict[str, Any],
+    *,
+    requeue_to_wanted: bool,
+    search_filetype_override: str | None = None,
+    record_validation_attempt: bool = True,
+    import_job_id: int | None = None,
+    import_job_error: str = "",
+    import_job_message: str | None = None,
+    import_job_result: dict[str, Any] | None = None,
+    denylist_username: str | None = None,
+    denylist_reason: str | None = None,
+) -> int:
+    """Sole writer of the four self-healing rejection side effects (U4).
+
+    The single source of truth for "a candidate was rejected; clean up
+    state so the parent request can advance." Both the importer-side
+    ``_record_rejection_and_maybe_requeue`` (with full ``DownloadInfo``
+    context) and the preview-side ``_record_preview_measurement_failed``
+    (without slskd context) delegate here. Grep for this function name to
+    find every call site — there should be exactly two production callers.
+
+    Side effects, in order:
+
+      1. Optional request → ``wanted`` transition via
+         ``transitions.finalize_request`` (skipped when ``request_id is
+         None`` or ``requeue_to_wanted=False``). When the transition
+         fires and ``record_validation_attempt=True``, also bumps the
+         validation attempt counter — matches pre-U4 importer behavior.
+      2. ``download_log`` row write via ``db.log_download(**log_download_kwargs)``.
+         Always fires. Returns the new row id.
+      3. ``source_denylist`` write when ``denylist_username`` is supplied
+         AND ``request_id is not None`` (denylist FK-references a
+         request). The importer-side entry point currently passes None
+         here and handles denylist externally; the preview-side path
+         passes a username when the 5-strikes rule applies.
+      4. ``import_jobs.status='failed'`` via ``mark_import_job_failed``
+         when ``import_job_id`` is supplied. The importer-side caller
+         leaves this to the worker (``scripts/importer.py``) so it
+         continues to pass None here; the preview-side caller fires it
+         so the poll loop's active-import-job guard releases.
+
+    Returns the new ``download_log`` row id. The ``request_not_found``
+    subcase (``request_id is None``) writes the log + marks the job
+    failed but skips finalize_request and denylist.
+    """
+    if requeue_to_wanted and request_id is not None:
+        transition_kwargs: dict[str, object] = {}
+        if search_filetype_override is not None:
+            transition_kwargs["search_filetype_override"] = search_filetype_override
+        transitions.finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_wanted_fields(
+                fields=transition_kwargs),
+        )
+        if record_validation_attempt:
+            db.record_attempt(request_id, "validation")
+
+    download_log_id = db.log_download(
+        request_id=request_id,
+        **log_download_kwargs,
+    )
+
+    if denylist_username and request_id is not None:
+        db.add_denylist(request_id, denylist_username, reason=denylist_reason)
+
+    if import_job_id is not None:
+        db.mark_import_job_failed(
+            import_job_id,
+            error=import_job_error,
+            message=import_job_message,
+            result=import_job_result,
+        )
+
+    return download_log_id
+
+
 def _record_rejection_and_maybe_requeue(
     db: "PipelineDB",
     request_id: int,
@@ -861,60 +942,132 @@ def _record_rejection_and_maybe_requeue(
     search_filetype_override: str | None = None,
     validation_result: str | None = None,
     staged_path: str | None = None,
-) -> None:
-    """Record a rejected import and optionally requeue the request.
+) -> int:
+    """Importer-side rejection entry point.
 
-    When requeue=True (auto-import): transitions to "wanted", records attempt.
-    When requeue=False (force/manual import): only logs to download_log.
+    Builds the ``log_download`` kwargs from ``DownloadInfo`` (slskd context:
+    username, bitrate, spectral, V0 probe, etc.) and delegates to
+    ``_finalize_request_and_log_rejection``. Behavior is preserved from
+    pre-U4: optional requeue-to-wanted with attempt bump, mandatory
+    download_log row, no denylist (caller handles via ``action.denylist``
+    in ``dispatch_import_core``), no job-failed mark (caller in
+    ``scripts/importer.py`` handles it on the outer return).
 
-    Note: denylisting and cooldown are handled by the caller (dispatch_import_core)
-    via action.denylist, not here.
+    When ``requeue=True`` (auto-import): transitions to "wanted", records
+    attempt. When ``requeue=False`` (force/manual import): only logs to
+    download_log.
+
+    Returns the new ``download_log`` row id — captured by the
+    auto-import path for downstream Wrong Matches triage.
     """
-    if requeue:
-        transition_kwargs: dict[str, object] = {}
-        if search_filetype_override is not None:
-            transition_kwargs["search_filetype_override"] = search_filetype_override
-        transitions.finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted_fields(
-                fields=transition_kwargs),
-        )
-        db.record_attempt(request_id, "validation")
+    log_download_kwargs: dict[str, Any] = {
+        "soulseek_username": dl_info.username,
+        "filetype": dl_info.filetype,
+        "beets_distance": distance,
+        "beets_scenario": scenario,
+        "beets_detail": detail,
+        "outcome": outcome_label,
+        "staged_path": staged_path,
+        "error_message": error,
+        "bitrate": dl_info.bitrate,
+        "sample_rate": dl_info.sample_rate,
+        "bit_depth": dl_info.bit_depth,
+        "is_vbr": dl_info.is_vbr,
+        "was_converted": dl_info.was_converted,
+        "original_filetype": dl_info.original_filetype,
+        "slskd_filetype": dl_info.slskd_filetype,
+        "slskd_bitrate": dl_info.slskd_bitrate,
+        "actual_filetype": dl_info.actual_filetype,
+        "actual_min_bitrate": dl_info.actual_min_bitrate,
+        "spectral_grade": (dl_info.download_spectral.grade
+                           if dl_info.download_spectral else None),
+        "spectral_bitrate": (dl_info.download_spectral.bitrate_kbps
+                             if dl_info.download_spectral else None),
+        "existing_min_bitrate": dl_info.existing_min_bitrate,
+        "existing_spectral_bitrate": (dl_info.current_spectral.bitrate_kbps
+                                      if dl_info.current_spectral else None),
+        "import_result": dl_info.import_result,
+        "validation_result": (validation_result
+                              if validation_result is not None
+                              else dl_info.validation_result),
+    }
+    log_download_kwargs.update(_v0_probe_log_fields(dl_info))
+    return _finalize_request_and_log_rejection(
+        db,
+        request_id,
+        log_download_kwargs,
+        requeue_to_wanted=requeue,
+        search_filetype_override=search_filetype_override,
+        record_validation_attempt=True,
+        # Importer-side leaves job-failed + denylist to its caller.
+        import_job_id=None,
+        denylist_username=None,
+    )
 
-    db.log_download(
-        request_id=request_id,
-        soulseek_username=dl_info.username,
-        filetype=dl_info.filetype,
-        beets_distance=distance,
-        beets_scenario=scenario,
-        beets_detail=detail,
-        outcome=outcome_label,
-        staged_path=staged_path,
-        error_message=error,
-        bitrate=dl_info.bitrate,
-        sample_rate=dl_info.sample_rate,
-        bit_depth=dl_info.bit_depth,
-        is_vbr=dl_info.is_vbr,
-        was_converted=dl_info.was_converted,
-        original_filetype=dl_info.original_filetype,
-        slskd_filetype=dl_info.slskd_filetype,
-        slskd_bitrate=dl_info.slskd_bitrate,
-        actual_filetype=dl_info.actual_filetype,
-        actual_min_bitrate=dl_info.actual_min_bitrate,
-        spectral_grade=dl_info.download_spectral.grade if dl_info.download_spectral else None,
-        spectral_bitrate=(
-            dl_info.download_spectral.bitrate_kbps if dl_info.download_spectral else None
-        ),
-        existing_min_bitrate=dl_info.existing_min_bitrate,
-        existing_spectral_bitrate=(
-            dl_info.current_spectral.bitrate_kbps if dl_info.current_spectral else None
-        ),
-        import_result=dl_info.import_result,
-        validation_result=(validation_result
-                           if validation_result is not None
-                           else dl_info.validation_result),
-        **_v0_probe_log_fields(dl_info),
+
+def _record_preview_measurement_failed(
+    db: "PipelineDB",
+    *,
+    request_id: int | None,
+    import_job_id: int,
+    payload: MeasurementFailure,
+    denylist_username: str | None = None,
+    denylist_reason: str | None = None,
+) -> int:
+    """Preview-side measurement_failed entry point (U4).
+
+    Called when preview cannot produce evidence — measurement crashed, the
+    source folder vanished, the snapshot went stale after retry, or one of
+    the pre-claim sanity checks failed (request_not_found, missing MBID,
+    etc.). Has no slskd context because no transfer is in flight; the
+    ``download_log`` row carries NULL for username/bitrate/filetype/spectral
+    columns and the typed ``MeasurementFailure`` payload as its
+    ``validation_result`` JSONB.
+
+    Delegates to ``_finalize_request_and_log_rejection`` for the four
+    self-healing side effects:
+
+      * ``download_log`` row written with ``outcome='measurement_failed'``,
+        ``beets_scenario='measurement_failed'``, and the
+        ``MeasurementFailure`` JSON as ``validation_result``.
+      * Parent request → ``wanted`` via ``transitions.finalize_request``
+        (skipped when ``request_id is None`` — the
+        ``reason='request_not_found'`` subcase).
+      * Optional denylist write when ``denylist_username`` is supplied.
+      * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
+        the poll loop's active-import-job guard releases on the next tick.
+
+    Returns the new ``download_log`` row id.
+    """
+    requeue = request_id is not None
+    validation_json = msgspec.json.encode(payload).decode("utf-8")
+    log_download_kwargs: dict[str, Any] = {
+        # NULL for all slskd-only fields — preview has no transfer context.
+        "soulseek_username": None,
+        "filetype": None,
+        "beets_distance": None,
+        "beets_scenario": "measurement_failed",
+        "beets_detail": payload.detail,
+        "outcome": "measurement_failed",
+        "staged_path": payload.source_path or None,
+        "error_message": None,
+        "validation_result": validation_json,
+    }
+    job_result = msgspec.to_builtins(payload)
+    assert isinstance(job_result, dict), \
+        "msgspec.to_builtins on a Struct returns a dict"
+    return _finalize_request_and_log_rejection(
+        db,
+        request_id,
+        log_download_kwargs,
+        requeue_to_wanted=requeue,
+        record_validation_attempt=False,  # preview failures aren't validation attempts
+        import_job_id=import_job_id,
+        import_job_error=payload.reason,
+        import_job_message=payload.detail,
+        import_job_result=job_result,
+        denylist_username=denylist_username,
+        denylist_reason=denylist_reason,
     )
 
 
