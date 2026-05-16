@@ -81,259 +81,6 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
     return persisted
 
 
-class TestWrongMatchCleanupDecision(unittest.TestCase):
-    def _patch_beets_album(self, album_path: str | None, *, min_bitrate: int):
-        from lib.beets_db import AlbumInfo
-
-        beets = MagicMock()
-        beets.__enter__.return_value = beets
-        beets.__exit__.return_value = None
-        beets.get_album_info.return_value = (
-            None
-            if album_path is None
-            else AlbumInfo(
-                album_id=1,
-                track_count=1,
-                min_bitrate_kbps=min_bitrate,
-                avg_bitrate_kbps=min_bitrate,
-                median_bitrate_kbps=min_bitrate,
-                is_cbr=False,
-                album_path=album_path,
-                format="MP3",
-            )
-        )
-        return patch("lib.beets_db.BeetsDB", return_value=beets)
-
-    def _seed_cleanup_evidence(
-        self,
-        db: FakePipelineDB,
-        *,
-        source_path: str,
-        candidate_min: int,
-        current_min: int,
-    ) -> int:
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id="mbid-123",
-            status="manual",
-        ))
-        log_id = db.log_download(
-            42,
-            outcome="rejected",
-            validation_result={
-                "scenario": "high_distance",
-                "failed_path": source_path,
-            },
-        )
-        _seed_candidate_for_download_log(
-            db, log_id,
-            mb_release_id="mbid-candidate",
-            files=snapshot_audio_files(source_path),
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=candidate_min,
-                avg_bitrate_kbps=candidate_min,
-                median_bitrate_kbps=candidate_min,
-                format="MP3",
-                spectral_grade="genuine",
-            ),
-            codec="mp3",
-            container="mp3",
-            storage_format="MP3",
-        )
-        _seed_current_for_request(
-            db, 42,
-            mb_release_id="mbid-current",
-            files=snapshot_audio_files(source_path),
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=current_min,
-                avg_bitrate_kbps=current_min,
-                median_bitrate_kbps=current_min,
-                format="MP3",
-                spectral_grade="genuine",
-            ),
-            codec="mp3",
-            container="mp3",
-            storage_format="MP3",
-        )
-        return log_id
-
-    def test_decision_reuses_download_log_evidence_without_preview(self):
-        from lib.wrong_match_cleanup_decision import (
-            CLEANUP_DECISION_PROVENANCE,
-            decide_wrong_match_cleanup,
-        )
-
-        db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            log_id = self._seed_cleanup_evidence(
-                db,
-                source_path=source,
-                candidate_min=128,
-                current_min=245,
-            )
-
-            with self._patch_beets_album(source, min_bitrate=245):
-                decision = decide_wrong_match_cleanup(
-                    db,
-                    log_id,
-                    cfg=CratediggerConfig(),
-                )
-
-        self.assertTrue(decision.delete_allowed)
-        self.assertFalse(decision.uncertain)
-        self.assertEqual(decision.provenance, CLEANUP_DECISION_PROVENANCE)
-        self.assertEqual(decision.preview_decision, "downgrade")
-
-    def test_decision_blocks_uncertain_when_preview_cannot_build_evidence(self):
-        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id="mbid-123",
-            status="manual",
-        ))
-        log_id = db.log_download(
-            42,
-            outcome="rejected",
-            validation_result={
-                "scenario": "high_distance",
-                "failed_path": "/tmp/missing-evidence",
-            },
-        )
-        preview = ImportPreviewResult(
-            mode="download_log",
-            verdict="uncertain",
-            uncertain=True,
-            cleanup_eligible=False,
-            reason="fresh evidence unavailable",
-            download_log_id=7,
-        )
-
-        decision = decide_wrong_match_cleanup(
-            db,
-            log_id,
-            preview_builder=lambda _db, _log_id: preview,
-            cfg=CratediggerConfig(),
-        )
-
-        self.assertFalse(decision.delete_allowed)
-        self.assertTrue(decision.uncertain)
-        self.assertIn("fresh evidence unavailable", decision.skip_reason)
-
-    def test_cleanup_preview_must_publish_evidence_before_cleanup_decision(self):
-        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
-
-        db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            db.seed_request(make_request_row(
-                id=42,
-                mb_release_id="mbid-123",
-                status="manual",
-            ))
-            log_id = db.log_download(
-                42,
-                outcome="rejected",
-                validation_result={
-                    "scenario": "high_distance",
-                    "failed_path": source,
-                },
-            )
-            preview = ImportPreviewResult(
-                mode="download_log",
-                verdict="would_import",
-                would_import=True,
-                decision="import",
-                reason="import",
-                source_path=source,
-                import_result=ImportResult(
-                    decision="import",
-                    new_measurement=AudioQualityMeasurement(
-                        min_bitrate_kbps=245,
-                        avg_bitrate_kbps=256,
-                        median_bitrate_kbps=252,
-                        format="MP3 V0",
-                        spectral_grade="genuine",
-                    ),
-                ),
-            )
-
-            with patch(
-                "lib.quality_evidence.persist_candidate_evidence_from_import_result",
-                side_effect=AssertionError(
-                    "cleanup decision must rely on preview's guarded persistence"
-                ),
-            ) as persist:
-                decision = decide_wrong_match_cleanup(
-                    db,
-                    log_id,
-                    preview_builder=lambda _db, _log_id: preview,
-                    cfg=CratediggerConfig(),
-                )
-
-        persist.assert_not_called()
-        self.assertFalse(decision.delete_allowed)
-        self.assertTrue(decision.uncertain)
-        self.assertEqual(decision.verdict, "uncertain")
-
-    def test_decision_blocks_importable_candidate_even_with_old_reject_row(self):
-        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
-
-        db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            log_id = self._seed_cleanup_evidence(
-                db,
-                source_path=source,
-                candidate_min=245,
-                current_min=128,
-            )
-
-            with self._patch_beets_album(source, min_bitrate=128):
-                decision = decide_wrong_match_cleanup(
-                    db,
-                    log_id,
-                    cfg=CratediggerConfig(),
-                )
-
-        self.assertFalse(decision.delete_allowed)
-        self.assertFalse(decision.uncertain)
-        self.assertFalse(decision.confident_reject)
-        self.assertFalse(decision.cleanup_eligible)
-        self.assertEqual(decision.preview_decision, "import")
-
-    def test_no_current_album_does_not_use_stale_current_evidence_for_delete(self):
-        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
-
-        db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as source:
-            with open(os.path.join(source, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            log_id = self._seed_cleanup_evidence(
-                db,
-                source_path=source,
-                candidate_min=128,
-                current_min=320,
-            )
-
-            with self._patch_beets_album(None, min_bitrate=320):
-                decision = decide_wrong_match_cleanup(
-                    db,
-                    log_id,
-                    cfg=CratediggerConfig(),
-                )
-
-        self.assertFalse(decision.delete_allowed)
-        self.assertFalse(decision.uncertain)
-        self.assertEqual(decision.verdict, "would_import")
-        self.assertEqual(decision.preview_decision, "import")
-
-
 class TestAutomationEvidenceReuse(unittest.TestCase):
     def test_previewed_automation_job_skips_preimport_gates(self):
         from lib.download import _process_beets_validation
@@ -581,8 +328,15 @@ class TestImporterWorker(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=request_id,
                 mb_release_id="mbid-123",
-                status="manual",
+                status="imported",
+                imported_path=source_path,
             ))
+        else:
+            db.update_request_fields(
+                request_id,
+                status="imported",
+                imported_path=source_path,
+            )
         _seed_candidate_for_download_log(
             db, log_id,
             mb_release_id="mbid-candidate-reject",
@@ -844,11 +598,9 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(db.get_wrong_matches(), [])
             result = self._result(updated)
             self.assertEqual(result["cleanup"]["success"], True)
+            self.assertEqual(result["cleanup"]["outcome"], "deleted")
             self.assertEqual(result["cleanup"]["cleared_rows"], 1)
-            self.assertEqual(
-                result["cleanup"]["cleanup_decision"]["delete_allowed"],
-                True,
-            )
+            self.assertEqual(result["cleanup"]["verdict"], "confident_reject")
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
@@ -902,12 +654,8 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(result["cleanup"]["success"], False)
             self.assertTrue(result["cleanup"]["skipped"])
             self.assertEqual(
-                result["cleanup"]["cleanup_decision"]["delete_allowed"],
-                False,
-            )
-            self.assertEqual(
-                result["cleanup"]["cleanup_decision"]["uncertain"],
-                True,
+                result["cleanup"]["outcome"],
+                "skipped_candidate_evidence_missing",
             )
         finally:
             shutil.rmtree(source, ignore_errors=True)
@@ -958,14 +706,11 @@ class TestImporterWorker(unittest.TestCase):
                 "lib.import_dispatch.dispatch_import_from_db",
                 side_effect=fake_dispatch,
             ), patch(
-                "lib.wrong_match_cleanup_decision.decide_wrong_match_cleanup",
-            ) as decision, patch(
-                "lib.wrong_matches.cleanup_wrong_match_source",
+                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
             ) as cleanup:
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             # Importer must NOT have written a terminal status.
-            decision.assert_not_called()
             cleanup.assert_not_called()
             self.assertTrue(os.path.isdir(source))
             # Job row is queued/waiting after the requeue.
@@ -1024,15 +769,12 @@ class TestImporterWorker(unittest.TestCase):
                     code=DISPATCH_CODE_REQUEUE_FAILED,
                 ),
             ), patch(
-                "lib.wrong_match_cleanup_decision.decide_wrong_match_cleanup",
-            ) as decision, patch(
-                "lib.wrong_matches.cleanup_wrong_match_source",
+                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
             ) as cleanup:
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             # No wrong-match cleanup runs on the requeue-failed path (the
             # situation is a DB issue, not a quality decision).
-            decision.assert_not_called()
             cleanup.assert_not_called()
             row = next(r for r in db._import_jobs if r["id"] == job.id)
             self.assertEqual(row["status"], "failed")

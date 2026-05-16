@@ -852,6 +852,44 @@ class FakePipelineDB:
         rows.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
 
+    def list_active_import_jobs_for_wrong_match(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int | None,
+        failed_paths: Iterable[str],
+        source_dirs: Iterable[str],
+        ignore_import_job_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        paths = {str(path) for path in failed_paths if path}
+        dirs = {str(path) for path in source_dirs if path}
+        rows: list[dict[str, Any]] = []
+        for row in self._import_jobs:
+            if row.get("status") not in ("queued", "running"):
+                continue
+            if (
+                ignore_import_job_id is not None
+                and int(row["id"]) == int(ignore_import_job_id)
+            ):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            payload_dirs = {
+                str(path) for path in payload.get("source_dirs", [])
+                if path
+            }
+            matches = (
+                payload.get("download_log_id") == download_log_id
+                or str(payload.get("download_log_id")) == str(download_log_id)
+                or (request_id is not None and row.get("request_id") == request_id)
+                or str(payload.get("failed_path") or "") in paths
+                or bool(dirs.intersection(payload_dirs))
+            )
+            if matches:
+                rows.append(row)
+        rows.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
     def count_import_jobs_by_status(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for row in self._import_jobs:
@@ -1894,38 +1932,6 @@ class FakePipelineDB:
         val = row.get("current_evidence_id")
         return int(val) if val is not None else None
 
-    def get_request_latest_import_job_evidence_id(
-        self,
-        request_id: int,
-    ) -> int | None:
-        candidates = [
-            row for row in self._import_jobs
-            if row.get("request_id") == request_id
-            and row.get("candidate_evidence_id") is not None
-        ]
-        candidates.sort(
-            key=lambda row: (
-                _as_datetime(row.get("created_at")),
-                int(row["id"]),
-            ),
-            reverse=True,
-        )
-        if not candidates:
-            return None
-        val = candidates[0].get("candidate_evidence_id")
-        return int(val) if val is not None else None
-
-    def get_request_latest_import_job_evidence_id_from_dl(
-        self,
-        download_log_id: int,
-    ) -> int | None:
-        for row in self.download_logs:
-            if row.id == download_log_id:
-                return self.get_request_latest_import_job_evidence_id(
-                    row.request_id
-                )
-        return None
-
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         row = self._requests.get(request_id)
         if row is None:
@@ -2735,58 +2741,6 @@ class FakePipelineDB:
                 entry.validation_result = new_vr
             cleared += 1
         return cleared
-
-    def update_download_log_measurement(
-        self,
-        download_log_id: int,
-        *,
-        spectral_grade: str | None = None,
-        spectral_bitrate: int | None = None,
-        v0_probe_kind: str | None = None,
-        v0_probe_avg_bitrate: int | None = None,
-    ) -> bool:
-        """Persist measurement evidence onto a fake download_log row.
-
-        Mirrors ``PipelineDB.update_download_log_measurement``: partial /
-        non-destructive write where ``None`` inputs leave existing values
-        untouched. Stores values on ``entry.extra`` so the fake's
-        ``get_wrong_matches`` (which already reads those keys) sees them.
-        """
-        updates: dict[str, object] = {}
-        if spectral_grade is not None:
-            updates["spectral_grade"] = spectral_grade
-        if spectral_bitrate is not None:
-            updates["spectral_bitrate"] = spectral_bitrate
-        if v0_probe_kind is not None:
-            updates["v0_probe_kind"] = v0_probe_kind
-        if v0_probe_avg_bitrate is not None:
-            updates["v0_probe_avg_bitrate"] = v0_probe_avg_bitrate
-        if not updates:
-            return False
-        for entry in self.download_logs:
-            if entry.id != download_log_id:
-                continue
-            entry.extra.update(updates)
-            return True
-        return False
-
-    def record_wrong_match_triage(
-        self,
-        log_id: int,
-        triage_result: dict[str, object],
-    ) -> bool:
-        """Persist preview-driven triage audit details on a fake log row."""
-        for entry in self.download_logs:
-            if entry.id != log_id:
-                continue
-            vr = self._validation_result_dict(entry.validation_result) or {}
-            vr["wrong_match_triage"] = triage_result
-            if isinstance(entry.validation_result, str):
-                entry.validation_result = json.dumps(vr)
-            else:
-                entry.validation_result = vr
-            return True
-        return False
 
     @staticmethod
     def _validation_result_dict(vr: Any) -> dict[str, Any] | None:

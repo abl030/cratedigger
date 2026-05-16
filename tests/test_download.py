@@ -119,36 +119,74 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
 
 class TestPostRejectionWrongMatchTriage(unittest.TestCase):
-    def test_runs_triage_for_new_wrong_match_log_row(self):
-        from lib.download import _run_post_rejection_wrong_match_triage
+    def test_runs_cleanup_for_new_wrong_match_log_row(self):
+        from lib.download import _run_post_rejection_wrong_match_cleanup
 
         db = FakePipelineDB()
         ctx = make_ctx_with_fake_db(db)
 
-        with patch("lib.wrong_match_triage.triage_wrong_match") as triage:
-            result = _run_post_rejection_wrong_match_triage(
+        with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
+            result = _run_post_rejection_wrong_match_cleanup(
                 ctx,
                 123,
                 scenario="high_distance",
             )
 
-        triage.assert_called_once_with(db, 123)
-        self.assertIs(result, triage.return_value)
+        cleanup.assert_called_once_with(
+            db,
+            123,
+            ignore_import_job_id=None,
+        )
+        self.assertIs(result, cleanup.return_value)
+
+    def test_copies_import_job_candidate_evidence_before_cleanup(self):
+        from lib.download import _run_post_rejection_wrong_match_cleanup
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        log_id = db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={"scenario": "wrong_match", "failed_path": "/tmp/source"},
+        )
+        job = db.enqueue_import_job(
+            "automation_import",
+            request_id=1,
+            payload={},
+        )
+        db.set_import_job_candidate_evidence(job.id, 44)
+        ctx = make_ctx_with_fake_db(db)
+
+        with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
+            result = _run_post_rejection_wrong_match_cleanup(
+                ctx,
+                log_id,
+                scenario="high_distance",
+                import_job_id=job.id,
+            )
+
+        self.assertEqual(db.get_download_log_candidate_evidence_id(log_id), 44)
+        cleanup.assert_called_once_with(
+            db,
+            log_id,
+            ignore_import_job_id=job.id,
+        )
+        self.assertIs(result, cleanup.return_value)
 
     def test_skips_bad_file_rejections(self):
-        from lib.download import _run_post_rejection_wrong_match_triage
+        from lib.download import _run_post_rejection_wrong_match_cleanup
 
         db = FakePipelineDB()
         ctx = make_ctx_with_fake_db(db)
 
-        with patch("lib.wrong_match_triage.triage_wrong_match") as triage:
-            result = _run_post_rejection_wrong_match_triage(
+        with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
+            result = _run_post_rejection_wrong_match_cleanup(
                 ctx,
                 123,
                 scenario="spectral_reject",
             )
 
-        triage.assert_not_called()
+        cleanup.assert_not_called()
         self.assertIsNone(result)
 
     def test_rejected_download_handler_triggers_triage_after_logging(self):
@@ -199,7 +237,7 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
                 detail="too far",
             )
 
-            with patch("lib.wrong_match_triage.triage_wrong_match") as triage:
+            with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
                 _handle_rejected_result(
                     album,
                     result,
@@ -211,7 +249,11 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         assert source.reject_args is not None
         stored = source.reject_args[1]
         self.assertEqual(stored.source_dirs, ["user1\\Music"])
-        triage.assert_called_once_with(db, 77)
+        cleanup.assert_called_once_with(
+            db,
+            77,
+            ignore_import_job_id=None,
+        )
 
 
 class TestRequestScopedAutoImportPath(unittest.TestCase):

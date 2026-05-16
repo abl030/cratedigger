@@ -436,10 +436,9 @@ function greenEntries(group, thresholdMilli) {
 /**
  * @param {number|string} requestId
  * @param {unknown} thresholdMilli
- * @param {boolean} deleteUnmatched
  * @returns {{request_id: number, threshold_milli: number, delete_unmatched: boolean}}
  */
-function convergeRequestBody(requestId, thresholdMilli, deleteUnmatched) {
+function convergeRequestBody(requestId, thresholdMilli) {
   return {
     request_id: Number(requestId),
     threshold_milli: normalizeThreshold(thresholdMilli),
@@ -478,42 +477,6 @@ function formatEntryEvidence(entry) {
 }
 
 /**
- * Build the toast text shown after the Delete Lossless Opus bulk
- * action. Pure — input is the API response, output is the text.
- * Surfaces ``groups_skipped_spectral_suspect`` (added by the backend
- * R4-R6 gate) when present, else derives the count from ``skipped[]``
- * by deduplicating ``request_id`` on ``spectral_suspect`` rows.
- * @param {any} data
- * @returns {string}
- */
-function formatLosslessOpusToastBody(data) {
-  const deleted = data && Number.isFinite(data.deleted) ? data.deleted : 0;
-  const groupsDeleted = data && Number.isFinite(data.groups_deleted)
-    ? data.groups_deleted : 0;
-  let skippedGroups = 0;
-  if (data && Number.isFinite(data.groups_skipped_spectral_suspect)) {
-    skippedGroups = data.groups_skipped_spectral_suspect;
-  } else if (data && Array.isArray(data.skipped)) {
-    const ids = new Set();
-    for (const s of data.skipped) {
-      if (s && s.reason === 'spectral_suspect' && s.request_id != null) {
-        ids.add(s.request_id);
-      }
-    }
-    skippedGroups = ids.size;
-  }
-  const parts = [
-    `Deleted ${deleted} candidate${deleted === 1 ? '' : 's'}`,
-    `from ${groupsDeleted} release${groupsDeleted === 1 ? '' : 's'}`,
-  ];
-  let body = parts.join(' ');
-  if (skippedGroups > 0) {
-    body += `; ${skippedGroups} group${skippedGroups === 1 ? '' : 's'} skipped (spectral suspect)`;
-  }
-  return body;
-}
-
-/**
  * @param {any} data
  * @returns {string}
  */
@@ -528,130 +491,23 @@ function convergeToast(data) {
 }
 
 /**
- * @param {any} item
- * @returns {boolean}
- */
-function itemLooksFlac(item) {
-  if (!item || typeof item !== 'object') return false;
-  for (const key of ['format', 'filetype', 'actual_filetype', 'slskd_filetype', 'original_filetype']) {
-    const value = item[key];
-    if (typeof value === 'string' && value.toLowerCase().includes('flac')) return true;
-  }
-  for (const key of ['path', 'filename', 'name']) {
-    const value = item[key];
-    if (typeof value !== 'string') continue;
-    const normalized = value.toLowerCase().split('?')[0].split('#')[0];
-    if (normalized.endsWith('.flac')) return true;
-  }
-  return false;
-}
-
-/**
- * @param {any} entry
- * @returns {any[]}
- */
-function localItemsForEntry(entry) {
-  const items = [];
-  if (Array.isArray(entry?.local_items)) items.push(...entry.local_items);
-  const candidate = entry?.candidate || {};
-  if (Array.isArray(candidate.extra_items)) items.push(...candidate.extra_items);
-  if (Array.isArray(candidate.mapping)) {
-    for (const match of candidate.mapping) {
-      if (match?.item) items.push(match.item);
-    }
-  }
-  return items.filter((/** @type {any} */ item) => item && typeof item === 'object');
-}
-
-/**
- * @param {any} entry
- * @returns {boolean}
- */
-function entryDownloadIsNonFlac(entry) {
-  const items = localItemsForEntry(entry);
-  return items.length > 0 && !items.some(itemLooksFlac);
-}
-
-/**
- * @param {any} group
- * @returns {boolean}
- */
-function groupIsTransparentNonFlacCleanupTarget(group) {
-  const entries = Array.isArray(group?.entries) ? group.entries : [];
-  return group?.quality_rank === 'transparent'
-    && entries.length > 0
-    && entries.every(entryDownloadIsNonFlac);
-}
-
-/**
- * @param {any[]} groups
- * @returns {any[]}
- */
-function transparentNonFlacGroups(groups) {
-  return groups.filter(groupIsTransparentNonFlacCleanupTarget);
-}
-
-/**
- * @param {any[]} groups
- * @returns {{groups: number, entries: number}}
- */
-function transparentNonFlacCounts(groups) {
-  const targets = transparentNonFlacGroups(groups);
-  return {
-    groups: targets.length,
-    entries: targets.reduce((/** @type {number} */ n, /** @type {any} */ g) => (
-      n + (g.pending_count || (Array.isArray(g.entries) ? g.entries.length : 0))
-    ), 0),
-  };
-}
-
-/**
- * @param {{groups: number, entries: number}} counts
+ * @param {any} data
  * @returns {string}
  */
-function transparentNonFlacButtonLabel(counts) {
-  return `Delete transparent non-FLAC (${counts.entries})`;
-}
-
-/**
- * @param {any} group
- * @returns {boolean}
- */
-function groupIsLosslessOpusCleanupTarget(group) {
-  const entries = Array.isArray(group?.entries) ? group.entries : [];
-  return !!group?.verified_lossless
-    && String(group?.format || '').toLowerCase() === 'opus'
-    && entries.length > 0;
-}
-
-/**
- * @param {any[]} groups
- * @returns {any[]}
- */
-function losslessOpusGroups(groups) {
-  return groups.filter(groupIsLosslessOpusCleanupTarget);
-}
-
-/**
- * @param {any[]} groups
- * @returns {{groups: number, entries: number}}
- */
-function losslessOpusCounts(groups) {
-  const targets = losslessOpusGroups(groups);
-  return {
-    groups: targets.length,
-    entries: targets.reduce((/** @type {number} */ n, /** @type {any} */ g) => (
-      n + (g.pending_count || (Array.isArray(g.entries) ? g.entries.length : 0))
-    ), 0),
-  };
-}
-
-/**
- * @param {{groups: number, entries: number}} counts
- * @returns {string}
- */
-function losslessOpusButtonLabel(counts) {
-  return `Delete lossless-Opus (${counts.entries})`;
+function cleanupSummaryToast(data) {
+  const deleted = Number(data?.deleted || 0);
+  const kept = Number(data?.kept_would_import || 0)
+    + Number(data?.kept_uncertain || 0);
+  const skipped = Number(data?.skipped_candidate_evidence_missing || 0)
+    + Number(data?.skipped_candidate_evidence_stale || 0)
+    + Number(data?.skipped_current_evidence_missing || 0)
+    + Number(data?.skipped_current_evidence_stale || 0)
+    + Number(data?.skipped_active_job || 0)
+    + Number(data?.skipped_invalid_row || 0)
+    + Number(data?.skipped_missing_path || 0)
+    + Number(data?.skipped_operational || 0)
+    + Number(data?.delete_failed || 0);
+  return `Deleted ${deleted} candidate${deleted === 1 ? '' : 's'}, kept ${kept}, skipped ${skipped}`;
 }
 
 /**
@@ -769,24 +625,6 @@ function wrongMatchCounts(groups) {
   };
 }
 
-function updateTransparentNonFlacButton() {
-  if (!_lastData || !Array.isArray(_lastData.groups)) return;
-  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('wm-transparent-nonflac-btn'));
-  if (!btn) return;
-  const counts = transparentNonFlacCounts(_lastData.groups);
-  btn.textContent = transparentNonFlacButtonLabel(counts);
-  btn.disabled = counts.groups === 0;
-}
-
-function updateLosslessOpusButton() {
-  if (!_lastData || !Array.isArray(_lastData.groups)) return;
-  const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('wm-lossless-opus-btn'));
-  if (!btn) return;
-  const counts = losslessOpusCounts(_lastData.groups);
-  btn.textContent = losslessOpusButtonLabel(counts);
-  btn.disabled = counts.groups === 0;
-}
-
 function updateWrongMatchesSummary() {
   if (!_lastData || !Array.isArray(_lastData.groups) || !_lastEl) return;
   const counts = wrongMatchCounts(_lastData.groups);
@@ -798,8 +636,6 @@ function updateWrongMatchesSummary() {
   if (summary) {
     summary.textContent = `${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review`;
   }
-  updateTransparentNonFlacButton();
-  updateLosslessOpusButton();
 }
 
 /**
@@ -829,14 +665,6 @@ export function setWrongMatchConvergeThreshold(requestId, value) {
 }
 
 /**
- * @param {boolean} checked
- */
-export function setWrongMatchConvergeCleanup(_checked) {
-  // Kept for old inline handlers after deploy; Converge now always cleans up
-  // the non-green rows for the release.
-}
-
-/**
  * Render grouped wrong-match entries (issue #113).
  * Top level = one collapsed card per release; expand reveals every rejected
  * candidate that still has files on disk.
@@ -855,14 +683,11 @@ function renderWrongMatches(data, el) {
   }
 
   const counts = wrongMatchCounts(groups);
-  const cleanupCounts = transparentNonFlacCounts(groups);
-  const losslessCounts = losslessOpusCounts(groups);
   let html = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
       <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-        <button id="wm-transparent-nonflac-btn" class="p-btn delete" ${cleanupCounts.groups === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteTransparentNonFlacWrongMatches(this)">${transparentNonFlacButtonLabel(cleanupCounts)}</button>
-        <button id="wm-lossless-opus-btn" class="p-btn delete" ${losslessCounts.groups === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteLosslessOpusWrongMatches(this)">${losslessOpusButtonLabel(losslessCounts)}</button>
+        <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches(this)">Cleanup Wrong Matches (${counts.entries})</button>
       </div>
     </div>`;
 
@@ -1047,7 +872,6 @@ function renderConvergeControls(g, count, thresholdMilli) {
   const greenCount = greenEntries(g, thresholdMilli).length;
   const disabled = greenCount === 0;
   const label = convergeButtonLabel(greenCount);
-  const releaseName = esc(String(g.artist) + ' — ' + String(g.album));
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:4px 0 0 0;padding:6px 8px;background:#151515;border:1px solid #242424;border-radius:4px;">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -1059,7 +883,6 @@ function renderConvergeControls(g, count, thresholdMilli) {
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <button id="wm-converge-btn-${g.request_id}" class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
-        <button class="p-btn delete" data-release-name="${releaseName}" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
       </div>
     </div>`;
 }
@@ -1194,7 +1017,6 @@ function renderEntryDetail(e, job) {
   const active = job && (job.status === 'queued' || job.status === 'running');
   const label = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
   html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${label}</button>`;
-  html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
 
   return html;
@@ -1307,25 +1129,21 @@ async function _pollImportJob(jobId, btn) {
 
 export const __test__ = {
   pollImportJob: _pollImportJob,
+  bulkTriageWrongMatches,
+  cleanupSummaryToast,
   convergeRequestBody,
   convergeWrongMatches,
-  deleteLosslessOpusWrongMatches,
-  deleteTransparentNonFlacWrongMatches,
   deleteUnmatchedOnConverge,
   formatEntryEvidence,
-  formatLosslessOpusToastBody,
   greenEntries,
   isConvergeGreen,
-  losslessOpusGroups,
   normalizeThreshold,
   reloadWrongMatchExplorer,
   renderWrongMatchExplorer,
   renderWrongMatches,
-  setWrongMatchConvergeCleanup,
   setWrongMatchConvergeThreshold,
   thresholdForGroup,
   toggleWrongMatchEntry,
-  transparentNonFlacGroups,
 };
 
 /**
@@ -1349,7 +1167,7 @@ export async function convergeWrongMatches(requestId, btn) {
     const r = await fetch(`${API}/api/wrong-matches/converge`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(convergeRequestBody(requestId, thresholdMilli, true)),
+      body: JSON.stringify(convergeRequestBody(requestId, thresholdMilli)),
     });
     const data = await r.json();
     if (r.ok && data.status === 'ok') {
@@ -1408,160 +1226,39 @@ export async function forceImportWrongMatch(logId, btn) {
 }
 
 /**
- * Delete every wrong-match candidate for one release at once.
- * @param {number} requestId
- * @param {HTMLButtonElement} btn - the clicked button; carries data-release-name for the confirm dialog
- */
-export async function deleteWrongMatchGroup(requestId, btn) {
-  const releaseName = btn.dataset.releaseName || 'this release';
-  if (!confirm(`Delete ALL wrong-match candidates for "${releaseName}"?\nThis removes the files from disk and clears them from the review queue.`)) return;
-  btn.disabled = true;
-  btn.textContent = 'Deleting…';
-  try {
-    const r = await fetch(`${API}/api/wrong-matches/delete-group`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({request_id: requestId}),
-    });
-    const data = await r.json();
-    if (data.status === 'ok') {
-      toast(`Deleted ${data.deleted} candidate${data.deleted !== 1 ? 's' : ''} for ${releaseName}`);
-      invalidateWrongMatches();
-      await _refreshWrongMatches();
-    } else {
-      btn.textContent = 'Failed';
-      toast('Delete-all failed', true);
-    }
-  } catch (e) {
-    btn.textContent = 'Error';
-    toast('Delete-all request failed', true);
-  }
-}
-
-/**
- * Delete all visible release groups that already have transparent quality on
- * disk and whose pending wrong-match folders are non-FLAC.
+ * Run evidence-only cleanup over the full Wrong Matches queue.
  * @param {HTMLButtonElement} btn
  */
-export async function deleteTransparentNonFlacWrongMatches(btn) {
+export async function bulkTriageWrongMatches(btn) {
   const groups = _lastData && Array.isArray(_lastData.groups) ? _lastData.groups : [];
-  const counts = transparentNonFlacCounts(groups);
-  if (counts.groups === 0) {
-    toast('No transparent non-FLAC wrong matches to delete', true);
+  const counts = wrongMatchCounts(groups);
+  if (counts.entries === 0) {
+    toast('No wrong matches to clean up', true);
     return;
   }
-  const ok = confirm(
-    `Delete ${counts.entries} non-FLAC wrong-match candidate${counts.entries !== 1 ? 's' : ''} `
-    + `across ${counts.groups} transparent release${counts.groups !== 1 ? 's' : ''}?`,
-  );
-  if (!ok) return;
+  if (!confirm(`Process all ${counts.entries} Wrong Matches candidates?\nOnly force-mode confident rejects will be deleted.`)) return;
 
   btn.disabled = true;
-  btn.textContent = 'Deleting...';
+  btn.textContent = 'Cleaning...';
   try {
-    const r = await fetch(`${API}/api/wrong-matches/delete-transparent-non-flac`, {
+    const r = await fetch(`${API}/api/wrong-matches/triage`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({}),
+      body: JSON.stringify({confirm_all_wrong_matches: true}),
     });
     const data = await r.json();
     if (r.ok && data.status === 'ok') {
-      toast(
-        `Deleted ${data.deleted || 0} candidate${data.deleted === 1 ? '' : 's'} `
-        + `from ${data.groups_deleted || 0} release${data.groups_deleted === 1 ? '' : 's'}`,
-      );
-      invalidateWrongMatches();
-      if (Array.isArray(data.deleted_request_ids) && data.deleted_request_ids.length > 0) {
-        for (const requestId of data.deleted_request_ids) removeWrongMatchGroup(requestId);
-      } else {
-        await _refreshWrongMatches();
-      }
-    } else {
-      btn.disabled = false;
-      btn.textContent = transparentNonFlacButtonLabel(counts);
-      toast(data.message || 'Bulk delete failed', true);
-    }
-  } catch (_e) {
-    btn.disabled = false;
-    btn.textContent = transparentNonFlacButtonLabel(counts);
-    toast('Bulk delete request failed', true);
-  }
-}
-
-/**
- * Delete all visible release groups whose current exact library copy is
- * verified-lossless Opus.
- * @param {HTMLButtonElement} btn
- */
-export async function deleteLosslessOpusWrongMatches(btn) {
-  const groups = _lastData && Array.isArray(_lastData.groups) ? _lastData.groups : [];
-  const counts = losslessOpusCounts(groups);
-  if (counts.groups === 0) {
-    toast('No lossless-Opus wrong matches to delete', true);
-    return;
-  }
-  const ok = confirm(
-    `Delete ${counts.entries} wrong-match candidate${counts.entries !== 1 ? 's' : ''} `
-    + `across ${counts.groups} release${counts.groups !== 1 ? 's' : ''} `
-    + `that already reached verified lossless Opus?`,
-  );
-  if (!ok) return;
-
-  btn.disabled = true;
-  btn.textContent = 'Deleting...';
-  try {
-    const r = await fetch(`${API}/api/wrong-matches/delete-lossless-opus`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({}),
-    });
-    const data = await r.json();
-    if (r.ok && data.status === 'ok') {
-      toast(formatLosslessOpusToastBody(data));
-      invalidateWrongMatches();
-      if (Array.isArray(data.deleted_request_ids) && data.deleted_request_ids.length > 0) {
-        for (const requestId of data.deleted_request_ids) removeWrongMatchGroup(requestId);
-      } else {
-        await _refreshWrongMatches();
-      }
-    } else {
-      btn.disabled = false;
-      btn.textContent = losslessOpusButtonLabel(counts);
-      toast(data.message || 'Bulk delete failed', true);
-    }
-  } catch (_e) {
-    btn.disabled = false;
-    btn.textContent = losslessOpusButtonLabel(counts);
-    toast('Bulk delete request failed', true);
-  }
-}
-
-/**
- * Delete a wrong match (files + clear DB path).
- * @param {number} logId
- * @param {HTMLButtonElement} btn
- */
-export async function deleteWrongMatch(logId, btn) {
-  if (!confirm('Delete files and dismiss this wrong match?')) return;
-  btn.disabled = true;
-  btn.textContent = 'Deleting...';
-  try {
-    const r = await fetch(`${API}/api/wrong-matches/delete`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({download_log_id: logId}),
-    });
-    const data = await r.json();
-    if (data.status === 'ok') {
-      toast('Wrong match deleted');
+      toast(cleanupSummaryToast(data));
       invalidateWrongMatches();
       await _refreshWrongMatches();
     } else {
-      btn.textContent = 'Failed';
-      toast('Delete failed', true);
+      btn.disabled = false;
+      btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
+      toast(data.message || 'Cleanup failed', true);
     }
-  } catch (e) {
-    btn.textContent = 'Error';
-    toast('Delete request failed', true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
+    toast('Cleanup request failed', true);
   }
 }

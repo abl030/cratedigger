@@ -175,6 +175,7 @@ def cleanup_wrong_match_source(
     download_log_id: int,
     *,
     failed_path_hint: str | None = None,
+    clear_missing: bool = True,
 ) -> WrongMatchCleanupResult:
     """Delete one wrong-match source and clear its actionable DB pointers.
 
@@ -220,7 +221,9 @@ def cleanup_wrong_match_source(
         path_missing = True
 
     cleared_rows = 0
-    if request_id is not None:
+    if path_missing and not clear_missing:
+        cleared_rows = 0
+    elif request_id is not None:
         cleared_rows = int(db.clear_wrong_match_paths(request_id, candidates))
     elif raw_path:
         cleared_rows = 1 if db.clear_wrong_match_path(download_log_id) else 0

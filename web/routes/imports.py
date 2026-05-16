@@ -2,8 +2,6 @@
 
 import json
 import os
-import shutil
-from typing import Literal
 
 import msgspec
 
@@ -20,13 +18,12 @@ from lib.import_queue import (
     manual_import_dedupe_key,
     manual_import_payload,
 )
-from lib.quality import (
-    OPUS_DELETE_SKIP_REASON_SPECTRAL,
-    is_opus_copy_safe_for_lossless_delete,
-)
 from lib.util import resolve_failed_path
-from lib.wrong_match_triage import triage_wrong_match
-from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
+from lib.wrong_match_cleanup_service import (
+    OUTCOME_DELETED,
+    cleanup_all_wrong_matches,
+    cleanup_wrong_match,
+)
 from lib.import_preview import (
     ImportPreviewValues,
     preview_import_from_download_log,
@@ -120,113 +117,6 @@ def _distance_value(vr: dict[str, object]) -> float | None:
 def _is_green_distance(vr: dict[str, object], threshold_milli: int) -> bool:
     distance = _distance_value(vr)
     return distance is not None and distance <= threshold_milli / 1000
-
-
-def _validation_local_items(vr: dict[str, object]) -> list[dict[str, object]]:
-    """Collect local item payloads from every place beets validation stores them."""
-    items: list[dict[str, object]] = []
-
-    def add_dicts(raw: object) -> None:
-        if isinstance(raw, list):
-            items.extend(
-                item for item in raw
-                if isinstance(item, dict)
-            )
-
-    add_dicts(vr.get("items"))
-
-    raw_candidates = vr.get("candidates", [])
-    if isinstance(raw_candidates, list):
-        for candidate in raw_candidates:
-            if not isinstance(candidate, dict):
-                continue
-            add_dicts(candidate.get("extra_items"))
-            raw_mapping = candidate.get("mapping", [])
-            if isinstance(raw_mapping, list):
-                for match in raw_mapping:
-                    if not isinstance(match, dict):
-                        continue
-                    item = match.get("item")
-                    if isinstance(item, dict):
-                        items.append(item)
-
-    return items
-
-
-def _item_looks_flac(item: dict[str, object]) -> bool:
-    for key in ("format", "filetype", "actual_filetype", "slskd_filetype",
-                "original_filetype"):
-        value = item.get(key)
-        if isinstance(value, str) and "flac" in value.lower():
-            return True
-
-    for key in ("path", "filename", "name"):
-        value = item.get(key)
-        if not isinstance(value, str):
-            continue
-        normalized = value.lower().split("?", 1)[0].split("#", 1)[0]
-        if normalized.endswith(".flac"):
-            return True
-
-    return False
-
-
-def _validation_download_is_non_flac(vr: dict[str, object]) -> bool:
-    items = _validation_local_items(vr)
-    return bool(items) and not any(_item_looks_flac(item) for item in items)
-
-
-def _transparent_non_flac_wrong_match_targets(pdb, srv) -> list[dict[str, object]]:
-    rows = pdb.get_wrong_matches()
-    mbids = [
-        mbid for row in rows
-        for mbid in [row.get("mb_release_id")]
-        if isinstance(mbid, str) and mbid
-    ]
-    beets_info = srv.check_beets_library_detail(mbids) if mbids else {}
-    groups: dict[int, dict[str, object]] = {}
-
-    for row in rows:
-        request_id = row.get("request_id")
-        log_id = row.get("download_log_id")
-        if not isinstance(request_id, int) or not isinstance(log_id, int):
-            continue
-
-        vr = _parse_validation_result(row.get("validation_result"))
-        failed_path_raw = vr.get("failed_path")
-        failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
-        if resolve_failed_path(failed_path) is None:
-            continue
-
-        group = groups.get(request_id)
-        if group is None:
-            quality = _quality_summary(
-                row,
-                beets_info,
-                _row_presence(row, beets_info),
-            )
-            group = {
-                "request_id": request_id,
-                "artist": row.get("artist_name"),
-                "album": row.get("album_title"),
-                "quality_rank": quality.get("quality_rank"),
-                "download_log_ids": [],
-                "all_non_flac": True,
-            }
-            groups[request_id] = group
-
-        log_ids = group["download_log_ids"]
-        assert isinstance(log_ids, list)
-        log_ids.append(log_id)
-        if not _validation_download_is_non_flac(vr):
-            group["all_non_flac"] = False
-
-    return [
-        group for group in groups.values()
-        if group.get("quality_rank") == "transparent"
-        and group.get("all_non_flac")
-        and group.get("download_log_ids")
-    ]
 
 
 def get_manual_import_scan(h, params: dict[str, list[str]]) -> None:
@@ -548,17 +438,6 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
     return [groups[rid] for rid in order]
 
 
-def _group_format(group: dict[str, object]) -> str:
-    """Normalized on-disk codec name for bulk-action filtering."""
-    fmt = group.get("format")
-    return fmt.lower() if isinstance(fmt, str) else ""
-
-
-def _is_lossless_opus_group(group: dict[str, object]) -> bool:
-    """Verified-lossless Opus already landed on disk for this release."""
-    return bool(group.get("verified_lossless")) and _group_format(group) == "opus"
-
-
 def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
     """Return grouped wrong-match rejections for the manual-review UI."""
     h._json({"groups": _build_wrong_match_groups()})
@@ -694,231 +573,9 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
             remaining -= len(chunk)
 
 
-WrongMatchDeleteResult = Literal["deleted", "skipped", "missing", "error"]
-
-
-def _delete_wrong_match_row(pdb, log_id: int) -> WrongMatchDeleteResult:
-    """Shared helper: delete files for one wrong-match entry and clear its path.
-
-    Cleanup decisions are recomputed at action time; stored triage/preview
-    verdicts are audit only.
-    """
-    entry = pdb.get_download_log_entry(log_id)
-    if not entry:
-        return "missing"
-    decision = decide_wrong_match_cleanup(pdb, log_id)
-    if not decision.delete_allowed:
-        return "skipped"
-    vr = _parse_validation_result(entry.get("validation_result"))
-    failed_path_raw = vr.get("failed_path")
-    failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
-    resolved_path = resolve_failed_path(failed_path)
-    if resolved_path is not None:
-        try:
-            shutil.rmtree(resolved_path)
-        except FileNotFoundError:
-            pass
-        except Exception:
-            return "error"
-    pdb.clear_wrong_match_path(log_id)
-    return "deleted"
-
-
-def post_wrong_match_delete(h, body: dict) -> None:
-    """Delete files for a wrong match and clear its failed_path."""
-    log_id = body.get("download_log_id")
-    if not log_id:
-        h._error("Missing download_log_id")
-        return
-
-    pdb = _server()._db()
-    result = _delete_wrong_match_row(pdb, int(log_id))
-    if result == "missing":
-        h._error(f"Download log entry {log_id} not found", 404)
-        return
-    if result == "skipped":
-        h._json({"status": "skipped", "download_log_id": log_id})
-        return
-    if result == "error":
-        h._error("Wrong-match cleanup failed", 500)
-        return
-
-    h._json({"status": "ok", "download_log_id": log_id})
-
-
-def post_wrong_match_delete_group(h, body: dict) -> None:
-    """Delete every wrong-match candidate for one release (request_id).
-
-    Iterates the current ``get_wrong_matches()`` set, filters to rows for the
-    given ``request_id``, and deletes each in turn via the same helper as the
-    single-row endpoint — so files on disk are removed and ``failed_path`` is
-    cleared uniformly. Returns the count deleted so the UI can toast it.
-    """
-    request_id = body.get("request_id")
-    if request_id is None:
-        h._error("Missing request_id")
-        return
-    try:
-        rid = int(request_id)
-    except (TypeError, ValueError):
-        h._error("request_id must be an integer")
-        return
-
-    pdb = _server()._db()
-    rows = pdb.get_wrong_matches()
-    log_ids: list[int] = []
-    for r in rows:
-        if r.get("request_id") != rid:
-            continue
-        lid = r.get("download_log_id")
-        if isinstance(lid, int):
-            log_ids.append(lid)
-    deleted = 0
-    for log_id in log_ids:
-        if _delete_wrong_match_row(pdb, log_id) == "deleted":
-            deleted += 1
-    h._json({"status": "ok", "request_id": rid, "deleted": deleted})
-
-
-def post_wrong_match_delete_transparent_non_flac(h, body: dict) -> None:
-    """Bulk-delete non-FLAC wrong matches when the exact library copy is transparent."""
-    srv = _server()
-    pdb = srv._db()
-    targets = _transparent_non_flac_wrong_match_targets(pdb, srv)
-
-    deleted = 0
-    deleted_request_ids: list[int] = []
-    skipped: list[dict[str, object]] = []
-    for target in targets:
-        request_deleted = 0
-        log_ids = target.get("download_log_ids")
-        if not isinstance(log_ids, list):
-            continue
-        for log_id in log_ids:
-            if not isinstance(log_id, int):
-                continue
-            result = _delete_wrong_match_row(pdb, log_id)
-            if result == "deleted":
-                deleted += 1
-                request_deleted += 1
-            else:
-                skipped.append({
-                    "download_log_id": log_id,
-                    "reason": (
-                        "delete_failed"
-                        if result == "missing"
-                        else "cleanup_uncertain"
-                    ),
-                })
-        request_id = target.get("request_id")
-        if request_deleted and isinstance(request_id, int):
-            deleted_request_ids.append(request_id)
-
-    h._json({
-        "status": "ok",
-        "groups_deleted": len(deleted_request_ids),
-        "deleted": deleted,
-        "deleted_request_ids": deleted_request_ids,
-        "eligible_groups": len(targets),
-        "skipped": skipped,
-    })
-
-
-def post_wrong_match_delete_lossless_opus(h, body: dict) -> None:
-    """Bulk-delete wrong matches once the exact library copy is verified-lossless Opus.
-
-    Two-stage gate: the existing ``_is_lossless_opus_group`` predicate
-    (verified_lossless + format='opus') still defines what counts as
-    eligible. On top of that, the on-disk Opus copy's
-    ``current_spectral_grade`` must be safe per
-    ``is_opus_copy_safe_for_lossless_delete`` — ``suspect`` and
-    ``likely_transcode`` block deletion (R4-R6 of the wrong-matches
-    spectral evidence plan), so a candidate folder isn't wiped just
-    because *some* Opus copy is on disk when that copy itself is
-    spectrally suspect.
-    """
-    del body  # unused; endpoint intentionally operates on the current visible set
-    safe_request_ids: list[int] = []
-    unsafe_request_ids: set[int] = set()
-    for group in _build_wrong_match_groups():
-        request_id = group.get("request_id")
-        if not (isinstance(request_id, int) and _is_lossless_opus_group(group)):
-            continue
-        grade = group.get("current_spectral_grade")
-        grade_str = grade if isinstance(grade, str) else None
-        if is_opus_copy_safe_for_lossless_delete(grade_str):
-            safe_request_ids.append(request_id)
-        else:
-            unsafe_request_ids.add(request_id)
-
-    eligible_groups = len(safe_request_ids) + len(unsafe_request_ids)
-    skipped: list[dict[str, object]] = []
-    if not safe_request_ids and not unsafe_request_ids:
-        h._json({
-            "status": "ok",
-            "groups_deleted": 0,
-            "deleted": 0,
-            "deleted_request_ids": [],
-            "eligible_groups": 0,
-            "groups_skipped_spectral_suspect": 0,
-            "skipped": skipped,
-        })
-        return
-
-    pdb = _server()._db()
-    safe_request_id_set = set(safe_request_ids)
-    deleted = 0
-    deleted_by_request_id: dict[int, int] = {}
-    for row in pdb.get_wrong_matches():
-        request_id = row.get("request_id")
-        log_id = row.get("download_log_id")
-        if not isinstance(log_id, int):
-            continue
-        if request_id in unsafe_request_ids:
-            # R4-R6: spectral-suspect on-disk copy blocks the delete;
-            # surface every blocked row in skipped[] with the new reason
-            # so the frontend can break out the count separately from
-            # delete_failed. Carry request_id only on this branch — keep
-            # delete_failed shape stable across delete-lossless-opus and
-            # delete-transparent-non-flac.
-            skipped.append({
-                "download_log_id": log_id,
-                "reason": OPUS_DELETE_SKIP_REASON_SPECTRAL,
-                "request_id": request_id,
-            })
-            continue
-        if request_id not in safe_request_id_set:
-            continue
-        result = _delete_wrong_match_row(pdb, log_id)
-        if result == "deleted":
-            deleted += 1
-            assert isinstance(request_id, int)
-            deleted_by_request_id[request_id] = (
-                deleted_by_request_id.get(request_id, 0) + 1
-            )
-        else:
-            skipped.append({
-                "download_log_id": log_id,
-                "reason": (
-                    "delete_failed"
-                    if result == "missing"
-                    else "cleanup_uncertain"
-                ),
-            })
-
-    deleted_request_ids = [
-        request_id for request_id in safe_request_ids
-        if deleted_by_request_id.get(request_id)
-    ]
-    h._json({
-        "status": "ok",
-        "groups_deleted": len(deleted_request_ids),
-        "deleted": deleted,
-        "deleted_request_ids": deleted_request_ids,
-        "eligible_groups": eligible_groups,
-        "groups_skipped_spectral_suspect": len(unsafe_request_ids),
-        "skipped": skipped,
-    })
+def _delete_wrong_match_row(pdb, log_id: int):
+    """Converge helper that routes deletion through the cleanup service."""
+    return cleanup_wrong_match(pdb, log_id)
 
 
 def post_wrong_match_converge(h, body: dict) -> None:
@@ -1025,16 +682,14 @@ def post_wrong_match_converge(h, body: dict) -> None:
     if selected:
         for lid in unmatched_log_ids:
             result = _delete_wrong_match_row(pdb, lid)
-            if result == "deleted":
+            if result.outcome == OUTCOME_DELETED:
                 deleted += 1
             else:
                 skipped.append({
                     "download_log_id": lid,
-                    "reason": (
-                        "delete_failed"
-                        if result == "missing"
-                        else "cleanup_uncertain"
-                    ),
+                    "reason": result.outcome,
+                    "cleanup_reason": result.reason,
+                    "cleanup_verdict": result.verdict,
                 })
                 remaining += 1
     else:
@@ -1113,16 +768,20 @@ def post_import_preview(h, body: dict) -> None:
 
 
 def post_wrong_match_triage(h, body: dict) -> None:
-    raw_id = body.get("download_log_id")
-    if raw_id is None:
-        h._error("Missing download_log_id")
+    if body.get("confirm_all_wrong_matches") is not True:
+        h._error("confirm_all_wrong_matches must be true")
         return
     try:
-        result = triage_wrong_match(_server()._db(), int(raw_id))
+        summary = cleanup_all_wrong_matches(
+            _server()._db(),
+            confirm_all_wrong_matches=True,
+        )
     except (ValueError, TypeError) as exc:
-        h._error(f"Invalid triage input: {exc}")
+        h._error(f"Invalid cleanup input: {exc}")
         return
-    h._json(result.to_dict())
+    data = summary.to_dict()
+    data["status"] = "ok"
+    h._json(data)
 GET_ROUTES: dict[str, object] = {
     "/api/manual-import/scan": get_manual_import_scan,
     "/api/wrong-matches": get_wrong_matches,
@@ -1134,8 +793,4 @@ POST_ROUTES: dict[str, object] = {
     "/api/import-preview": post_import_preview,
     "/api/wrong-matches/converge": post_wrong_match_converge,
     "/api/wrong-matches/triage": post_wrong_match_triage,
-    "/api/wrong-matches/delete": post_wrong_match_delete,
-    "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
-    "/api/wrong-matches/delete-transparent-non-flac": post_wrong_match_delete_transparent_non_flac,
-    "/api/wrong-matches/delete-lossless-opus": post_wrong_match_delete_lossless_opus,
 }

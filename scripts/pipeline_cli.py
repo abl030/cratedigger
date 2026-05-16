@@ -1429,102 +1429,47 @@ def cmd_import_preview(db, args):
 
 
 def cmd_wrong_match_triage(db, args):
-    """Run conservative preview-driven cleanup for Wrong Matches rows."""
-    from lib.wrong_match_triage import triage_wrong_match, triage_wrong_matches
+    """Run evidence-only cleanup for the full Wrong Matches queue."""
+    from lib.wrong_match_cleanup_service import (
+        OUTCOME_KEYS,
+        cleanup_all_wrong_matches,
+    )
 
-    if args.limit is not None and args.limit <= 0:
-        print("  --limit must be positive.", file=sys.stderr)
+    forbidden_scope: list[str] = []
+    for name in ("download_log_id", "request_id", "limit", "all"):
+        value = getattr(args, name, None)
+        if value is not None and value is not False:
+            forbidden_scope.append(f"--{name.replace('_', '-')}")
+    if forbidden_scope:
+        print(
+            "  wrong-match-triage processes the whole Wrong Matches queue; "
+            f"scope flags are not supported: {', '.join(forbidden_scope)}.",
+            file=sys.stderr,
+        )
         return 2
     if not args.apply:
         print(
             "  Refusing destructive wrong-match triage without --apply. "
-            "Use wrong-match-preview-backfill --cleanup for a dry run.",
-            file=sys.stderr,
-        )
-        return 2
-    if (
-        args.download_log_id is None
-        and args.request_id is None
-        and args.limit is None
-        and not args.all
-    ):
-        print(
-            "  Refusing bulk triage without --request-id, --limit, or --all.",
+            "This command processes the whole Wrong Matches queue.",
             file=sys.stderr,
         )
         return 2
 
-    if args.download_log_id is not None:
-        results = [triage_wrong_match(db, args.download_log_id)]
-    else:
-        results = triage_wrong_matches(
-            db,
-            request_id=args.request_id,
-            limit=args.limit,
-        )
-
+    summary = cleanup_all_wrong_matches(db, confirm_all_wrong_matches=True)
     if args.json:
-        print(json.dumps([r.to_dict() for r in results], indent=2, sort_keys=True))
+        print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
         return 0
 
-    counts: dict[str, int] = {}
-    for result in results:
-        counts[result.action] = counts.get(result.action, 0) + 1
+    for result in summary.results:
         print(
-            f"  [{result.download_log_id}] {result.action}"
+            f"  [{result.download_log_id}] {result.outcome}"
             f"{': ' + result.reason if result.reason else ''}"
         )
-    print("")
-    for action, count in sorted(counts.items()):
-        print(f"  {action}: {count}")
-    print(f"  total: {len(results)}")
-    return 0
-
-
-def cmd_wrong_match_preview_backfill(db, args):
-    """Run explicit preview backfill for current Wrong Matches rows."""
-    from lib.wrong_match_triage import backfill_wrong_match_previews
-
-    if args.limit is not None and args.limit <= 0:
-        print("  --limit must be positive.", file=sys.stderr)
-        return 2
-    if args.apply and args.dry_run:
-        print("  --apply and --dry-run cannot be combined.", file=sys.stderr)
-        return 2
-    if args.apply and not args.cleanup:
-        print("  --apply is only valid with --cleanup.", file=sys.stderr)
-        return 2
-    if (
-        args.cleanup
-        and args.apply
-        and args.request_id is None
-        and args.limit is None
-        and not args.all
-    ):
-        print(
-            "  Refusing cleanup apply without --request-id, --limit, or --all.",
-            file=sys.stderr,
-        )
-        return 2
-
-    dry_run = args.dry_run or (args.cleanup and not args.apply)
-    summary = backfill_wrong_match_previews(
-        db,
-        request_id=args.request_id,
-        limit=args.limit,
-        cleanup=args.cleanup,
-        dry_run=dry_run,
-    )
-    if args.json:
-        print(json.dumps(summary, indent=2, sort_keys=True))
-        return 0
-
-    if dry_run:
-        print("  mode: dry_run")
-    elif args.cleanup:
-        print("  mode: apply")
-    for key, count in sorted(summary.items()):
-        print(f"  {key}: {count}")
+    if summary.results:
+        print("")
+    for outcome in OUTCOME_KEYS:
+        print(f"  {outcome}: {getattr(summary, outcome)}")
+    print(f"  total: {summary.processed}")
     return 0
 
 
@@ -1991,38 +1936,11 @@ def main():
     # wrong-match-triage
     p_triage = sub.add_parser(
         "wrong-match-triage",
-        help="Preview Wrong Matches and delete only cleanup-eligible rejects",
+        help="Clean the full Wrong Matches queue using existing evidence",
     )
-    p_triage.add_argument("--download-log-id", type=int,
-                          help="Triage one Wrong Matches candidate")
-    p_triage.add_argument("--request-id", type=int,
-                          help="Limit batch triage to one request")
-    p_triage.add_argument("--limit", type=int,
-                          help="Maximum candidates to triage")
     p_triage.add_argument("--apply", action="store_true",
-                          help="Allow destructive triage")
-    p_triage.add_argument("--all", action="store_true",
-                          help="Allow --apply to process every candidate")
+                          help="Allow destructive full-queue cleanup")
     p_triage.add_argument("--json", action="store_true")
-
-    # wrong-match-preview-backfill
-    p_backfill = sub.add_parser(
-        "wrong-match-preview-backfill",
-        help="One-shot preview audit for current Wrong Matches rows",
-    )
-    p_backfill.add_argument("--request-id", type=int,
-                            help="Limit backfill to one request")
-    p_backfill.add_argument("--limit", type=int,
-                            help="Maximum candidates to preview")
-    p_backfill.add_argument("--cleanup", action="store_true",
-                            help="Preview cleanup-eligible confident rejects; add --apply to delete")
-    p_backfill.add_argument("--apply", action="store_true",
-                            help="Allow --cleanup to delete candidates")
-    p_backfill.add_argument("--all", action="store_true",
-                            help="Allow --cleanup --apply to process every candidate")
-    p_backfill.add_argument("--dry-run", action="store_true",
-                            help="Preview without writing audit or deleting files")
-    p_backfill.add_argument("--json", action="store_true")
 
     # repair-spectral
     p_repair = sub.add_parser("repair-spectral",
@@ -2057,7 +1975,6 @@ def main():
         "import-jobs": cmd_import_jobs,
         "import-preview": cmd_import_preview,
         "wrong-match-triage": cmd_wrong_match_triage,
-        "wrong-match-preview-backfill": cmd_wrong_match_preview_backfill,
         "repair-spectral": cmd_repair_spectral,
     }
     search_plan_commands = {

@@ -81,13 +81,14 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     return analyze_album(folder, trim_seconds=trim_seconds)
 
 
-def _run_post_rejection_wrong_match_triage(
+def _run_post_rejection_wrong_match_cleanup(
     ctx: "CratediggerContext",
     download_log_id: object,
     *,
     scenario: str | None,
+    import_job_id: int | None = None,
 ) -> Any:
-    """Immediately triage newly-created Wrong Matches rows.
+    """Evaluate newly-created Wrong Matches rows through importer cleanup.
 
     This runs after the rejected download_log row exists and only for the
     review-queue scenarios that Wrong Matches exposes. Bad-file scenarios have
@@ -103,20 +104,29 @@ def _run_post_rejection_wrong_match_triage(
     if get_db is None:
         return None
     try:
-        from lib.wrong_match_triage import triage_wrong_match
+        from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
-        result = triage_wrong_match(get_db(), download_log_id)
-        logger.info(
-            "WRONG-MATCH TRIAGE: download_log_id=%s action=%s verdict=%s reason=%s",
+        db = get_db()
+        if import_job_id is not None:
+            evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
+            if evidence_id is not None:
+                db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+        result = cleanup_wrong_match(
+            db,
             download_log_id,
-            getattr(result, "action", None),
-            getattr(getattr(result, "preview", None), "verdict", None),
+            ignore_import_job_id=import_job_id,
+        )
+        logger.info(
+            "WRONG-MATCH CLEANUP: download_log_id=%s outcome=%s verdict=%s reason=%s",
+            download_log_id,
+            getattr(result, "outcome", None),
+            getattr(result, "verdict", None),
             getattr(result, "reason", None),
         )
         return result
     except Exception:
         logger.exception(
-            "WRONG-MATCH TRIAGE FAILED: download_log_id=%s",
+            "WRONG-MATCH CLEANUP FAILED: download_log_id=%s",
             download_log_id,
         )
         return None
@@ -1275,7 +1285,12 @@ def _process_beets_validation(
             prevalidated_candidate_result=candidate_evidence_result,
         )
     return _handle_rejected_result(
-        album_data, bv_result, staged_album, ctx)
+        album_data,
+        bv_result,
+        staged_album,
+        ctx,
+        import_job_id=import_job_id,
+    )
 
 
 def _resolved_request_rejection_id(
@@ -1387,7 +1402,7 @@ def _reject_request_auto_import(
         requeue=True,
         validation_result=failed_result.to_json(),
     )
-    _run_post_rejection_wrong_match_triage(
+    _run_post_rejection_wrong_match_cleanup(
         ctx,
         download_log_id,
         scenario=failed_result.scenario,
@@ -1598,7 +1613,9 @@ def _handle_valid_result(
 
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
                             staged_album: StagedAlbum,
-                            ctx: CratediggerContext) -> DispatchOutcome:
+                            ctx: CratediggerContext,
+                            *,
+                            import_job_id: int | None = None) -> DispatchOutcome:
     """Handle a rejected beets validation result."""
     bv_result.source_dirs = _source_dirs_for_album(album_data)
     failed_dest = move_failed_import(
@@ -1629,10 +1646,11 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
         search_filetype_override=backfill_override,
         cooled_down_users=ctx.cooled_down_users,
     )
-    _run_post_rejection_wrong_match_triage(
+    _run_post_rejection_wrong_match_cleanup(
         ctx,
         download_log_id,
         scenario=bv_result.scenario,
+        import_job_id=import_job_id,
     )
     logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "
                    f"(scenario={bv_result.scenario}, "

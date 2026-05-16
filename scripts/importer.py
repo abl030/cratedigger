@@ -69,27 +69,21 @@ def _cleanup_failed_force_import(
         return None
     download_log_id, failed_path_hint = force_payload
     try:
-        from lib.wrong_match_cleanup_decision import decide_wrong_match_cleanup
-        from lib.wrong_matches import cleanup_wrong_match_source
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_DELETED,
+            cleanup_wrong_match,
+        )
 
-        decision = decide_wrong_match_cleanup(db, download_log_id)
-        if not decision.delete_allowed:
-            return {
-                "success": False,
-                "skipped": True,
-                "download_log_id": download_log_id,
-                "failed_path_hint": failed_path_hint,
-                "reason": decision.skip_reason,
-                "cleanup_decision": decision.to_dict(),
-            }
-        cleanup = cleanup_wrong_match_source(
+        result = cleanup_wrong_match(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
+            ignore_import_job_id=job.id,
         )
-        result = cleanup.to_dict()
-        result["cleanup_decision"] = decision.to_dict()
-        return result
+        data = result.to_dict()
+        if result.outcome != OUTCOME_DELETED:
+            data["skipped"] = True
+        return data
     except Exception as exc:
         logger.exception(
             "Failed to clean wrong-match source for import job %s",

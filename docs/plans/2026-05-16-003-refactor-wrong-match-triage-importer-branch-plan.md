@@ -1,7 +1,7 @@
 ---
 title: "refactor: Fold Wrong Matches triage into importer decisions"
 type: refactor
-status: active
+status: completed
 date: 2026-05-16
 origin: docs/brainstorms/2026-05-16-wrong-match-triage-importer-branch-requirements.md
 ---

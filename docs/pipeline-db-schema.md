@@ -399,19 +399,18 @@ A free-form `TEXT` column populated by system flips that move a request to `stat
 
 Albums rejected by beets validation (high distance, wrong pressing) are moved
 to `failed_imports/` under the slskd download dir, with their `failed_path`
-stored in `download_log.validation_result` JSONB. New Wrong Matches rows are
-immediately previewed through the no-mutation import preview path. Confident
-cleanup-eligible rejects are deleted and cleared; would-import and uncertain
-rows stay actionable for manual review or converge.
+stored in `download_log.validation_result` JSONB. Wrong Matches cleanup consumes
+already-persisted candidate/current evidence only; it never previews,
+measures, or backfills evidence at delete time. Confident cleanup-eligible
+force-mode rejects are deleted and cleared; would-import, uncertain, missing
+evidence, stale evidence, active-job, and missing-path rows stay actionable for
+manual review or converge.
 
-The triage result is persisted under
-`download_log.validation_result.wrong_match_triage`, so a row that leaves the
-actionable Wrong Matches list still keeps the action, success flag, reason,
-preview verdict/decision, stage chain, and cleanup result for audit. Denylist
-rows written by the rejection path are not removed by triage. Recents History
-renders this audit as a compact triage chip on the collapsed card and as
-expanded download-history rows; this is display-only and does not change
-cleanup, import, spectral, or match-threshold policy.
+Historical rows may still contain
+`download_log.validation_result.wrong_match_triage` from the retired preview
+triage path. Recents History renders those old blobs as display-only audit
+metadata. New cleanup does not write a replacement blob; its immediate outcome
+is returned in the web/CLI summary.
 
 After manual review, force-import bypasses the distance check. The request
 handler or CLI command validates the row/path synchronously, then enqueues a
@@ -439,18 +438,10 @@ review list.
 ```bash
 pipeline_cli.py force-import <download_log_id>
 pipeline_cli.py import-jobs --status failed
-pipeline_cli.py wrong-match-preview-backfill --json
-pipeline_cli.py wrong-match-preview-backfill --cleanup --json
-pipeline_cli.py wrong-match-preview-backfill --cleanup --apply --request-id <id>
+pipeline_cli.py wrong-match-triage --apply --json
 # or: POST /api/pipeline/force-import {"download_log_id": N}
 ```
 
-`wrong-match-preview-backfill` is intentionally one-shot maintenance, not a
-daemon. It previews currently visible Wrong Matches rows with resolvable source
-folders, skips rows whose files are gone, skips rows already represented by an
-active force-import job, and records preview audit without creating import jobs.
-Use `--cleanup` by itself as the cleanup dry-run: it counts cleanup-eligible
-confident rejects without writing audit rows or deleting files. Destructive
-cleanup requires `--cleanup --apply` and either `--request-id`, `--limit`, or
-explicit `--all`. The older `wrong-match-triage` command follows the same
-destructive-operation guard: `--apply` plus a scope, or explicit `--all`.
+`wrong-match-triage` is destructive and intentionally processes the full
+Wrong Matches queue. It requires `--apply`, rejects scope flags, and returns
+per-outcome counts matching the web `/api/wrong-matches/triage` summary.

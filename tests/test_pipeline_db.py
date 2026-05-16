@@ -3825,6 +3825,25 @@ class TestAdvisoryLock(unittest.TestCase):
         with self.db2.advisory_lock(self.NS, 12345) as other:
             self.assertTrue(other)
 
+    def test_wrong_match_cleanup_namespace_isolated(self):
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
+            wrong_match_cleanup_lock_key,
+        )
+
+        key = wrong_match_cleanup_lock_key(42, 77, "/failed/Artist - Album")
+        with self.db1.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            key,
+        ) as import_lock:
+            self.assertTrue(import_lock)
+            with self.db2.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
+                key,
+            ) as cleanup_lock:
+                self.assertTrue(cleanup_lock)
+
 
 @requires_postgres
 class TestGetWrongMatches(unittest.TestCase):
@@ -3978,38 +3997,6 @@ class TestGetWrongMatches(unittest.TestCase):
             (self.req2, "other-request"),
         })
 
-    def test_record_wrong_match_triage_preserves_audit_after_clear(self):
-        log_id = self.db.log_download(
-            request_id=self.req1,
-            soulseek_username="alice",
-            outcome="rejected",
-            validation_result=json.dumps({
-                "scenario": "high_distance",
-                "failed_path": "/abs/Album",
-            }),
-        )
-
-        recorded = self.db.record_wrong_match_triage(log_id, {
-            "action": "deleted_reject",
-            "success": True,
-            "reason": "downgrade",
-        })
-        cleared = self.db.clear_wrong_match_paths(self.req1, ["/abs/Album"])
-
-        self.assertTrue(recorded)
-        self.assertEqual(cleared, 1)
-        entry = self.db.get_download_log_entry(log_id)
-        assert entry is not None
-        raw_vr = entry["validation_result"]
-        vr = json.loads(raw_vr) if isinstance(raw_vr, str) else raw_vr
-        assert isinstance(vr, dict)
-        self.assertNotIn("failed_path", vr)
-        self.assertEqual(vr["wrong_match_triage"], {
-            "action": "deleted_reject",
-            "success": True,
-            "reason": "downgrade",
-        })
-
     def test_excludes_non_rejected_outcomes(self):
         """success / force_import / timeout must never surface in wrong-matches."""
         self._log_rejected(self.req1, "reject-me", "/fi/keep")
@@ -4155,123 +4142,6 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertIsNone(row["request_current_spectral_bitrate"])
         self.assertEqual(row["request_imported_path"],
                          "/mnt/virtio/Music/Beets/Artist/Album")
-
-
-@requires_postgres
-class TestUpdateDownloadLogMeasurement(unittest.TestCase):
-    """Persist measurement output from wrong-match triage onto download_log.
-
-    Triage runs preview-with-spectral on every wrong-match row and gets
-    back a populated ImportResult with new_measurement.spectral_* and
-    v0_probe.*. This helper writes those four values onto the same row
-    that get_wrong_matches reads, so the candidate-evidence cells from
-    PR #181 actually populate. Partial / non-destructive — None inputs
-    leave existing values untouched.
-    """
-
-    def setUp(self):
-        self.db = make_db()
-        self.req = self.db.add_request(
-            mb_release_id="meas-1", artist_name="Artist 1",
-            album_title="Album 1", source="request")
-
-    def tearDown(self):
-        self.db.close()
-
-    def _log(self, **fields):
-        defaults = dict(
-            request_id=self.req,
-            soulseek_username="alice",
-            outcome="rejected",
-            beets_scenario="high_distance",
-            validation_result=json.dumps({
-                "scenario": "high_distance",
-                "failed_path": "/fi/path",
-            }),
-        )
-        defaults.update(fields)
-        return self.db.log_download(**defaults)
-
-    def _row(self, log_id):
-        return self.db.get_download_log_entry(log_id)
-
-    def test_populates_all_four_columns_from_null(self):
-        """Happy path: row with NULL columns gets all four populated."""
-        log_id = self._log()
-        result = self.db.update_download_log_measurement(
-            log_id,
-            spectral_grade="genuine",
-            spectral_bitrate=950,
-            v0_probe_kind="lossless_source_v0",
-            v0_probe_avg_bitrate=265,
-        )
-        self.assertTrue(result)
-        row = self._row(log_id)
-        assert row is not None
-        self.assertEqual(row["spectral_grade"], "genuine")
-        self.assertEqual(row["spectral_bitrate"], 950)
-        self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
-        self.assertEqual(row["v0_probe_avg_bitrate"], 265)
-
-    def test_partial_update_leaves_omitted_columns_alone(self):
-        """Only spectral pair passed → V0 columns remain NULL."""
-        log_id = self._log()
-        self.db.update_download_log_measurement(
-            log_id,
-            spectral_grade="suspect",
-            spectral_bitrate=320,
-        )
-        row = self._row(log_id)
-        assert row is not None
-        self.assertEqual(row["spectral_grade"], "suspect")
-        self.assertEqual(row["spectral_bitrate"], 320)
-        self.assertIsNone(row["v0_probe_kind"])
-        self.assertIsNone(row["v0_probe_avg_bitrate"])
-
-    def test_none_inputs_do_not_wipe_existing_values(self):
-        """Non-destructive: pre-populated columns survive None inputs."""
-        log_id = self._log(
-            spectral_grade="genuine",
-            spectral_bitrate=950,
-        )
-        self.db.update_download_log_measurement(
-            log_id,
-            spectral_grade=None,
-            spectral_bitrate=None,
-            v0_probe_kind="lossless_source_v0",
-            v0_probe_avg_bitrate=265,
-        )
-        row = self._row(log_id)
-        assert row is not None
-        self.assertEqual(row["spectral_grade"], "genuine")
-        self.assertEqual(row["spectral_bitrate"], 950)
-        self.assertEqual(row["v0_probe_kind"], "lossless_source_v0")
-        self.assertEqual(row["v0_probe_avg_bitrate"], 265)
-
-    def test_all_none_is_noop(self):
-        """All-None call leaves the row unchanged and returns False."""
-        log_id = self._log(spectral_grade="genuine", spectral_bitrate=950)
-        result = self.db.update_download_log_measurement(
-            log_id,
-            spectral_grade=None,
-            spectral_bitrate=None,
-            v0_probe_kind=None,
-            v0_probe_avg_bitrate=None,
-        )
-        self.assertFalse(result)
-        row = self._row(log_id)
-        assert row is not None
-        self.assertEqual(row["spectral_grade"], "genuine")
-        self.assertEqual(row["spectral_bitrate"], 950)
-
-    def test_missing_log_id_returns_false(self):
-        """Updating a non-existent download_log row returns False."""
-        result = self.db.update_download_log_measurement(
-            999_999_999,
-            spectral_grade="genuine",
-            spectral_bitrate=950,
-        )
-        self.assertFalse(result)
 
 
 @requires_postgres
@@ -4553,6 +4423,99 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         result = self.db.get_active_import_job_for_request(self.req_id)
         assert result is not None
         self.assertEqual(result["id"], max(first.id, second.id))
+
+
+@requires_postgres
+class TestActiveImportJobsForWrongMatch(unittest.TestCase):
+    """Real-DB coverage for Wrong Matches active-job race checks."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="wm-active-uuid",
+            artist_name="Wrong",
+            album_title="Match",
+            source="request",
+        )
+        self.other_req_id = self.db.add_request(
+            mb_release_id="wm-active-other",
+            artist_name="Other",
+            album_title="Match",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_matches_active_jobs_by_row_request_path_and_source_dirs(self):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            IMPORT_JOB_MANUAL,
+            force_import_payload,
+            manual_import_payload,
+        )
+
+        path = "/tmp/failed/Artist - Album"
+        source_dir = "user1\\Music\\Artist\\Album"
+
+        by_download_log = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.other_req_id,
+            dedupe_key="wm:download-log",
+            payload=force_import_payload(download_log_id=77, failed_path="/tmp/other"),
+        )
+        by_request = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="wm:request",
+            payload=manual_import_payload(failed_path="/tmp/unrelated"),
+        )
+        by_path = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.other_req_id,
+            dedupe_key="wm:path",
+            payload=manual_import_payload(failed_path=path),
+        )
+        by_source_dir = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.other_req_id,
+            dedupe_key="wm:source-dir",
+            payload=force_import_payload(
+                download_log_id=88,
+                failed_path="/tmp/source-dir-other",
+                source_dirs=[source_dir],
+            ),
+        )
+        self.db._execute(
+            "UPDATE import_jobs SET status = 'running' WHERE id = %s",
+            (by_source_dir.id,),
+        )
+        ignored = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key="wm:ignored",
+            payload=force_import_payload(download_log_id=77, failed_path=path),
+        )
+        completed = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key="wm:completed",
+            payload=force_import_payload(download_log_id=77, failed_path=path),
+        )
+        self.db.mark_import_job_completed(completed.id, result={"ok": True})
+
+        jobs = self.db.list_active_import_jobs_for_wrong_match(
+            download_log_id=77,
+            request_id=self.req_id,
+            failed_paths=[path],
+            source_dirs=[source_dir],
+            ignore_import_job_id=ignored.id,
+        )
+
+        self.assertEqual(
+            {job.id for job in jobs},
+            {by_download_log.id, by_request.id, by_path.id, by_source_dir.id},
+        )
 
 
 # ---------------------------------------------------------------------------

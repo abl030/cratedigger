@@ -47,8 +47,7 @@ Browser → https://music.ablz.au
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
-| `/api/wrong-matches/triage` | POST | Re-run wrong-match auto-triage for a single candidate |
-| `/api/wrong-matches/delete-transparent-non-flac` | POST | Bulk-delete wrong-match folders whose exact library copy is already transparent and whose pending downloads are non-FLAC |
+| `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running import jobs in Recents queue order |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
@@ -89,18 +88,14 @@ Browser → https://music.ablz.au
 - **Wrong Matches explorer** — expanding a candidate now shows the original
   downloaded folder names captured from the Soulseek user, a per-file explorer,
   extracted audio tags, and inline browser playback for supported audio files.
-- **Wrong Matches bulk cleanup** — top-level cleanup deletes pending non-FLAC
-  wrong-match folders for releases that already have an exact transparent copy
-  in beets, leaving FLAC candidates for manual review.
-- **Wrong Matches triage** — new download-path wrong-match rejections are
-  previewed immediately after their `download_log` row is created. The
-  `/api/wrong-matches/triage` endpoint can rerun the same policy for one
-  candidate. Triage deletes only `cleanup_eligible` confident rejects;
-  would-import and uncertain candidates stay visible for operator review. The
-  action and reason are stored in
-  `download_log.validation_result.wrong_match_triage` and are surfaced in
-  Recents History: collapsed cards show a triage chip, and expanded download
-  history shows action, preview, reason, and stage-chain detail.
+- **Wrong Matches cleanup** — one top-level action runs over the full Wrong
+  Matches queue. It consumes existing evidence only, deletes force-mode
+  confident cleanup-eligible rejects, and leaves would-import, uncertain,
+  missing-evidence, stale-evidence, active-job, and missing-path candidates for
+  review. The result is shown as a summary toast and the pane refreshes.
+- **Wrong Matches history** — old rows with
+  `download_log.validation_result.wrong_match_triage` still render their
+  historical chip/detail in Recents. New cleanup does not write that blob.
 - **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls the value-preview adapter through `/api/pipeline/simulate` with presets for known scenarios.
 
 ## Dev Server Workflows

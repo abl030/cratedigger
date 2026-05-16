@@ -137,6 +137,11 @@ ADVISORY_LOCK_NAMESPACE_IMPORTER = 0x51554555
 # ``0x504C414E`` = ASCII "PLAN", recognisable in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_PLAN = 0x504C414E
 
+# Per-source lock for destructive Wrong Matches cleanup. Key =
+# ``wrong_match_cleanup_lock_key(request_id, download_log_id, source_path)``.
+# ``0x574D434C`` = ASCII "WMCL", recognisable in ``pg_locks``.
+ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP = 0x574D434C
+
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
     """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.
@@ -165,6 +170,20 @@ def release_id_to_lock_key(mb_release_id: str) -> int:
     lock's purpose silently.
     """
     return zlib.crc32(mb_release_id.strip().encode("utf-8")) & 0x7FFFFFFF
+
+
+def wrong_match_cleanup_lock_key(
+    request_id: int | None,
+    download_log_id: int,
+    source_path: str | None,
+) -> int:
+    """Map a Wrong Matches source row to a stable int32 advisory-lock key."""
+    parts = (
+        str(request_id) if request_id is not None else "",
+        str(int(download_log_id)),
+        str(source_path or "").strip(),
+    )
+    return zlib.crc32("\0".join(parts).encode("utf-8")) & 0x7FFFFFFF
 
 # Schema is managed by lib/migrator.py via numbered files in migrations/.
 # PipelineDB itself never runs DDL — see scripts/migrate_db.py and the
@@ -1028,6 +1047,48 @@ class PipelineDB:
             FROM import_jobs
             WHERE status IN ('queued', 'running')
             {request_filter}
+            ORDER BY created_at ASC, id ASC
+            LIMIT %s
+        """, tuple(params))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def list_active_import_jobs_for_wrong_match(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int | None,
+        failed_paths: Iterable[str],
+        source_dirs: Iterable[str],
+        ignore_import_job_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        """Return queued/running import jobs that could be using this source."""
+        paths = [str(path) for path in dict.fromkeys(failed_paths) if path]
+        dirs = [str(path) for path in dict.fromkeys(source_dirs) if path]
+        match_clauses: list[str] = ["payload->>'download_log_id' = %s::text"]
+        match_params: list[Any] = [str(int(download_log_id))]
+        if request_id is not None:
+            match_clauses.append("request_id = %s")
+            match_params.append(int(request_id))
+        if paths:
+            match_clauses.append("payload->>'failed_path' = ANY(%s::text[])")
+            match_params.append(paths)
+        if dirs:
+            match_clauses.append("(payload->'source_dirs') ?| %s::text[]")
+            match_params.append(dirs)
+
+        ignore_clause = ""
+        ignore_params: list[Any] = []
+        if ignore_import_job_id is not None:
+            ignore_clause = "AND id <> %s"
+            ignore_params.append(int(ignore_import_job_id))
+        params = [*ignore_params, *match_params, limit]
+        cur = self._execute(f"""
+            SELECT *
+            FROM import_jobs
+            WHERE status IN ('queued', 'running')
+              {ignore_clause}
+              AND ({" OR ".join(match_clauses)})
             ORDER BY created_at ASC, id ASC
             LIMIT %s
         """, tuple(params))
@@ -1950,46 +2011,6 @@ class PipelineDB:
             return None
         return int(row["current_evidence_id"])
 
-    def get_request_latest_import_job_evidence_id(
-        self,
-        request_id: int,
-    ) -> int | None:
-        """Most-recent import_job FK for a request (cross-walk helper)."""
-        cur = self._execute(
-            """
-            SELECT candidate_evidence_id FROM import_jobs
-            WHERE request_id = %s AND candidate_evidence_id IS NOT NULL
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            (int(request_id),),
-        )
-        row = cur.fetchone()
-        if row is None or row["candidate_evidence_id"] is None:
-            return None
-        return int(row["candidate_evidence_id"])
-
-    def get_request_latest_import_job_evidence_id_from_dl(
-        self,
-        download_log_id: int,
-    ) -> int | None:
-        """Cross-walk: download_log → request_id → most recent import_job FK."""
-        cur = self._execute(
-            """
-            SELECT j.candidate_evidence_id
-            FROM download_log dl
-            JOIN import_jobs j ON j.request_id = dl.request_id
-            WHERE dl.id = %s AND j.candidate_evidence_id IS NOT NULL
-            ORDER BY j.created_at DESC, j.id DESC
-            LIMIT 1
-            """,
-            (int(download_log_id),),
-        )
-        row = cur.fetchone()
-        if row is None or row["candidate_evidence_id"] is None:
-            return None
-        return int(row["candidate_evidence_id"])
-
     def _album_quality_evidence_from_row(
         self,
         row: dict[str, Any],
@@ -2871,72 +2892,6 @@ class PipelineDB:
         """, tuple([request_id, *paths]))
         self.conn.commit()
         return cur.rowcount
-
-    def update_download_log_measurement(
-        self,
-        download_log_id: int,
-        *,
-        spectral_grade: str | None = None,
-        spectral_bitrate: int | None = None,
-        v0_probe_kind: str | None = None,
-        v0_probe_avg_bitrate: int | None = None,
-    ) -> bool:
-        """Persist measurement evidence onto one download_log row.
-
-        Partial / non-destructive: only columns whose source value is
-        non-None are touched. Used by wrong-match triage to plumb the
-        measurement from ``ImportPreviewResult.import_result`` onto the
-        same row that ``get_wrong_matches`` reads, so the candidate-
-        evidence cells from PR #181 populate without changing the read
-        path. Returns True when at least one column was updated, False
-        when the call was a no-op (all None) or the row didn't exist.
-        """
-        sets: list[str] = []
-        params: list[object] = []
-        if spectral_grade is not None:
-            sets.append("spectral_grade = %s")
-            params.append(spectral_grade)
-        if spectral_bitrate is not None:
-            sets.append("spectral_bitrate = %s")
-            params.append(spectral_bitrate)
-        if v0_probe_kind is not None:
-            sets.append("v0_probe_kind = %s")
-            params.append(v0_probe_kind)
-        if v0_probe_avg_bitrate is not None:
-            sets.append("v0_probe_avg_bitrate = %s")
-            params.append(v0_probe_avg_bitrate)
-        if not sets:
-            return False
-        params.append(download_log_id)
-        cur = self._execute(
-            f"UPDATE download_log SET {', '.join(sets)} WHERE id = %s",
-            tuple(params),
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
-
-    def record_wrong_match_triage(
-        self,
-        log_id: int,
-        triage_result: dict[str, object],
-    ) -> bool:
-        """Persist preview-driven triage audit details on a download_log row."""
-        cur = self._execute("""
-            UPDATE download_log
-            SET validation_result = jsonb_set(
-                CASE
-                    WHEN jsonb_typeof(validation_result) = 'object'
-                    THEN validation_result
-                    ELSE '{}'::jsonb
-                END,
-                '{wrong_match_triage}',
-                %s::jsonb,
-                true
-            )
-            WHERE id = %s
-        """, (json.dumps(triage_result), log_id))
-        self.conn.commit()
-        return cur.rowcount > 0
 
     # -- Search log -----------------------------------------------------------
 
