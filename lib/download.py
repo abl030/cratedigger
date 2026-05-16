@@ -32,7 +32,7 @@ from lib.processing_paths import (
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
-                         DownloadDecision, DownloadInfo, ValidationResult,
+                         DownloadDecision, ValidationResult,
                          decide_download_action,
                          compute_effective_override_bitrate,
                          extract_usernames,
@@ -1555,75 +1555,6 @@ def _handle_valid_result(
         return None
 
 
-def _persist_candidate_evidence_for_reject(
-    *,
-    db: Any,
-    ctx: CratediggerContext,
-    album_data: GrabListEntry,
-    dl_info: DownloadInfo,
-    bv_result: ValidationResult,
-    download_log_id: int | None,
-) -> None:
-    """Measure and persist candidate evidence on a reject row.
-
-    Called after the download_log row is written by ``_handle_rejected_result``.
-    Future Wrong Matches triage on this row looks up evidence by
-    ``owner_type='download_log_candidate', owner_id=download_log_id`` and
-    skips re-measurement when the snapshot still matches the file on disk.
-
-    Every error case here is non-fatal — the reject row is already written
-    and the request transition has already happened. The worst case is that
-    triage falls back to its own measurement path on first interaction, which
-    is the pre-fix behavior. Log a warning and move on.
-    """
-    if db is None or not isinstance(download_log_id, int) or download_log_id <= 0:
-        return
-    failed_path = bv_result.failed_path
-    if not isinstance(failed_path, str) or not failed_path:
-        return
-    try:
-        from lib.preimport import measure_preimport_state
-        from lib.quality_evidence import (
-            persist_candidate_evidence_from_measurement,
-        )
-
-        measurement = measure_preimport_state(
-            path=failed_path,
-            mb_release_id=album_data.mb_release_id or "",
-            label=f"{album_data.artist} - {album_data.title}",
-            download_filetype=dl_info.filetype or "",
-            download_min_bitrate_bps=dl_info.bitrate,
-            download_is_vbr=dl_info.is_vbr,
-            cfg=ctx.cfg,
-            db=db,
-            request_id=album_data.db_request_id,
-            propagate_download_to_existing=False,
-        )
-        result = persist_candidate_evidence_from_measurement(
-            db,
-            source_path=failed_path,
-            measurement=measurement,
-            download_log_id=download_log_id,
-        )
-        if result.status != "ready":
-            logger.warning(
-                "REJECT EVIDENCE PERSIST: status=%s detail=%r dl_id=%s — "
-                "Wrong Matches triage will fall back to re-measurement on "
-                "first interaction.",
-                result.status,
-                result.reason,
-                download_log_id,
-            )
-    except Exception:
-        logger.warning(
-            "REJECT EVIDENCE PERSIST: unexpected error persisting candidate "
-            "evidence for dl_id=%s — Wrong Matches triage will fall back to "
-            "re-measurement on first interaction.",
-            download_log_id,
-            exc_info=True,
-        )
-
-
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
                             staged_album: StagedAlbum,
                             ctx: CratediggerContext) -> DispatchOutcome:
@@ -1656,26 +1587,6 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
         download_info=dl_info,
         search_filetype_override=backfill_override,
         cooled_down_users=ctx.cooled_down_users,
-    )
-    # Persist candidate evidence on the rejected row so Wrong Matches triage
-    # (`decide_wrong_match_cleanup → ensure_candidate_evidence_for_action`)
-    # finds it via owner_type='download_log_candidate' and returns
-    # candidate_status='reused' on first interaction. Without this, triage
-    # falls back to `_preview_for_triage` → full re-measurement (snapshot +
-    # validate_audio + spectral_analyze + V0 probe), 10-30s per album. The
-    # legacy auto-import path (this function) is the only reject seam that
-    # didn't already write evidence — the preview-worker path persists via
-    # `persist_candidate_evidence_from_measurement` in `import_preview.py`
-    # before marking `evidence_ready`. Moves the measurement cost from
-    # interactive triage to the background poll loop where it doesn't block
-    # the operator.
-    _persist_candidate_evidence_for_reject(
-        db=ctx.pipeline_db_source._get_db(),
-        ctx=ctx,
-        album_data=album_data,
-        dl_info=dl_info,
-        bv_result=bv_result,
-        download_log_id=download_log_id,
     )
     _run_post_rejection_wrong_match_triage(
         ctx,
