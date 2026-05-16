@@ -8,7 +8,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Any
 
-from lib.util import resolve_failed_path
+from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 
 
 @dataclass(frozen=True)
@@ -129,6 +129,60 @@ def _resolved_candidates(candidates: list[str]) -> tuple[str | None, list[str]]:
     return resolved_path, candidates
 
 
+def unsafe_failed_import_path_reason(path: str) -> str | None:
+    """Return a reason when ``path`` is outside a failed_imports child dir."""
+    real_path = os.path.realpath(path)
+    for root in _failed_import_roots():
+        if _is_child_path(real_path, root):
+            return None
+    if _has_failed_imports_ancestor(real_path):
+        return None
+    return f"unsafe_failed_import_path: {path}"
+
+
+def _failed_import_roots() -> tuple[str, ...]:
+    return tuple(
+        os.path.realpath(os.path.join(base, "failed_imports"))
+        for base in FAILED_IMPORT_SEARCH_DIRS
+    )
+
+
+def _is_child_path(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root and path != root
+    except ValueError:
+        return False
+
+
+def _has_failed_imports_ancestor(path: str) -> bool:
+    parts = path.split(os.sep)
+    for index, part in enumerate(parts):
+        if part == "failed_imports" and index < len(parts) - 1:
+            return True
+    return False
+
+
+def _equivalent_failed_path_aliases(
+    db: Any,
+    request_id: int | None,
+    resolved_path: str | None,
+) -> list[str]:
+    if request_id is None or resolved_path is None:
+        return []
+    target_path = os.path.realpath(resolved_path)
+    aliases: list[str] = []
+    for row in db.get_wrong_matches():
+        if row.get("request_id") != request_id:
+            continue
+        raw_path = validation_failed_path(row.get("validation_result"))
+        if not raw_path:
+            continue
+        row_resolved = resolve_failed_path(raw_path)
+        if row_resolved and os.path.realpath(row_resolved) == target_path:
+            aliases.append(raw_path)
+    return aliases
+
+
 def dismiss_wrong_match_source(
     db: Any,
     download_log_id: int,
@@ -152,6 +206,10 @@ def dismiss_wrong_match_source(
 
     candidates = _path_candidates(failed_path_hint, raw_path)
     resolved_path, candidates = _resolved_candidates(candidates)
+    candidates = _path_candidates(
+        *candidates,
+        *_equivalent_failed_path_aliases(db, request_id, resolved_path),
+    )
 
     cleared_rows = 0
     if request_id is not None:
@@ -195,8 +253,23 @@ def cleanup_wrong_match_source(
 
     candidates = _path_candidates(failed_path_hint, raw_path)
     resolved_path, candidates = _resolved_candidates(candidates)
+    candidates = _path_candidates(
+        *candidates,
+        *_equivalent_failed_path_aliases(db, request_id, resolved_path),
+    )
 
     if resolved_path is not None:
+        unsafe_reason = unsafe_failed_import_path_reason(resolved_path)
+        if unsafe_reason:
+            return WrongMatchCleanupResult(
+                download_log_id=download_log_id,
+                entry_found=True,
+                request_id=request_id,
+                raw_failed_path=raw_path,
+                failed_path_hint=failed_path_hint,
+                resolved_path=resolved_path,
+                error=unsafe_reason,
+            )
         try:
             shutil.rmtree(resolved_path)
         except FileNotFoundError:

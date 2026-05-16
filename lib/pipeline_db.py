@@ -1067,9 +1067,6 @@ class PipelineDB:
         dirs = [str(path) for path in dict.fromkeys(source_dirs) if path]
         match_clauses: list[str] = ["payload->>'download_log_id' = %s::text"]
         match_params: list[Any] = [str(int(download_log_id))]
-        if request_id is not None:
-            match_clauses.append("request_id = %s")
-            match_params.append(int(request_id))
         if paths:
             match_clauses.append("payload->>'failed_path' = ANY(%s::text[])")
             match_params.append(paths)

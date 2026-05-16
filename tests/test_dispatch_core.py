@@ -604,8 +604,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     candidate_import_job_id=job.id,
                 )
 
+            from lib.import_dispatch import DISPATCH_CODE_QUALITY_PIPELINE_REJECTED
+
             self.assertFalse(result.success)
             self.assertIn("Rejected by persisted quality evidence", result.message)
+            self.assertEqual(result.code, DISPATCH_CODE_QUALITY_PIPELINE_REJECTED)
             ext.run.assert_not_called()
             refreshed_id = db.get_request_current_evidence_id(42)
             self.assertIsNotNone(refreshed_id)
