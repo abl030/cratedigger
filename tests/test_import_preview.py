@@ -19,16 +19,6 @@ from lib.quality import (
     full_pipeline_decision,
 )
 
-# U2/U3 removed the (owner_type, owner_id) evidence addressing; two tests
-# below reference the old symbols and will need migrating to the new
-# ``current_evidence_id`` FK shape. Out of scope for U6 — they're guarded
-# with ``unittest.skip`` so the rest of the module loads.
-ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE = None
-ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE = None
-
-
-def AlbumQualityEvidenceOwner(*args: object, **kwargs: object) -> None:  # noqa: N802
-    return None
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -295,12 +285,11 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    @unittest.skip(
-        "Pre-existing post-U2: references removed "
-        "ALBUM_QUALITY_EVIDENCE_OWNER_* / load_album_quality_evidence(owner). "
-        "Migrate to current_evidence_id FK shape — out of scope for U6."
-    )
     def test_path_preview_persists_candidate_evidence_for_job_owner(self):
+        """Post-migration 021: preview persists candidate evidence and wires
+        the ``import_jobs.candidate_evidence_id`` FK. Loading via the FK
+        chain returns the persisted row.
+        """
         db = self._db()
         job = db.enqueue_import_job(
             "manual_import",
@@ -348,12 +337,9 @@ class TestImportPreviewPath(unittest.TestCase):
                 )
 
             self.assertEqual(preview.verdict, "would_import")
-            loaded = db.load_album_quality_evidence(
-                AlbumQualityEvidenceOwner(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                    owner_id=job.id,
-                )
-            )
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            self.assertIsNotNone(evidence_id)
+            loaded = db.load_album_quality_evidence_by_id(evidence_id)
             assert loaded is not None
             self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
             self.assertEqual([f.relative_path for f in loaded.files], ["01.mp3"])
@@ -361,11 +347,6 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    @unittest.skip(
-        "Pre-existing post-U2: references removed "
-        "ALBUM_QUALITY_EVIDENCE_OWNER_* / load_album_quality_evidence(owner). "
-        "Migrate to current_evidence_id FK shape — out of scope for U6."
-    )
     def test_path_preview_persists_candidate_evidence_for_download_log_owner(self):
         db = self._db()
         download_log_id = db.log_download(
@@ -413,23 +394,17 @@ class TestImportPreviewPath(unittest.TestCase):
                 )
 
             self.assertEqual(preview.verdict, "would_import")
-            loaded = db.load_album_quality_evidence(
-                AlbumQualityEvidenceOwner(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                    owner_id=download_log_id,
-                )
+            evidence_id = db.get_download_log_candidate_evidence_id(
+                download_log_id
             )
+            self.assertIsNotNone(evidence_id)
+            loaded = db.load_album_quality_evidence_by_id(evidence_id)
             assert loaded is not None
             self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    @unittest.skip(
-        "Pre-existing post-U2: references removed "
-        "FakePipelineDB.load_album_quality_evidence(owner). "
-        "Migrate to current_evidence_id FK shape — out of scope for U6."
-    )
     def test_source_change_during_preview_does_not_persist_candidate_evidence(self):
         db = self._db()
         job = db.enqueue_import_job(
@@ -485,12 +460,9 @@ class TestImportPreviewPath(unittest.TestCase):
 
             self.assertEqual(preview.verdict, "uncertain")
             self.assertEqual(preview.decision, "source_changed_during_preview")
-            self.assertIsNone(db.load_album_quality_evidence(
-                AlbumQualityEvidenceOwner(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                    owner_id=job.id,
-                )
-            ))
+            # Source mutated mid-flight: preview must NOT wire the candidate
+            # FK on the import_job row.
+            self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

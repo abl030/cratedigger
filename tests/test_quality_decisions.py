@@ -24,7 +24,6 @@ from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
-    AlbumQualityEvidenceOwner,
     AlbumQualityV0Metric,
     SpectralContext,
     DownloadInfo,
@@ -952,6 +951,9 @@ import inspect
 EXPECTED_RESULT_KEYS = {
     # Preimport gates (shared, run before the FLAC/MP3 branches) — issue #91
     "preimport_audio", "preimport_nested",
+    # U11: bad_audio_hash + empty_fileset early branches read from evidence;
+    # the flat-kwargs simulator leaves them None.
+    "preimport_bad_hash", "preimport_empty_fileset",
     "stage0_spectral_gate",
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
@@ -1032,8 +1034,16 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
                 source_provenance="neutral_album_quality_evidence",
                 proof_provenance=v0_proof,
             )
+        # Post-migration 021: evidence is content-addressed by
+        # (mb_release_id, snapshot_fingerprint). For pure decision tests we
+        # don't care which entity points at the row — the decider reads the
+        # facts off the struct itself — so synthesise unique addressing keys
+        # from the legacy ``(owner_type, owner_id)`` kwargs to preserve the
+        # uniqueness of distinct evidence shapes within a test.
         return AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(owner_type, owner_id),
+            mb_release_id=f"mbid-{owner_type}-{owner_id}",
+            snapshot_fingerprint=f"sha256:{owner_type}-{owner_id}-{container}",
+            source_path=f"/tmp/{owner_type}-{owner_id}",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
                 avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
