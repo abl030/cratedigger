@@ -38,6 +38,7 @@ from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     legacy_current_lossless_v0_probe_from_request,
     lossless_source_v0_probe_from_metric,
+    propagate_candidate_evidence_to_current,
     verified_lossless_proof_from_import_result,
 )
 from lib.import_evidence import (
@@ -655,7 +656,25 @@ def _refresh_current_evidence_after_import(
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
 ) -> None:
-    """Persist current evidence from the just-imported Beets album."""
+    """Persist current evidence for the just-imported Beets album.
+
+    When ``source_candidate`` is supplied (the normal post-U10 path), the new
+    library-side evidence row is built by propagating the candidate's full
+    measurement payload — see
+    :func:`lib.quality_evidence.propagate_candidate_evidence_to_current`.
+    Renamed-only imports inherit spectral grade, V0 lineage, and
+    bad-audio-hash matches; transcoded imports inherit only the verified-
+    lossless proof. Bitrate/format always re-derive from ``album_info``
+    (dual-check against the candidate measurement).
+
+    When ``source_candidate`` is ``None`` (rare — legacy callers, an evidence
+    record that vanished, or non-post-import callers reusing this helper),
+    fall back to the pre-U10 ``backfill_current_evidence_from_album_info``
+    path. That path rebuilds evidence from beets fields plus a carried-
+    forward ``verified_lossless_proof`` and is preserved for non-post-import
+    callers (e.g., wrong-match triage backfilling library evidence for
+    pre-refactor albums).
+    """
 
     from lib.beets_db import BeetsDB
     from lib.quality import QualityRankConfig
@@ -665,20 +684,26 @@ def _refresh_current_evidence_after_import(
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return
+
+    if source_candidate is not None:
+        propagate_candidate_evidence_to_current(
+            db,
+            request_id=request_id,
+            candidate_evidence=source_candidate,
+            album_info=album_info,
+        )
+        return
+
+    # Legacy fallback: no candidate evidence on hand. Rebuild from beets +
+    # carry-forward verified_lossless_proof from the import_result, matching
+    # pre-U10 behaviour exactly.
     decision = import_result.decision if import_result is not None else None
     verified_lossless_proof = None
     if decision != "preflight_existing":
         verified_lossless_proof = (
-            source_candidate.verified_lossless_proof
-            if (
-                source_candidate is not None
-                and source_candidate.measurement.verified_lossless
-            )
-            else (
-                verified_lossless_proof_from_import_result(import_result)
-                if import_result is not None
-                else None
-            )
+            verified_lossless_proof_from_import_result(import_result)
+            if import_result is not None
+            else None
         )
     backfill_current_evidence_from_album_info(
         db,

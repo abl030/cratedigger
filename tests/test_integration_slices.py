@@ -7114,5 +7114,387 @@ class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
             _shutil.rmtree(source, ignore_errors=True)
 
 
+class TestU10PostImportEvidencePropagation(unittest.TestCase):
+    """U10: ``_refresh_current_evidence_after_import`` propagates the candidate
+    measurement payload into the new library evidence row.
+
+    Renamed-only imports (same codec) inherit spectral grade, V0 lineage,
+    bad-audio-hash matches, and verified-lossless proof. Transcoded imports
+    (different codec) inherit ONLY ``verified_lossless`` /
+    ``verified_lossless_proof``; spectral and V0 fields stay NULL. The
+    candidate evidence row is preserved as the audit trail for the import
+    job, and ``album_requests.current_evidence_id`` is updated to the new
+    library evidence row.
+    """
+
+    def _stage_audio(self, tmpdir: str, *, filenames: list[str]) -> None:
+        for fname in filenames:
+            with open(os.path.join(tmpdir, fname), "wb") as handle:
+                handle.write(b"audio-bytes-" + fname.encode("utf-8"))
+
+    def test_renamed_only_flac_propagates_full_measurement_payload(self):
+        """FLAC source → FLAC library: spectral grade, V0 lineage,
+        verified-lossless proof, and bad-hash matches all carry forward.
+        ``snapshot_fingerprint`` differs (filenames changed),
+        ``source_path`` points at the library, ``audio_corrupt`` is False.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            VerifiedLosslessProof,
+        )
+        from lib.quality_evidence import (
+            audio_snapshot_matches,
+            snapshot_audio_files,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mbid-r1"))
+
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.flac", "02 - source.flac"])
+            self._stage_audio(library_dir, filenames=["01 - Library.flac", "02 - Library.flac"])
+
+            candidate_files = snapshot_audio_files(source_dir)
+            proof = VerifiedLosslessProof(
+                proof_origin="import_result",
+                source="flac",
+                classifier="spectral_verified_lossless",
+                detail="genuine",
+            )
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=240,
+                avg_bitrate_kbps=255,
+                median_bitrate_kbps=250,
+                source_lineage="lossless_source",
+                source_provenance="lossless_source",
+                proof_provenance="lossless-source probe",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=820,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=845,
+                format="flac",
+                is_cbr=False,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=850,
+                verified_lossless=True,
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-r1",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="flac",
+                v0_metric=v0_metric,
+                verified_lossless_proof=proof,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(candidate_files),
+                filetype_band="lossless",
+                matched_bad_audio_hash_id=None,
+                matched_bad_audio_hash_path=None,
+            )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-r1",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+            candidate_id = persisted_candidate.id
+
+            beets_info = AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=820,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=845,
+                is_cbr=False,
+                album_path=library_dir,
+                format="flac",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    mb_release_id="mbid-r1",
+                    quality_ranks=None,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=820,
+                    ),
+                )
+
+            request_row = db.request(42)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            self.assertNotEqual(
+                new_evidence_id, candidate_id,
+                "library evidence must be a new row, not the candidate",
+            )
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
+
+            # Renamed-only: spectral grade + V0 lineage + verified-lossless
+            # all propagate. Bitrate/format refresh from album_info (same
+            # values — dual-check passes).
+            self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 850)
+            self.assertTrue(new_evidence.measurement.verified_lossless)
+            self.assertEqual(new_evidence.measurement.format, "flac")
+            self.assertEqual(new_evidence.measurement.min_bitrate_kbps, 820)
+            self.assertIsNotNone(new_evidence.verified_lossless_proof)
+            assert new_evidence.verified_lossless_proof is not None
+            self.assertEqual(
+                new_evidence.verified_lossless_proof.classifier,
+                "spectral_verified_lossless",
+            )
+            self.assertIsNotNone(new_evidence.v0_metric)
+            assert new_evidence.v0_metric is not None
+            self.assertEqual(new_evidence.v0_metric.avg_bitrate_kbps, 255)
+            self.assertEqual(new_evidence.v0_metric.source_lineage, "lossless_source")
+            self.assertFalse(new_evidence.audio_corrupt)
+            self.assertEqual(new_evidence.codec, "flac")
+
+            # Fingerprint changed (filenames changed at library path) +
+            # source_path points at library.
+            self.assertNotEqual(
+                new_evidence.snapshot_fingerprint,
+                candidate_evidence.snapshot_fingerprint,
+            )
+            self.assertEqual(new_evidence.source_path, library_dir)
+
+            # Candidate evidence row survives as audit trail.
+            still_there = db.load_album_quality_evidence_by_id(candidate_id)
+            self.assertIsNotNone(still_there)
+
+            # Freshness check passes immediately for the library path.
+            self.assertTrue(
+                audio_snapshot_matches(library_dir, new_evidence.files)
+            )
+
+    def test_transcoded_flac_to_v0_drops_spectral_and_v0_keeps_proof(self):
+        """FLAC source → V0 library: spectral grade, V0 lineage, and bad-hash
+        matches stay NULL on the library row (they describe source audio).
+        ``verified_lossless`` / ``verified_lossless_proof`` carry forward.
+        Bitrate/format reflect the V0 output from ``album_info``.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            VerifiedLosslessProof,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=43, mb_release_id="mbid-t1"))
+
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.flac"])
+            self._stage_audio(library_dir, filenames=["01 - Library.mp3"])
+
+            from lib.quality_evidence import snapshot_audio_files
+            candidate_files = snapshot_audio_files(source_dir)
+            proof = VerifiedLosslessProof(
+                proof_origin="import_result",
+                source="flac",
+                classifier="spectral_verified_lossless",
+                detail="genuine",
+            )
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=240,
+                avg_bitrate_kbps=255,
+                median_bitrate_kbps=250,
+                source_lineage="lossless_source",
+                source_provenance="lossless_source",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=820,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=845,
+                format="flac",
+                is_cbr=False,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=850,
+                verified_lossless=True,
+                was_converted_from="flac",
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-t1",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="mp3",
+                v0_metric=v0_metric,
+                verified_lossless_proof=proof,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(candidate_files),
+                filetype_band="lossless",
+                matched_bad_audio_hash_id=99,
+                matched_bad_audio_hash_path="/some/known/bad.flac",
+            )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-t1",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+
+            # Library copy is V0 — different codec.
+            beets_info = AlbumInfo(
+                album_id=2,
+                track_count=1,
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                is_cbr=False,
+                album_path=library_dir,
+                format="MP3",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=43,
+                    mb_release_id="mbid-t1",
+                    quality_ranks=None,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=245,
+                    ),
+                )
+
+            request_row = db.request(43)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
+
+            # Transcoded: spectral + V0 lineage + bad-hash do NOT propagate.
+            self.assertIsNone(new_evidence.measurement.spectral_grade)
+            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
+            self.assertIsNone(new_evidence.v0_metric)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
+
+            # But verified-lossless proof carries forward.
+            self.assertTrue(new_evidence.measurement.verified_lossless)
+            self.assertIsNotNone(new_evidence.verified_lossless_proof)
+            assert new_evidence.verified_lossless_proof is not None
+            self.assertEqual(
+                new_evidence.verified_lossless_proof.classifier,
+                "spectral_verified_lossless",
+            )
+
+            # Bitrate / format reflect the V0 output from album_info.
+            self.assertEqual(new_evidence.measurement.min_bitrate_kbps, 245)
+            self.assertEqual(new_evidence.measurement.avg_bitrate_kbps, 256)
+            self.assertEqual(new_evidence.measurement.format, "MP3")
+            self.assertEqual(new_evidence.codec, "mp3")
+            self.assertEqual(new_evidence.container, "mp3")
+
+    def test_source_candidate_none_falls_back_to_legacy_backfill(self):
+        """When ``source_candidate is None`` the helper falls back to the
+        pre-U10 ``backfill_current_evidence_from_album_info`` path. The
+        post-refactor row matches what the legacy helper would have produced
+        — same bitrate/format from ``album_info``, same
+        ``verified_lossless_proof`` carried from the import_result.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality_evidence import backfill_current_evidence_from_album_info
+
+        db_via_helper = FakePipelineDB()
+        db_via_helper.seed_request(make_request_row(id=51, mb_release_id="mbid-fb"))
+
+        db_direct = FakePipelineDB()
+        db_direct.seed_request(make_request_row(id=51, mb_release_id="mbid-fb"))
+
+        with tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(library_dir, filenames=["01 - track.mp3"])
+
+            beets_info = AlbumInfo(
+                album_id=7,
+                track_count=1,
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                is_cbr=False,
+                album_path=library_dir,
+                format="MP3",
+            )
+
+            # 1) Helper with source_candidate=None.
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db_via_helper,  # type: ignore[arg-type]
+                    request_id=51,
+                    mb_release_id="mbid-fb",
+                    quality_ranks=None,
+                    source_candidate=None,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=245,
+                    ),
+                )
+
+            # 2) Legacy direct call producing the same row pre-U10 callers got.
+            backfill_current_evidence_from_album_info(
+                db_direct,
+                request_id=51,
+                mb_release_id="mbid-fb",
+                album_info=beets_info,
+                verified_lossless_proof=None,
+                preserve_existing_verified_lossless_proof=True,
+            )
+
+            row_helper = db_via_helper.request(51)
+            row_direct = db_direct.request(51)
+            ev_helper = db_via_helper.load_album_quality_evidence_by_id(
+                row_helper["current_evidence_id"]
+            )
+            ev_direct = db_direct.load_album_quality_evidence_by_id(
+                row_direct["current_evidence_id"]
+            )
+            assert ev_helper is not None and ev_direct is not None
+
+            # Both rows share the same content-addressed key and same
+            # post-import measurement shape (modulo measured_at, which is
+            # always "now"). Bitrate / format / fingerprint are identical.
+            self.assertEqual(
+                ev_helper.snapshot_fingerprint, ev_direct.snapshot_fingerprint
+            )
+            self.assertEqual(ev_helper.measurement.min_bitrate_kbps,
+                             ev_direct.measurement.min_bitrate_kbps)
+            self.assertEqual(ev_helper.measurement.format,
+                             ev_direct.measurement.format)
+            self.assertEqual(ev_helper.codec, ev_direct.codec)
+            # Neither carries spectral/V0/proof when both inputs are bare.
+            self.assertEqual(
+                ev_helper.measurement.spectral_grade,
+                ev_direct.measurement.spectral_grade,
+            )
+            self.assertEqual(ev_helper.v0_metric, ev_direct.v0_metric)
+            self.assertEqual(
+                ev_helper.verified_lossless_proof,
+                ev_direct.verified_lossless_proof,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

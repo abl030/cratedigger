@@ -792,6 +792,149 @@ def persist_candidate_evidence_from_measurement(
     return result
 
 
+def propagate_candidate_evidence_to_current(
+    db: Any,
+    *,
+    request_id: int,
+    candidate_evidence: AlbumQualityEvidence,
+    album_info: Any,
+    target_format: str | None = None,
+    measured_at: datetime | None = None,
+) -> EvidenceBuildResult:
+    """Build new library-side evidence by propagating candidate measurement payload.
+
+    Post-import propagation path (U10). The candidate evidence row that the
+    importer worked on already paid for expensive measurements (spectral
+    analysis, V0 lineage, bad-audio-hash matches, verified-lossless proof).
+    After the file rename to the library path, the candidate and library
+    rows describe audio that is bit-equal in the non-transcoded case and
+    semantically related in the transcoded case. This helper builds the
+    new library-side evidence row without re-measuring — see
+    ``CLAUDE.md`` § "Decision architecture" and the U10 design doc.
+
+    Detection:
+
+    * The candidate's persisted ``codec`` (lowercased) is the source codec.
+    * The library copy's ``album_info.format`` (lowercased, "flac"/"mp3"/etc)
+      is the library codec.
+    * ``target_format`` (or the candidate's persisted ``target_format``) is
+      the planned target format if a conversion was configured.
+    * Transcode = ``(target_format and target_format != source_codec)`` OR
+      ``(library_codec != source_codec)``.
+
+    Field policy:
+
+    * Always re-derived from the library snapshot: ``snapshot_fingerprint``,
+      ``source_path``, ``files``, ``codec``, ``container``, ``storage_format``,
+      ``folder_layout``, ``audio_file_count``, ``filetype_band``,
+      ``audio_corrupt`` (from files[*].decode_ok), ``measured_at`` (now).
+    * Always re-derived from ``album_info``: ``min_bitrate_kbps``,
+      ``avg_bitrate_kbps``, ``median_bitrate_kbps``, ``format``, ``is_cbr``.
+      Beets's per-track bitrate measurements describe the on-disk files at
+      the library path — for renamed-only this is the same audio as the
+      candidate's measurement (a dual-check that catches drift); for
+      transcoded imports this describes the V0 output.
+    * Propagated when renamed-only, NULL when transcoded: ``spectral_grade``,
+      ``spectral_bitrate_kbps`` (on the inner measurement); ``v0_metric``,
+      ``matched_bad_audio_hash_id``, ``matched_bad_audio_hash_path`` (on
+      the outer evidence row). These describe the source audio's frequency
+      content / lineage / hash; under transcode the V0 output has a
+      different spectrum and no V0 lineage relative to itself.
+    * Propagated in BOTH cases: ``verified_lossless`` and
+      ``verified_lossless_proof``. These classify the source's provenance
+      and survive transcode — a V0 transcoded from a verified-lossless FLAC
+      is still verified-lossless by lineage. Also ``was_converted_from``
+      (source format before conversion) propagates as-is.
+    """
+
+    album_path = getattr(album_info, "album_path", "")
+    try:
+        files = snapshot_audio_files(str(album_path))
+    except OSError as exc:
+        return EvidenceBuildResult(None, "failed", str(exc))
+    if not files:
+        return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
+
+    source_codec = (candidate_evidence.codec or "").lower() or None
+    library_codec = (getattr(album_info, "format", None) or "").lower() or None
+    effective_target = (
+        (target_format or candidate_evidence.target_format) or None
+    )
+    effective_target_lc = effective_target.lower() if effective_target else None
+    if (
+        effective_target_lc is not None
+        and source_codec is not None
+        and effective_target_lc != source_codec
+    ):
+        is_transcode = True
+    elif (
+        library_codec is not None
+        and source_codec is not None
+        and library_codec != source_codec
+    ):
+        is_transcode = True
+    else:
+        is_transcode = False
+
+    candidate_measurement = candidate_evidence.measurement
+    measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
+        avg_bitrate_kbps=getattr(album_info, "avg_bitrate_kbps", None),
+        median_bitrate_kbps=getattr(album_info, "median_bitrate_kbps", None),
+        format=getattr(album_info, "format", None) or None,
+        is_cbr=bool(getattr(album_info, "is_cbr", False)),
+        spectral_grade=(
+            None if is_transcode else candidate_measurement.spectral_grade
+        ),
+        spectral_bitrate_kbps=(
+            None if is_transcode else candidate_measurement.spectral_bitrate_kbps
+        ),
+        verified_lossless=candidate_measurement.verified_lossless,
+        was_converted_from=candidate_measurement.was_converted_from,
+    )
+
+    library_filetype_band = derive_filetype_band(files)
+    library_codec_from_files = files[0].codec
+    library_container_from_files = files[0].container
+
+    evidence = AlbumQualityEvidence(
+        mb_release_id=candidate_evidence.mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path=str(album_path) or "",
+        measurement=measurement,
+        measured_at=measured_at or datetime.now(timezone.utc),
+        files=files,
+        codec=library_codec_from_files,
+        container=library_container_from_files,
+        storage_format=measurement.format,
+        target_format=None,
+        v0_metric=(None if is_transcode else candidate_evidence.v0_metric),
+        verified_lossless_proof=candidate_evidence.verified_lossless_proof,
+        audio_corrupt=any(not file.decode_ok for file in files),
+        folder_layout=derive_folder_layout(files),
+        audio_file_count=len(files),
+        filetype_band=library_filetype_band,
+        matched_bad_audio_hash_id=(
+            None if is_transcode else candidate_evidence.matched_bad_audio_hash_id
+        ),
+        matched_bad_audio_hash_path=(
+            None if is_transcode else candidate_evidence.matched_bad_audio_hash_path
+        ),
+    )
+    errors = evidence.storage_validation_errors()
+    if errors:
+        return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    if persisted is not None and persisted.id is not None:
+        db.set_request_current_evidence(request_id, persisted.id)
+    return EvidenceBuildResult(evidence, "ready")
+
+
 def backfill_current_evidence_from_album_info(
     db: Any,
     *,
