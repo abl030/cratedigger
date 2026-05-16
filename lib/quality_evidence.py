@@ -402,9 +402,9 @@ def _apply_measurement_facts_to_files(
     ``snapshot_audio_files`` defaults ``decode_ok=True`` because the snapshot
     helper does not run ffmpeg. The preimport measurement is the authority on
     audio integrity, so when it reports corrupt files we propagate that fact
-    into the snapshot rows before persisting evidence. This lets the importer's
-    ``preimport_decide`` consume ``decode_ok=False`` flags as the per-file
-    evidence for ``audio_corrupt``.
+    into the snapshot rows before persisting evidence. This lets the
+    importer's ``full_pipeline_decision_from_evidence`` (U11) consume
+    ``decode_ok=False`` flags as the per-file evidence for ``audio_corrupt``.
     """
     if not measurement.corrupt_files:
         return files
@@ -551,9 +551,10 @@ def evidence_from_measurement(
 
     Used by the preview worker when the harness cannot or should not run
     (audio_corrupt, bad_audio_hash, nested_layout, empty_fileset). The
-    measurement carries every U1 fact the importer's ``preimport_decide``
-    needs to reject: ``audio_corrupt``, ``matched_bad_audio_hash_*``,
-    ``folder_layout``, ``audio_file_count``, and the spectral measurements.
+    measurement carries every U1 fact the importer's
+    ``full_pipeline_decision_from_evidence`` (U11) needs to reject:
+    ``audio_corrupt``, ``matched_bad_audio_hash_*``, ``folder_layout``,
+    ``audio_file_count``, and the spectral measurements.
 
     The synthesized ``AudioQualityMeasurement`` only carries enough data to
     satisfy ``AlbumQualityEvidence.policy_incomplete_reasons`` (format + at
@@ -756,8 +757,10 @@ def persist_candidate_evidence_from_measurement(
 
     Mirrors ``persist_candidate_evidence_from_import_result`` for the preview
     code path that never invoked the harness (audio_corrupt / bad_audio_hash /
-    nested_layout / empty_fileset). The importer's ``preimport_decide`` reads
-    the persisted U1 facts and rejects upstream of the quality gate.
+    nested_layout / empty_fileset). The importer's
+    ``full_pipeline_decision_from_evidence`` (U11) reads the persisted U1
+    facts and rejects via its four-fact early-exit branches upstream of the
+    quality gate.
     """
     if download_log_id is None and import_job_id is None:
         return EvidenceBuildResult(None, "unowned", "no persisted candidate owner")

@@ -59,10 +59,12 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
 class PreimportMeasurement(msgspec.Struct, frozen=True):
     """Facts gathered by ``measure_preimport_state``. No decision fields.
 
-    The pure decision function ``lib.quality.preimport_decide`` consumes this
-    typed Struct + the runtime ``QualityRankConfig`` + optional existing-album
-    evidence and returns a ``PreimportDecision``. The measurement helper has
-    no opinion on accept/reject — it only reports what is on disk.
+    The measurement helper has no opinion on accept/reject — it only reports
+    what is on disk. The persisted ``AlbumQualityEvidence`` row carries the
+    same facts (audio_corrupt, folder_layout, audio_file_count,
+    matched_bad_audio_hash_*); the unified decider
+    ``lib.quality.full_pipeline_decision_from_evidence`` consumes them as
+    early-exit reject branches (U11).
 
     Fields map 1:1 onto the new ``AlbumQualityEvidence`` columns added in U1
     (``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
@@ -390,11 +392,12 @@ def measure_preimport_state(
     and must fire whether or not the downstream decision is accept or reject
     (issue #90).
 
-    The companion pure decision function ``lib.quality.preimport_decide``
-    consumes the returned Struct to decide accept/reject. As of U8 there is
-    no legacy shim — every caller invokes ``measure_preimport_state``
-    directly and routes the decision through either ``preimport_decide`` or
-    the importer's ``full_pipeline_decision_from_evidence``.
+    As of U11 there is exactly one decision function: persisted evidence
+    flows into ``lib.quality.full_pipeline_decision_from_evidence``, whose
+    four early-exit branches handle the folder/audio-integrity facts that
+    used to live in the deleted ``preimport_decide``. Callers invoke
+    ``measure_preimport_state`` to gather the facts, persist them to
+    ``AlbumQualityEvidence``, and let the unified decider decide.
 
     Args:
         path: Filesystem path containing the files to validate.
@@ -607,8 +610,10 @@ def measure_preimport_state(
     # next attempt needs accurate ``album_requests.current_spectral_*`` to
     # make a sound comparison. Persists AFTER the existing_spectral snapshot
     # used by the decision is taken — propagation can't poison the comparison
-    # because the decision runs in ``preimport_decide`` on the *returned*
-    # Struct, which carries the pre-propagation values.
+    # because the decision runs in ``full_pipeline_decision_from_evidence``
+    # on the *persisted* candidate evidence row (or the returned Struct for
+    # legacy callers), neither of which sees the post-propagation
+    # ``album_requests.current_spectral_*``.
     if download_spectral is not None and db is not None and request_id is not None:
         try:
             _persist_spectral_state(
