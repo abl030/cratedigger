@@ -24,7 +24,6 @@ from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
-    AlbumQualityEvidenceOwner,
     AlbumQualityV0Metric,
     SpectralContext,
     DownloadInfo,
@@ -65,7 +64,7 @@ from lib.quality import (
 class TestSpectralGateTrigger(unittest.TestCase):
     """Test the pre-analysis "would spectral run?" decision (issue #93).
 
-    Mirrors the live gate in lib.preimport._needs_spectral_check. Delivers
+    Mirrors the live gate in lib.measurement._needs_spectral_check. Delivers
     the input the UI Decisions tab and pipeline-cli quality simulator need
     to explain which files go through spectral vs. skip.
     """
@@ -188,214 +187,14 @@ class TestSpectralImportDecision(unittest.TestCase):
 
 
 # ============================================================================
-# preimport_decide — U3
+# U11: ``preimport_decide`` was folded into ``full_pipeline_decision_from_evidence``.
+# Its four folder/audio-integrity reject branches (audio_corrupt,
+# bad_audio_hash, nested_layout, empty_fileset) are now early-exit rejects
+# at the top of the unified decider. The pure-branch coverage lives in
+# ``tests/test_quality_classification.py::TestFourFactPreimportRejects`` and
+# the parity contract in
+# ``TestLiveBugReproductionsThroughEvidencePipeline``.
 # ============================================================================
-
-class TestPreimportDecide(unittest.TestCase):
-    """preimport_decide: pure mapping from PreimportMeasurement → PreimportDecision.
-
-    Decision order mirrors run_preimport_gates today: audio_corrupt first, then
-    bad_audio_hash, then nested_layout, then empty_fileset, then spectral. Each
-    row in CASES is one subTest. The decision function consumes only the typed
-    measurement Struct + cfg + (optional) existing evidence — no DB writes, no
-    denylists, no filesystem side effects.
-    """
-
-    def _measurement(self, **overrides: Any):
-        """Build a clean PreimportMeasurement with overrides applied."""
-        from lib.preimport import PreimportMeasurement
-        from lib.quality import SpectralMeasurement
-
-        defaults: dict[str, Any] = dict(
-            corrupt_files=[],
-            audio_corrupt=False,
-            matched_bad_hash_id=None,
-            matched_bad_track_path=None,
-            download_spectral=None,
-            existing_spectral=None,
-            existing_min_bitrate=None,
-            folder_layout="flat",
-            audio_file_count=12,
-            filetype_band="mp3",
-            min_bitrate_kbps=320,
-            is_vbr=False,
-        )
-        defaults.update(overrides)
-        # Spectral measurement helpers may produce None (use as-is).
-        ds = defaults.get("download_spectral")
-        if isinstance(ds, tuple):
-            grade, kbps = ds
-            defaults["download_spectral"] = (
-                SpectralMeasurement.from_parts(grade, kbps))
-        es = defaults.get("existing_spectral")
-        if isinstance(es, tuple):
-            grade, kbps = es
-            defaults["existing_spectral"] = (
-                SpectralMeasurement.from_parts(grade, kbps))
-        return PreimportMeasurement(**defaults)
-
-    def _cfg(self):
-        from lib.quality import QualityRankConfig
-        return QualityRankConfig.defaults()
-
-    def test_clean_candidate_accepts(self):
-        from lib.quality import preimport_decide
-        m = self._measurement()
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-        self.assertIsNone(result.reason)
-
-    def test_audio_corrupt_rejects(self):
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            audio_corrupt=True,
-            corrupt_files=["track01.mp3"],
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "reject")
-        self.assertEqual(result.reason, "audio_corrupt")
-
-    def test_bad_audio_hash_rejects(self):
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            matched_bad_hash_id=42,
-            matched_bad_track_path="/Incoming/auto-import/Album/01.mp3",
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "reject")
-        self.assertEqual(result.reason, "bad_audio_hash")
-        self.assertIn("42", result.detail or "")
-
-    def test_nested_layout_rejects(self):
-        from lib.quality import preimport_decide
-        m = self._measurement(folder_layout="nested")
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "reject")
-        self.assertEqual(result.reason, "nested_layout")
-
-    def test_empty_fileset_rejects(self):
-        from lib.quality import preimport_decide
-        m = self._measurement(audio_file_count=0)
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "reject")
-        self.assertEqual(result.reason, "empty_fileset")
-
-    # ------------------------------------------------------------------
-    # Spectral is NOT a preimport gate.
-    #
-    # The preimport gate owns folder/audio-integrity facts only:
-    # audio_corrupt, bad_audio_hash, nested_layout, empty_fileset.
-    # Spectral, codec rank, V0 probe, provisional lossless, verified
-    # lossless, and quality-gate decisions all live in
-    # ``full_pipeline_decision_from_evidence`` (the same function the
-    # album test set in tests/test_quality_classification.py pins).
-    #
-    # Previously, preimport_decide ran its own narrower spectral
-    # comparison that fell back to ``existing_min_bitrate`` (container
-    # bitrate) when ``existing_spectral_bitrate`` was None — violating
-    # evidence-set parity ("a 320 kbps MP3 container with no spectral
-    # run on it" outranking "a freshly measured 160 kbps cliff") AND
-    # short-circuiting the provisional-lossless pathway for FLAC sources
-    # before the full pipeline could fire. Both regressions are now
-    # impossible by construction: there is no spectral branch here.
-    # ------------------------------------------------------------------
-
-    def test_spectral_suspect_with_existing_lossy_no_spectral_accepts(self):
-        """Request 4514 shape: candidate FLAC source measured suspect at
-        160kbps cliff vs existing MP3 320 container with no spectral.
-        Preimport must NOT reject — that's the full pipeline's call."""
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            download_spectral=("suspect", 160),
-            existing_spectral=None,
-            existing_min_bitrate=320,
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-        self.assertIsNone(result.reason)
-
-    def test_spectral_likely_transcode_with_lossy_no_spectral_accepts(self):
-        """likely_transcode candidate vs existing MP3 320 container with
-        no spectral — still accept. Evidence-set parity invariant."""
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            download_spectral=("likely_transcode", 128),
-            existing_spectral=None,
-            existing_min_bitrate=320,
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-
-    def test_spectral_likely_transcode_with_lossless_existing_accepts(self):
-        """Even with existing spectral evidence, preimport accepts —
-        the full pipeline owns the quality comparison."""
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            download_spectral=("likely_transcode", 128),
-            existing_spectral=("genuine", 320),
-            existing_min_bitrate=320,
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-
-    def test_spectral_upgrade_accepts(self):
-        """suspect grade BUT bitrate improves on existing → accept."""
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            download_spectral=("suspect", 256),
-            existing_spectral=("likely_transcode", 96),
-            existing_min_bitrate=96,
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-
-    def test_spectral_import_no_exist_accepts(self):
-        """existing_spectral=None + suspect grade → accept (mirrors import_no_exist)."""
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            download_spectral=("suspect", 128),
-            existing_spectral=None,
-            existing_min_bitrate=None,
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-
-    def test_genuine_spectral_accepts(self):
-        """Even with existing on disk, genuine spectral always accepts."""
-        from lib.quality import preimport_decide
-        m = self._measurement(
-            download_spectral=("genuine", 320),
-            existing_spectral=("genuine", 320),
-            existing_min_bitrate=320,
-        )
-        result = preimport_decide(m, self._cfg(), None)
-        self.assertEqual(result.decision, "accept")
-
-    def test_preimport_never_emits_spectral_reject(self):
-        """Reason taxonomy: preimport_decide must never return
-        ``reason='spectral_reject'``. Quality decisions live elsewhere."""
-        import inspect
-        from lib import quality
-        src = inspect.getsource(quality.preimport_decide)
-        self.assertNotIn(
-            "spectral_reject", src,
-            "preimport_decide must not emit spectral_reject — "
-            "spectral is owned by full_pipeline_decision_from_evidence")
-        self.assertNotIn(
-            "spectral_import_decision", src,
-            "preimport_decide must not call spectral_import_decision — "
-            "that's a quality decision, not a preimport gate")
-
-    def test_decision_function_has_no_side_effect_imports(self):
-        """preimport_decide is pure: no db, denylist, filesystem references."""
-        import inspect
-        from lib import quality
-        src = inspect.getsource(quality.preimport_decide)
-        forbidden = ("db.", "add_denylist", "update_spectral_state",
-                     "log_download", "subprocess", "os.path", "open(")
-        for bad in forbidden:
-            self.assertNotIn(bad, src,
-                             f"preimport_decide must not contain {bad!r}")
 
 
 # ============================================================================
@@ -1152,6 +951,9 @@ import inspect
 EXPECTED_RESULT_KEYS = {
     # Preimport gates (shared, run before the FLAC/MP3 branches) — issue #91
     "preimport_audio", "preimport_nested",
+    # U11: bad_audio_hash + empty_fileset early branches read from evidence;
+    # the flat-kwargs simulator leaves them None.
+    "preimport_bad_hash", "preimport_empty_fileset",
     "stage0_spectral_gate",
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
@@ -1191,7 +993,7 @@ EXPECTED_PARAMS = {
     "candidate_v0_probe_kind", "existing_v0_probe_kind",
     "supported_lossless_source",
     # Preimport gate inputs (issue #91) — keep the simulator's picture of the
-    # pipeline in sync with lib.preimport.run_preimport_gates.
+    # pipeline in sync with lib.measurement.measure_preimport_state + preimport_decide.
     "audio_check_mode", "audio_corrupt",
     "import_mode", "has_nested_audio",
 }
@@ -1232,8 +1034,16 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
                 source_provenance="neutral_album_quality_evidence",
                 proof_provenance=v0_proof,
             )
+        # Post-migration 021: evidence is content-addressed by
+        # (mb_release_id, snapshot_fingerprint). For pure decision tests we
+        # don't care which entity points at the row — the decider reads the
+        # facts off the struct itself — so synthesise unique addressing keys
+        # from the legacy ``(owner_type, owner_id)`` kwargs to preserve the
+        # uniqueness of distinct evidence shapes within a test.
         return AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(owner_type, owner_id),
+            mb_release_id=f"mbid-{owner_type}-{owner_id}",
+            snapshot_fingerprint=f"sha256:{owner_type}-{owner_id}-{container}",
+            source_path=f"/tmp/{owner_type}-{owner_id}",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
                 avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
@@ -1444,10 +1254,10 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
 class TestPreimportAudioGate(unittest.TestCase):
     """Pure decision tests for the preimport audio-integrity gate (issue #91).
 
-    Models ``lib.preimport.run_preimport_gates``'s first gate (validate_audio).
-    The simulator must treat ``audio_check_mode=off`` as a distinct outcome
-    from a passing check so operators can see when the gate is disabled in
-    config.
+    Models the first gate in ``lib.measurement.measure_preimport_state``
+    (validate_audio). The simulator must treat ``audio_check_mode=off`` as
+    a distinct outcome from a passing check so operators can see when the
+    gate is disabled in config.
     """
 
     # (desc, audio_check_mode, audio_corrupt, expected)
@@ -1604,8 +1414,8 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
 
     def test_nested_wins_over_audio_in_force_mode(self):
         # Live ordering (dispatch_import_from_db): nested check runs *before*
-        # run_preimport_gates is even called, so a corrupt-AND-nested folder
-        # is reported as nested_layout, not audio_corrupt. The simulator
+        # measure_preimport_state is even called, so a corrupt-AND-nested
+        # folder is reported as nested_layout, not audio_corrupt. The simulator
         # must short-circuit the same way so operators are sent to the
         # right remediation (flatten the folder).
         r = full_pipeline_decision(
@@ -2023,7 +1833,7 @@ class TestFullPipelineContract(unittest.TestCase):
     def test_decision_tree_mp3_gate_exposes_threshold(self):
         """The new mp3_spectral_gate stage must surface the VBR threshold
         (issue #93) so the UI Decisions tab shows the same cutoff as the
-        live production gate in lib/preimport._needs_spectral_check."""
+        live production gate in lib/measurement._needs_spectral_check."""
         tree = get_decision_tree()
         stage_map = {s["id"]: s for s in tree["stages"]}
         self.assertIn("mp3_spectral_gate", stage_map,

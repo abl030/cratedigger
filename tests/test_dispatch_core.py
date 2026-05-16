@@ -15,9 +15,6 @@ from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     DownloadInfo,
@@ -33,6 +30,48 @@ from tests.helpers import (
     patch_dispatch_externals,
 )
 from lib.quality_evidence import snapshot_audio_files
+
+
+# Migration 021 helpers — seed evidence and wire the FK chain that
+# production reads through (download_log.candidate_evidence_id,
+# import_jobs.candidate_evidence_id, album_requests.current_evidence_id).
+def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
+                                     **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_download_log_candidate_evidence(log_id, persisted.id)
+    return persisted
+
+
+def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    return persisted
+
+
+def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
+                              **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_request_current_evidence(request_id, persisted.id)
+    return persisted
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -177,9 +216,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with open(f"{current_dir}/01.mp3", "wb") as handle:
                 handle.write(b"current")
             files = snapshot_audio_files(tmpdir)
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=log_id,
+            _seed_candidate_for_download_log(
+                db, log_id,
+                mb_release_id="mbid-123",
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=900,
@@ -199,10 +238,10 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     median_bitrate_kbps=240,
                     source_lineage="lossless_source",
                 ),
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            )
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(current_dir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=116,
@@ -221,7 +260,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     median_bitrate_kbps=260,
                     source_lineage="lossless_source",
                 ),
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -278,9 +317,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             )
             import_job_id = job.id
             files = snapshot_audio_files(tmpdir)
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=import_job_id,
+            _seed_candidate_for_import_job(
+                db, import_job_id,
+                mb_release_id="mbid-123",
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -292,10 +331,10 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            )
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-123-current",
                 files=snapshot_audio_files(current_dir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
@@ -307,7 +346,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 128",
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -348,9 +387,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             self.assertIn("--quality-evidence-action-file", cmd)
             self.assertNotIn("--preview-import-result-file", cmd)
             payload = decoded_payload["payload"]
-            self.assertEqual(payload.candidate.owner.owner_id, import_job_id)
+            # Post-migration 021: candidate evidence is content-addressed by
+            # (mb_release_id, snapshot_fingerprint); addressing back to the
+            # import_job is via the FK we wired in the helper.
+            self.assertEqual(payload.candidate.mb_release_id, "mbid-123")
             assert payload.current is not None
-            self.assertEqual(payload.current.owner.owner_id, 42)
+            self.assertEqual(payload.current.mb_release_id, "mbid-123-current")
             self.assertIs(payload.decision["imported"], True)
         finally:
             import shutil
@@ -373,9 +415,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             classifier="spectral_verified_lossless",
             detail="genuine",
         )
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+        _seed_current_for_request(
+            db, 42,
+            mb_release_id="mbid-123",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=116,
                 avg_bitrate_kbps=128,
@@ -385,7 +427,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             ),
             verified_lossless_proof=proof,
             storage_format="Opus",
-        ))
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(f"{tmpdir}/01.mp3", "wb") as handle:
                 handle.write(b"audio")
@@ -408,10 +450,10 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     ),
                 )
 
-        loaded = db.load_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
-        ).owner)
+        # After the refresh, request_current FK points at the new evidence.
+        refreshed_id = db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(refreshed_id)
+        loaded = db.load_album_quality_evidence_by_id(refreshed_id)
         assert loaded is not None
         self.assertFalse(loaded.measurement.verified_lossless)
         self.assertIsNone(loaded.verified_lossless_proof)
@@ -431,9 +473,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -445,7 +487,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -491,7 +533,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
 
     def test_persisted_candidate_evidence_backfills_stale_current_before_decision(self):
         from lib.import_dispatch import dispatch_import_core
-        from lib.quality_evidence import request_current_owner
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -511,9 +552,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123-candidate",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -525,10 +566,10 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            )
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-123",
                 files=old_current_files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
@@ -540,7 +581,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 128",
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -566,7 +607,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertIn("Rejected by persisted quality evidence", result.message)
             ext.run.assert_not_called()
-            refreshed = db.load_album_quality_evidence(request_current_owner(42))
+            refreshed_id = db.get_request_current_evidence_id(42)
+            self.assertIsNotNone(refreshed_id)
+            refreshed = db.load_album_quality_evidence_by_id(refreshed_id)
             assert refreshed is not None
             self.assertEqual(refreshed.measurement.min_bitrate_kbps, 320)
         finally:
@@ -590,9 +633,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -604,7 +647,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -650,9 +693,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -664,7 +707,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,

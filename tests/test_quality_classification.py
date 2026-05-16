@@ -845,15 +845,20 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         post_conversion_min_bitrate: int | None = None,
         candidate_v0_probe_avg: int | None = None,
         candidate_v0_probe_min: int | None = None,
+        mb_release_id: str = "mbid-parity-candidate",
+        audio_corrupt: bool = False,
+        folder_layout: str = "flat",
+        audio_file_count: int | None = None,
+        matched_bad_audio_hash_id: int | None = None,
+        matched_bad_audio_hash_path: str | None = None,
+        snapshot_fingerprint: str = "sha256:candidate-fingerprint",
     ):
         """Build an ``AlbumQualityEvidence`` candidate row matching the
-        simulator's flat-kwargs shape."""
+        simulator's flat-kwargs shape (post-U2/U3 schema)."""
         from datetime import datetime, timezone
         from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
             AlbumQualityEvidence,
             AlbumQualityEvidenceFile,
-            AlbumQualityEvidenceOwner,
             AlbumQualityV0Metric,
             AudioQualityMeasurement,
             V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
@@ -911,22 +916,33 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
                 source_provenance="neutral_album_quality_evidence",
             )
 
+        files = [AlbumQualityEvidenceFile(
+            relative_path=f"01.{container}",
+            size_bytes=1, mtime_ns=1,
+            extension=container, container=container, codec=codec,
+        )]
+        # ``audio_file_count`` defaults to len(files) for the standard
+        # parity scenarios. Tests covering empty_fileset explicitly pass
+        # ``audio_file_count=0`` and override ``files`` separately.
         return AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=1,
-            ),
+            mb_release_id=mb_release_id,
+            snapshot_fingerprint=snapshot_fingerprint,
+            source_path="/Incoming/auto-import/candidate",
             measurement=measurement,
             measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
-            files=[AlbumQualityEvidenceFile(
-                relative_path=f"01.{container}",
-                size_bytes=1, mtime_ns=1,
-                extension=container, container=container, codec=codec,
-            )],
+            files=files,
             codec=codec,
             container=container,
             storage_format=storage_format,
             v0_metric=v0_metric,
+            audio_corrupt=audio_corrupt,
+            folder_layout=folder_layout,
+            audio_file_count=(
+                audio_file_count if audio_file_count is not None else len(files)
+            ),
+            filetype_band=storage_format,
+            matched_bad_audio_hash_id=matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=matched_bad_audio_hash_path,
         )
 
     def _build_current(
@@ -938,24 +954,27 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         is_cbr: bool = False,
         spectral_grade: str | None = None,
         spectral_bitrate: int | None = None,
+        mb_release_id: str = "mbid-parity-candidate",
     ):
         if min_bitrate is None:
             return None
         from datetime import datetime, timezone
         from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
             AlbumQualityEvidence,
             AlbumQualityEvidenceFile,
-            AlbumQualityEvidenceOwner,
             AudioQualityMeasurement,
         )
 
         container = format.lower().split()[0]
+        files = [AlbumQualityEvidenceFile(
+            relative_path=f"01.{container}",
+            size_bytes=1, mtime_ns=1,
+            extension=container, container=container, codec=container,
+        )]
         return AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=1,
-            ),
+            mb_release_id=mb_release_id,
+            snapshot_fingerprint="sha256:current-fingerprint",
+            source_path="/Beets/current",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
                 avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
@@ -966,14 +985,12 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
                 spectral_bitrate_kbps=spectral_bitrate,
             ),
             measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
-            files=[AlbumQualityEvidenceFile(
-                relative_path=f"01.{container}",
-                size_bytes=1, mtime_ns=1,
-                extension=container, container=container, codec=container,
-            )],
+            files=files,
             codec=container,
             container=container,
             storage_format=format.lower(),
+            audio_file_count=len(files),
+            filetype_band=format.lower(),
         )
 
     def test_mountain_goats_flux_provisional_lossless_via_evidence(self):
@@ -1066,6 +1083,214 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         self.assertEqual(r["stage2_import"], "downgrade")
         self.assertFalse(r["imported"])
+
+
+class TestFourFactPreimportRejects(unittest.TestCase):
+    """U11: the four folder/audio-integrity facts that used to live in
+    ``preimport_decide`` are now early-exit rejects at the top of
+    ``full_pipeline_decision_from_evidence``. Each test covers one fact:
+    asserts the decision dict carries the right ``preimport_*`` key AND
+    that ``evidence_decision_name`` maps it to the expected decision string.
+
+    Parity with the (deleted) ``preimport_decide``:
+      * ``audio_corrupt``  → ``preimport_audio='reject_corrupt'``,
+        ``evidence_decision_name='audio_corrupt'``,
+        ``classify_full_pipeline_decision`` → confident_reject
+      * ``bad_audio_hash`` → ``preimport_bad_hash='reject_bad_hash'``,
+        ``evidence_decision_name='bad_audio_hash'``
+      * ``nested_layout`` → ``preimport_nested='reject_nested'``,
+        ``evidence_decision_name='nested_layout'``
+      * ``empty_fileset`` → ``preimport_empty_fileset='reject_empty'``,
+        ``evidence_decision_name='empty_fileset'``
+
+    The reject order matches the deleted ``preimport_decide``: corrupt >
+    bad-hash > nested > empty.
+    """
+
+    # Reuse the parity helpers so the new tests share the exact shape used
+    # by the rest of TestLiveBugReproductionsThroughEvidencePipeline.
+    _build_candidate = (
+        TestLiveBugReproductionsThroughEvidencePipeline._build_candidate
+    )
+    _build_current = (
+        TestLiveBugReproductionsThroughEvidencePipeline._build_current
+    )
+
+    def test_audio_corrupt_routes_through_full_pipeline(self):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            classify_full_pipeline_decision,
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=245, is_cbr=False,
+            audio_corrupt=True,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertFalse(r["imported"])
+        # Audio-integrity rejects denylist the peer (source-quality problem).
+        self.assertTrue(r["denylisted"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertEqual(evidence_decision_name(r), "audio_corrupt")
+        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
+        self.assertEqual(reason, "audio_corrupt")
+
+    def test_bad_audio_hash_routes_through_full_pipeline(self):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            classify_full_pipeline_decision,
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=245, is_cbr=False,
+            matched_bad_audio_hash_id=42,
+            matched_bad_audio_hash_path="01 - track.mp3",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["preimport_bad_hash"], "reject_bad_hash")
+        # Curated bad-hash hit is a source-quality problem — denylist on auto.
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertEqual(evidence_decision_name(r), "bad_audio_hash")
+        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
+        self.assertEqual(reason, "bad_audio_hash")
+
+    def test_nested_layout_routes_through_full_pipeline(self):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            classify_full_pipeline_decision,
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=245, is_cbr=False,
+            folder_layout="nested",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["preimport_nested"], "reject_nested")
+        self.assertFalse(r["imported"])
+        # nested_layout is a folder-shape problem — peer is not at fault.
+        self.assertFalse(r["denylisted"])
+        # Auto path still self-heals (final_status='wanted', keep_searching).
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        self.assertEqual(evidence_decision_name(r), "nested_layout")
+        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
+        self.assertEqual(reason, "nested_layout")
+
+    def test_empty_fileset_routes_through_full_pipeline(self):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            classify_full_pipeline_decision,
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        # audio_file_count=0 AND no snapshot files — the explicit empty
+        # signal (cannot collide with legacy SQL-default rows).
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=245, is_cbr=False,
+            audio_file_count=0,
+        )
+        # Override files to empty (the helper defaults to one snapshot file).
+        from msgspec import structs
+        candidate = structs.replace(candidate, files=[], audio_file_count=0)
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["preimport_empty_fileset"], "reject_empty")
+        self.assertFalse(r["imported"])
+        # Empty fileset is a folder-shape problem — peer not at fault.
+        self.assertFalse(r["denylisted"])
+        self.assertEqual(evidence_decision_name(r), "empty_fileset")
+        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
+        self.assertEqual(reason, "empty_fileset")
+
+    def test_decision_order_corrupt_takes_priority_over_other_facts(self):
+        """When multiple facts are present, ``audio_corrupt`` wins
+        (matches the deleted ``preimport_decide`` evaluation order)."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=245, is_cbr=False,
+            audio_corrupt=True,
+            matched_bad_audio_hash_id=99,
+            matched_bad_audio_hash_path="01.mp3",
+            folder_layout="nested",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertIsNone(r["preimport_bad_hash"])
+        self.assertIsNone(r["preimport_nested"])
+        self.assertEqual(evidence_decision_name(r), "audio_corrupt")
+
+    def test_force_mode_does_not_set_keep_searching(self):
+        """The four-fact reject dict reflects the auto-path requeue
+        invariant; force/manual leaves the parent request alone
+        (the unified reject helper independently forces requeue=True via
+        ``_PREIMPORT_FACT_REJECT_DECISIONS`` — that's tested in
+        tests/test_import_dispatch_evidence.py)."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=245, is_cbr=False,
+            audio_corrupt=True,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
+        )
+
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertIsNone(r["final_status"])
+        self.assertFalse(r["denylisted"])
+        self.assertFalse(r["keep_searching"])
 
 
 # ============================================================================

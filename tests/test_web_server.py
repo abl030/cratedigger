@@ -1756,7 +1756,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(
             data["stage0_spectral_gate"], "skipped_vbr_high_avg",
             "high-avg VBR must short-circuit the spectral gate in the "
-            "web simulator (matches production lib.preimport)")
+            "web simulator (matches production lib.measurement)")
 
         # VBR MP3 with low avg → stage 0 must say would_run
         status, data = self._get(

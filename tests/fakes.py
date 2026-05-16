@@ -58,11 +58,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanProvenance, SearchPlanRow,
                              WantedReconciliationCandidate)
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AlbumQualityEvidence,
-    AlbumQualityEvidenceOwner,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
@@ -113,6 +109,8 @@ class DownloadLogRow:
     import_result: Any = None
     # Auto-assigned monotonic id matching PostgreSQL serial behaviour.
     id: int = 0
+    # Migration 021: addressing FK to album_quality_evidence(id).
+    candidate_evidence_id: int | None = None
     # Auto-populated timestamp matching download_log.created_at.
     created_at: datetime = field(default_factory=_utcnow)
     # Catch-all for less commonly asserted fields
@@ -666,9 +664,14 @@ class FakePipelineDB:
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
+        # Keyed by (mb_release_id, snapshot_fingerprint) — content-addressed
+        # after migration 021. Each row also has a surrogate ``id``; the
+        # parallel ``_evidence_by_id`` dict mirrors load-by-id lookups.
         self.album_quality_evidence: dict[
-            tuple[str, int], AlbumQualityEvidence,
+            tuple[str, str], AlbumQualityEvidence,
         ] = {}
+        self._evidence_by_id: dict[int, AlbumQualityEvidence] = {}
+        self._next_evidence_id = 0
         self._next_bad_audio_hash_id = 0
         self.cooldowns_applied: list[str] = []
         self.recorded_attempts: list[tuple[int, str]] = []
@@ -790,6 +793,7 @@ class FakePipelineDB:
             "preview_heartbeat_at": None,
             "preview_completed_at": None,
             "importable_at": None,
+            "candidate_evidence_id": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
@@ -1787,21 +1791,6 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
-    def validate_album_quality_evidence_owner(
-        self,
-        owner: AlbumQualityEvidenceOwner,
-    ) -> bool:
-        errors = owner.validation_errors()
-        if errors:
-            raise ValueError("; ".join(errors))
-        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT:
-            return owner.owner_id in self._requests
-        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE:
-            return any(row.id == owner.owner_id for row in self.download_logs)
-        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE:
-            return any(row.get("id") == owner.owner_id for row in self._import_jobs)
-        return False
-
     def upsert_album_quality_evidence(
         self,
         evidence: AlbumQualityEvidence,
@@ -1810,24 +1799,132 @@ class FakePipelineDB:
         errors = evidence.storage_validation_errors()
         if errors:
             raise ValueError("; ".join(errors))
-        if not self.validate_album_quality_evidence_owner(evidence.owner):
-            raise LookupError(
-                "album quality evidence owner does not exist: "
-                f"{evidence.owner.owner_type}:{evidence.owner.owner_id}"
-            )
-        self.album_quality_evidence[
-            (evidence.owner.owner_type, evidence.owner.owner_id)
-        ] = copy.deepcopy(evidence)
+        key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
+        existing = self.album_quality_evidence.get(key)
+        if existing is not None and existing.id is not None:
+            evidence_id = existing.id
+        else:
+            self._next_evidence_id += 1
+            evidence_id = self._next_evidence_id
+        stored = copy.deepcopy(msgspec.structs.replace(evidence, id=evidence_id))
+        self.album_quality_evidence[key] = stored
+        self._evidence_by_id[evidence_id] = stored
 
-    def load_album_quality_evidence(
+    def load_album_quality_evidence_by_id(
         self,
-        owner: AlbumQualityEvidenceOwner,
+        evidence_id: int | None,
     ) -> AlbumQualityEvidence | None:
-        errors = owner.validation_errors()
-        if errors:
-            raise ValueError("; ".join(errors))
-        evidence = self.album_quality_evidence.get((owner.owner_type, owner.owner_id))
+        if evidence_id is None:
+            return None
+        evidence = self._evidence_by_id.get(int(evidence_id))
         return copy.deepcopy(evidence) if evidence is not None else None
+
+    def find_album_quality_evidence(
+        self,
+        *,
+        mb_release_id: str,
+        snapshot_fingerprint: str,
+    ) -> AlbumQualityEvidence | None:
+        evidence = self.album_quality_evidence.get(
+            (mb_release_id, snapshot_fingerprint)
+        )
+        return copy.deepcopy(evidence) if evidence is not None else None
+
+    def set_import_job_candidate_evidence(
+        self,
+        import_job_id: int,
+        evidence_id: int | None,
+    ) -> None:
+        for row in self._import_jobs:
+            if row.get("id") == import_job_id:
+                row["candidate_evidence_id"] = evidence_id
+                row["updated_at"] = _utcnow()
+                return
+
+    def set_download_log_candidate_evidence(
+        self,
+        download_log_id: int,
+        evidence_id: int | None,
+    ) -> None:
+        for row in self.download_logs:
+            if row.id == download_log_id:
+                row.candidate_evidence_id = evidence_id
+                return
+
+    def set_request_current_evidence(
+        self,
+        request_id: int,
+        evidence_id: int | None,
+    ) -> None:
+        row = self._requests.get(request_id)
+        if row is not None:
+            row["current_evidence_id"] = evidence_id
+            row["updated_at"] = _utcnow()
+
+    def get_import_job_candidate_evidence_id(
+        self,
+        import_job_id: int,
+    ) -> int | None:
+        for row in self._import_jobs:
+            if row.get("id") == import_job_id:
+                val = row.get("candidate_evidence_id")
+                return int(val) if val is not None else None
+        return None
+
+    def get_download_log_candidate_evidence_id(
+        self,
+        download_log_id: int,
+    ) -> int | None:
+        for row in self.download_logs:
+            if row.id == download_log_id:
+                return (
+                    int(row.candidate_evidence_id)
+                    if row.candidate_evidence_id is not None
+                    else None
+                )
+        return None
+
+    def get_request_current_evidence_id(
+        self,
+        request_id: int,
+    ) -> int | None:
+        row = self._requests.get(request_id)
+        if row is None:
+            return None
+        val = row.get("current_evidence_id")
+        return int(val) if val is not None else None
+
+    def get_request_latest_import_job_evidence_id(
+        self,
+        request_id: int,
+    ) -> int | None:
+        candidates = [
+            row for row in self._import_jobs
+            if row.get("request_id") == request_id
+            and row.get("candidate_evidence_id") is not None
+        ]
+        candidates.sort(
+            key=lambda row: (
+                _as_datetime(row.get("created_at")),
+                int(row["id"]),
+            ),
+            reverse=True,
+        )
+        if not candidates:
+            return None
+        val = candidates[0].get("candidate_evidence_id")
+        return int(val) if val is not None else None
+
+    def get_request_latest_import_job_evidence_id_from_dl(
+        self,
+        download_log_id: int,
+    ) -> int | None:
+        for row in self.download_logs:
+            if row.id == download_log_id:
+                return self.get_request_latest_import_job_evidence_id(
+                    row.request_id
+                )
+        return None
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         row = self._requests.get(request_id)
@@ -1924,6 +2021,8 @@ class FakePipelineDB:
             "active_plan_id": None,
             "next_plan_ordinal": 0,
             "plan_cycle_count": 0,
+            # Migration 021 addressing FK.
+            "current_evidence_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -1946,20 +2045,10 @@ class FakePipelineDB:
             e for e in self.search_logs if e.request_id != request_id]
         self.denylist = [
             e for e in self.denylist if e.request_id != request_id]
-        self.album_quality_evidence = {
-            key: evidence
-            for key, evidence in self.album_quality_evidence.items()
-            if not (
-                key == (
-                    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                    request_id,
-                )
-                or (
-                    key[0] == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
-                    and all(row.id != key[1] for row in self.download_logs)
-                )
-            )
-        }
+        # Migration 021: evidence is content-addressed; deleting a request
+        # no longer cascades into evidence rows. Addressing FKs on
+        # album_requests / download_log / import_jobs were nulled by the
+        # earlier reassignments above.
         # U1: cascade plans + items with the request, mirroring the real
         # ON DELETE CASCADE FKs from migration 014.
         plan_ids_to_drop = [

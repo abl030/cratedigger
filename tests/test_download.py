@@ -3,10 +3,11 @@
 Tests _build_download_info, cancel_and_delete, slskd_download_status,
 downloads_all_done, poll_active_downloads, grab_most_wanted.
 
-Pre-import gate behavior (audio integrity + spectral transcode detection)
-is shared with the force/manual import paths and tested against
-``lib.preimport.run_preimport_gates`` in ``tests/test_force_import_gates.py``
-and ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
+Pre-import measurement behavior (audio integrity + spectral analysis) is
+shared with the force/manual import paths and tested directly against
+``lib.measurement.measure_preimport_state`` in ``tests/test_measurement.py``
+and end-to-end through
+``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 
 import unittest
@@ -1392,14 +1393,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 os.path.join(tmpdir, "downloads", "Artist - Album (2024)"),
             )
 
-    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
     def test_returns_none_for_post_move_auto_import_retry(
         self,
         mock_mt,
         mock_beets_validate,
-        mock_run_preimport_gates,
+        mock_measure_preimport_state,
     ):
         """Post-move auto-import retries must stop before re-dispatch."""
         from lib.download import process_completed_album
@@ -1445,14 +1446,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            mock_run_preimport_gates.return_value = MagicMock(
-                valid=True,
-                scenario=None,
-                detail=None,
-                corrupt_files=[],
-                download_spectral=None,
-                existing_spectral=None,
-                existing_min_bitrate=None,
+            from lib.measurement import PreimportMeasurement
+            mock_measure_preimport_state.return_value = PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
             )
 
             with patch("lib.download.dispatch_import_core") as mock_dispatch, \
@@ -1561,14 +1559,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertTrue(result)
             self.assertEqual(album.files[0].import_path, resumed_file)
 
-    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
     def test_request_auto_import_without_request_id_fails_before_staging_move(
         self,
         mock_mt,
         mock_beets_validate,
-        mock_run_preimport_gates,
+        mock_measure_preimport_state,
     ):
         """Fresh request auto-imports must fail before moving into staged auto-import."""
         from lib.download import process_completed_album
@@ -1618,14 +1616,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            mock_run_preimport_gates.return_value = MagicMock(
-                valid=True,
-                scenario=None,
-                detail=None,
-                corrupt_files=[],
-                download_spectral=None,
-                existing_spectral=None,
-                existing_min_bitrate=None,
+            from lib.measurement import PreimportMeasurement
+            mock_measure_preimport_state.return_value = PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
             )
 
             expected_canonical = os.path.join(
@@ -1677,14 +1672,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             )
             self.assertIn("missing db_request_id", "\n".join(logs.output))
 
-    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
     def test_request_auto_import_without_resolvable_request_logs_warning(
         self,
         mock_mt,
         mock_beets_validate,
-        mock_run_preimport_gates,
+        mock_measure_preimport_state,
     ):
         """Unresolvable request ids must block in place, not orphan files."""
         from lib.download import process_completed_album
@@ -1725,14 +1720,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            mock_run_preimport_gates.return_value = MagicMock(
-                valid=True,
-                scenario=None,
-                detail=None,
-                corrupt_files=[],
-                download_spectral=None,
-                existing_spectral=None,
-                existing_min_bitrate=None,
+            from lib.measurement import PreimportMeasurement
+            mock_measure_preimport_state.return_value = PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
             )
 
             expected_canonical = os.path.join(
@@ -1757,14 +1749,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 "\n".join(logs.output),
             )
 
-    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
     def test_request_auto_import_without_request_id_matches_row_when_album_year_blank(
         self,
         mock_mt,
         mock_beets_validate,
-        mock_run_preimport_gates,
+        mock_measure_preimport_state,
     ):
         """Blank album years must not block safe request-row recovery."""
         from lib.download import process_completed_album
@@ -1813,14 +1805,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            mock_run_preimport_gates.return_value = MagicMock(
-                valid=True,
-                scenario=None,
-                detail=None,
-                corrupt_files=[],
-                download_spectral=None,
-                existing_spectral=None,
-                existing_min_bitrate=None,
+            from lib.measurement import PreimportMeasurement
+            mock_measure_preimport_state.return_value = PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
             )
 
             result = process_completed_album(album, [], ctx)
@@ -1837,14 +1826,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 "request_missing_request_id",
             )
 
-    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
     def test_returns_none_for_legacy_shared_staged_retry(
         self,
         mock_mt,
         mock_beets_validate,
-        mock_run_preimport_gates,
+        mock_measure_preimport_state,
     ):
         """Legacy shared staged retries must stop before validation reruns."""
         from lib.download import process_completed_album
@@ -1877,7 +1866,12 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
             mock_mt.load_file.return_value = MagicMock()
-            mock_run_preimport_gates.return_value = MagicMock(valid=True)
+            from lib.measurement import PreimportMeasurement
+            mock_measure_preimport_state.return_value = PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
+            )
 
             with patch("lib.download.dispatch_import_core") as mock_dispatch, \
                  self.assertLogs("cratedigger", level="ERROR") as logs:
@@ -1888,14 +1882,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             mock_dispatch.assert_not_called()
             self.assertIn("legacy shared staged path", "\n".join(logs.output))
 
-    @patch("lib.preimport.run_preimport_gates")
+    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
     def test_retries_post_move_redownload_path_without_blocking(
         self,
         mock_mt,
         mock_beets_validate,
-        mock_run_preimport_gates,
+        mock_measure_preimport_state,
     ):
         """Post-move non-auto retries should re-enter and finish mark_done."""
         from lib.download import process_completed_album
@@ -1941,14 +1935,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            mock_run_preimport_gates.return_value = MagicMock(
-                valid=True,
-                scenario=None,
-                detail=None,
-                corrupt_files=[],
-                download_spectral=None,
-                existing_spectral=None,
-                existing_min_bitrate=None,
+            from lib.measurement import PreimportMeasurement
+            mock_measure_preimport_state.return_value = PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="mp3",
             )
 
             with patch("lib.download.dispatch_import_core") as mock_dispatch:

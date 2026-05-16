@@ -12,15 +12,13 @@ from lib.import_preview import (
     preview_import_from_path,
     preview_import_from_values,
 )
-from lib.preimport import LocalFileInspection, PreImportGateResult
+from lib.measurement import LocalFileInspection, PreimportMeasurement
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    AlbumQualityEvidenceOwner,
     AudioQualityMeasurement,
     ImportResult,
     full_pipeline_decision,
 )
+
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -250,8 +248,11 @@ class TestImportPreviewPath(unittest.TestCase):
                            min_bitrate_bps=245000,
                            is_vbr=True,
                        )), \
-                 patch("lib.import_preview.run_preimport_gates",
-                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           folder_layout="flat",
+                           audio_file_count=1,
+                       )), \
                  patch("lib.import_preview.run_import_one",
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
@@ -285,6 +286,10 @@ class TestImportPreviewPath(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
 
     def test_path_preview_persists_candidate_evidence_for_job_owner(self):
+        """Post-migration 021: preview persists candidate evidence and wires
+        the ``import_jobs.candidate_evidence_id`` FK. Loading via the FK
+        chain returns the persisted row.
+        """
         db = self._db()
         job = db.enqueue_import_job(
             "manual_import",
@@ -305,8 +310,11 @@ class TestImportPreviewPath(unittest.TestCase):
                            min_bitrate_bps=245000,
                            is_vbr=True,
                        )), \
-                 patch("lib.import_preview.run_preimport_gates",
-                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           folder_layout="flat",
+                           audio_file_count=1,
+                       )), \
                  patch("lib.import_preview.run_import_one",
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
@@ -329,12 +337,9 @@ class TestImportPreviewPath(unittest.TestCase):
                 )
 
             self.assertEqual(preview.verdict, "would_import")
-            loaded = db.load_album_quality_evidence(
-                AlbumQualityEvidenceOwner(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                    owner_id=job.id,
-                )
-            )
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            self.assertIsNotNone(evidence_id)
+            loaded = db.load_album_quality_evidence_by_id(evidence_id)
             assert loaded is not None
             self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
             self.assertEqual([f.relative_path for f in loaded.files], ["01.mp3"])
@@ -362,8 +367,11 @@ class TestImportPreviewPath(unittest.TestCase):
                            min_bitrate_bps=245000,
                            is_vbr=True,
                        )), \
-                 patch("lib.import_preview.run_preimport_gates",
-                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           folder_layout="flat",
+                           audio_file_count=1,
+                       )), \
                  patch("lib.import_preview.run_import_one",
                        return_value=SimpleNamespace(
                            import_result=ImportResult(
@@ -386,12 +394,11 @@ class TestImportPreviewPath(unittest.TestCase):
                 )
 
             self.assertEqual(preview.verdict, "would_import")
-            loaded = db.load_album_quality_evidence(
-                AlbumQualityEvidenceOwner(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                    owner_id=download_log_id,
-                )
+            evidence_id = db.get_download_log_candidate_evidence_id(
+                download_log_id
             )
+            self.assertIsNotNone(evidence_id)
+            loaded = db.load_album_quality_evidence_by_id(evidence_id)
             assert loaded is not None
             self.assertEqual(loaded.measurement.avg_bitrate_kbps, 245)
         finally:
@@ -435,8 +442,11 @@ class TestImportPreviewPath(unittest.TestCase):
                            min_bitrate_bps=245000,
                            is_vbr=True,
                        )), \
-                 patch("lib.import_preview.run_preimport_gates",
-                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           folder_layout="flat",
+                           audio_file_count=1,
+                       )), \
                  patch("lib.import_preview.run_import_one",
                        side_effect=run_preview):
                 preview = preview_import_from_path(
@@ -450,17 +460,20 @@ class TestImportPreviewPath(unittest.TestCase):
 
             self.assertEqual(preview.verdict, "uncertain")
             self.assertEqual(preview.decision, "source_changed_during_preview")
-            self.assertIsNone(db.load_album_quality_evidence(
-                AlbumQualityEvidenceOwner(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                    owner_id=job.id,
-                )
-            ))
+            # Source mutated mid-flight: preview must NOT wire the candidate
+            # FK on the import_job row.
+            self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_preimport_reject_is_confident_without_denylist_side_effects(self):
+    def test_audio_corrupt_is_confident_reject_without_denylist_side_effects(self):
+        """U6: preview surfaces the four folder/audio-integrity facts as a
+        confident_reject. Spectral / codec rank / V0 are NEVER decided in
+        preview — those live in the importer's
+        ``full_pipeline_decision_from_evidence``. Preview must also NEVER
+        touch the denylist (importer owns that on reject via U11).
+        """
         db = self._db()
         source = self._source_dir()
         try:
@@ -475,11 +488,12 @@ class TestImportPreviewPath(unittest.TestCase):
                            min_bitrate_bps=128000,
                            is_vbr=False,
                        )), \
-                 patch("lib.import_preview.run_preimport_gates",
-                       return_value=PreImportGateResult(
-                           valid=False,
-                           scenario="spectral_reject",
-                           detail="spectral 96kbps <= existing 128kbps",
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           audio_corrupt=True,
+                           corrupt_files=["01.mp3"],
+                           folder_layout="flat",
+                           audio_file_count=0,
                        )), \
                  patch("lib.import_preview.run_import_one") as mock_run:
                 preview = preview_import_from_path(
@@ -490,12 +504,73 @@ class TestImportPreviewPath(unittest.TestCase):
 
             self.assertEqual(preview.verdict, "confident_reject")
             self.assertTrue(preview.cleanup_eligible)
-            self.assertEqual(preview.decision, "spectral_reject")
+            self.assertEqual(preview.decision, "audio_corrupt")
             self.assertEqual(db.denylist, [])
             mock_run.assert_not_called()
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
+
+    def test_bad_audio_hash_is_confident_reject_without_denylist_side_effects(self):
+        """U6: preview must surface ``bad_audio_hash`` as confident_reject
+        without writing to the denylist. The importer's unified reject path
+        (U11) owns the denylist write.
+        """
+        db = self._db()
+        source = self._source_dir()
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=CratediggerConfig(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="mp3",
+                           min_bitrate_bps=128000,
+                           is_vbr=False,
+                       )), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           matched_bad_hash_id=7,
+                           matched_bad_track_path="01.mp3",
+                           folder_layout="flat",
+                           audio_file_count=0,
+                       )), \
+                 patch("lib.import_preview.run_import_one") as mock_run:
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                )
+
+            self.assertEqual(preview.verdict, "confident_reject")
+            self.assertTrue(preview.cleanup_eligible)
+            self.assertEqual(preview.decision, "bad_audio_hash")
+            self.assertEqual(db.denylist, [])
+            mock_run.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_preview_legacy_path_does_not_call_run_preimport_gates(self):
+        """U6/U8 anti-regression: the legacy ``run_preimport_gates`` shim
+        was deleted in U8. If a future change reintroduces it (in
+        lib.measurement or as a re-export from lib.import_preview), this
+        guard fires.
+        """
+        import lib.import_preview as ip
+        import lib.measurement as pi
+        self.assertFalse(
+            hasattr(ip, "run_preimport_gates"),
+            "lib.import_preview must not re-export run_preimport_gates — "
+            "preview measures only",
+        )
+        self.assertFalse(
+            hasattr(pi, "run_preimport_gates"),
+            "lib.measurement must not export run_preimport_gates — the shim "
+            "was deleted in U8",
+        )
 
     def test_missing_path_is_uncertain_not_cleanup_eligible(self):
         preview = preview_import_from_path(
@@ -523,8 +598,11 @@ class TestImportPreviewPath(unittest.TestCase):
                            min_bitrate_bps=160000,
                            is_vbr=True,
                        )), \
-                 patch("lib.import_preview.run_preimport_gates",
-                       return_value=PreImportGateResult()), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           folder_layout="flat",
+                           audio_file_count=1,
+                       )), \
                  patch("lib.import_preview.run_import_one",
                        return_value=SimpleNamespace(
                            import_result=ImportResult(

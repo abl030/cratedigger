@@ -22,18 +22,13 @@ from tests.helpers import (
 
 
 class TestFakePipelineDB(unittest.TestCase):
-    def test_album_quality_evidence_round_trips_like_pipeline_db(self):
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AlbumQualityEvidenceFile,
-            AlbumQualityEvidenceOwner,
-        )
+    def test_album_quality_evidence_round_trips_by_content_key(self):
+        from lib.quality import AlbumQualityEvidenceFile
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
         evidence = make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+            mb_release_id="mb-roundtrip-1",
             files=[
                 AlbumQualityEvidenceFile(
                     relative_path="b.mp3",
@@ -53,11 +48,9 @@ class TestFakePipelineDB(unittest.TestCase):
         )
 
         db.upsert_album_quality_evidence(evidence)
-        loaded = db.load_album_quality_evidence(
-            AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
-            )
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
         )
 
         assert loaded is not None
@@ -65,6 +58,7 @@ class TestFakePipelineDB(unittest.TestCase):
             [file.relative_path for file in loaded.files],
             ["a.mp3", "b.mp3"],
         )
+        assert loaded.id is not None
         loaded.files.append(AlbumQualityEvidenceFile(
             relative_path="mutated.mp3",
             size_bytes=3,
@@ -72,33 +66,21 @@ class TestFakePipelineDB(unittest.TestCase):
             extension="mp3",
             container="mp3",
         ))
-        reloaded = db.load_album_quality_evidence(
-            AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
-            )
-        )
+        reloaded = db.load_album_quality_evidence_by_id(loaded.id)
         assert reloaded is not None
         self.assertEqual(
             [file.relative_path for file in reloaded.files],
             ["a.mp3", "b.mp3"],
         )
 
-    def test_album_quality_evidence_validates_owner_and_snapshot(self):
-        from lib.quality import AlbumQualityEvidenceFile, AlbumQualityEvidenceOwner
+    def test_album_quality_evidence_validates_snapshot(self):
+        from lib.quality import AlbumQualityEvidenceFile
 
         db = FakePipelineDB()
-        self.assertFalse(db.validate_album_quality_evidence_owner(
-            AlbumQualityEvidenceOwner("request_current", 99)
-        ))
-        with self.assertRaisesRegex(ValueError, "invalid owner_type"):
-            db.validate_album_quality_evidence_owner(
-                AlbumQualityEvidenceOwner("simulator", 1)
-            )
         db.seed_request(make_request_row(id=42))
         with self.assertRaisesRegex(ValueError, "container is required"):
             db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_id=42,
+                mb_release_id="mb-validate-1",
                 files=[
                     AlbumQualityEvidenceFile(
                         relative_path="bad.mp3",
@@ -110,35 +92,29 @@ class TestFakePipelineDB(unittest.TestCase):
                 ],
             ))
 
-    def test_album_quality_evidence_supports_download_log_candidate_owner(self):
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            AlbumQualityEvidenceOwner,
-        )
-
+    def test_album_quality_evidence_supports_download_log_addressing(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
         log_id = db.log_download(request_id=42, outcome="rejected")
-        evidence = make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=log_id,
-        )
+        evidence = make_album_quality_evidence(mb_release_id="mb-dl-fk-1")
 
         db.upsert_album_quality_evidence(evidence)
-
-        self.assertIsNotNone(db.load_album_quality_evidence(
-            AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=log_id,
-            )
-        ))
-
-    def test_album_quality_evidence_supports_import_job_candidate_owner(self):
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            AlbumQualityEvidenceOwner,
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
         )
+        assert persisted is not None and persisted.id is not None
+        db.set_download_log_candidate_evidence(log_id, persisted.id)
 
+        self.assertEqual(
+            db.get_download_log_candidate_evidence_id(log_id),
+            persisted.id,
+        )
+        loaded = db.load_album_quality_evidence_by_id(persisted.id)
+        assert loaded is not None
+        self.assertEqual(loaded.mb_release_id, "mb-dl-fk-1")
+
+    def test_album_quality_evidence_supports_import_job_addressing(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
         job = db.enqueue_import_job(
@@ -146,18 +122,69 @@ class TestFakePipelineDB(unittest.TestCase):
             request_id=42,
             payload={"failed_path": "/tmp/candidate"},
         )
+        evidence = make_album_quality_evidence(mb_release_id="mb-import-fk-1")
 
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=job.id,
-        ))
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
 
-        loaded = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=job.id,
-        ))
-        assert loaded is not None
-        self.assertEqual(loaded.owner.owner_type, "import_job_candidate")
+        self.assertEqual(
+            db.get_import_job_candidate_evidence_id(job.id),
+            persisted.id,
+        )
+
+    def test_album_quality_evidence_supports_request_current_addressing(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        evidence = make_album_quality_evidence(mb_release_id="mb-current-fk-1")
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        self.assertEqual(db.get_request_current_evidence_id(42), persisted.id)
+
+    def test_album_quality_evidence_cross_walk_via_request(self):
+        """Cross-walk: download_log → request_id → most recent import_job FK."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        job = db.enqueue_import_job(
+            "manual_import",
+            request_id=42,
+            payload={"failed_path": "/tmp/x"},
+        )
+        log_id = db.log_download(request_id=42, outcome="rejected")
+        evidence = make_album_quality_evidence(mb_release_id="mb-walk-1")
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+
+        self.assertEqual(
+            db.get_request_latest_import_job_evidence_id_from_dl(log_id),
+            persisted.id,
+        )
+
+    def test_album_quality_evidence_dedupes_by_content_key(self):
+        """Upserting the same (mbid, fingerprint) twice keeps one row."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        e = make_album_quality_evidence(mb_release_id="mb-dedupe-1")
+        db.upsert_album_quality_evidence(e)
+        db.upsert_album_quality_evidence(e)
+
+        self.assertEqual(len(db.album_quality_evidence), 1)
+        self.assertEqual(len(db._evidence_by_id), 1)
 
     def test_album_quality_evidence_preview_facts_mirror_pipeline_db(self):
         """U1: FakePipelineDB round-trips new preview-evidence facts the same
@@ -165,17 +192,12 @@ class TestFakePipelineDB(unittest.TestCase):
         the per-file decode_ok flag survives upsert/load.
         """
         import msgspec
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AlbumQualityEvidenceFile,
-            AlbumQualityEvidenceOwner,
-        )
+        from lib.quality import AlbumQualityEvidenceFile
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
         evidence = make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+            mb_release_id="mb-preview-facts-1",
             files=[
                 AlbumQualityEvidenceFile(
                     relative_path="01 - Track.mp3",
@@ -198,11 +220,9 @@ class TestFakePipelineDB(unittest.TestCase):
         )
 
         db.upsert_album_quality_evidence(evidence)
-        loaded = db.load_album_quality_evidence(
-            AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
-            )
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
         )
         assert loaded is not None
         self.assertTrue(loaded.audio_corrupt)
@@ -216,25 +236,20 @@ class TestFakePipelineDB(unittest.TestCase):
     def test_album_quality_evidence_empty_fileset_accepts_zero_count_on_fake(self):
         """U1 AE4: empty fileset with audio_file_count=0 is storable on fake too."""
         import msgspec
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AlbumQualityEvidenceOwner,
-        )
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
         evidence = make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+            mb_release_id="mb-empty-1",
             files=[],
         )
         # default audio_file_count is 0 — explicit for clarity.
         evidence = msgspec.structs.replace(evidence, audio_file_count=0)
         db.upsert_album_quality_evidence(evidence)
-        loaded = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
-        ))
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
         assert loaded is not None
         self.assertEqual(loaded.audio_file_count, 0)
         self.assertEqual(loaded.files, [])
@@ -1856,39 +1871,28 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual([e.request_id for e in db.search_logs], [2])
         self.assertEqual([e.request_id for e in db.denylist], [2])
 
-    def test_delete_request_cascades_album_quality_evidence(self):
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AlbumQualityEvidenceOwner,
-        )
-
+    def test_delete_request_does_not_cascade_evidence_post_021(self):
+        """Migration 021: evidence is content-addressed. Deleting a request
+        no longer removes evidence rows — addressing FKs go ``ON DELETE SET
+        NULL`` so the row survives the parent's removal.
+        """
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
         log_id = db.log_download(1, outcome="rejected")
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=1,
-        ))
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=log_id,
-        ))
+        evidence = make_album_quality_evidence(mb_release_id="mb-delete-1")
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_download_log_candidate_evidence(log_id, persisted.id)
 
         db.delete_request(1)
 
-        self.assertIsNone(db.load_album_quality_evidence(
-            AlbumQualityEvidenceOwner(
-                ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                1,
-            )
-        ))
-        self.assertIsNone(db.load_album_quality_evidence(
-            AlbumQualityEvidenceOwner(
-                ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                log_id,
-            )
-        ))
+        # Evidence rows survive; the parent and its child download_log are
+        # gone via the cascade rules earlier in delete_request.
+        self.assertIsNotNone(db.load_album_quality_evidence_by_id(persisted.id))
 
     def test_get_wanted_prioritizes_new_and_respects_limit(self):
         db = FakePipelineDB()

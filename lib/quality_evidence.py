@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -19,7 +18,6 @@ from lib.quality import (
     V0_SOURCE_LINEAGE_ON_DISK_RESEARCH,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
-    AlbumQualityEvidenceOwner,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
@@ -28,7 +26,7 @@ from lib.quality import (
 )
 
 if TYPE_CHECKING:
-    from lib.preimport import PreimportMeasurement
+    from lib.measurement import PreimportMeasurement
 
 
 _AUDIO_EXTENSIONS = {
@@ -71,34 +69,6 @@ class EvidenceBuildResult:
     @property
     def available(self) -> bool:
         return self.evidence is not None
-
-
-def _candidate_owners(
-    *,
-    download_log_id: int | None = None,
-    import_job_id: int | None = None,
-) -> list[AlbumQualityEvidenceOwner]:
-    """Return persisted candidate owners for an import candidate."""
-
-    owners: list[AlbumQualityEvidenceOwner] = []
-    if import_job_id is not None:
-        owners.append(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=import_job_id,
-        ))
-    if download_log_id is not None:
-        owners.append(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=download_log_id,
-        ))
-    return owners
-
-
-def request_current_owner(request_id: int) -> AlbumQualityEvidenceOwner:
-    return AlbumQualityEvidenceOwner(
-        owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-        owner_id=request_id,
-    )
 
 
 _LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
@@ -184,6 +154,69 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
     if walk_errors:
         raise SnapshotAudioFilesError("; ".join(walk_errors))
     return sorted(files, key=lambda f: f.relative_path)
+
+
+def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
+    """SHA-256 fingerprint of an audio inventory used as the evidence row key.
+
+    This is the canonical addressing key for ``album_quality_evidence`` after
+    the rekey landed in plan ``2026-05-16-002`` (U1/U2/U3). The exact formula
+    is load-bearing: U2's SQL migration computes the same hash from each
+    row's ``album_quality_evidence_files`` records, so a Python-vs-SQL drift
+    here would scramble post-deploy lookup and break dedupe.
+
+    Formula (must be mirrored exactly by U2's migration):
+
+    1. For each file, build a tuple ``[relative_path, size_bytes, extension,
+       container, codec]`` as a JSON array. ``codec`` may be ``None`` and is
+       rendered as JSON ``null``.
+    2. Sort the per-file tuples by ``relative_path`` ascending.
+    3. JSON-encode the sorted list with ``sort_keys=False``,
+       ``separators=(",", ":")`` (no whitespace), ``ensure_ascii=False``.
+       Each file becomes e.g. ``["track01.flac",12345,"flac","flac","flac"]``.
+    4. SHA-256 hex digest of the UTF-8 bytes of that JSON string.
+
+    Fields chosen mirror ``_snapshot_match_key`` so freshness and identity
+    stay coherent. ``mtime_ns`` is deliberately excluded — see the
+    ``_snapshot_match_key`` docstring for why (ID3 tag mutation, virtiofs
+    flake). ``decode_ok`` is excluded too: it is per-file evidence written
+    by the measurement gate, not an identity attribute.
+
+    The empty list hashes the JSON encoding of ``[]`` (``"[]"`` → a stable,
+    defined 64-char digest), not an error.
+    """
+
+    payload: list[list[Any]] = sorted(
+        (
+            [
+                file.relative_path,
+                file.size_bytes,
+                file.extension,
+                file.container,
+                file.codec,
+            ]
+            for file in files
+        ),
+        key=lambda row: row[0],
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=False,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def snapshot_fingerprint_for_path(root: str) -> str:
+    """Snapshot the audio inventory under ``root`` and fingerprint it.
+
+    Thin wrapper combining :func:`snapshot_audio_files` and
+    :func:`snapshot_fingerprint` for the common "compute from disk" path.
+    Returns the same digest as ``snapshot_fingerprint(snapshot_audio_files(root))``.
+    """
+
+    return snapshot_fingerprint(snapshot_audio_files(root))
 
 
 def _snapshot_match_key(
@@ -369,9 +402,9 @@ def _apply_measurement_facts_to_files(
     ``snapshot_audio_files`` defaults ``decode_ok=True`` because the snapshot
     helper does not run ffmpeg. The preimport measurement is the authority on
     audio integrity, so when it reports corrupt files we propagate that fact
-    into the snapshot rows before persisting evidence. This lets the importer's
-    ``preimport_decide`` consume ``decode_ok=False`` flags as the per-file
-    evidence for ``audio_corrupt``.
+    into the snapshot rows before persisting evidence. This lets the
+    importer's ``full_pipeline_decision_from_evidence`` (U11) consume
+    ``decode_ok=False`` flags as the per-file evidence for ``audio_corrupt``.
     """
     if not measurement.corrupt_files:
         return files
@@ -429,7 +462,7 @@ def _filetype_band_to_format(filetype_band: str) -> str | None:
 
 def evidence_from_import_result(
     *,
-    owner: AlbumQualityEvidenceOwner,
+    mb_release_id: str,
     source_path: str,
     import_result: ImportResult | None,
     measured_at: datetime | None = None,
@@ -480,7 +513,9 @@ def evidence_from_import_result(
         matched_bad_hash_id = None
         matched_bad_hash_path = None
     evidence = AlbumQualityEvidence(
-        owner=owner,
+        mb_release_id=mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path=source_path,
         measurement=audio_measurement,
         measured_at=measured_at or datetime.now(timezone.utc),
         files=files,
@@ -505,7 +540,7 @@ def evidence_from_import_result(
 
 def evidence_from_measurement(
     *,
-    owner: AlbumQualityEvidenceOwner,
+    mb_release_id: str,
     source_path: str,
     measurement: "PreimportMeasurement",
     measured_at: datetime | None = None,
@@ -516,9 +551,10 @@ def evidence_from_measurement(
 
     Used by the preview worker when the harness cannot or should not run
     (audio_corrupt, bad_audio_hash, nested_layout, empty_fileset). The
-    measurement carries every U1 fact the importer's ``preimport_decide``
-    needs to reject: ``audio_corrupt``, ``matched_bad_audio_hash_*``,
-    ``folder_layout``, ``audio_file_count``, and the spectral measurements.
+    measurement carries every U1 fact the importer's
+    ``full_pipeline_decision_from_evidence`` (U11) needs to reject:
+    ``audio_corrupt``, ``matched_bad_audio_hash_*``, ``folder_layout``,
+    ``audio_file_count``, and the spectral measurements.
 
     The synthesized ``AudioQualityMeasurement`` only carries enough data to
     satisfy ``AlbumQualityEvidence.policy_incomplete_reasons`` (format + at
@@ -570,7 +606,9 @@ def evidence_from_measurement(
     codec = files[0].codec if files else None
     container = files[0].container if files else None
     evidence = AlbumQualityEvidence(
-        owner=owner,
+        mb_release_id=mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path=source_path,
         measurement=audio_measurement,
         measured_at=measured_at or datetime.now(timezone.utc),
         files=files,
@@ -595,7 +633,7 @@ def evidence_from_measurement(
 
 def evidence_from_album_info(
     *,
-    owner: AlbumQualityEvidenceOwner,
+    mb_release_id: str,
     album_info: Any,
     request_row: dict[str, Any] | None = None,
     verified_lossless_proof: VerifiedLosslessProof | None = None,
@@ -632,7 +670,9 @@ def evidence_from_album_info(
         verified_lossless=verified_lossless,
     )
     evidence = AlbumQualityEvidence(
-        owner=owner,
+        mb_release_id=mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path=str(album_path) or "",
         measurement=measurement,
         measured_at=measured_at or datetime.now(timezone.utc),
         files=files,
@@ -655,6 +695,7 @@ def evidence_from_album_info(
 def persist_candidate_evidence_from_import_result(
     db: Any,
     *,
+    mb_release_id: str,
     source_path: str,
     import_result: ImportResult | None,
     download_log_id: int | None = None,
@@ -663,11 +704,14 @@ def persist_candidate_evidence_from_import_result(
     files: list[AlbumQualityEvidenceFile] | None = None,
     measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
-    owners = _candidate_owners(
-        download_log_id=download_log_id,
-        import_job_id=import_job_id,
-    )
-    if not owners:
+    """Persist content-addressed candidate evidence and write addressing FKs.
+
+    After upsert (keyed by ``(mb_release_id, snapshot_fingerprint)``), writes
+    the surviving evidence row's id back to ``import_jobs.candidate_evidence_id``
+    and/or ``download_log.candidate_evidence_id`` so triage and importer can
+    look up evidence via FK chain.
+    """
+    if download_log_id is None and import_job_id is None:
         return EvidenceBuildResult(None, "unowned", "no persisted candidate owner")
     if files is None:
         try:
@@ -675,7 +719,7 @@ def persist_candidate_evidence_from_import_result(
         except OSError as exc:
             return EvidenceBuildResult(None, "failed", str(exc))
     result = evidence_from_import_result(
-        owner=owners[0],
+        mb_release_id=mb_release_id,
         source_path=source_path,
         import_result=import_result,
         target_format=target_format,
@@ -683,33 +727,25 @@ def persist_candidate_evidence_from_import_result(
         measurement=measurement,
     )
     if result.evidence is not None:
-        for owner in owners:
-            db.upsert_album_quality_evidence(AlbumQualityEvidence(
-                owner=owner,
-                measurement=result.evidence.measurement,
-                measured_at=result.evidence.measured_at,
-                files=result.evidence.files,
-                codec=result.evidence.codec,
-                container=result.evidence.container,
-                storage_format=result.evidence.storage_format,
-                target_format=result.evidence.target_format,
-                v0_metric=result.evidence.v0_metric,
-                verified_lossless_proof=result.evidence.verified_lossless_proof,
-                audio_corrupt=result.evidence.audio_corrupt,
-                folder_layout=result.evidence.folder_layout,
-                audio_file_count=result.evidence.audio_file_count,
-                filetype_band=result.evidence.filetype_band,
-                matched_bad_audio_hash_id=result.evidence.matched_bad_audio_hash_id,
-                matched_bad_audio_hash_path=(
-                    result.evidence.matched_bad_audio_hash_path
-                ),
-            ))
+        db.upsert_album_quality_evidence(result.evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=result.evidence.mb_release_id,
+            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
+        )
+        if persisted is not None and persisted.id is not None:
+            if import_job_id is not None:
+                db.set_import_job_candidate_evidence(import_job_id, persisted.id)
+            if download_log_id is not None:
+                db.set_download_log_candidate_evidence(
+                    download_log_id, persisted.id
+                )
     return result
 
 
 def persist_candidate_evidence_from_measurement(
     db: Any,
     *,
+    mb_release_id: str,
     source_path: str,
     measurement: "PreimportMeasurement",
     download_log_id: int | None = None,
@@ -721,14 +757,12 @@ def persist_candidate_evidence_from_measurement(
 
     Mirrors ``persist_candidate_evidence_from_import_result`` for the preview
     code path that never invoked the harness (audio_corrupt / bad_audio_hash /
-    nested_layout / empty_fileset). The importer's ``preimport_decide`` reads
-    the persisted U1 facts and rejects upstream of the quality gate.
+    nested_layout / empty_fileset). The importer's
+    ``full_pipeline_decision_from_evidence`` (U11) reads the persisted U1
+    facts and rejects via its four-fact early-exit branches upstream of the
+    quality gate.
     """
-    owners = _candidate_owners(
-        download_log_id=download_log_id,
-        import_job_id=import_job_id,
-    )
-    if not owners:
+    if download_log_id is None and import_job_id is None:
         return EvidenceBuildResult(None, "unowned", "no persisted candidate owner")
     if files is None:
         try:
@@ -736,48 +770,194 @@ def persist_candidate_evidence_from_measurement(
         except OSError as exc:
             return EvidenceBuildResult(None, "failed", str(exc))
     result = evidence_from_measurement(
-        owner=owners[0],
+        mb_release_id=mb_release_id,
         source_path=source_path,
         measurement=measurement,
         target_format=target_format,
         files=files,
     )
     if result.evidence is not None:
-        for owner in owners:
-            db.upsert_album_quality_evidence(AlbumQualityEvidence(
-                owner=owner,
-                measurement=result.evidence.measurement,
-                measured_at=result.evidence.measured_at,
-                files=result.evidence.files,
-                codec=result.evidence.codec,
-                container=result.evidence.container,
-                storage_format=result.evidence.storage_format,
-                target_format=result.evidence.target_format,
-                v0_metric=result.evidence.v0_metric,
-                verified_lossless_proof=result.evidence.verified_lossless_proof,
-                audio_corrupt=result.evidence.audio_corrupt,
-                folder_layout=result.evidence.folder_layout,
-                audio_file_count=result.evidence.audio_file_count,
-                filetype_band=result.evidence.filetype_band,
-                matched_bad_audio_hash_id=result.evidence.matched_bad_audio_hash_id,
-                matched_bad_audio_hash_path=(
-                    result.evidence.matched_bad_audio_hash_path
-                ),
-            ))
+        db.upsert_album_quality_evidence(result.evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=result.evidence.mb_release_id,
+            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
+        )
+        if persisted is not None and persisted.id is not None:
+            if import_job_id is not None:
+                db.set_import_job_candidate_evidence(import_job_id, persisted.id)
+            if download_log_id is not None:
+                db.set_download_log_candidate_evidence(
+                    download_log_id, persisted.id
+                )
     return result
+
+
+def propagate_candidate_evidence_to_current(
+    db: Any,
+    *,
+    request_id: int,
+    candidate_evidence: AlbumQualityEvidence,
+    album_info: Any,
+    target_format: str | None = None,
+    measured_at: datetime | None = None,
+) -> EvidenceBuildResult:
+    """Build new library-side evidence by propagating candidate measurement payload.
+
+    Post-import propagation path (U10). The candidate evidence row that the
+    importer worked on already paid for expensive measurements (spectral
+    analysis, V0 lineage, bad-audio-hash matches, verified-lossless proof).
+    After the file rename to the library path, the candidate and library
+    rows describe audio that is bit-equal in the non-transcoded case and
+    semantically related in the transcoded case. This helper builds the
+    new library-side evidence row without re-measuring — see
+    ``CLAUDE.md`` § "Decision architecture" and the U10 design doc.
+
+    Detection:
+
+    * The candidate's persisted ``codec`` (lowercased) is the source codec.
+    * The library copy's ``album_info.format`` (lowercased, "flac"/"mp3"/etc)
+      is the library codec.
+    * ``target_format`` (or the candidate's persisted ``target_format``) is
+      the planned target format if a conversion was configured.
+    * Transcode = ``(target_format and target_format != source_codec)`` OR
+      ``(library_codec != source_codec)``.
+
+    Field policy:
+
+    * Always re-derived from the library snapshot: ``snapshot_fingerprint``,
+      ``source_path``, ``files``, ``codec``, ``container``, ``storage_format``,
+      ``folder_layout``, ``audio_file_count``, ``filetype_band``,
+      ``audio_corrupt`` (from files[*].decode_ok), ``measured_at`` (now).
+    * Always re-derived from ``album_info``: ``min_bitrate_kbps``,
+      ``avg_bitrate_kbps``, ``median_bitrate_kbps``, ``format``, ``is_cbr``.
+      Beets's per-track bitrate measurements describe the on-disk files at
+      the library path — for renamed-only this is the same audio as the
+      candidate's measurement (a dual-check that catches drift); for
+      transcoded imports this describes the V0 output.
+    * Propagated when renamed-only, NULL when transcoded: ``spectral_grade``,
+      ``spectral_bitrate_kbps`` (on the inner measurement); ``v0_metric``,
+      ``matched_bad_audio_hash_id``, ``matched_bad_audio_hash_path`` (on
+      the outer evidence row). These describe the source audio's frequency
+      content / lineage / hash; under transcode the V0 output has a
+      different spectrum and no V0 lineage relative to itself.
+    * Propagated in BOTH cases: ``verified_lossless`` and
+      ``verified_lossless_proof``. These classify the source's provenance
+      and survive transcode — a V0 transcoded from a verified-lossless FLAC
+      is still verified-lossless by lineage. Also ``was_converted_from``
+      (source format before conversion) propagates as-is.
+    """
+
+    album_path = getattr(album_info, "album_path", "")
+    try:
+        files = snapshot_audio_files(str(album_path))
+    except OSError as exc:
+        return EvidenceBuildResult(None, "failed", str(exc))
+    if not files:
+        return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
+
+    source_codec = (candidate_evidence.codec or "").lower() or None
+    library_codec = (getattr(album_info, "format", None) or "").lower() or None
+    effective_target = (
+        (target_format or candidate_evidence.target_format) or None
+    )
+    effective_target_lc = effective_target.lower() if effective_target else None
+    if (
+        effective_target_lc is not None
+        and source_codec is not None
+        and effective_target_lc != source_codec
+    ):
+        is_transcode = True
+    elif (
+        library_codec is not None
+        and source_codec is not None
+        and library_codec != source_codec
+    ):
+        is_transcode = True
+    else:
+        is_transcode = False
+
+    candidate_measurement = candidate_evidence.measurement
+    measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
+        avg_bitrate_kbps=getattr(album_info, "avg_bitrate_kbps", None),
+        median_bitrate_kbps=getattr(album_info, "median_bitrate_kbps", None),
+        format=getattr(album_info, "format", None) or None,
+        is_cbr=bool(getattr(album_info, "is_cbr", False)),
+        spectral_grade=(
+            None if is_transcode else candidate_measurement.spectral_grade
+        ),
+        spectral_bitrate_kbps=(
+            None if is_transcode else candidate_measurement.spectral_bitrate_kbps
+        ),
+        verified_lossless=candidate_measurement.verified_lossless,
+        was_converted_from=candidate_measurement.was_converted_from,
+    )
+
+    library_filetype_band = derive_filetype_band(files)
+    library_codec_from_files = files[0].codec
+    library_container_from_files = files[0].container
+
+    evidence = AlbumQualityEvidence(
+        mb_release_id=candidate_evidence.mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path=str(album_path) or "",
+        measurement=measurement,
+        measured_at=measured_at or datetime.now(timezone.utc),
+        files=files,
+        codec=library_codec_from_files,
+        container=library_container_from_files,
+        storage_format=measurement.format,
+        target_format=None,
+        v0_metric=(None if is_transcode else candidate_evidence.v0_metric),
+        verified_lossless_proof=candidate_evidence.verified_lossless_proof,
+        audio_corrupt=any(not file.decode_ok for file in files),
+        folder_layout=derive_folder_layout(files),
+        audio_file_count=len(files),
+        filetype_band=library_filetype_band,
+        matched_bad_audio_hash_id=(
+            None if is_transcode else candidate_evidence.matched_bad_audio_hash_id
+        ),
+        matched_bad_audio_hash_path=(
+            None if is_transcode else candidate_evidence.matched_bad_audio_hash_path
+        ),
+    )
+    errors = evidence.storage_validation_errors()
+    if errors:
+        return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    if persisted is not None and persisted.id is not None:
+        db.set_request_current_evidence(request_id, persisted.id)
+    return EvidenceBuildResult(evidence, "ready")
 
 
 def backfill_current_evidence_from_album_info(
     db: Any,
     *,
     request_id: int,
+    mb_release_id: str,
     album_info: Any,
     verified_lossless_proof: VerifiedLosslessProof | None = None,
     preserve_existing_verified_lossless_proof: bool = True,
 ) -> EvidenceBuildResult:
+    """Build current evidence from beets, upsert, and write request FK.
+
+    Identity is ``(mb_release_id, snapshot_fingerprint)``. Once persisted the
+    surviving row id is written to ``album_requests.current_evidence_id`` so
+    downstream readers can fetch via FK rather than scanning by mbid.
+    """
     request_row = db.get_request(request_id)
     if verified_lossless_proof is None and preserve_existing_verified_lossless_proof:
-        existing = db.load_album_quality_evidence(request_current_owner(request_id))
+        existing_id = db.get_request_current_evidence_id(request_id)
+        existing = (
+            db.load_album_quality_evidence_by_id(existing_id)
+            if existing_id is not None
+            else None
+        )
         if (
             existing is not None
             and existing.measurement.verified_lossless
@@ -785,13 +965,19 @@ def backfill_current_evidence_from_album_info(
         ):
             verified_lossless_proof = existing.verified_lossless_proof
     result = evidence_from_album_info(
-        owner=request_current_owner(request_id),
+        mb_release_id=mb_release_id,
         album_info=album_info,
         request_row=request_row,
         verified_lossless_proof=verified_lossless_proof,
     )
     if result.evidence is not None:
         db.upsert_album_quality_evidence(result.evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=result.evidence.mb_release_id,
+            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
+        )
+        if persisted is not None and persisted.id is not None:
+            db.set_request_current_evidence(request_id, persisted.id)
     return result
 
 
@@ -802,38 +988,53 @@ def load_candidate_evidence_for_source(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
 ) -> EvidenceBuildResult:
-    """Load stored candidate evidence and require source snapshot freshness."""
+    """Load stored candidate evidence via the FK chain and verify freshness.
 
-    owners = _candidate_owners(
-        download_log_id=download_log_id,
-        import_job_id=import_job_id,
-    )
-    if not owners:
+    Walks ``download_log.candidate_evidence_id``, then falls back to the most
+    recent ``import_jobs.candidate_evidence_id`` for the same request via
+    cross-walk through ``download_log.request_id``. Once a candidate evidence
+    row is found, ``audio_snapshot_matches`` confirms it still describes the
+    audio at ``source_path``.
+    """
+
+    if download_log_id is None and import_job_id is None:
         return EvidenceBuildResult(None, "unowned", "no candidate owner")
 
-    missing: list[str] = []
-    for owner in owners:
-        evidence = db.load_album_quality_evidence(owner)
-        if evidence is None:
-            missing.append(f"{owner.owner_type}:{owner.owner_id}")
-            continue
-        if not audio_snapshot_matches(source_path, evidence.files):
-            return EvidenceBuildResult(
-                None,
-                "stale",
-                f"candidate source changed since evidence capture: "
-                f"{owner.owner_type}:{owner.owner_id}",
+    evidence_id: int | None = None
+    if import_job_id is not None:
+        evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
+    if evidence_id is None and download_log_id is not None:
+        evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
+        if evidence_id is None:
+            # Cross-walk via request_id → most recent import_job
+            evidence_id = db.get_request_latest_import_job_evidence_id_from_dl(
+                download_log_id
             )
-        errors = evidence.policy_incomplete_reasons()
-        if errors:
-            return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
-        return EvidenceBuildResult(evidence, "ready")
 
-    return EvidenceBuildResult(
-        None,
-        "missing",
-        "no candidate evidence found for " + ", ".join(missing),
-    )
+    if evidence_id is None:
+        return EvidenceBuildResult(
+            None,
+            "missing",
+            "no candidate evidence found via FK chain",
+        )
+
+    evidence = db.load_album_quality_evidence_by_id(evidence_id)
+    if evidence is None:
+        return EvidenceBuildResult(
+            None,
+            "missing",
+            f"candidate evidence id {evidence_id} not found",
+        )
+    if not audio_snapshot_matches(source_path, evidence.files):
+        return EvidenceBuildResult(
+            None,
+            "stale",
+            "candidate source changed since evidence capture",
+        )
+    errors = evidence.policy_incomplete_reasons()
+    if errors:
+        return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+    return EvidenceBuildResult(evidence, "ready")
 
 
 def load_or_backfill_current_evidence(
@@ -851,12 +1052,15 @@ def load_or_backfill_current_evidence(
     from lib.beets_db import BeetsDB
     from lib.quality import QualityRankConfig
 
-    owner = request_current_owner(request_id)
-    existing = (
-        preloaded_evidence
-        if preloaded
-        else db.load_album_quality_evidence(owner)
-    )
+    if preloaded:
+        existing = preloaded_evidence
+    else:
+        existing_id = db.get_request_current_evidence_id(request_id)
+        existing = (
+            db.load_album_quality_evidence_by_id(existing_id)
+            if existing_id is not None
+            else None
+        )
     if existing is not None:
         errors = existing.policy_incomplete_reasons()
         if not errors:
@@ -871,5 +1075,6 @@ def load_or_backfill_current_evidence(
     return backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
+        mb_release_id=mb_release_id,
         album_info=album_info,
     )

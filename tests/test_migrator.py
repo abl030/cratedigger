@@ -690,6 +690,10 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
             conn.close()
 
     def test_tables_and_owner_domain_exist(self):
+        # NOTE: post-migration 021 the schema is keyed by
+        # ``(mb_release_id, snapshot_fingerprint)`` rather than the legacy
+        # ``(owner_type, owner_id)`` domain. The test name is kept for
+        # historical continuity; assertion shape has been updated.
         tables = self._query("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'public'
@@ -703,13 +707,15 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
             {"album_quality_evidence", "album_quality_evidence_files"},
         )
 
+        # mb_release_id is NOT NULL with a length>0 CHECK after 021. The
+        # empty string therefore triggers a CHECK violation.
         with self.assertRaises(psycopg2.errors.CheckViolation):
             self._exec("""
                 INSERT INTO album_quality_evidence (
-                    owner_type, owner_id, measured_at, format,
-                    verified_lossless
+                    mb_release_id, snapshot_fingerprint, source_path,
+                    measured_at, format, verified_lossless
                 )
-                VALUES ('simulator', 1, NOW(), 'mp3 v0', FALSE)
+                VALUES ('', 'fp', '', NOW(), 'mp3 v0', FALSE)
             """)
 
     def test_relational_file_rows_and_verified_proof_constraints(self):
@@ -723,32 +729,35 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
             ("aqe-schema-mbid",),
         )[0][0]
         try:
+            # verified_lossless=TRUE without proof columns must still raise.
             with self.assertRaises(psycopg2.errors.CheckViolation):
                 self._exec("""
                     INSERT INTO album_quality_evidence (
-                        owner_type, owner_id, measured_at, format,
-                        verified_lossless
+                        mb_release_id, snapshot_fingerprint, source_path,
+                        measured_at, format, verified_lossless
                     )
-                    VALUES ('request_current', %s, NOW(), 'flac', TRUE)
-                """, (rid,))
+                    VALUES ('aqe-schema-mbid', 'fp-1', '/p/1', NOW(), 'flac', TRUE)
+                """)
 
             self._exec("""
                 INSERT INTO album_quality_evidence (
-                    owner_type, owner_id, measured_at, format,
+                    mb_release_id, snapshot_fingerprint, source_path,
+                    measured_at, format,
                     verified_lossless, verified_lossless_proof_origin,
                     verified_lossless_source, verified_lossless_classifier,
                     v0_avg_bitrate_kbps, v0_source_lineage
                 )
                 VALUES (
-                    'request_current', %s, NOW(), 'flac', TRUE, 'import',
+                    'aqe-schema-mbid', 'fp-2', '/p/2', NOW(), 'flac',
+                    TRUE, 'import',
                     'lossless candidate', 'spectral+v0', 228,
                     'lossless_container_source'
                 )
-            """, (rid,))
+            """)
             evidence_id = self._query(
                 "SELECT id FROM album_quality_evidence "
-                "WHERE owner_type = 'request_current' AND owner_id = %s",
-                (rid,),
+                "WHERE mb_release_id = %s AND snapshot_fingerprint = %s",
+                ("aqe-schema-mbid", "fp-2"),
             )[0][0]
             self._exec("""
                 INSERT INTO album_quality_evidence_files (
@@ -766,8 +775,8 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
         finally:
             self._exec(
                 "DELETE FROM album_quality_evidence "
-                "WHERE owner_type = 'request_current' AND owner_id = %s",
-                (rid,),
+                "WHERE mb_release_id = %s",
+                ("aqe-schema-mbid",),
             )
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
@@ -874,11 +883,14 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
             with self.assertRaises(psycopg2.errors.CheckViolation):
                 self._exec("""
                     INSERT INTO album_quality_evidence (
-                        owner_type, owner_id, measured_at, format,
-                        verified_lossless, folder_layout
+                        mb_release_id, snapshot_fingerprint, source_path,
+                        measured_at, format, verified_lossless, folder_layout
                     )
-                    VALUES ('request_current', %s, NOW(), 'flac', FALSE, 'tree')
-                """, (rid,))
+                    VALUES (
+                        'mig019-folder-mbid', 'fp-folder', '', NOW(), 'flac',
+                        FALSE, 'tree'
+                    )
+                """)
         finally:
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
@@ -977,21 +989,23 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
             bad_id = bad_id_rows[0][0]
             self._exec("""
                 INSERT INTO album_quality_evidence (
-                    owner_type, owner_id, measured_at, format,
+                    mb_release_id, snapshot_fingerprint, source_path,
+                    measured_at, format,
                     verified_lossless, matched_bad_audio_hash_id,
                     matched_bad_audio_hash_path
                 )
                 VALUES (
-                    'request_current', %s, NOW(), 'flac', FALSE, %s,
+                    'mig019-fk-mbid', 'fp-bad-hash', '', NOW(), 'flac',
+                    FALSE, %s,
                     '01 - Track.flac'
                 )
-            """, (rid, bad_id))
+            """, (bad_id,))
             self._exec("DELETE FROM bad_audio_hashes WHERE id = %s", (bad_id,))
             rows = self._query("""
                 SELECT matched_bad_audio_hash_id, matched_bad_audio_hash_path
                 FROM album_quality_evidence
-                WHERE owner_type = 'request_current' AND owner_id = %s
-            """, (rid,))
+                WHERE mb_release_id = %s AND snapshot_fingerprint = %s
+            """, ("mig019-fk-mbid", "fp-bad-hash"))
             self.assertEqual(len(rows), 1)
             self.assertIsNone(rows[0][0])
             # The paired path column is NOT touched by the FK cascade — it
@@ -1002,8 +1016,8 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
         finally:
             self._exec("""
                 DELETE FROM album_quality_evidence
-                WHERE owner_type = 'request_current' AND owner_id = %s
-            """, (rid,))
+                WHERE mb_release_id = %s
+            """, ("mig019-fk-mbid",))
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 

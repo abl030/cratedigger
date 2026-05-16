@@ -854,11 +854,11 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         from lib.quality import (
             AlbumQualityEvidence,
             AlbumQualityEvidenceFile,
-            AlbumQualityEvidenceOwner,
             AudioQualityMeasurement,
             QualityEvidenceActionPayload,
             QualityEvidenceActionProvenance,
         )
+        from lib.quality_evidence import snapshot_fingerprint
 
         files = []
         for fname in sorted(os.listdir(album_path)):
@@ -877,10 +877,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             ))
 
         candidate = AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(
-                owner_type="download_log_candidate",
-                owner_id=1,
-            ),
+            mb_release_id="mbid-test-candidate",
+            snapshot_fingerprint=snapshot_fingerprint(files),
+            source_path=album_path,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=252,

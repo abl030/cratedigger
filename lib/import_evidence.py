@@ -19,7 +19,6 @@ from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
-    request_current_owner,
 )
 
 
@@ -129,8 +128,12 @@ def ensure_current_evidence_for_action(
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
 
-    owner = request_current_owner(request_id)
-    existing = db.load_album_quality_evidence(owner)
+    existing_id = db.get_request_current_evidence_id(request_id)
+    existing = (
+        db.load_album_quality_evidence_by_id(existing_id)
+        if existing_id is not None
+        else None
+    )
     existing_snapshot_stale = False
     if existing is not None:
         errors = existing.policy_incomplete_reasons()
@@ -174,6 +177,7 @@ def ensure_current_evidence_for_action(
             backfilled = backfill_current_evidence_from_album_info(
                 db,
                 request_id=request_id,
+                mb_release_id=mb_release_id,
                 album_info=album_info,
             )
         else:

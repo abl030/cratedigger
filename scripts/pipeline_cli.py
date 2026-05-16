@@ -977,7 +977,7 @@ def cmd_quality(db, args):
     # --- Preimport gate scenarios (issue #91) ---
     # Audio and nested-layout gates short-circuit before any FLAC/MP3 stage
     # runs. These let operators see the rejection paths that live in
-    # lib.preimport.run_preimport_gates and
+    # lib.measurement.measure_preimport_state and
     # lib.import_dispatch.dispatch_import_from_db.
     #
     # `audio_check_mode` is read from the active runtime config and

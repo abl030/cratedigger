@@ -36,12 +36,8 @@ from lib.import_queue import (
     validate_status,
 )
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
-    AlbumQualityEvidenceOwner,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     CooldownConfig,
@@ -1561,29 +1557,11 @@ class PipelineDB:
         return self.get_request_by_mb_release_id(identity.release_id)
 
     def delete_request(self, request_id: int) -> None:
-        log_cur = self._execute(
-            "SELECT id FROM download_log WHERE request_id = %s",
-            (request_id,),
-        )
-        download_log_ids = [int(row["id"]) for row in log_cur.fetchall()]
-        self._execute(
-            """
-            DELETE FROM album_quality_evidence
-            WHERE owner_type = %s AND owner_id = %s
-            """,
-            (ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT, request_id),
-        )
-        if download_log_ids:
-            self._execute(
-                """
-                DELETE FROM album_quality_evidence
-                WHERE owner_type = %s AND owner_id = ANY(%s)
-                """,
-                (
-                    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                    download_log_ids,
-                ),
-            )
+        # Evidence rows are content-addressed after migration 021 — they are
+        # NOT deleted when the request is deleted. Addressing FKs on
+        # ``album_requests`` / ``import_jobs`` / ``download_log`` are
+        # ``ON DELETE SET NULL`` so the evidence survives. The mantra:
+        # "evidence is never deleted unless files change."
         self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
         self.conn.commit()
 
@@ -1672,48 +1650,21 @@ class PipelineDB:
 
     # --- active album-quality evidence --------------------------------------
 
-    def validate_album_quality_evidence_owner(
-        self,
-        owner: AlbumQualityEvidenceOwner,
-    ) -> bool:
-        """Return whether an evidence owner is well-formed and present."""
-        errors = owner.validation_errors()
-        if errors:
-            raise ValueError("; ".join(errors))
-
-        if owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT:
-            cur = self._execute(
-                "SELECT 1 FROM album_requests WHERE id = %s",
-                (owner.owner_id,),
-            )
-        elif owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE:
-            cur = self._execute(
-                "SELECT 1 FROM download_log WHERE id = %s",
-                (owner.owner_id,),
-            )
-        elif owner.owner_type == ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE:
-            cur = self._execute(
-                "SELECT 1 FROM import_jobs WHERE id = %s",
-                (owner.owner_id,),
-            )
-        else:  # pragma: no cover - guarded by owner.validation_errors()
-            raise ValueError(f"invalid owner_type: {owner.owner_type!r}")
-        return cur.fetchone() is not None
-
     def upsert_album_quality_evidence(
         self,
         evidence: AlbumQualityEvidence,
     ) -> None:
-        """Atomically replace one owner-scoped evidence row and its snapshot."""
+        """Atomically upsert evidence by ``(mb_release_id, snapshot_fingerprint)``.
+
+        The row's surviving id can be fetched via
+        :func:`find_album_quality_evidence`. Addressing FKs on
+        ``import_jobs`` / ``download_log`` / ``album_requests`` are written
+        separately via the dedicated setters.
+        """
         evidence = evidence.sorted_for_storage()
         errors = evidence.storage_validation_errors()
         if errors:
             raise ValueError("; ".join(errors))
-        if not self.validate_album_quality_evidence_owner(evidence.owner):
-            raise LookupError(
-                "album quality evidence owner does not exist: "
-                f"{evidence.owner.owner_type}:{evidence.owner.owner_id}"
-            )
 
         v0 = evidence.v0_metric
         proof = evidence.verified_lossless_proof
@@ -1735,7 +1686,8 @@ class PipelineDB:
             """
             WITH upserted AS (
                 INSERT INTO album_quality_evidence (
-                    owner_type, owner_id, measured_at, codec, container,
+                    mb_release_id, snapshot_fingerprint, source_path,
+                    measured_at, codec, container,
                     storage_format, target_format, min_bitrate_kbps,
                     avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr,
                     spectral_grade, spectral_bitrate_kbps,
@@ -1754,11 +1706,12 @@ class PipelineDB:
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
                     NOW()
                 )
-                ON CONFLICT (owner_type, owner_id)
+                ON CONFLICT (mb_release_id, snapshot_fingerprint)
                 DO UPDATE SET
+                    source_path = EXCLUDED.source_path,
                     measured_at = EXCLUDED.measured_at,
                     codec = EXCLUDED.codec,
                     container = EXCLUDED.container,
@@ -1831,8 +1784,9 @@ class PipelineDB:
             CROSS JOIN file_rows
             """,
             (
-                evidence.owner.owner_type,
-                evidence.owner.owner_id,
+                evidence.mb_release_id,
+                evidence.snapshot_fingerprint,
+                evidence.source_path,
                 evidence.measured_at,
                 evidence.codec,
                 evidence.container,
@@ -1867,26 +1821,20 @@ class PipelineDB:
             ),
         )
 
-    def load_album_quality_evidence(
+    def load_album_quality_evidence_by_id(
         self,
-        owner: AlbumQualityEvidenceOwner,
+        evidence_id: int | None,
     ) -> AlbumQualityEvidence | None:
-        """Load active album-quality evidence by owner, without legacy fallbacks."""
-        errors = owner.validation_errors()
-        if errors:
-            raise ValueError("; ".join(errors))
+        """Load evidence by surrogate id (the addressing-FK target)."""
+        if evidence_id is None:
+            return None
         cur = self._execute(
-            """
-            SELECT *
-            FROM album_quality_evidence
-            WHERE owner_type = %s AND owner_id = %s
-            """,
-            (owner.owner_type, owner.owner_id),
+            "SELECT * FROM album_quality_evidence WHERE id = %s",
+            (int(evidence_id),),
         )
         row = cur.fetchone()
         if row is None:
             return None
-        evidence_id = int(row["id"])
         files_cur = self._execute(
             """
             SELECT relative_path, size_bytes, mtime_ns, extension, container,
@@ -1895,10 +1843,152 @@ class PipelineDB:
             WHERE evidence_id = %s
             ORDER BY relative_path
             """,
-            (evidence_id,),
+            (int(row["id"]),),
         )
         file_rows = [dict(r) for r in files_cur.fetchall()]
         return self._album_quality_evidence_from_row(dict(row), file_rows)
+
+    def find_album_quality_evidence(
+        self,
+        *,
+        mb_release_id: str,
+        snapshot_fingerprint: str,
+    ) -> AlbumQualityEvidence | None:
+        """Find evidence by its content-addressed key."""
+        cur = self._execute(
+            """
+            SELECT * FROM album_quality_evidence
+            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
+            """,
+            (mb_release_id, snapshot_fingerprint),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        files_cur = self._execute(
+            """
+            SELECT relative_path, size_bytes, mtime_ns, extension, container,
+                   codec, decode_ok
+            FROM album_quality_evidence_files
+            WHERE evidence_id = %s
+            ORDER BY relative_path
+            """,
+            (int(row["id"]),),
+        )
+        file_rows = [dict(r) for r in files_cur.fetchall()]
+        return self._album_quality_evidence_from_row(dict(row), file_rows)
+
+    def set_import_job_candidate_evidence(
+        self,
+        import_job_id: int,
+        evidence_id: int | None,
+    ) -> None:
+        self._execute(
+            "UPDATE import_jobs SET candidate_evidence_id = %s WHERE id = %s",
+            (evidence_id, int(import_job_id)),
+        )
+        self.conn.commit()
+
+    def set_download_log_candidate_evidence(
+        self,
+        download_log_id: int,
+        evidence_id: int | None,
+    ) -> None:
+        self._execute(
+            "UPDATE download_log SET candidate_evidence_id = %s WHERE id = %s",
+            (evidence_id, int(download_log_id)),
+        )
+        self.conn.commit()
+
+    def set_request_current_evidence(
+        self,
+        request_id: int,
+        evidence_id: int | None,
+    ) -> None:
+        self._execute(
+            "UPDATE album_requests SET current_evidence_id = %s WHERE id = %s",
+            (evidence_id, int(request_id)),
+        )
+        self.conn.commit()
+
+    def get_import_job_candidate_evidence_id(
+        self,
+        import_job_id: int,
+    ) -> int | None:
+        cur = self._execute(
+            "SELECT candidate_evidence_id FROM import_jobs WHERE id = %s",
+            (int(import_job_id),),
+        )
+        row = cur.fetchone()
+        if row is None or row["candidate_evidence_id"] is None:
+            return None
+        return int(row["candidate_evidence_id"])
+
+    def get_download_log_candidate_evidence_id(
+        self,
+        download_log_id: int,
+    ) -> int | None:
+        cur = self._execute(
+            "SELECT candidate_evidence_id FROM download_log WHERE id = %s",
+            (int(download_log_id),),
+        )
+        row = cur.fetchone()
+        if row is None or row["candidate_evidence_id"] is None:
+            return None
+        return int(row["candidate_evidence_id"])
+
+    def get_request_current_evidence_id(
+        self,
+        request_id: int,
+    ) -> int | None:
+        cur = self._execute(
+            "SELECT current_evidence_id FROM album_requests WHERE id = %s",
+            (int(request_id),),
+        )
+        row = cur.fetchone()
+        if row is None or row["current_evidence_id"] is None:
+            return None
+        return int(row["current_evidence_id"])
+
+    def get_request_latest_import_job_evidence_id(
+        self,
+        request_id: int,
+    ) -> int | None:
+        """Most-recent import_job FK for a request (cross-walk helper)."""
+        cur = self._execute(
+            """
+            SELECT candidate_evidence_id FROM import_jobs
+            WHERE request_id = %s AND candidate_evidence_id IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(request_id),),
+        )
+        row = cur.fetchone()
+        if row is None or row["candidate_evidence_id"] is None:
+            return None
+        return int(row["candidate_evidence_id"])
+
+    def get_request_latest_import_job_evidence_id_from_dl(
+        self,
+        download_log_id: int,
+    ) -> int | None:
+        """Cross-walk: download_log → request_id → most recent import_job FK."""
+        cur = self._execute(
+            """
+            SELECT j.candidate_evidence_id
+            FROM download_log dl
+            JOIN import_jobs j ON j.request_id = dl.request_id
+            WHERE dl.id = %s AND j.candidate_evidence_id IS NOT NULL
+            ORDER BY j.created_at DESC, j.id DESC
+            LIMIT 1
+            """,
+            (int(download_log_id),),
+        )
+        row = cur.fetchone()
+        if row is None or row["candidate_evidence_id"] is None:
+            return None
+        return int(row["candidate_evidence_id"])
 
     def _album_quality_evidence_from_row(
         self,
@@ -1929,10 +2019,10 @@ class PipelineDB:
                 detail=row.get("verified_lossless_detail"),
             )
         return AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(
-                owner_type=row["owner_type"],
-                owner_id=int(row["owner_id"]),
-            ),
+            mb_release_id=row["mb_release_id"],
+            snapshot_fingerprint=row["snapshot_fingerprint"],
+            source_path=row.get("source_path") or "",
+            id=int(row["id"]) if row.get("id") is not None else None,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=row.get("min_bitrate_kbps"),
                 avg_bitrate_kbps=row.get("avg_bitrate_kbps"),

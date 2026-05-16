@@ -21,7 +21,6 @@ import msgspec
 from lib import transitions
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ImportResult, MeasurementFailure,
-                         PreimportDecision,
                          SpectralMeasurement, V0ProbeEvidence,
                          ValidationResult, QUALITY_UPGRADE_TIERS, QUALITY_LOSSLESS,
                          AlbumQualityEvidence,
@@ -34,13 +33,12 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          full_pipeline_decision_from_evidence,
                          narrow_override_on_downgrade,
                          override_bitrate_from_current_evidence,
-                         preimport_decide,
                          rejection_backfill_override)
-from lib.preimport import PreimportMeasurement
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     legacy_current_lossless_v0_probe_from_request,
     lossless_source_v0_probe_from_metric,
+    propagate_candidate_evidence_to_current,
     verified_lossless_proof_from_import_result,
 )
 from lib.import_evidence import (
@@ -342,187 +340,28 @@ def _download_info_from_candidate_evidence(
     )
 
 
-def _build_preimport_measurement_from_evidence(
-    candidate: AlbumQualityEvidence,
-    current: AlbumQualityEvidence | None,
-) -> PreimportMeasurement:
-    """Build a ``PreimportMeasurement`` Struct from persisted evidence (U6).
-
-    Pure: reads typed facts off the candidate ``AlbumQualityEvidence`` (the
-    U1 fields ``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
-    ``filetype_band``, ``matched_bad_audio_hash_*``) and the candidate /
-    current ``AudioQualityMeasurement`` spectral fields. No DB writes,
-    no I/O.
-
-    The pure decision function ``lib.quality.preimport_decide`` consumes
-    the returned Struct + ``QualityRankConfig`` + the current evidence
-    and returns a ``PreimportDecision`` (accept / reject + reason).
-
-    Maps the persisted U1 facts onto the pre-import decision inputs:
-
-      * ``audio_corrupt`` / ``corrupt_files`` ← ``candidate.audio_corrupt`` and
-        the set of per-file ``decode_ok=False`` paths (when any present).
-      * ``matched_bad_hash_id`` / ``matched_bad_track_path`` ←
-        ``candidate.matched_bad_audio_hash_*``.
-      * ``folder_layout`` / ``audio_file_count`` / ``filetype_band`` ← direct.
-      * ``download_spectral`` ← candidate measurement's
-        ``spectral_grade`` + ``spectral_bitrate_kbps`` (when either set).
-      * ``existing_spectral`` ← current measurement's spectral fields.
-      * ``existing_min_bitrate`` ← current measurement's
-        ``min_bitrate_kbps``. Mirrors the legacy ``_analyze_existing``
-        behavior in ``lib.preimport`` (which reads
-        ``existing_info.min_bitrate_kbps`` from beets); under the new
-        contract that fact is persisted into the current
-        ``AlbumQualityEvidence`` row by the evidence-refresh path
-        (see ``_refresh_current_evidence_after_import``).
-      * ``min_bitrate_kbps`` / ``is_vbr`` ← candidate measurement.
-    """
-    cand_m = candidate.measurement
-    corrupt_files = [
-        f.relative_path for f in candidate.files if not f.decode_ok
-    ]
-    # If audio_corrupt is True but no per-file flags are set (legacy rows
-    # decoding under the SQL default), surface the bool fact without an
-    # empty file list misleading downstream consumers.
-    audio_corrupt = bool(candidate.audio_corrupt) or bool(corrupt_files)
-
-    download_spectral = SpectralMeasurement.from_parts(
-        cand_m.spectral_grade, cand_m.spectral_bitrate_kbps,
-    )
-
-    existing_spectral: SpectralMeasurement | None = None
-    existing_min_bitrate: int | None = None
-    if current is not None:
-        existing_spectral = SpectralMeasurement.from_parts(
-            current.measurement.spectral_grade,
-            current.measurement.spectral_bitrate_kbps,
-        )
-        existing_min_bitrate = current.measurement.min_bitrate_kbps
-
-    layout = candidate.folder_layout
-    if layout not in ("flat", "nested"):
-        layout = "flat"
-
-    # SQL defaults for U1 fields (migration 019) are
-    # ``audio_corrupt=FALSE``, ``folder_layout='flat'``,
-    # ``audio_file_count=0``, ``filetype_band=''``. Legacy rows decode
-    # under these defaults, so we cannot treat ``audio_file_count == 0``
-    # as the "no audio files" signal alone — it can also mean "we never
-    # wrote this fact." Reconcile against the snapshot ``files`` list:
-    # when files are present, derive the count; only the
-    # explicit-and-corroborated "zero files" case (count=0 AND no
-    # snapshot files) should produce the empty_fileset reject. The
-    # production write path (preview's evidence persistence) sets both
-    # consistently; this branch keeps legacy rows safe.
-    audio_file_count = candidate.audio_file_count
-    if candidate.files:
-        audio_file_count = len(candidate.files)
-
-    return PreimportMeasurement(
-        corrupt_files=corrupt_files,
-        audio_corrupt=audio_corrupt,
-        matched_bad_hash_id=candidate.matched_bad_audio_hash_id,
-        matched_bad_track_path=candidate.matched_bad_audio_hash_path,
-        download_spectral=download_spectral,
-        existing_spectral=existing_spectral,
-        existing_min_bitrate=existing_min_bitrate,
-        folder_layout=layout,  # type: ignore[arg-type]
-        audio_file_count=audio_file_count,
-        filetype_band=candidate.filetype_band,
-        min_bitrate_kbps=cand_m.min_bitrate_kbps,
-        is_vbr=(not cand_m.is_cbr) if cand_m.min_bitrate_kbps is not None else None,
-    )
+# U11: ``_build_preimport_measurement_from_evidence``,
+# ``_PREIMPORT_REJECT_DENYLIST_REASONS``, and
+# ``_route_preimport_decision_reject`` have all been folded into the unified
+# decider + reject helper. The four folder/audio-integrity facts are now
+# early-exit branches inside ``full_pipeline_decision_from_evidence``; the
+# unified ``_reject_import_from_evidence_decision`` below handles their
+# denylist policy + forced-requeue invariant alongside the existing
+# quality-side rejects. See CLAUDE.md § "Quality decisions live in ONE place".
 
 
-_PREIMPORT_REJECT_DENYLIST_REASONS = {
-    "audio_corrupt": "audio decode failures",
-    "bad_audio_hash": "matched curated bad audio hash",
-    "spectral_reject": "spectral analysis rejected the source",
-    # nested_layout / empty_fileset are folder-shape problems, not source-
-    # quality problems — denylisting the peer would be unfair. Callers
-    # treat absence here as "no denylist".
-}
-
-
-def _route_preimport_decision_reject(
-    *,
-    db: "PipelineDB",
-    request_id: int,
-    decision: PreimportDecision,
-    dl_info: DownloadInfo,
-    distance: float,
-    files: Sequence[object] | None,
-    cooled_down_users: set[str] | None,
-    staged_path: str,
-    source_path_cleanup_scenario: str,
-    source_dirs: list[str],
-) -> DispatchOutcome:
-    """Route a ``preimport_decide`` reject through the shared rejection helper.
-
-    U6 entry point: builds a ``ValidationResult`` from the typed
-    ``PreimportDecision``, delegates the four self-healing side effects
-    to ``_record_rejection_and_maybe_requeue``, applies the per-user
-    5-strikes denylist when the reject reason warrants it (mirrors today's
-    importer denylist rule for source-quality rejects), and cleans the
-    staged directory when safe.
-    """
-    reason = decision.reason or "preimport_reject"
-    detail = decision.detail or reason
-    validation_json = ValidationResult(
-        distance=distance,
-        scenario=reason,
-        detail=detail,
-        source_dirs=source_dirs,
-    ).to_json()
-    # U6 invariant: preimport_decide rejects always self-heal the parent
-    # request back to ``wanted``. The candidate failed at the
-    # measurement-stage gate (audio decode / hash / layout / spectral) —
-    # the album itself is still desired, only this specific source is bad.
-    # This matches U5's preview-side measurement_failed contract (the
-    # mirror image on the preview side). Force/manual paths use
-    # ``requeue_on_failure=False`` for *beets-time* rejections (where the
-    # operator chose to act on this specific source), but a preimport
-    # gate-failure is upstream of any operator intent and should free
-    # the request to retry.
-    _record_rejection_and_maybe_requeue(
-        db,
-        request_id,
-        dl_info,
-        distance=distance,
-        scenario=reason,
-        detail=detail,
-        error=None,
-        requeue=True,
-        outcome_label="rejected",
-        validation_result=validation_json,
-        staged_path=staged_path,
-    )
-    denylist_reason = _PREIMPORT_REJECT_DENYLIST_REASONS.get(reason)
-    if denylist_reason is not None:
-        usernames = extract_usernames(files or [])
-        if dl_info.username:
-            usernames.add(dl_info.username)
-        for username in usernames:
-            db.add_denylist(request_id, username, denylist_reason)
-            if cooled_down_users is not None:
-                if db.check_and_apply_cooldown(username):
-                    cooled_down_users.add(username)
-    # Source cleanup: safe only when the path is a disposable staging
-    # directory (auto-import). Force/manual paths point at the user's
-    # only copy of the source and are skipped via ``_should_cleanup_path``.
-    # Synthetic ``DispatchAction`` mirrors the rejection shape used by
-    # post-import dispatch (``denylist`` + ``cleanup`` semantics).
-    synthetic_action = DispatchAction(
-        mark_done=False,
-        denylist=denylist_reason is not None,
-        cleanup=True,
-    )
-    if _should_cleanup_path(source_path_cleanup_scenario, synthetic_action):
-        _cleanup_staged_dir(staged_path)
-    return DispatchOutcome(
-        success=False,
-        message=f"Rejected by preimport_decide: {reason}",
-    )
+# Reject reasons that come from folder/audio-integrity facts persisted on
+# ``AlbumQualityEvidence`` (formerly emitted by ``preimport_decide``). The
+# unified reject helper forces ``requeue=True`` for these regardless of the
+# caller's ``requeue_on_failure`` flag — the candidate failed *upstream* of
+# any beets mutation, so the parent request must always self-heal back to
+# ``wanted`` even when the operator chose force/manual import.
+_PREIMPORT_FACT_REJECT_DECISIONS: frozenset[str] = frozenset({
+    "audio_corrupt",
+    "bad_audio_hash",
+    "nested_layout",
+    "empty_fileset",
+})
 
 
 def _write_quality_evidence_action_file(
@@ -817,7 +656,25 @@ def _refresh_current_evidence_after_import(
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
 ) -> None:
-    """Persist current evidence from the just-imported Beets album."""
+    """Persist current evidence for the just-imported Beets album.
+
+    When ``source_candidate`` is supplied (the normal post-U10 path), the new
+    library-side evidence row is built by propagating the candidate's full
+    measurement payload — see
+    :func:`lib.quality_evidence.propagate_candidate_evidence_to_current`.
+    Renamed-only imports inherit spectral grade, V0 lineage, and
+    bad-audio-hash matches; transcoded imports inherit only the verified-
+    lossless proof. Bitrate/format always re-derive from ``album_info``
+    (dual-check against the candidate measurement).
+
+    When ``source_candidate`` is ``None`` (rare — legacy callers, an evidence
+    record that vanished, or non-post-import callers reusing this helper),
+    fall back to the pre-U10 ``backfill_current_evidence_from_album_info``
+    path. That path rebuilds evidence from beets fields plus a carried-
+    forward ``verified_lossless_proof`` and is preserved for non-post-import
+    callers (e.g., wrong-match triage backfilling library evidence for
+    pre-refactor albums).
+    """
 
     from lib.beets_db import BeetsDB
     from lib.quality import QualityRankConfig
@@ -827,24 +684,31 @@ def _refresh_current_evidence_after_import(
         album_info = beets.get_album_info(mb_release_id, cfg)
     if album_info is None:
         return
+
+    if source_candidate is not None:
+        propagate_candidate_evidence_to_current(
+            db,
+            request_id=request_id,
+            candidate_evidence=source_candidate,
+            album_info=album_info,
+        )
+        return
+
+    # Legacy fallback: no candidate evidence on hand. Rebuild from beets +
+    # carry-forward verified_lossless_proof from the import_result, matching
+    # pre-U10 behaviour exactly.
     decision = import_result.decision if import_result is not None else None
     verified_lossless_proof = None
     if decision != "preflight_existing":
         verified_lossless_proof = (
-            source_candidate.verified_lossless_proof
-            if (
-                source_candidate is not None
-                and source_candidate.measurement.verified_lossless
-            )
-            else (
-                verified_lossless_proof_from_import_result(import_result)
-                if import_result is not None
-                else None
-            )
+            verified_lossless_proof_from_import_result(import_result)
+            if import_result is not None
+            else None
         )
     backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
+        mb_release_id=mb_release_id,
         album_info=album_info,
         verified_lossless_proof=verified_lossless_proof,
         preserve_existing_verified_lossless_proof=(
@@ -872,6 +736,13 @@ def _reject_import_from_evidence_decision(
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
+    Unified rejection helper for every ``full_pipeline_decision_from_evidence``
+    reject outcome — quality-side (downgrade / suspect_lossless / etc.) AND
+    folder/audio-integrity (audio_corrupt / bad_audio_hash / nested_layout /
+    empty_fileset, formerly routed through the deleted
+    ``_route_preimport_decision_reject``). One decision function, one
+    rejection helper, one denylist policy.
+
     Threads ``import_result`` through ``_populate_dl_info_from_import_result``
     so the same top-level ``download_log`` columns the post-import reject
     path populates (``bitrate``, ``actual_filetype``, ``spectral_grade``,
@@ -879,10 +750,23 @@ def _reject_import_from_evidence_decision(
     Without this, the Recents UI rendered evidence-decision rejections
     as just ``"downgrade · username"`` because every quality column
     came back NULL — see ``TestRejectImportFromEvidenceDecision``.
+
+    **U11 forced-requeue invariant.** When ``decision`` names a
+    folder/audio-integrity fact (``_PREIMPORT_FACT_REJECT_DECISIONS``), the
+    helper forces ``requeue=True`` regardless of the caller's
+    ``requeue_on_failure`` flag. These rejects fire upstream of any beets
+    mutation and upstream of any operator intent — the album is still
+    desired, only this specific source is bad — so the parent request must
+    always self-heal back to ``wanted``. Quality-side rejects continue to
+    honour ``requeue_on_failure`` (force/manual paths pass ``False``
+    because the operator already chose to act on this source).
     """
 
     _populate_dl_info_from_import_result(dl_info, import_result)
     action = dispatch_action(decision)
+    # U11: force requeue on folder/audio-integrity rejects (formerly the
+    # invariant enforced by the deleted ``_route_preimport_decision_reject``).
+    effective_requeue = requeue_on_failure or decision in _PREIMPORT_FACT_REJECT_DECISIONS
     _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -891,7 +775,7 @@ def _reject_import_from_evidence_decision(
         scenario=decision or scenario,
         detail=detail,
         error=None,
-        requeue=requeue_on_failure,
+        requeue=effective_requeue,
         outcome_label="rejected",
         validation_result=validation_result,
         staged_path=staged_path,
@@ -900,6 +784,9 @@ def _reject_import_from_evidence_decision(
         usernames = extract_usernames(files or [])
         if dl_info.username:
             usernames.add(dl_info.username)
+        # Unified denylist policy. Quality-side and four-fact reject reasons
+        # both live here — formerly split across ``_route_preimport_decision_reject``
+        # (folder/audio-integrity) and the quality-side branch below.
         reason = (
             "quality downgrade prevented"
             if decision == "downgrade"
@@ -907,6 +794,12 @@ def _reject_import_from_evidence_decision(
             if decision.startswith("suspect_lossless")
             else "lossless source locked"
             if decision == "lossless_source_locked"
+            else "audio decode failures"
+            if decision == "audio_corrupt"
+            else "matched curated bad audio hash"
+            if decision == "bad_audio_hash"
+            else "spectral analysis rejected the source"
+            if decision == "spectral_reject"
             else f"rejected: {decision}"
         )
         for username in usernames:
@@ -1627,7 +1520,7 @@ def dispatch_import_core(
             #   reset-to-wanted left ``current_spectral_*`` populated
             #   from a download that was never imported, skewing the
             #   next cycle's quality-gate decisions. With no reset,
-            #   ``run_preimport_gates`` re-runs on retry and
+            #   ``measure_preimport_state`` re-runs on retry and
             #   re-populates spectral from the same files.
             #
             # Force/manual paths (scenario in FORCE_MANUAL_SCENARIOS)
@@ -1711,39 +1604,13 @@ def dispatch_import_core(
                 )
 
             if evidence_gate.candidate is not None:
-                # U6: ``preimport_decide`` runs upstream of the existing
-                # quality-gate-from-evidence. The importer is now the sole
-                # caller of ``preimport_decide`` in production; preview never
-                # decides (U5). On reject we route through the shared U4
-                # self-healing helper. On accept we fall through to the
-                # existing evidence-pipeline decision below.
-                preimport_decision = preimport_decide(
-                    _build_preimport_measurement_from_evidence(
-                        evidence_gate.candidate,
-                        evidence_gate.current,
-                    ),
-                    cfg.quality_ranks if cfg is not None else None,  # type: ignore[arg-type]
-                    evidence_gate.current,
-                )
-                if preimport_decision.decision == "reject":
-                    logger.info(
-                        f"{mode} PREIMPORT REJECT: {label} "
-                        f"reason={preimport_decision.reason} "
-                        f"detail={preimport_decision.detail}"
-                    )
-                    return _route_preimport_decision_reject(
-                        db=db,
-                        request_id=request_id,
-                        decision=preimport_decision,
-                        dl_info=dl_info,
-                        distance=distance,
-                        files=files,
-                        cooled_down_users=cooled_down_users,
-                        staged_path=path,
-                        source_path_cleanup_scenario=scenario,
-                        source_dirs=source_dirs,
-                    )
-
+                # U11: ``full_pipeline_decision_from_evidence`` is the single
+                # decision function. Folder/audio-integrity facts
+                # (audio_corrupt / bad_audio_hash / nested_layout /
+                # empty_fileset) are early-exit rejects at the top of that
+                # function — the unified reject helper below recognises them
+                # via ``_PREIMPORT_FACT_REJECT_DECISIONS`` and forces
+                # ``requeue=True`` so the parent request self-heals.
                 facts = AlbumQualityEvidenceDecisionFacts(
                     import_mode=(
                         "force"
@@ -2243,7 +2110,7 @@ def dispatch_import_from_db(
     the candidate ``AlbumQualityEvidence`` via
     ``ensure_candidate_evidence_for_action``. The preview worker is the
     only producer of candidate measurements; dispatch never invokes
-    ``run_preimport_gates`` itself. When evidence is missing or stale, the
+    ``measure_preimport_state`` itself. When evidence is missing or stale, the
     job is requeued back to the preview lane via
     ``_requeue_import_job_to_preview`` (returning
     ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
@@ -2318,8 +2185,8 @@ def _dispatch_import_from_db_locked(
     MUST be supplied. After U4 (importer-never-measures refactor) the only
     production caller is ``scripts/importer.py``, which always supplies
     ``import_job_id``. The previous legacy direct-measurement branch that
-    ran ``inspect_local_files`` / ``run_preimport_gates`` for callers that
-    omitted both IDs has been deleted; the importer never measures.
+    ran ``inspect_local_files`` / ``measure_preimport_state`` for callers
+    that omitted both IDs has been deleted; the importer never measures.
     """
     from lib.grab_list import DownloadFile
 

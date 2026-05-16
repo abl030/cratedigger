@@ -32,7 +32,7 @@ from lib.processing_paths import (
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
-                         DownloadDecision, DownloadInfo, ValidationResult,
+                         DownloadDecision, ValidationResult,
                          decide_download_action,
                          compute_effective_override_bitrate,
                          extract_usernames,
@@ -46,6 +46,7 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
 )
+from lib.measurement import measure_preimport_state
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -1144,10 +1145,25 @@ def _process_beets_validation(
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
-    After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
-    for the shared audio + spectral gates. The force/manual-import path
-    (``dispatch_import_from_db``) calls the same function — only the beets
-    distance check is path-specific.
+    After beets validation passes, the queue-backed caller (``import_job_id``
+    + ``db`` set) relies on the preview/importer evidence pipeline:
+    ``ensure_candidate_evidence_for_action`` has already persisted candidate
+    evidence, and the importer runs ``full_pipeline_decision_from_evidence``
+    downstream. The legacy non-queue fallback (CLI / test callers with no
+    ``import_job_id`` or no DB) instead measures inline via
+    ``lib.measurement.measure_preimport_state`` and surfaces only the two
+    folder/audio-integrity facts (``audio_corrupt`` and ``bad_audio_hash``)
+    — quality decisions belong to the unified importer decider in U11.
+
+    Denylist on reject: this caller does NOT denylist peers directly from the
+    measurement. When the measurement flips ``bv_result.valid=False``, the
+    function returns into ``_handle_rejected_result``, which calls
+    ``reject_and_requeue(usernames=...)`` — that path writes the denylist
+    with the standard "beets validation rejected" reason. Per-fact denylist
+    differentiation (audio_corrupt → "audio decode failures", bad_audio_hash →
+    "matched curated bad audio hash") is the importer's concern via the
+    unified reject path (U11); the legacy fallback inherits whatever the
+    reject_and_requeue helper does, which is intentionally coarser.
 
     Returns the dispatch outcome when the auto-import path fires,
     ``None`` when beets validation rejects (``_handle_rejected_result``
@@ -1157,7 +1173,6 @@ def _process_beets_validation(
     keep the row untouched for manual recovery.
     """
     from lib.beets import beets_validate as _bv
-    from lib.preimport import run_preimport_gates
     current_path = staged_album.current_path
     bv_result = _bv(ctx.cfg.beets_harness_path, current_path,
                     album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
@@ -1197,7 +1212,17 @@ def _process_beets_validation(
                 )
 
         if not candidate_evidence_available:
-            preimport = run_preimport_gates(
+            # U7: legacy non-queue fallback. Measure only; never decide. The
+            # importer's full pipeline decider owns spectral / codec rank /
+            # quality-gate outcomes. We inline only the two folder/audio-
+            # integrity facts (``audio_corrupt`` and ``bad_audio_hash``) —
+            # ``nested_layout`` and ``empty_fileset`` are intentionally NOT
+            # checked here, matching the historical scope of this fallback.
+            # Denylist on reject is handled downstream by
+            # ``_handle_rejected_result`` → ``reject_and_requeue`` (which
+            # writes the standard "beets validation rejected" denylist
+            # entry). This caller does not issue per-fact denylist writes.
+            measurement = measure_preimport_state(
                 path=current_path,
                 mb_release_id=album_data.mb_release_id or "",
                 label=f"{album_data.artist} - {album_data.title}",
@@ -1207,22 +1232,38 @@ def _process_beets_validation(
                 cfg=ctx.cfg,
                 db=db,
                 request_id=album_data.db_request_id,
-                usernames=usernames_pre,
+                propagate_download_to_existing=True,
             )
-            album_data.download_spectral = preimport.download_spectral
-            album_data.current_spectral = preimport.existing_spectral
-            album_data.current_min_bitrate = preimport.existing_min_bitrate
-            if not preimport.valid:
+            album_data.download_spectral = measurement.download_spectral
+            album_data.current_spectral = measurement.existing_spectral
+            album_data.current_min_bitrate = measurement.existing_min_bitrate
+            audio_corrupt = measurement.audio_corrupt
+            bad_audio_hash = measurement.matched_bad_hash_id is not None
+            if audio_corrupt or bad_audio_hash:
+                scenario = "audio_corrupt" if audio_corrupt else "bad_audio_hash"
+                if audio_corrupt and measurement.corrupt_files:
+                    detail = (
+                        f"{len(measurement.corrupt_files)} files failed "
+                        "ffmpeg decode"
+                    )
+                elif bad_audio_hash and measurement.matched_bad_track_path:
+                    detail = (
+                        f"matched bad_audio_hash id="
+                        f"{measurement.matched_bad_hash_id} on track "
+                        f"{measurement.matched_bad_track_path}"
+                    )
+                else:
+                    detail = scenario
                 bv_result.valid = False
-                bv_result.scenario = preimport.scenario
-                bv_result.detail = preimport.detail
-                if preimport.corrupt_files:
-                    bv_result.corrupt_files = preimport.corrupt_files
+                bv_result.scenario = scenario
+                bv_result.detail = detail
+                if audio_corrupt and measurement.corrupt_files:
+                    bv_result.corrupt_files = measurement.corrupt_files
                 # Carry bad-audio-hash gate match through to download_log via
                 # ValidationResult JSONB (plan 2026-04-29-005 / U5).
-                if preimport.matched_bad_hash_id is not None:
-                    bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
-                    bv_result.matched_bad_track_path = preimport.matched_bad_track_path
+                if bad_audio_hash:
+                    bv_result.matched_bad_hash_id = measurement.matched_bad_hash_id
+                    bv_result.matched_bad_track_path = measurement.matched_bad_track_path
 
     if bv_result.valid:
         return _handle_valid_result(
@@ -1555,75 +1596,6 @@ def _handle_valid_result(
         return None
 
 
-def _persist_candidate_evidence_for_reject(
-    *,
-    db: Any,
-    ctx: CratediggerContext,
-    album_data: GrabListEntry,
-    dl_info: DownloadInfo,
-    bv_result: ValidationResult,
-    download_log_id: int | None,
-) -> None:
-    """Measure and persist candidate evidence on a reject row.
-
-    Called after the download_log row is written by ``_handle_rejected_result``.
-    Future Wrong Matches triage on this row looks up evidence by
-    ``owner_type='download_log_candidate', owner_id=download_log_id`` and
-    skips re-measurement when the snapshot still matches the file on disk.
-
-    Every error case here is non-fatal — the reject row is already written
-    and the request transition has already happened. The worst case is that
-    triage falls back to its own measurement path on first interaction, which
-    is the pre-fix behavior. Log a warning and move on.
-    """
-    if db is None or not isinstance(download_log_id, int) or download_log_id <= 0:
-        return
-    failed_path = bv_result.failed_path
-    if not isinstance(failed_path, str) or not failed_path:
-        return
-    try:
-        from lib.preimport import measure_preimport_state
-        from lib.quality_evidence import (
-            persist_candidate_evidence_from_measurement,
-        )
-
-        measurement = measure_preimport_state(
-            path=failed_path,
-            mb_release_id=album_data.mb_release_id or "",
-            label=f"{album_data.artist} - {album_data.title}",
-            download_filetype=dl_info.filetype or "",
-            download_min_bitrate_bps=dl_info.bitrate,
-            download_is_vbr=dl_info.is_vbr,
-            cfg=ctx.cfg,
-            db=db,
-            request_id=album_data.db_request_id,
-            propagate_download_to_existing=False,
-        )
-        result = persist_candidate_evidence_from_measurement(
-            db,
-            source_path=failed_path,
-            measurement=measurement,
-            download_log_id=download_log_id,
-        )
-        if result.status != "ready":
-            logger.warning(
-                "REJECT EVIDENCE PERSIST: status=%s detail=%r dl_id=%s — "
-                "Wrong Matches triage will fall back to re-measurement on "
-                "first interaction.",
-                result.status,
-                result.reason,
-                download_log_id,
-            )
-    except Exception:
-        logger.warning(
-            "REJECT EVIDENCE PERSIST: unexpected error persisting candidate "
-            "evidence for dl_id=%s — Wrong Matches triage will fall back to "
-            "re-measurement on first interaction.",
-            download_log_id,
-            exc_info=True,
-        )
-
-
 def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
                             staged_album: StagedAlbum,
                             ctx: CratediggerContext) -> DispatchOutcome:
@@ -1656,26 +1628,6 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
         download_info=dl_info,
         search_filetype_override=backfill_override,
         cooled_down_users=ctx.cooled_down_users,
-    )
-    # Persist candidate evidence on the rejected row so Wrong Matches triage
-    # (`decide_wrong_match_cleanup → ensure_candidate_evidence_for_action`)
-    # finds it via owner_type='download_log_candidate' and returns
-    # candidate_status='reused' on first interaction. Without this, triage
-    # falls back to `_preview_for_triage` → full re-measurement (snapshot +
-    # validate_audio + spectral_analyze + V0 probe), 10-30s per album. The
-    # legacy auto-import path (this function) is the only reject seam that
-    # didn't already write evidence — the preview-worker path persists via
-    # `persist_candidate_evidence_from_measurement` in `import_preview.py`
-    # before marking `evidence_ready`. Moves the measurement cost from
-    # interactive triage to the background poll loop where it doesn't block
-    # the operator.
-    _persist_candidate_evidence_for_reject(
-        db=ctx.pipeline_db_source._get_db(),
-        ctx=ctx,
-        album_data=album_data,
-        dl_info=dl_info,
-        bv_result=bv_result,
-        download_log_id=download_log_id,
     )
     _run_post_rejection_wrong_match_triage(
         ctx,

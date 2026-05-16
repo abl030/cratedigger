@@ -15,12 +15,7 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
 )
 from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-    AudioQualityMeasurement,
-)
+from lib.quality import AudioQualityMeasurement
 from lib.quality_evidence import snapshot_audio_files
 from tests.helpers import (
     make_album_quality_evidence,
@@ -29,6 +24,48 @@ from tests.helpers import (
     patch_dispatch_externals,
 )
 from tests.fakes import FakePipelineDB
+
+
+# Migration 021 helpers — seed evidence and wire the FK chain that
+# production reads through (download_log.candidate_evidence_id,
+# import_jobs.candidate_evidence_id, album_requests.current_evidence_id).
+def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
+                                     **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_download_log_candidate_evidence(log_id, persisted.id)
+    return persisted
+
+
+def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    return persisted
+
+
+def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
+                              **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_request_current_evidence(request_id, persisted.id)
+    return persisted
 
 
 def _mock_beets_db_for_dispatch():
@@ -111,9 +148,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             import_job_id = job.id
 
             # Seed candidate evidence matching the on-disk snapshot.
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=import_job_id,
+            _seed_candidate_for_import_job(
+                db, import_job_id,
+                mb_release_id="mbid-candidate",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320,
@@ -125,14 +162,14 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 320",
-            ))
+            )
             # Seed current (on-disk) evidence so override-min-bitrate
             # derivation flows through the same grade-aware logic the
             # legacy branch used (compute_effective_override_bitrate of
             # min_bitrate=180 vs likely_transcode spectral=128 → 128).
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-current",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
                     avg_bitrate_kbps=req_kwargs.get("min_bitrate", 180),
@@ -145,7 +182,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3",
-            ))
+            )
 
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
@@ -300,9 +337,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             files = snapshot_audio_files(tmpdir)
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=download_log_id,
+            _seed_candidate_for_download_log(
+                db, download_log_id,
+                mb_release_id="mbid-candidate",
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -314,10 +351,10 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            )
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-current",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
                     avg_bitrate_kbps=128,
@@ -328,7 +365,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 128",
-            ))
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
@@ -376,9 +413,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             )
             import_job_id = job.id
             files = snapshot_audio_files(tmpdir)
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=import_job_id,
+            _seed_candidate_for_import_job(
+                db, import_job_id,
+                mb_release_id="mbid-candidate",
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -390,10 +427,10 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            )
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-current",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
                     avg_bitrate_kbps=128,
@@ -404,7 +441,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 128",
-            ))
+            )
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
@@ -465,9 +502,9 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             )
             claimed = db.claim_next_import_job(worker_id="importer")
             assert claimed is not None
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -479,7 +516,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             # Mutate file so the snapshot now mismatches.
             with open(track, "ab") as handle:
                 handle.write(b" changed")
@@ -921,9 +958,9 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320,
@@ -935,7 +972,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 320",
-            ))
+            )
             with patch_dispatch_externals(), \
                  patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
@@ -959,7 +996,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
     nor ``download_log_id`` is a programmer error.
 
     After the importer-never-measures refactor, the legacy direct-measurement
-    branch that ran ``inspect_local_files`` / ``run_preimport_gates`` for
+    branch that ran ``inspect_local_files`` / ``measure_preimport_state`` for
     callers that omitted both IDs has been deleted. The only production
     caller (``scripts/importer.py``) always supplies ``import_job_id``;
     a call that omits both is misuse and must surface as a typed

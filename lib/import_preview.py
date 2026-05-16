@@ -17,10 +17,9 @@ from typing import Any
 import msgspec
 
 from lib.import_dispatch import run_import_one
-from lib.preimport import (
+from lib.measurement import (
     inspect_local_files,
     measure_preimport_state,
-    run_preimport_gates,
 )
 from lib.quality_evidence import (
     audio_snapshot_matches,
@@ -29,7 +28,6 @@ from lib.quality_evidence import (
     lossless_source_v0_probe_from_metric,
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
-    request_current_owner,
     snapshot_audio_files,
 )
 from lib.quality import (
@@ -46,6 +44,23 @@ from lib.quality import (
     quality_gate_decision,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
+
+
+def _load_current_evidence_by_request(
+    db: Any, request_id: int
+) -> Any:
+    """U3 FK reader: load current evidence via ``album_requests.current_evidence_id``.
+
+    Replaces the old ``db.load_album_quality_evidence(request_current_owner(rid))``
+    pattern which queried by ``(owner_type, owner_id)`` before the U2 rekey
+    removed those columns. The post-rekey addressing path is
+    ``album_requests.current_evidence_id → album_quality_evidence.id``.
+    """
+    evidence_id = db.get_request_current_evidence_id(request_id)
+    if evidence_id is None:
+        return None
+    return db.load_album_quality_evidence_by_id(evidence_id)
+
 
 # Verdict values for `ImportPreviewResult.verdict`. After U5 the preview worker
 # emits only the two new verdicts (`evidence_ready` / `measurement_failed`) when
@@ -219,8 +234,9 @@ def _evidence_ready_result(
     """Build a ``verdict='evidence_ready'`` preview result.
 
     Used by the worker-mode entry point when preview successfully measured the
-    candidate and persisted evidence. The importer (U6) reads the persisted
-    evidence and decides accept/reject via ``preimport_decide``.
+    candidate and persisted evidence. The importer reads the persisted
+    evidence and decides accept/reject via
+    ``full_pipeline_decision_from_evidence`` (U11).
     """
     return _preview_result(
         mode=mode,
@@ -361,10 +377,12 @@ def _preview_import_from_path_worker_mode(
 ) -> ImportPreviewResult:
     """Worker-mode preview path: measure facts, persist evidence, never decide.
 
-    Replaces the legacy ``run_preimport_gates`` pipeline that bundled the
-    accept/reject decision with the measurement. The preview worker is now
-    purely a fact-gathering surface; the importer (``preimport_decide``) reads
-    the persisted ``AlbumQualityEvidence`` row and makes the import decision.
+    The preview worker is purely a fact-gathering surface: it calls
+    ``measure_preimport_state`` and persists the resulting facts on
+    ``AlbumQualityEvidence``. The importer's
+    ``full_pipeline_decision_from_evidence`` (U11) reads the persisted
+    evidence row and makes every import decision — folder/audio-integrity
+    facts are early-exit reject branches at the top of that function.
 
     Flow:
       1. Validate request / mbid / path inputs (return measurement_failed on
@@ -381,8 +399,10 @@ def _preview_import_from_path_worker_mode(
       6. If the measurement carries an importer-rejecting fact (audio_corrupt,
          bad_audio_hash, nested layout, empty fileset), persist evidence
          straight from the measurement (no harness call) and return
-         ``evidence_ready``. The importer's ``preimport_decide`` rejects on
-         those facts upstream of the quality gate.
+         ``evidence_ready``. The importer's
+         ``full_pipeline_decision_from_evidence`` (U11) reads those facts off
+         the persisted evidence row and rejects via the four-fact early-exit
+         branches upstream of the quality gate.
       7. Otherwise, run ``run_import_one`` in dry-run mode to produce an
          ``ImportResult`` with ``new_measurement``. Persist evidence built
          from both the measurement (U1 facts) and the import result (audio
@@ -496,8 +516,10 @@ def _preview_import_from_path_worker_mode(
         # --- Measurement-only evidence path ---
         # When the measurement carries any importer-rejecting fact, skip the
         # harness (it would either fail or produce misleading state) and
-        # persist evidence straight from the measurement. preimport_decide
-        # on the importer side will reject on these facts.
+        # persist evidence straight from the measurement. The importer's
+        # ``full_pipeline_decision_from_evidence`` (U11) reads those facts
+        # off the persisted evidence row and rejects via the four-fact
+        # early-exit branches.
         measurement_rejecting = (
             measurement.audio_corrupt
             or measurement.matched_bad_hash_id is not None
@@ -518,6 +540,7 @@ def _preview_import_from_path_worker_mode(
             try:
                 evidence_result = persist_candidate_evidence_from_measurement(
                     db,
+                    mb_release_id=mbid,
                     source_path=path,
                     measurement=measurement,
                     download_log_id=download_log_id,
@@ -561,8 +584,8 @@ def _preview_import_from_path_worker_mode(
         existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
         current_evidence = None
         try:
-            current_evidence = db.load_album_quality_evidence(
-                request_current_owner(request_id)
+            current_evidence = _load_current_evidence_by_request(
+                db, request_id
             )
         except Exception:
             current_evidence = None
@@ -685,6 +708,7 @@ def _preview_import_from_path_worker_mode(
         try:
             evidence_result = persist_candidate_evidence_from_import_result(
                 db,
+                mb_release_id=mbid,
                 source_path=path,
                 import_result=run.import_result,
                 download_log_id=download_log_id,
@@ -738,8 +762,9 @@ def _measurement_decision_hint(measurement: Any) -> str:
     """Derive a short label for measurement-only evidence_ready returns.
 
     Used purely for log/decision-string display — the importer's
-    ``preimport_decide`` makes the actual reject call from the persisted
-    evidence. Order mirrors ``preimport_decide``'s evaluation order.
+    ``full_pipeline_decision_from_evidence`` (U11) makes the actual reject
+    call from the persisted evidence via its four-fact early-exit branches.
+    Order mirrors that decider's evaluation order.
     """
     if measurement.audio_corrupt:
         return "audio_corrupt"
@@ -777,13 +802,14 @@ def preview_import_from_path(
     classifier's ``would_import`` / ``confident_reject`` / ``uncertain``
     verdicts unchanged.
 
-    worker_mode contract: this function MUST NOT call ``run_preimport_gates``
-    in that branch. ``run_preimport_gates`` bundles the decision (reject on
-    audio_corrupt / bad_hash / spectral) with the measurement; the preview
-    worker must only measure. Worker_mode collects facts via
-    ``measure_preimport_state``, runs the harness when the facts allow it
-    (skipping it on audio_corrupt / bad_hash / nested / empty), persists
-    evidence, and lets the importer call ``preimport_decide``.
+    Contract (both paths): preview only measures. Both paths collect facts
+    via ``measure_preimport_state``; the legacy non-worker path inlines the
+    four folder/audio-integrity facts as a confident_reject verdict for
+    CLI/triage UI, and the worker path persists evidence and lets the
+    importer's ``full_pipeline_decision_from_evidence`` decide (U11 folded
+    the folder/audio-integrity reject branches into the unified decider).
+    Spectral / codec rank / V0 / quality-gate decisions belong to the
+    importer's ``full_pipeline_decision_from_evidence`` in both paths.
     """
     if worker_mode:
         return _preview_import_from_path_worker_mode(
@@ -974,7 +1000,16 @@ def preview_import_from_path(
                 cleanup_eligible=True,
             )
 
-        preimport = run_preimport_gates(
+        # Preview measures; never decides. Mirror the worker-mode pattern:
+        # collect facts via ``measure_preimport_state`` (no denylist writes,
+        # no decision branches), then either surface the four folder/audio-
+        # integrity facts as a confident reject (legacy callers) or let the
+        # importer read the persisted evidence and decide (worker_mode).
+        # ``db=None`` / ``request_id=None`` / ``propagate_download_to_existing=False``:
+        # spectral propagation belongs to the persisted ``AlbumQualityEvidence``
+        # row that the importer reads — preview is now a pure measurement
+        # surface.
+        measurement = measure_preimport_state(
             path=preview_path,
             mb_release_id=mbid,
             label=_request_label(req),
@@ -984,24 +1019,51 @@ def preview_import_from_path(
             cfg=cfg,
             db=None,
             request_id=None,
-            usernames=set(),
             propagate_download_to_existing=False,
             precomputed_inspection=inspection,
         )
-        if not preimport.valid:
-            scenario = preimport.scenario or "preimport_reject"
+
+        # Four-fact reject (mirror worker-mode lines 517-522). ``nested_layout``
+        # is already handled by the ``inspection.has_nested_audio`` branch
+        # above; ``empty_fileset`` is handled by the ``not source_snapshot``
+        # branch on the persist path. At this site only ``audio_corrupt`` and
+        # ``bad_audio_hash`` can fire — but we check ``folder_layout``/
+        # ``audio_file_count`` defensively so the measurement-derived facts
+        # stay the single source of truth.
+        audio_corrupt = measurement.audio_corrupt
+        bad_audio_hash = measurement.matched_bad_hash_id is not None
+        nested_layout = measurement.folder_layout == "nested"
+        empty_fileset = measurement.audio_file_count == 0
+        if audio_corrupt or bad_audio_hash or nested_layout or empty_fileset:
+            scenario = (
+                "audio_corrupt" if audio_corrupt
+                else "bad_audio_hash" if bad_audio_hash
+                else "nested_layout" if nested_layout
+                else "empty_fileset"
+            )
+            detail: str | None = None
+            if audio_corrupt and measurement.corrupt_files:
+                detail = (
+                    f"{len(measurement.corrupt_files)} files failed ffmpeg decode"
+                )
+            elif bad_audio_hash and measurement.matched_bad_track_path:
+                detail = (
+                    f"matched bad_audio_hash id={measurement.matched_bad_hash_id} "
+                    f"on track {measurement.matched_bad_track_path}"
+                )
             if worker_mode:
                 # Preview no longer makes the reject decision. Persist the
-                # measurement facts; the importer (U6) reads the evidence and
-                # invokes ``preimport_decide`` to reject. We mark evidence_ready
-                # when persistence is plausible; otherwise surface
-                # measurement_failed so the parent request self-heals.
+                # measurement facts; the importer reads the evidence and
+                # rejects via ``full_pipeline_decision_from_evidence`` (U11)
+                # using its four-fact early-exit branches. We mark
+                # evidence_ready when persistence is plausible; otherwise
+                # surface measurement_failed so the parent request self-heals.
                 if persist_candidate_evidence and source_snapshot:
                     return _evidence_ready_result(
                         mode="path",
                         decision=scenario,
                         reason=scenario,
-                        detail=preimport.detail,
+                        detail=detail,
                         stage_chain=[f"preimport:{scenario}"],
                         request_id=request_id,
                         download_log_id=download_log_id,
@@ -1011,7 +1073,7 @@ def preview_import_from_path(
                     mode="path",
                     reason="measurement_crashed",
                     decision=scenario,
-                    detail=preimport.detail or scenario,
+                    detail=detail or scenario,
                     stage_chain=[f"preimport:{scenario}"],
                     request_id=request_id,
                     download_log_id=download_log_id,
@@ -1022,7 +1084,7 @@ def preview_import_from_path(
                 verdict=PREVIEW_VERDICT_CONFIDENT_REJECT,
                 decision=scenario,
                 reason=scenario,
-                detail=preimport.detail,
+                detail=detail,
                 stage_chain=[f"preimport:{scenario}"],
                 request_id=request_id,
                 download_log_id=download_log_id,
@@ -1030,7 +1092,7 @@ def preview_import_from_path(
                 cleanup_eligible=True,
             )
 
-        existing_spectral = preimport.existing_spectral
+        existing_spectral = measurement.existing_spectral
         existing_grade = existing_spectral.grade if existing_spectral else req.get("current_spectral_grade")
         existing_bitrate = (
             existing_spectral.bitrate_kbps
@@ -1039,8 +1101,8 @@ def preview_import_from_path(
         )
         current_evidence = None
         try:
-            current_evidence = db.load_album_quality_evidence(
-                request_current_owner(request_id)
+            current_evidence = _load_current_evidence_by_request(
+                db, request_id
             )
         except Exception:
             current_evidence = None
@@ -1124,6 +1186,7 @@ def preview_import_from_path(
             try:
                 evidence = persist_candidate_evidence_from_import_result(
                     db,
+                    mb_release_id=mbid,
                     source_path=path,
                     import_result=run.import_result,
                     download_log_id=download_log_id,

@@ -13,13 +13,9 @@ from lib.import_evidence import (
     ensure_candidate_evidence_for_action,
     ensure_current_evidence_for_action,
 )
-from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    AlbumQualityEvidence,
-)
+from lib.quality import AlbumQualityEvidence
 from lib.quality_evidence import (
     EvidenceBuildResult,
-    request_current_owner,
     snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
@@ -43,13 +39,39 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
     def _candidate_evidence(self) -> AlbumQualityEvidence:
         return make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=self.download_log_id,
+            mb_release_id="release-1",
             files=snapshot_audio_files(self.root),
         )
 
+    def _persist_candidate(self) -> int:
+        evidence = self._candidate_evidence()
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(
+            self.download_log_id, persisted.id
+        )
+        return persisted.id
+
+    def _persist_current(self) -> int:
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            files=snapshot_audio_files(self.root),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(42, persisted.id)
+        return persisted.id
+
     def test_reused_candidate_evidence_is_action_ready(self):
-        self.db.upsert_album_quality_evidence(self._candidate_evidence())
+        self._persist_candidate()
 
         result = ensure_candidate_evidence_for_action(
             self.db,
@@ -63,7 +85,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertFalse(result.provenance.fail_closed)
 
     def test_stale_candidate_snapshot_fails_closed(self):
-        self.db.upsert_album_quality_evidence(self._candidate_evidence())
+        self._persist_candidate()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
             handle.write(b" changed")
 
@@ -93,10 +115,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertTrue(result.provenance.fail_closed)
 
     def test_matching_current_evidence_loads_without_backfill(self):
-        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_id=42,
-            files=snapshot_audio_files(self.root),
-        ))
+        self._persist_current()
 
         def backfill(*_args, **_kwargs):
             raise AssertionError("backfill should not be called")
@@ -132,14 +151,14 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         self.assertTrue(result.available)
         self.assertEqual(result.provenance.current_status, "backfilled")
-        loaded = self.db.load_album_quality_evidence(request_current_owner(42))
+        # The FK is wired by the backfill production code.
+        evidence_id = self.db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(evidence_id)
+        loaded = self.db.load_album_quality_evidence_by_id(evidence_id)
         self.assertIsNotNone(loaded)
 
     def test_stale_current_evidence_backfills_from_album_info(self):
-        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_id=42,
-            files=snapshot_audio_files(self.root),
-        ))
+        self._persist_current()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
             handle.write(b" changed")
 
@@ -170,10 +189,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.evidence.measurement.min_bitrate_kbps, 230)
 
     def test_stale_current_evidence_is_not_reused_as_preloaded_backfill(self):
-        self.db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_id=42,
-            files=snapshot_audio_files(self.root),
-        ))
+        self._persist_current()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
             handle.write(b" changed")
 

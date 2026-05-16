@@ -377,6 +377,87 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         self.assertIsNotNone(log.import_result)
 
 
+class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
+    """U11 invariant: the four folder/audio-integrity facts always self-heal.
+
+    ``_PREIMPORT_FACT_REJECT_DECISIONS`` lists the four decisions the deleted
+    ``_route_preimport_decision_reject`` helper used to handle. After the
+    fold-in, ``_reject_import_from_evidence_decision`` is the single helper
+    for all rejects and must preserve the old "always requeue on four-fact
+    reject" rule — even when the caller passes ``requeue_on_failure=False``
+    (force/manual paths). Spectral/quality-side rejects (e.g., ``downgrade``)
+    honor the caller's flag normally; only the four-fact reasons override.
+    """
+
+    FOUR_FACT_DECISIONS = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
+
+    def _reject(self, *, decision: str, requeue_on_failure: bool):
+        from lib.import_dispatch import _reject_import_from_evidence_decision
+        from lib.quality import AudioQualityMeasurement, ImportResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            mb_release_id="test-mbid",
+        ))
+        dl_info = DownloadInfo(filetype="mp3", username="user1")
+        ir = ImportResult(
+            decision=decision,
+            new_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                dl_info=dl_info,
+                import_result=ir,
+                distance=0.0,
+                decision=decision,
+                detail=f"test {decision}",
+                requeue_on_failure=requeue_on_failure,
+                validation_result=None,
+                staged_path="/tmp/cratedigger-forced-requeue-test",
+                scenario=decision,
+                files=None,
+                source_path_cleanup_scenario=decision,
+                cooled_down_users=None,
+            )
+        return db
+
+    def test_four_fact_rejects_force_requeue_even_when_caller_says_no(self) -> None:
+        for decision in self.FOUR_FACT_DECISIONS:
+            with self.subTest(decision=decision):
+                db = self._reject(decision=decision, requeue_on_failure=False)
+                # The request must be back in 'wanted' — self-heal invariant.
+                self.assertEqual(
+                    db.request(42)["status"],
+                    "wanted",
+                    f"{decision} reject with requeue_on_failure=False must "
+                    f"still self-heal the request back to 'wanted' (the "
+                    f"album is still desired; only this source is bad).",
+                )
+
+    def test_four_fact_rejects_also_requeue_when_caller_says_yes(self) -> None:
+        # Baseline: requeue_on_failure=True keeps the same self-heal behavior.
+        for decision in self.FOUR_FACT_DECISIONS:
+            with self.subTest(decision=decision):
+                db = self._reject(decision=decision, requeue_on_failure=True)
+                self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_quality_reject_honors_requeue_flag(self) -> None:
+        # Non-four-fact reject (downgrade) must NOT be force-requeued.
+        # When the caller passes requeue_on_failure=False the request stays
+        # in its current status — the operator chose to act on this source.
+        db = self._reject(decision="downgrade", requeue_on_failure=False)
+        self.assertEqual(db.request(42)["status"], "downloading")
+
+
 class TestDispatchImport(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 

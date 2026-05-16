@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -33,8 +33,7 @@ from lib.audio_hash import AudioHashError, hash_audio_content
 # wav/alac albums don't trip a per-track warning every validation cycle.
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
-from lib.quality import (SPECTRAL_TRANSCODE_GRADES, PreimportDecision,
-                         SpectralMeasurement)
+from lib.quality import SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement
 from lib.util import repair_mp3_headers, validate_audio
 
 if TYPE_CHECKING:
@@ -49,52 +48,23 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     """Proxy to spectral_check.analyze_album (lazy import).
 
     Mirrors lib.download.spectral_analyze so tests can patch one or the other
-    depending on which module is under test. Callers inside lib.preimport must
+    depending on which module is under test. Callers inside lib.measurement must
     use this proxy (not the one in lib.download) so patches on
-    ``lib.preimport.spectral_analyze`` take effect.
+    ``lib.measurement.spectral_analyze`` take effect.
     """
     from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
 
 
-@dataclass
-class PreImportGateResult:
-    """Outcome of the shared pre-import gate pipeline.
-
-    ``valid=False`` means the import must be rejected. ``scenario`` and
-    ``detail`` mirror the fields on ``ValidationResult`` so callers can fold
-    the result into an existing ``ValidationResult`` without translation.
-
-    The spectral fields are populated whenever a spectral analysis ran
-    (regardless of pass/reject) so callers can persist them to download_log.
-
-    NOTE (U3): ``valid`` and ``scenario`` are derived fields kept ONLY for
-    backward compatibility with existing callers (``lib.import_preview``,
-    ``lib.download``). New code SHOULD call ``measure_preimport_state`` +
-    ``lib.quality.preimport_decide`` directly and never read these fields.
-    U6/U7 deletes the legacy bridge.
-    """
-    valid: bool = True
-    scenario: str | None = None      # "audio_corrupt" | "spectral_reject" | "bad_audio_hash"
-    detail: str | None = None
-    corrupt_files: list[str] = field(default_factory=list)
-    download_spectral: SpectralMeasurement | None = None
-    existing_spectral: SpectralMeasurement | None = None
-    existing_min_bitrate: int | None = None
-    # Bad-audio-hash gate fields (plan 2026-04-29-005 / U5). Populated only
-    # when ``scenario == "bad_audio_hash"``. Callers fold these into the
-    # ``ValidationResult`` written to ``download_log.validation_result``.
-    matched_bad_hash_id: int | None = None
-    matched_bad_track_path: str | None = None
-
-
 class PreimportMeasurement(msgspec.Struct, frozen=True):
     """Facts gathered by ``measure_preimport_state``. No decision fields.
 
-    The pure decision function ``lib.quality.preimport_decide`` consumes this
-    typed Struct + the runtime ``QualityRankConfig`` + optional existing-album
-    evidence and returns a ``PreimportDecision``. The measurement helper has
-    no opinion on accept/reject — it only reports what is on disk.
+    The measurement helper has no opinion on accept/reject — it only reports
+    what is on disk. The persisted ``AlbumQualityEvidence`` row carries the
+    same facts (audio_corrupt, folder_layout, audio_file_count,
+    matched_bad_audio_hash_*); the unified decider
+    ``lib.quality.full_pipeline_decision_from_evidence`` consumes them as
+    early-exit reject branches (U11).
 
     Fields map 1:1 onto the new ``AlbumQualityEvidence`` columns added in U1
     (``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
@@ -122,7 +92,7 @@ AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
 class LocalFileInspection:
     """Result of inspecting audio files on disk at a force/manual import path.
 
-    Populated by ``inspect_local_files`` so callers of ``run_preimport_gates``
+    Populated by ``inspect_local_files`` so callers of ``measure_preimport_state``
     that have no DownloadFile metadata (force/manual paths) can still supply
     filetype / bitrate / vbr hints.
 
@@ -422,9 +392,12 @@ def measure_preimport_state(
     and must fire whether or not the downstream decision is accept or reject
     (issue #90).
 
-    The companion pure decision function ``lib.quality.preimport_decide``
-    consumes the returned Struct to decide accept/reject. U5/U6 will move
-    every caller off the legacy ``run_preimport_gates`` shim.
+    As of U11 there is exactly one decision function: persisted evidence
+    flows into ``lib.quality.full_pipeline_decision_from_evidence``, whose
+    four early-exit branches handle the folder/audio-integrity facts that
+    used to live in the deleted ``preimport_decide``. Callers invoke
+    ``measure_preimport_state`` to gather the facts, persist them to
+    ``AlbumQualityEvidence``, and let the unified decider decide.
 
     Args:
         path: Filesystem path containing the files to validate.
@@ -637,8 +610,10 @@ def measure_preimport_state(
     # next attempt needs accurate ``album_requests.current_spectral_*`` to
     # make a sound comparison. Persists AFTER the existing_spectral snapshot
     # used by the decision is taken — propagation can't poison the comparison
-    # because the decision runs in ``preimport_decide`` on the *returned*
-    # Struct, which carries the pre-propagation values.
+    # because the decision runs in ``full_pipeline_decision_from_evidence``
+    # on the *persisted* candidate evidence row (or the returned Struct for
+    # legacy callers), neither of which sees the post-propagation
+    # ``album_requests.current_spectral_*``.
     if download_spectral is not None and db is not None and request_id is not None:
         try:
             _persist_spectral_state(
@@ -668,163 +643,3 @@ def measure_preimport_state(
     )
 
 
-def run_preimport_gates(
-    *,
-    path: str,
-    mb_release_id: str,
-    label: str,
-    download_filetype: str,
-    download_min_bitrate_bps: int | None,
-    download_is_vbr: bool | None,
-    cfg: "CratediggerConfig",
-    db: "PipelineDB | None" = None,
-    request_id: int | None = None,
-    usernames: set[str] | None = None,
-    propagate_download_to_existing: bool = True,
-    precomputed_inspection: "LocalFileInspection | None" = None,
-) -> PreImportGateResult:
-    """Legacy compatibility shim — delegates to measure_preimport_state + preimport_decide.
-
-    U3 introduced ``measure_preimport_state`` (facts only) and
-    ``lib.quality.preimport_decide`` (pure decision). This shim keeps existing
-    callers (``lib.import_preview``, ``lib.download``, force/manual paths)
-    working unchanged: it runs the new pipeline and synthesises the legacy
-    ``PreImportGateResult`` shape (``valid`` + ``scenario`` + ``detail``)
-    that those callers still read. The side effects that previously lived
-    inline — denylisting on bad-hash and spectral-reject — also stay here so
-    behavior is identical to pre-U3.
-
-    U5 / U6 migrated the worker path (the importer + the preview worker) onto
-    ``measure_preimport_state`` + ``preimport_decide`` + the importer-side
-    rejection-finalize helper. After U7 the remaining callers are:
-      * ``lib/import_preview.py::preview_import_from_download_log`` — the
-        non-worker force / manual / wrong-match-triage preview entry point
-        (called with ``db=None`` so the shim's denylist side effects are
-        bypassed). Migrating it requires reshaping the calling function to
-        read measurement facts directly instead of legacy ``valid``/
-        ``scenario`` flags.
-      * ``lib/download.py::_process_finalized_download`` — the auto-import
-        fallback path when candidate evidence isn't already available.
-        Migrating it requires reshaping the calling function to delegate to
-        ``preimport_decide`` and the shared rejection-finalize helper.
-
-    Both are intentionally left on the shim: they live outside the worker
-    pipeline and the U7 grep-clean targets (``verdict="uncertain"`` /
-    ``verdict="confident_reject"`` / ``PREVIEW_FAILURE_STATUS`` /
-    ``IMPORT_JOB_PREVIEW_UNCERTAIN`` / ``preview_status='uncertain'``) do
-    not constrain them. A follow-up may eliminate this shim entirely.
-    """
-    measurement = measure_preimport_state(
-        path=path,
-        mb_release_id=mb_release_id,
-        label=label,
-        download_filetype=download_filetype,
-        download_min_bitrate_bps=download_min_bitrate_bps,
-        download_is_vbr=download_is_vbr,
-        cfg=cfg,
-        db=db,
-        request_id=request_id,
-        propagate_download_to_existing=propagate_download_to_existing,
-        precomputed_inspection=precomputed_inspection,
-    )
-    # Legacy decision: pre-U3 ``run_preimport_gates`` evaluated only three
-    # reject gates — ``audio_corrupt``, ``bad_audio_hash``, ``spectral_reject``.
-    # ``nested_layout`` was gated by callers (preview) and ``empty_fileset`` was
-    # never explicitly checked. The full ``preimport_decide`` adds those, but
-    # the shim must preserve the legacy decision surface so existing callers
-    # don't regress. U5/U6 will move callers onto the full decision function.
-    decision = _legacy_preimport_decision(measurement)
-
-    result = PreImportGateResult(
-        corrupt_files=list(measurement.corrupt_files),
-        download_spectral=measurement.download_spectral,
-        existing_spectral=measurement.existing_spectral,
-        existing_min_bitrate=measurement.existing_min_bitrate,
-        matched_bad_hash_id=measurement.matched_bad_hash_id,
-        matched_bad_track_path=measurement.matched_bad_track_path,
-    )
-
-    if decision.decision == "reject":
-        result.valid = False
-        result.scenario = decision.reason
-        result.detail = decision.detail
-        _apply_legacy_denylist_side_effects(
-            measurement=measurement,
-            decision=decision,
-            db=db,
-            request_id=request_id,
-            usernames=usernames,
-        )
-
-    return result
-
-
-def _legacy_preimport_decision(
-    measurement: PreimportMeasurement,
-) -> PreimportDecision:
-    """Pre-U3 ``run_preimport_gates`` decision shim — folder/audio facts only.
-
-    Owns the same two reject reasons preimport_decide owns for legacy callers
-    (``audio_corrupt``, ``bad_audio_hash``). ``nested_layout`` and
-    ``empty_fileset`` are intentionally excluded so this shim is bit-for-bit
-    backward compatible with pre-U3 callers (preview filters nested itself;
-    auto path never checked file count).
-
-    Quality decisions (spectral / codec rank / provisional lossless) are NOT
-    made here. The importer's evidence pipeline
-    (``full_pipeline_decision_from_evidence``) is the single decider for
-    quality — the same function the album test set pins. Re-litigating
-    spectral here bypasses the FLAC provisional pathway and violates
-    evidence-set parity.
-    """
-    if measurement.audio_corrupt:
-        n = len(measurement.corrupt_files)
-        return PreimportDecision(
-            decision="reject",
-            reason="audio_corrupt",
-            detail=f"{n} files failed ffmpeg decode" if n else "audio_corrupt",
-        )
-    if measurement.matched_bad_hash_id is not None:
-        track = measurement.matched_bad_track_path or "<unknown>"
-        return PreimportDecision(
-            decision="reject",
-            reason="bad_audio_hash",
-            detail=(
-                f"matched bad audio hash {measurement.matched_bad_hash_id} on "
-                f"track {track}"
-            ),
-        )
-    return PreimportDecision(decision="accept")
-
-
-def _apply_legacy_denylist_side_effects(
-    *,
-    measurement: PreimportMeasurement,
-    decision: PreimportDecision,
-    db: "PipelineDB | None",
-    request_id: int | None,
-    usernames: set[str] | None,
-) -> None:
-    """Denylist side effects for the legacy preimport gate shim.
-
-    Only ``bad_audio_hash`` denylists peers from this gate — that's a
-    source-quality decision the curator/operator has already made. Spectral
-    no longer rejects here (see ``_legacy_preimport_decision``); quality-side
-    denylisting is owned by the importer's evidence-pipeline reject helper.
-    """
-    if db is None or request_id is None or not usernames:
-        return
-    if decision.reason == "bad_audio_hash":
-        match_id = measurement.matched_bad_hash_id
-        for username in usernames:
-            try:
-                db.add_denylist(
-                    request_id, username,
-                    f"matched bad hash {match_id}")
-            except Exception:
-                logger.exception(
-                    "Failed to denylist %s for request %s "
-                    "(bad-hash match)", username, request_id)
-        logger.info(
-            f"  Denylisted {usernames} for request {request_id}")
-        return

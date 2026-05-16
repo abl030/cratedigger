@@ -25,9 +25,6 @@ from lib.import_queue import (
 )
 from lib.import_preview import ImportPreviewResult
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AudioQualityMeasurement,
     ImportResult,
 )
@@ -41,6 +38,47 @@ from tests.helpers import (
     make_grab_list_entry,
     make_request_row,
 )
+
+
+# Migration 021 helpers — seed evidence and wire the FK chain that
+# production reads through.
+def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
+                                     **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_download_log_candidate_evidence(log_id, persisted.id)
+    return persisted
+
+
+def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    return persisted
+
+
+def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
+                              **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_request_current_evidence(request_id, persisted.id)
+    return persisted
 
 
 class TestWrongMatchCleanupDecision(unittest.TestCase):
@@ -87,9 +125,9 @@ class TestWrongMatchCleanupDecision(unittest.TestCase):
                 "failed_path": source_path,
             },
         )
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=log_id,
+        _seed_candidate_for_download_log(
+            db, log_id,
+            mb_release_id="mbid-candidate",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=candidate_min,
@@ -101,10 +139,10 @@ class TestWrongMatchCleanupDecision(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="MP3",
-        ))
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=42,
+        )
+        _seed_current_for_request(
+            db, 42,
+            mb_release_id="mbid-current",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=current_min,
@@ -116,7 +154,7 @@ class TestWrongMatchCleanupDecision(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="MP3",
-        ))
+        )
         return log_id
 
     def test_decision_reuses_download_log_evidence_without_preview(self):
@@ -317,9 +355,9 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
                 handle.write(b"audio")
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -331,7 +369,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             cfg = CratediggerConfig(
                 beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                 beets_distance_threshold=0.15,
@@ -356,7 +394,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 scenario="strong_match",
             )), \
                  patch(
-                     "lib.preimport.run_preimport_gates",
+                     "lib.download.measure_preimport_state",
                      side_effect=AssertionError(
                          "valid preview evidence must skip preimport gates"),
                  ) as gates, \
@@ -398,9 +436,9 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
             track = os.path.join(tmpdir, "01 - Track.mp3")
             with open(track, "wb") as handle:
                 handle.write(b"audio")
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -412,7 +450,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             with open(track, "ab") as handle:
                 handle.write(b" changed")
             cfg = CratediggerConfig(
@@ -438,7 +476,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )), \
-                 patch("lib.preimport.run_preimport_gates") as gates, \
+                 patch("lib.download.measure_preimport_state") as gates, \
                  patch("lib.download._handle_valid_result") as handle_valid:
                 result = _process_beets_validation(
                     album_data,
@@ -545,9 +583,9 @@ class TestImporterWorker(unittest.TestCase):
                 mb_release_id="mbid-123",
                 status="manual",
             ))
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=log_id,
+        _seed_candidate_for_download_log(
+            db, log_id,
+            mb_release_id="mbid-candidate-reject",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128,
@@ -559,10 +597,10 @@ class TestImporterWorker(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="MP3",
-        ))
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=request_id,
+        )
+        _seed_current_for_request(
+            db, request_id,
+            mb_release_id="mbid-current-reject",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -574,7 +612,7 @@ class TestImporterWorker(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="MP3",
-        ))
+        )
 
     def test_force_import_job_calls_existing_dispatch_and_completes(self):
         from scripts import importer
@@ -1449,9 +1487,9 @@ class TestImportPreviewWorker(unittest.TestCase):
         job_id: int,
         source_path: str,
     ) -> None:
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=job_id,
+        _seed_candidate_for_import_job(
+            db, job_id,
+            mb_release_id=f"mbid-job-{job_id}",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -1463,7 +1501,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="mp3 v0",
-        ))
+        )
 
     def test_force_job_preview_would_import_marks_importable(self):
         from scripts import import_preview_worker
@@ -1931,9 +1969,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         job_id: int,
         source_path: str,
     ) -> None:
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            owner_id=job_id,
+        _seed_candidate_for_import_job(
+            db, job_id,
+            mb_release_id=f"mbid-frontgate-job-{job_id}",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -1945,7 +1983,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="mp3 v0",
-        ))
+        )
 
     def _seed_evidence_for_download_log(
         self,
@@ -1953,9 +1991,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         download_log_id: int,
         source_path: str,
     ) -> None:
-        db.upsert_album_quality_evidence(make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=download_log_id,
+        _seed_candidate_for_download_log(
+            db, download_log_id,
+            mb_release_id=f"mbid-frontgate-dl-{download_log_id}",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -1967,7 +2005,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="mp3 v0",
-        ))
+        )
 
     def test_force_job_valid_evidence_skips_measurement(self):
         """AE4 force/manual: matching snapshot + valid evidence → no measurement."""
@@ -1997,7 +2035,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
             ) as preview, patch(
-                "lib.preimport.run_preimport_gates",
+                "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
                 "lib.spectral_check.analyze_album",
             ) as spectral:
@@ -2042,7 +2080,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
             ) as preview, patch(
-                "lib.preimport.run_preimport_gates",
+                "lib.measurement.measure_preimport_state",
             ) as preimport:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
@@ -2099,7 +2137,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
             ) as preview, patch(
-                "lib.preimport.run_preimport_gates",
+                "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
                 "lib.download._materialize_processing_dir",
             ) as materialize:
@@ -2156,12 +2194,13 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             )
 
             def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
-                # Simulate production: preview persists candidate evidence.
-                db.upsert_album_quality_evidence(make_album_quality_evidence(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                    owner_id=download_log_id,
+                # Simulate production: preview persists candidate evidence
+                # and wires the FK chain that the front-gate reads from.
+                _seed_candidate_for_download_log(
+                    db, download_log_id,
+                    mb_release_id="mbid-missing-falls-through",
                     files=snapshot_audio_files(source),
-                ))
+                )
                 return preview_result
 
             with patch(
@@ -2208,9 +2247,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             # Seed evidence with files that don't match the on-disk snapshot.
             from lib.quality import AlbumQualityEvidenceFile
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=download_log_id,
+            _seed_candidate_for_download_log(
+                db, download_log_id,
+                mb_release_id="mbid-stale",
                 files=[AlbumQualityEvidenceFile(
                     relative_path="stale.mp3",
                     size_bytes=999,
@@ -2219,7 +2258,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     container="mp3",
                     codec="mp3",
                 )],
-            ))
+            )
 
             # Post-U5: worker-mode preview emits ``evidence_ready``.
             preview_result = ImportPreviewResult(
@@ -2233,12 +2272,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
             def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
                 # Simulate production: preview re-measures and persists fresh
-                # evidence with the actual on-disk snapshot.
-                db.upsert_album_quality_evidence(make_album_quality_evidence(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                    owner_id=download_log_id,
+                # evidence with the actual on-disk snapshot, rewiring the FK.
+                _seed_candidate_for_download_log(
+                    db, download_log_id,
+                    mb_release_id="mbid-fresh",
                     files=snapshot_audio_files(source),
-                ))
+                )
                 return preview_result
 
             with patch(
@@ -2254,12 +2293,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         preview.assert_called_once()
         assert updated is not None
         self.assertEqual(updated.preview_status, "evidence_ready")
-        # The stale evidence row was replaced.
-        from lib.quality import AlbumQualityEvidenceOwner
-        evidence = db.load_album_quality_evidence(AlbumQualityEvidenceOwner(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            owner_id=download_log_id,
-        ))
+        # The stale evidence row was replaced — the FK now points at fresh
+        # content-addressed evidence.
+        evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
+        self.assertIsNotNone(evidence_id)
+        evidence = db.load_album_quality_evidence_by_id(evidence_id)
         assert evidence is not None
         self.assertEqual(len(evidence.files), 1)
         self.assertEqual(evidence.files[0].relative_path, "01.mp3")

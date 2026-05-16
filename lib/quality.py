@@ -725,14 +725,6 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     was_converted_from: Optional[str] = None
 
 
-ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE = "download_log_candidate"
-ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE = "import_job_candidate"
-ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT = "request_current"
-ALBUM_QUALITY_EVIDENCE_OWNER_TYPES: tuple[str, ...] = (
-    ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-)
 _LEGACY_POLICY_V0_PROBE_KINDS: tuple[str, ...] = (
     "lossless_source_v0",
     "native_lossy_research_v0",
@@ -742,27 +734,6 @@ V0_SOURCE_LINEAGE_LOSSLESS_SOURCE = "lossless_source"
 V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH = "native_lossy_research"
 V0_SOURCE_LINEAGE_ON_DISK_RESEARCH = "on_disk_research"
 _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND = "neutral_v0_research"
-
-
-class AlbumQualityEvidenceOwner(msgspec.Struct, frozen=True):
-    """Owner identity for persisted active album-quality evidence.
-
-    Only the three owner families below are persisted in U2:
-    ``download_log_candidate``, ``import_job_candidate``, and
-    ``request_current``. Simulator evidence remains in memory and must not
-    invent a persisted owner type.
-    """
-
-    owner_type: str
-    owner_id: int
-
-    def validation_errors(self) -> list[str]:
-        errors: list[str] = []
-        if self.owner_type not in ALBUM_QUALITY_EVIDENCE_OWNER_TYPES:
-            errors.append(f"invalid owner_type: {self.owner_type!r}")
-        if not isinstance(self.owner_id, int) or self.owner_id <= 0:
-            errors.append("owner_id must be a positive integer")
-        return errors
 
 
 class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
@@ -852,11 +823,20 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     policy-facing facts. Snapshot rows and intrinsic provenance live here;
     action provenance such as reused/recomputed/backfilled/fallback outcomes
     belongs to preview/import/cleanup result surfaces, not to this durable row.
+
+    Identity is content-addressed by ``(mb_release_id, snapshot_fingerprint)``
+    after migration 021. ``id`` is the surrogate PK populated after upsert.
+    Addressing (which entity points at this row) lives on the addressing
+    entity: ``import_jobs.candidate_evidence_id``,
+    ``download_log.candidate_evidence_id``, ``album_requests.current_evidence_id``.
     """
 
-    owner: AlbumQualityEvidenceOwner
+    mb_release_id: str
+    snapshot_fingerprint: str
+    source_path: str
     measurement: AudioQualityMeasurement
     measured_at: datetime
+    id: int | None = None
     files: list[AlbumQualityEvidenceFile] = msgspec.field(default_factory=list)
     codec: str | None = None
     container: str | None = None
@@ -864,11 +844,12 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     target_format: str | None = None
     v0_metric: AlbumQualityV0Metric | None = None
     verified_lossless_proof: VerifiedLosslessProof | None = None
-    # U1 (migration 019) preview-evidence facts. The pure decision function
-    # ``preimport_decide`` reads these as typed facts — never derives them
-    # from snapshot files. SQL defaults (FALSE, 'flat', 0, '') keep legacy
-    # rows decoding into a safe shape that the decision function rejects
-    # only when explicit reject-shaped facts are present.
+    # U1 (migration 019) preview-evidence facts. The unified decider
+    # ``full_pipeline_decision_from_evidence`` reads these as typed facts
+    # via its four-fact early-exit reject branches (U11) — never derives
+    # them from snapshot files. SQL defaults (FALSE, 'flat', 0, '') keep
+    # legacy rows decoding into a safe shape that the decision function
+    # rejects only when explicit reject-shaped facts are present.
     audio_corrupt: bool = False
     folder_layout: str = "flat"
     audio_file_count: int = 0
@@ -878,9 +859,12 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
 
     def sorted_for_storage(self) -> "AlbumQualityEvidence":
         return AlbumQualityEvidence(
-            owner=self.owner,
+            mb_release_id=self.mb_release_id,
+            snapshot_fingerprint=self.snapshot_fingerprint,
+            source_path=self.source_path,
             measurement=self.measurement,
             measured_at=self.measured_at,
+            id=self.id,
             files=sorted(self.files, key=lambda f: f.relative_path),
             codec=self.codec,
             container=self.container,
@@ -897,7 +881,11 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
         )
 
     def storage_validation_errors(self) -> list[str]:
-        errors = self.owner.validation_errors()
+        errors: list[str] = []
+        if not self.mb_release_id:
+            errors.append("mb_release_id must be a non-empty string")
+        if not self.snapshot_fingerprint:
+            errors.append("snapshot_fingerprint must be a non-empty string")
         if self.measured_at is None:
             errors.append("measured_at is required")
         # Empty snapshot is a storable fact ONLY when audio_file_count=0
@@ -2043,7 +2031,7 @@ def spectral_gate_trigger(
 ) -> str:
     """Decide whether the preimport spectral gate would run on this file.
 
-    Mirrors ``lib.preimport._needs_spectral_check`` but operates on the
+    Mirrors ``lib.measurement._needs_spectral_check`` but operates on the
     simulator's booleans (``is_flac`` / ``is_cbr``) instead of a filetype
     string, so ``full_pipeline_decision`` and the web UI Decisions tab can
     explain why the gate fired (or didn't) for a given file.
@@ -2075,9 +2063,10 @@ def spectral_gate_trigger(
 def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
     """Decide the outcome of the preimport audio-integrity gate.
 
-    Mirrors the first check in ``lib.preimport.run_preimport_gates``:
-    ``validate_audio`` runs an ffmpeg full-decode pass unless the operator
-    has set ``[Beets Validation] audio_check = off``.
+    Mirrors the audio-integrity check that ``measure_preimport_state``
+    performs in ``lib.measurement``: ``validate_audio`` runs an ffmpeg
+    full-decode pass unless the operator has set
+    ``[Beets Validation] audio_check = off``.
 
     Returns one of:
         "skipped_off"     — cfg.audio_check_mode == "off", validate_audio is not called
@@ -2162,102 +2151,15 @@ class MeasurementFailure(msgspec.Struct, frozen=True):
 
 
 # ---------------------------------------------------------------------------
-# preimport_decide — U3 pure decision function
+# U11: ``preimport_decide`` and ``PreimportDecision`` have been folded into
+# ``full_pipeline_decision_from_evidence``. The four folder/audio-integrity
+# facts (``audio_corrupt``, ``bad_audio_hash``, ``nested_layout``,
+# ``empty_fileset``) are now early-exit reject branches at the top of that
+# function. There is exactly one decision function for the importer.
+#
+# See CLAUDE.md § "Quality decisions live in ONE place" and the U11 entry in
+# ``docs/plans/2026-05-16-002-refactor-evidence-canonical-cleanup-plan.md``.
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class PreimportDecision:
-    """Pure-function output of ``preimport_decide``.
-
-    The decision function consumes a ``PreimportMeasurement`` (facts collected
-    by the measurement helper in ``lib.preimport``) plus the runtime
-    ``QualityRankConfig`` and optional existing-album evidence, and returns
-    one of two decisions:
-
-      * ``decision='accept'`` — the candidate passes every pre-import gate.
-        Reason is None.
-      * ``decision='reject'`` — the candidate fails a gate. ``reason`` is a
-        machine-readable taxonomy (``audio_corrupt``, ``bad_audio_hash``,
-        ``nested_layout``, ``empty_fileset``, ``spectral_reject``); ``detail``
-        is a human-readable diagnostic.
-
-    The previous ``PreImportGateResult.scenario`` strings map 1:1 onto
-    ``reason``. The legacy ``run_preimport_gates`` shim derives ``scenario``
-    from ``reason`` and ``valid`` from ``decision``.
-    """
-    decision: str = "accept"  # Literal["accept", "reject"]
-    reason: str | None = None
-    detail: str | None = None
-
-
-def preimport_decide(
-    measurement,  # lib.preimport.PreimportMeasurement
-    cfg: "QualityRankConfig",
-    existing_evidence: "AlbumQualityEvidence | None" = None,
-) -> PreimportDecision:
-    """Decide accept/reject for the *pre-import folder/audio gate*.
-
-    Pure function — no DB writes, no denylist mutations, no filesystem
-    side effects. Owns only the facts ``full_pipeline_decision_from_evidence``
-    does not model: "is this folder even usable to run a quality decision
-    against?". Quality (spectral, codec rank, V0 probe, provisional lossless,
-    verified lossless, quality-gate) is owned by
-    ``full_pipeline_decision_from_evidence`` — the same function the album
-    test set in ``tests/test_quality_classification.py`` pins.
-
-    Decision order:
-      1. ``audio_corrupt`` — any decode failure → reject.
-      2. ``bad_audio_hash`` — track matches a curator-reported bad hash → reject.
-      3. ``nested_layout`` — audio in subdirectories → reject.
-      4. ``empty_fileset`` — no audio files found → reject.
-
-    Everything else is ``accept`` — even when spectral evidence is present.
-    Spectral comparisons live in ``full_pipeline_decision`` /
-    ``full_pipeline_decision_from_evidence``; routing them through this gate
-    bypasses the FLAC provisional-lossless pathway and violates evidence-set
-    parity (it would let an existing MP3 320 container with no spectral run
-    outrank a freshly measured candidate cliff). The ``existing_evidence``
-    parameter is retained for callers that still pass it; this gate ignores
-    it.
-    """
-    # 1. audio integrity
-    if measurement.audio_corrupt:
-        n = len(measurement.corrupt_files)
-        return PreimportDecision(
-            decision="reject",
-            reason="audio_corrupt",
-            detail=f"{n} files failed ffmpeg decode" if n else "audio_corrupt",
-        )
-
-    # 2. bad audio hash
-    if measurement.matched_bad_hash_id is not None:
-        track = measurement.matched_bad_track_path or "<unknown>"
-        return PreimportDecision(
-            decision="reject",
-            reason="bad_audio_hash",
-            detail=(
-                f"matched bad audio hash {measurement.matched_bad_hash_id} on "
-                f"track {track}"
-            ),
-        )
-
-    # 3. nested layout
-    if measurement.folder_layout == "nested":
-        return PreimportDecision(
-            decision="reject",
-            reason="nested_layout",
-            detail="audio files found in subdirectories",
-        )
-
-    # 4. empty fileset
-    if measurement.audio_file_count == 0:
-        return PreimportDecision(
-            decision="reject",
-            reason="empty_fileset",
-            detail="no audio files found",
-        )
-
-    return PreimportDecision(decision="accept")
 
 
 def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral_bitrate):
@@ -2874,6 +2776,24 @@ def dispatch_action(decision: str) -> DispatchAction:
                               cleanup=True)
     elif decision == "spectral_reject":
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == "audio_corrupt":
+        # U11: folder/audio-integrity reject. The source decoded as garbage —
+        # denylist the peer + clean the staged dir. Caller forces requeue
+        # (always self-heal on the four-fact rejects).
+        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == "bad_audio_hash":
+        # U11: folder/audio-integrity reject. The candidate matched a curated
+        # bad-audio hash — denylist the peer + clean. Caller forces requeue.
+        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == "nested_layout":
+        # U11: folder-shape reject (audio in subdirectories). Not a peer
+        # quality problem — no denylist. Clean the staged dir; caller forces
+        # requeue.
+        return DispatchAction(record_rejection=True, denylist=False, cleanup=True)
+    elif decision == "empty_fileset":
+        # U11: folder-shape reject (no audio files). Not a peer quality
+        # problem — no denylist. Clean the staged dir; caller forces requeue.
+        return DispatchAction(record_rejection=True, denylist=False, cleanup=True)
     elif decision == "duplicate_remove_guard_failed":
         return DispatchAction(record_rejection=True, denylist=True, requeue=False,
                               cleanup=False)
@@ -3321,7 +3241,7 @@ def get_decision_tree(
                 "path": "preimport",
                 "function": "preimport_audio_gate",
                 "when": "Every import path, before any FLAC/MP3 branching "
-                        "(lib.preimport.run_preimport_gates step 1)",
+                        "(lib.measurement.measure_preimport_state audio gate)",
                 "inputs": ["cfg.audio_check_mode", "validate_audio() result"],
                 "rules": [
                     {"condition": "audio_check_mode = off",
@@ -3769,6 +3689,17 @@ def full_pipeline_decision(
     result: dict[str, Any] = {
         "preimport_audio": None,
         "preimport_nested": None,
+        # U11: keys carrying the folded folder/audio-integrity rejects from
+        # ``full_pipeline_decision_from_evidence``. The simulator does not
+        # take these facts as flat kwargs, so they stay None here — the
+        # simulator surfaces ``audio_corrupt`` via the
+        # ``audio_check_mode='strict' + audio_corrupt=True`` kwargs which
+        # routes through ``preimport_audio``. ``bad_audio_hash`` and
+        # ``empty_fileset`` are only reachable through the evidence
+        # entrypoint; their presence here keeps both deciders'
+        # dict shapes identical.
+        "preimport_bad_hash": None,
+        "preimport_empty_fileset": None,
         "stage0_spectral_gate": None,
         "stage1_spectral": None,
         "stage2_import": None,
@@ -3783,9 +3714,10 @@ def full_pipeline_decision(
 
     # --- Preimport gates (issue #91) ---
     # Ordering mirrors the live flow: lib.import_dispatch.dispatch_import_from_db
-    # checks inspection.has_nested_audio *before* calling run_preimport_gates,
-    # so a force/manual import of a nested corrupt folder is rejected as
-    # nested_layout (not audio_corrupt). The nested gate returns "skipped_auto"
+    # checks inspection.has_nested_audio *before* calling
+    # measure_preimport_state, so a force/manual import of a nested corrupt
+    # folder is rejected as nested_layout (not audio_corrupt). The nested
+    # gate returns "skipped_auto"
     # on the auto path, which is a no-op — the auto pipeline flattens
     # downloads upstream in process_completed_album, so audio integrity is
     # the first real reject.
@@ -3827,7 +3759,7 @@ def full_pipeline_decision(
         return result
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
-    # Mirrors lib.preimport._needs_spectral_check. Tells the operator
+    # Mirrors lib.measurement._needs_spectral_check. Tells the operator
     # whether the preimport spectral gate would even run on this file,
     # so a VBR MP3 transcode masquerading as V0 (avg < threshold) is
     # distinguishable from genuine V0 in simulator output.
@@ -4230,16 +4162,29 @@ def evidence_decision_name(
     *,
     default: str = "quality_reject",
 ) -> str:
-    """Return the dispatch decision represented by a quality decision dict."""
+    """Return the dispatch decision represented by a quality decision dict.
 
+    Recognises the U11 folder/audio-integrity early-exit rejects via
+    ``preimport_audio`` / ``preimport_nested`` / ``preimport_bad_hash`` /
+    ``preimport_empty_fileset`` dict keys, plus the existing stage-* keys.
+    """
+
+    # Folder/audio-integrity rejects fire *before* the quality stages run,
+    # so check them first — if a four-fact reject is present, stage2/stage3
+    # will be None and falling through to the quality default would lose
+    # the specific reason.
+    if result.get("preimport_audio") == "reject_corrupt":
+        return "audio_corrupt"
+    if result.get("preimport_bad_hash") == "reject_bad_hash":
+        return "bad_audio_hash"
+    if result.get("preimport_nested") == "reject_nested":
+        return "nested_layout"
+    if result.get("preimport_empty_fileset") == "reject_empty":
+        return "empty_fileset"
     for key in ("stage2_import", "stage3_quality_gate"):
         value = result.get(key)
         if isinstance(value, str) and value:
             return value
-    if result.get("preimport_nested") == "reject_nested":
-        return "nested_layout"
-    if result.get("preimport_audio") == "reject_corrupt":
-        return "audio_corrupt"
     if (
         result.get("stage1_spectral") == "reject"
         and not result.get("stage2_import")
@@ -4310,6 +4255,11 @@ def classify_full_pipeline_decision(
         return "confident_reject", True, "nested_layout"
     if decision.get("preimport_audio") == "reject_corrupt":
         return "confident_reject", True, "audio_corrupt"
+    # U11: bad-hash and empty-fileset early-exit rejects.
+    if decision.get("preimport_bad_hash") == "reject_bad_hash":
+        return "confident_reject", True, "bad_audio_hash"
+    if decision.get("preimport_empty_fileset") == "reject_empty":
+        return "confident_reject", True, "empty_fileset"
     if (
         decision.get("stage1_spectral") == "reject"
         and not decision.get("stage2_import")
@@ -4438,11 +4388,43 @@ def full_pipeline_decision_from_evidence(
 ) -> dict[str, Any]:
     """Run the full quality policy from neutral album-quality evidence.
 
-    This is the evidence-pair entrypoint for action-time reducers. Callers
+    This is THE single decision function for the importer. Callers
     provide durable ``AlbumQualityEvidence`` rows plus narrow action facts;
-    old V0 probe ``kind`` constants are not accepted as public inputs. The
-    transitional call into ``full_pipeline_decision`` derives its comparable
-    V0 probe shape solely from neutral ``v0_metric.source_lineage``.
+    old V0 probe ``kind`` constants are not accepted as public inputs.
+
+    The decision dict shape (shared with ``full_pipeline_decision``):
+
+        {
+            "preimport_audio": str | None,
+            "preimport_nested": str | None,
+            "preimport_bad_hash": str | None,       # U11
+            "preimport_empty_fileset": str | None,  # U11
+            "stage0_spectral_gate": str | None,
+            "stage1_spectral": str | None,
+            "stage2_import": str | None,
+            "stage3_quality_gate": str | None,
+            "final_status": str | None,
+            "imported": bool,
+            "denylisted": bool,
+            "keep_searching": bool,
+            "target_final_format": str | None,
+            "verified_lossless": bool,
+        }
+
+    U11: four folder/audio-integrity facts are read directly off
+    ``candidate`` as early-exit rejects (in the same order the deleted
+    ``preimport_decide`` evaluated them):
+
+      1. ``audio_corrupt``  — sets ``preimport_audio='reject_corrupt'``
+      2. ``bad_audio_hash`` — sets ``preimport_bad_hash='reject_bad_hash'``
+      3. ``nested_layout``  — sets ``preimport_nested='reject_nested'``
+      4. ``empty_fileset``  — sets ``preimport_empty_fileset='reject_empty'``
+
+    The accompanying ``evidence_decision_name`` maps these dict shapes to
+    ``audio_corrupt`` / ``bad_audio_hash`` / ``nested_layout`` /
+    ``empty_fileset`` decision strings, which the importer feeds to
+    ``dispatch_action`` and the unified ``_reject_import_from_evidence_decision``
+    helper.
     """
 
     if facts is None:
@@ -4451,6 +4433,82 @@ def full_pipeline_decision_from_evidence(
     _require_evidence_ready("candidate", candidate)
     if current is not None:
         _require_evidence_ready("current", current)
+
+    # --- U11 folder/audio-integrity early-exit rejects ---
+    # The four facts live directly on the persisted ``AlbumQualityEvidence``
+    # row (added by U1+U2/U3 migrations). Order matches the deleted
+    # ``preimport_decide``: corrupt > bad-hash > nested > empty.
+    #
+    # SQL defaults for U1 fields (migration 019) are ``audio_corrupt=FALSE``,
+    # ``folder_layout='flat'``, ``audio_file_count=0``, ``filetype_band=''``.
+    # Legacy rows decoding under those defaults must not trigger
+    # ``empty_fileset`` when files are present — reconcile against the
+    # snapshot ``files`` list, mirroring the prior ``_build_preimport_
+    # measurement_from_evidence`` reconciliation.
+    def _early_reject_result(
+        *,
+        preimport_audio: str | None = None,
+        preimport_nested: str | None = None,
+        preimport_bad_hash: str | None = None,
+        preimport_empty_fileset: str | None = None,
+        denylisted: bool,
+    ) -> dict[str, Any]:
+        # Mirror the live four-fact reject side effects: auto-import
+        # rejects re-queue to ``wanted``; force/manual leaves the
+        # request alone (the unified reject helper forces ``requeue=True``
+        # for these decisions regardless, but the dict's ``final_status``
+        # / ``keep_searching`` reflect the auto path the simulator
+        # describes, matching the existing ``preimport_nested`` /
+        # ``preimport_audio`` early-exit shape produced by
+        # ``full_pipeline_decision``).
+        auto = facts.import_mode == "auto"
+        return {
+            "preimport_audio": preimport_audio,
+            "preimport_nested": preimport_nested,
+            "preimport_bad_hash": preimport_bad_hash,
+            "preimport_empty_fileset": preimport_empty_fileset,
+            "stage0_spectral_gate": None,
+            "stage1_spectral": None,
+            "stage2_import": None,
+            "stage3_quality_gate": None,
+            "final_status": "wanted" if auto else None,
+            "imported": False,
+            "denylisted": bool(denylisted and auto),
+            "keep_searching": bool(auto),
+            "target_final_format": None,
+            "verified_lossless": False,
+        }
+
+    if candidate.audio_corrupt:
+        return _early_reject_result(
+            preimport_audio="reject_corrupt",
+            denylisted=True,
+        )
+
+    if candidate.matched_bad_audio_hash_id is not None:
+        return _early_reject_result(
+            preimport_bad_hash="reject_bad_hash",
+            denylisted=True,
+        )
+
+    if candidate.folder_layout == "nested":
+        return _early_reject_result(
+            preimport_nested="reject_nested",
+            denylisted=False,
+        )
+
+    # Reconcile audio_file_count against snapshot files: legacy rows decode
+    # the SQL default 0 but may carry snapshot files. Only the
+    # explicit-and-corroborated zero case (count=0 AND no snapshot files)
+    # is the empty_fileset reject.
+    effective_audio_file_count = (
+        len(candidate.files) if candidate.files else candidate.audio_file_count
+    )
+    if effective_audio_file_count == 0:
+        return _early_reject_result(
+            preimport_empty_fileset="reject_empty",
+            denylisted=False,
+        )
 
     candidate_measurement = candidate.measurement
     current_measurement = current.measurement if current is not None else None

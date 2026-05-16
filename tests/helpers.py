@@ -14,10 +14,8 @@ from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
-    ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
-    AlbumQualityEvidenceOwner,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     CodecRankBands,
@@ -35,6 +33,7 @@ from lib.quality import (
     ValidationResult,
     VerifiedLosslessProof,
 )
+from lib.quality_evidence import snapshot_fingerprint
 
 
 def make_request_row(**overrides: Any) -> dict[str, Any]:
@@ -86,6 +85,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "active_plan_id": None,
         "next_plan_ordinal": 0,
         "plan_cycle_count": 0,
+        # Migration 021 addressing FK.
+        "current_evidence_id": None,
         "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
     }
@@ -95,8 +96,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
 
 def make_album_quality_evidence(
     *,
-    owner_type: str = ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-    owner_id: int = 1,
+    mb_release_id: str = "test-mbid-0001",
+    source_path: str = "/tmp/test-staged",
     measured_at: datetime | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
     measurement: AudioQualityMeasurement | None = None,
@@ -107,7 +108,13 @@ def make_album_quality_evidence(
     storage_format: str | None = "mp3 v0",
     target_format: str | None = None,
 ) -> AlbumQualityEvidence:
-    """Build production-shaped active album-quality evidence."""
+    """Build production-shaped active album-quality evidence.
+
+    Migration 021: evidence is content-addressed by
+    ``(mb_release_id, snapshot_fingerprint)``. The fingerprint is computed
+    from ``files`` using the canonical helper, so the builder always
+    produces a self-consistent row.
+    """
     if measured_at is None:
         measured_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     if files is None:
@@ -131,10 +138,9 @@ def make_album_quality_evidence(
             spectral_bitrate_kbps=None,
         )
     return AlbumQualityEvidence(
-        owner=AlbumQualityEvidenceOwner(
-            owner_type=owner_type,
-            owner_id=owner_id,
-        ),
+        mb_release_id=mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path=source_path,
         measurement=measurement,
         measured_at=measured_at,
         files=files,
@@ -144,6 +150,25 @@ def make_album_quality_evidence(
         target_format=target_format,
         v0_metric=v0_metric,
         verified_lossless_proof=verified_lossless_proof,
+    )
+
+
+def make_evidence(
+    mb_release_id: str = "test-mbid-0001",
+    files: list[AlbumQualityEvidenceFile] | None = None,
+    **overrides: Any,
+) -> AlbumQualityEvidence:
+    """Concise builder for content-addressed evidence rows.
+
+    Mirrors :func:`make_album_quality_evidence` with a positional-first
+    signature optimised for the post-021 rekey: pass ``mb_release_id`` and
+    ``files``, get back a fully-formed row with the snapshot fingerprint
+    already computed.
+    """
+    return make_album_quality_evidence(
+        mb_release_id=mb_release_id,
+        files=files,
+        **overrides,
     )
 
 

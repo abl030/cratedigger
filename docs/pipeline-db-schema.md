@@ -7,19 +7,38 @@ Full schema lives in `migrations/*.sql`. This doc covers the fields that appear 
 ## `album_quality_evidence` — active quality evidence
 
 Active reusable album-quality evidence is stored relationally, not in JSONB.
-One row exists per owner:
+Evidence is **content-addressed**: identity is `(mb_release_id,
+snapshot_fingerprint)`. Addressing entities reference evidence rows via FK
+columns (`import_jobs.candidate_evidence_id`,
+`download_log.candidate_evidence_id`, `album_requests.current_evidence_id`).
+The same audio collapses into one canonical row regardless of how many
+addressing entities point at it; differing file inventories produce
+different fingerprints under the same release id.
 
-- `owner_type TEXT` — exactly `download_log_candidate`, `import_job_candidate`,
-  or `request_current`. Simulator evidence is ephemeral and has no persisted
-  owner.
-- `owner_id INTEGER` — the owning `download_log.id`, `import_jobs.id`, or
-  `album_requests.id`, validated by `PipelineDB` before write.
+Key fields:
+
+- `mb_release_id TEXT NOT NULL` — the MusicBrainz release this evidence
+  describes.
+- `snapshot_fingerprint TEXT NOT NULL` — SHA-256 over the per-file tuple
+  `(relative_path, size_bytes, extension, container, codec)`, sorted by
+  `relative_path`, JSON-encoded with stable key order. Computed by
+  `lib.quality_evidence.snapshot_fingerprint`.
+- `source_path TEXT NOT NULL` — the on-disk root where measurement
+  happened.
+- `UNIQUE (mb_release_id, snapshot_fingerprint)` plus
+  `INDEX (mb_release_id)` for prefix lookups.
 - `measured_at TIMESTAMPTZ` — when this evidence snapshot was measured.
 - `codec`, `container`, `storage_format`, `target_format` — album-level
   intrinsic storage facts.
 - `min_bitrate_kbps`, `avg_bitrate_kbps`, `median_bitrate_kbps`, `format`,
   `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`,
   `was_converted_from` — the wrapped `AudioQualityMeasurement` facts.
+- `audio_corrupt BOOLEAN`, `folder_layout TEXT` (`flat` | `nested`),
+  `audio_file_count INTEGER`, `filetype_band TEXT`,
+  `matched_bad_audio_hash_id`, `matched_bad_audio_hash_path` — the four
+  folder/audio-integrity facts the importer's
+  `full_pipeline_decision_from_evidence` reads as early-exit reject
+  branches (U11).
 - `v0_min_bitrate_kbps`, `v0_avg_bitrate_kbps`,
   `v0_median_bitrate_kbps`, `v0_source_lineage`,
   `v0_source_provenance`, `v0_proof_provenance` — neutral V0 metric and

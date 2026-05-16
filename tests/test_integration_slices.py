@@ -31,6 +31,7 @@ from lib.quality import (
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
+    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_import_result,
     make_request_row,
@@ -39,6 +40,47 @@ from tests.helpers import (
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+# Migration 021 helpers — seed evidence and wire the FK chain that
+# production reads through.
+def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
+                                     **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_download_log_candidate_evidence(log_id, persisted.id)
+    return persisted
+
+
+def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    return persisted
+
+
+def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
+                              **kwargs):
+    evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    db.set_request_current_evidence(request_id, persisted.id)
+    return persisted
 
 
 def _download_ownership_cfg() -> CratediggerConfig:
@@ -750,28 +792,29 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
 
 
 class TestSpectralPropagationSlice(unittest.TestCase):
-    """Integration slice: shared run_preimport_gates updates spectral state + denylists.
+    """Integration slice: measure_preimport_state updates spectral state.
 
-    Exercises the pre-import gate pipeline that both the auto-import path
-    (lib.download.process_completed_album) and the force/manual-import path
-    (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves the
-    function does its side effects — spectral state write + denylist —
-    consistently regardless of caller.
+    Exercises the pre-import measurement pipeline that both the auto-import
+    path (lib.download.process_completed_album) and the force/manual-import
+    path (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves
+    the measurement helper persists existing-album spectral state
+    consistently regardless of caller. Quality decisions (and any denylist
+    side effects) live in the importer's evidence pipeline.
     """
 
     def test_suspect_download_persists_existing_spectral_state(self):
-        """Issue #90: when run_preimport_gates measures spectral on both the
-        download and the existing album, it must persist the *existing*
+        """Issue #90: when measure_preimport_state measures spectral on both
+        the download and the existing album, it must persist the *existing*
         spectral state to ``album_requests.current_spectral_*`` so subsequent
         attempts can compare evidence-to-evidence.
 
         Spectral comparison itself is owned by the importer's evidence
         pipeline (``full_pipeline_decision_from_evidence``) — preimport just
-        accepts and lets the importer decide. Denylisting on quality grounds
-        is the importer's responsibility, not this gate's.
+        measures. Denylisting on quality grounds is the importer's
+        responsibility, not this gate's.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -787,7 +830,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             side_effect=[
                 SimpleNamespace(
                     grade="suspect",
@@ -804,7 +847,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ],
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
                 label="Test Artist - Test Album",
@@ -814,15 +857,14 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
             )
 
-        # Preimport accepts — quality decisions live in
-        # full_pipeline_decision_from_evidence.
-        self.assertTrue(result.valid)
-        self.assertIsNone(result.scenario)
+        # Measurement is fact-only: no audio-corrupt, no bad-hash → the
+        # importer's evidence pipeline owns the accept/reject decision.
+        self.assertFalse(measurement.audio_corrupt)
+        self.assertIsNone(measurement.matched_bad_hash_id)
         self.assertEqual(len(db.denylist), 0,
-                         "preimport must not denylist on quality grounds")
+                         "preimport measurement must not denylist")
 
         # Spectral state for the *existing* album was persisted so the
         # importer's evidence pipeline can compare spectral-to-spectral on
@@ -854,7 +896,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         read ``spectral {x}kbps <= existing {x}kbps`` with equal numbers.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -871,7 +913,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             return_value=SimpleNamespace(
                 grade="suspect",
                 estimated_bitrate_kbps=128,
@@ -880,7 +922,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=False):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
                 label="Test Artist - Test Album",
@@ -890,30 +932,32 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
                 propagate_download_to_existing=True,
             )
 
-        # The self-compare bug — if any reject fires, it must not read as
-        # "spectral X <= existing X" with equal numbers. A legitimate reject
-        # against the container bitrate (320) is allowed.
-        if not result.valid:
-            self.assertNotEqual(result.detail,
-                                "spectral 128kbps <= existing 128kbps",
-                                "self-compare bug: download compared against "
-                                "a propagated copy of its own spectral")
+        # The self-compare bug — propagation must not have copied the
+        # download's spectral into existing_spectral. existing_spectral
+        # may stay None (stale path on disk) or come from beets, but it
+        # must NOT equal the download's spectral exactly.
+        if measurement.download_spectral and measurement.existing_spectral:
+            self.assertNotEqual(
+                measurement.existing_spectral,
+                measurement.download_spectral,
+                "self-compare bug: existing_spectral propagated from download",
+            )
 
     def test_stale_album_path_imports_when_download_beats_container(self):
-        """Issue #90 correctness: suspect download above the container
-        bitrate must import (import_upgrade) instead of self-rejecting.
+        """Issue #90 correctness: a suspect download above the container
+        bitrate must persist its spectral state to album_requests for the
+        importer's evidence pipeline to consume.
 
-        Without the fix: propagation writes 280 into existing_spectral,
-        decision sees 280 <= 280 → reject. A legitimate upgrade blocked.
-
-        With the fix: decision sees 280 vs container 256 → import_upgrade.
+        Pre-fix: propagation wrote 280 into existing_spectral, decision saw
+        280 <= 280 → reject. After the fix the measurement keeps
+        existing_spectral disjoint from the download's; the importer's
+        full pipeline then sees 280 vs container 256 and imports.
         """
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -929,7 +973,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             return_value=SimpleNamespace(
                 grade="suspect",
                 estimated_bitrate_kbps=280,
@@ -938,7 +982,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
             ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=False):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/download",
                 mb_release_id="mbid-123",
                 label="Test Artist - Test Album",
@@ -948,12 +992,11 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
                 propagate_download_to_existing=True,
             )
 
-        self.assertTrue(result.valid,
-                        "suspect 280 > container 256 should import (upgrade)")
+        # Measurement is fact-only — accept/reject lives in the importer.
+        self.assertFalse(measurement.audio_corrupt)
         # Propagation still persisted the download's spectral for future runs.
         row = db.request(42)
         self.assertEqual(row["current_spectral_grade"], "suspect")
@@ -978,7 +1021,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
     def test_accept_suspect_upgrade_still_persists_spectral(self):
         """Accept (suspect grade but bitrate upgrades existing) → spectral state still propagates."""
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -997,7 +1040,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             side_effect=[
                 # download: suspect at 256 (upgrade over existing at 96)
                 SimpleNamespace(
@@ -1016,7 +1059,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
             ],
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
              patch("os.path.isdir", return_value=True):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/dl",
                 mb_release_id="mbid-upgrade",
                 label="Upgrade Album",
@@ -1026,26 +1069,25 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
             )
 
-        # Accept (suspect grade BUT bitrate upgrades existing).
-        self.assertTrue(
-            result.valid,
-            "suspect 256 > existing 96 must accept (spectral upgrade)")
-        # Crucial: the spectral state still propagated despite the accept.
+        # Measurement is fact-only; the importer's evidence pipeline owns
+        # the accept/reject for the suspect-upgrade case.
+        self.assertFalse(measurement.audio_corrupt)
+        # Crucial: the existing-album spectral state propagated during the
+        # measurement so the importer can compare evidence-to-evidence.
         row = db.request(42)
         self.assertEqual(
             row["current_spectral_grade"], "likely_transcode",
-            "existing spectral measurement must be persisted on accept")
+            "existing spectral measurement must be persisted")
         self.assertEqual(row["current_spectral_bitrate"], 96)
-        # No denylist on accept paths.
+        # Measurement never writes denylist.
         self.assertEqual(len(db.denylist), 0)
 
     def test_accept_import_no_exist_still_persists_spectral(self):
         """Accept (suspect grade, no existing on disk) → spectral state propagates the download's spectral."""
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1055,7 +1097,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
-            "lib.preimport.spectral_analyze",
+            "lib.measurement.spectral_analyze",
             return_value=SimpleNamespace(
                 grade="suspect",
                 estimated_bitrate_kbps=192,
@@ -1064,7 +1106,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
             ),
         ), patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
              patch("os.path.isdir", return_value=True):
-            result = run_preimport_gates(
+            measurement = measure_preimport_state(
                 path="/tmp/dl",
                 mb_release_id="mbid-firsttime",
                 label="First Time Album",
@@ -1074,22 +1116,14 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"user1"},
             )
 
-        # Accept — no existing album, suspect spectral is import_no_exist.
-        self.assertTrue(result.valid)
-        # Without an existing-on-disk and no existing_min_bitrate, the
-        # propagation helper does NOT adopt the download's spectral (it would
-        # be speculative). But it must still attempt to write the
-        # existing_spectral (None) — which means we DON'T expect a row update
-        # in this case. Per ``_persist_spectral_state`` semantics: when
-        # existing_spectral is None AND existing_min_bitrate is None, nothing
-        # is persisted. The accept decision itself fires correctly.
+        # Measurement is fact-only; no existing album means no
+        # existing-spectral propagation. Per ``_persist_spectral_state``
+        # semantics, when existing_spectral is None AND existing_min_bitrate
+        # is None, nothing is persisted.
+        self.assertFalse(measurement.audio_corrupt)
         row = db.request(42)
-        # Either NULL (no propagation triggered) or the download's spectral
-        # (if existing_min_bitrate had been set, propagation would adopt it).
-        # Here the invariant is: no crash, accept decision wins, no denylist.
         self.assertIsNone(row.get("current_spectral_grade"))
         self.assertEqual(len(db.denylist), 0)
 
@@ -1229,13 +1263,8 @@ class TestForceImportSlice(unittest.TestCase):
         """Force-import → imported, download_log outcome=force_import."""
         from lib.import_dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AudioQualityMeasurement,
-        )
+        from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
-        from tests.helpers import make_album_quality_evidence
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1264,9 +1293,9 @@ class TestForceImportSlice(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-candidate",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320, avg_bitrate_kbps=320,
@@ -1274,10 +1303,10 @@ class TestForceImportSlice(unittest.TestCase):
                     spectral_grade="genuine",
                 ),
                 codec="mp3", container="mp3", storage_format="mp3 320",
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=42,
+            )
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-current",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=180, avg_bitrate_kbps=180,
                     median_bitrate_kbps=180, format="MP3",
@@ -1285,7 +1314,7 @@ class TestForceImportSlice(unittest.TestCase):
                     spectral_grade="likely_transcode",
                 ),
                 codec="mp3", container="mp3", storage_format="mp3",
-            ))
+            )
             # album_path=None makes ensure_current_evidence_for_action
             # skip the audio-snapshot guard and trust the seeded
             # _REQUEST_CURRENT row directly.
@@ -1327,13 +1356,8 @@ class TestForceImportSlice(unittest.TestCase):
         """
         from lib.import_dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AudioQualityMeasurement,
-        )
+        from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
-        from tests.helpers import make_album_quality_evidence
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1365,9 +1389,9 @@ class TestForceImportSlice(unittest.TestCase):
                 request_id=833,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-go-team-cand",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320, avg_bitrate_kbps=320,
@@ -1375,16 +1399,16 @@ class TestForceImportSlice(unittest.TestCase):
                     spectral_grade="genuine",
                 ),
                 codec="mp3", container="mp3", storage_format="mp3 320",
-            ))
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-                owner_id=833,
+            )
+            _seed_current_for_request(
+                db, 833,
+                mb_release_id="mbid-go-team-current",
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=192, avg_bitrate_kbps=192,
                     median_bitrate_kbps=192, format="MP3",
                 ),
                 codec="mp3", container="mp3", storage_format="mp3",
-            ))
+            )
             beets_info_no_path = AlbumInfo(
                 album_id=1, track_count=10, min_bitrate_kbps=320,
                 avg_bitrate_kbps=320, format="MP3",
@@ -1916,7 +1940,7 @@ class TestReleaseLockContention(unittest.TestCase):
           ``os.mkdir`` with ``os.path.exists`` and skips file moves
           when the destination already has the file).
         - **``current_spectral_*`` stays populated** — Codex R3 P2:
-          ``run_preimport_gates`` ran BEFORE this contention path
+          ``measure_preimport_state`` ran BEFORE this contention path
           fired and persisted spectral state from the downloaded
           files. A retry on the same files would compute the same
           spectral state anyway; clearing it would cause
@@ -1930,7 +1954,7 @@ class TestReleaseLockContention(unittest.TestCase):
                                      release_id_to_lock_key)
 
         db = self._make_db()
-        # Seed the spectral fields that ``run_preimport_gates`` would
+        # Seed the spectral fields that ``measure_preimport_state`` would
         # have populated pre-dispatch. These must survive the
         # contention path.
         db.request(42)["current_spectral_grade"] = "genuine"
@@ -1978,7 +2002,7 @@ class TestReleaseLockContention(unittest.TestCase):
                          "poll_active_downloads retries next cycle.")
         self.assertEqual(db.request(42)["current_spectral_grade"],
                          "genuine", "Spectral state from the "
-                         "pre-dispatch run_preimport_gates MUST "
+                         "pre-dispatch measure_preimport_state MUST "
                          "survive contention (Codex R3 P2).")
         self.assertEqual(db.request(42)["current_spectral_bitrate"], 245)
         # No staged-dir cleanup — Codex R3 P3.
@@ -2681,21 +2705,21 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
                 db_request_id=None,
             )
 
+            from lib.measurement import PreimportMeasurement
             with patch("lib.download.music_tag.load_file", return_value=MagicMock()), \
                  patch("lib.beets.beets_validate", return_value=ValidationResult(
                      valid=True,
                      distance=0.05,
                      scenario="strong_match",
                  )), \
-                 patch("lib.preimport.run_preimport_gates", return_value=MagicMock(
-                     valid=True,
-                     scenario=None,
-                     detail=None,
-                     corrupt_files=[],
-                     download_spectral=None,
-                     existing_spectral=None,
-                     existing_min_bitrate=None,
-                 )):
+                 patch(
+                     "lib.download.measure_preimport_state",
+                     return_value=PreimportMeasurement(
+                         folder_layout="flat",
+                         audio_file_count=1,
+                         filetype_band="mp3",
+                     ),
+                 ):
                 dl_mod._run_completed_processing(
                     entry,
                     42,
@@ -2865,21 +2889,21 @@ class TestWrongMatchTriageMeasurementRoundTrip(unittest.TestCase):
 
 
 class TestBadAudioHashSlice(unittest.TestCase):
-    """Integration slice: bad-audio-hash gate inside ``run_preimport_gates``.
+    """Integration slice: bad-audio-hash gate inside ``measure_preimport_state``.
 
-    Plan 2026-04-29-005 / U5. Populates ``FakePipelineDB`` with the U3 fixture's
-    real hash, points ``run_preimport_gates`` at the fixture, and asserts the
-    full F2 path: rejection scenario, denylist row written, and
-    ``PreImportGateResult`` carries ``matched_bad_hash_id`` /
-    ``matched_bad_track_path`` for the caller to fold into ``ValidationResult``.
+    Plan 2026-04-29-005 / U5. Populates ``FakePipelineDB`` with the U3
+    fixture's real hash, points ``measure_preimport_state`` at the fixture,
+    and asserts the measurement surfaces ``matched_bad_hash_id`` /
+    ``matched_bad_track_path``. After U8, denylisting on bad-hash is the
+    importer's responsibility — measurement only reports facts.
     """
 
-    def test_known_bad_hash_rejects_and_denylists(self):
+    def test_known_bad_hash_surfaces_match_facts(self):
         from pathlib import Path
         from lib.audio_hash import hash_audio_content
         from lib.config import CratediggerConfig
         from lib.pipeline_db import BadAudioHashInput
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -2903,7 +2927,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
         # 'off' keeps the slice scoped to the bad-hash gate).
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        result = run_preimport_gates(
+        measurement = measure_preimport_state(
             path=str(fixture_dir),
             mb_release_id="mbid-bad",
             label="Bad Rip Test",
@@ -2913,33 +2937,24 @@ class TestBadAudioHashSlice(unittest.TestCase):
             cfg=cfg,
             db=db,  # type: ignore[arg-type]
             request_id=42,
-            usernames={"H@rco"},
         )
 
-        # 1. Gate rejected the candidate with the bad-hash scenario.
-        self.assertFalse(result.valid)
-        self.assertEqual(result.scenario, "bad_audio_hash")
-        self.assertIsNotNone(result.matched_bad_hash_id)
+        # 1. Measurement surfaced the bad-hash match facts.
+        self.assertIsNotNone(measurement.matched_bad_hash_id)
         # The matched track must be the actual fixture path we seeded.
-        self.assertEqual(result.matched_bad_track_path, str(bad_track))
+        self.assertEqual(measurement.matched_bad_track_path, str(bad_track))
 
-        # 2. Supplying user denylisted on this request, with bad-hash reason.
-        self.assertEqual(len(db.denylist), 1)
-        self.assertEqual(db.denylist[0].request_id, 42)
-        self.assertEqual(db.denylist[0].username, "H@rco")
-        self.assertIn("matched bad hash", db.denylist[0].reason or "")
-
-        # 3. Detail string surfaces the hash id + track path for log audit.
-        assert result.detail is not None
-        self.assertIn("matched bad audio hash", result.detail)
-        self.assertIn(str(bad_track), result.detail)
+        # 2. Measurement never writes the denylist — that is the importer's
+        # responsibility in the unified reject path (covered by importer-side
+        # slices via the persisted-evidence path).
+        self.assertEqual(len(db.denylist), 0)
 
     def test_empty_table_runs_no_hashing(self):
         """When ``has_any_bad_audio_hashes`` is False, the gate fast-skips:
         no calls to ``hash_audio_content`` or ``lookup_bad_audio_hash``."""
         from pathlib import Path
         from lib.config import CratediggerConfig
-        from lib.preimport import run_preimport_gates
+        from lib.measurement import measure_preimport_state
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -2949,10 +2964,10 @@ class TestBadAudioHashSlice(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
         cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch("lib.preimport.hash_audio_content") as hashfn, \
+        with patch("lib.measurement.hash_audio_content") as hashfn, \
              patch.object(db, "lookup_bad_audio_hash") as lookup, \
-             patch("lib.preimport._needs_spectral_check", return_value=False):
-            result = run_preimport_gates(
+             patch("lib.measurement._needs_spectral_check", return_value=False):
+            measurement = measure_preimport_state(
                 path=str(fixture_dir),
                 mb_release_id="mbid-empty",
                 label="Empty Table",
@@ -2962,11 +2977,10 @@ class TestBadAudioHashSlice(unittest.TestCase):
                 cfg=cfg,
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
-                usernames={"someone"},
             )
 
-        self.assertTrue(result.valid)
-        self.assertIsNone(result.matched_bad_hash_id)
+        self.assertFalse(measurement.audio_corrupt)
+        self.assertIsNone(measurement.matched_bad_hash_id)
         hashfn.assert_not_called()
         lookup.assert_not_called()
         self.assertEqual(len(db.denylist), 0)
@@ -5222,20 +5236,36 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
     ``load_candidate_evidence_for_source`` and a FakePipelineDB. Asserts
     that when stored candidate evidence already passes the snapshot guard,
     the worker marks the job importable WITHOUT invoking
-    ``preview_import_from_path`` / ``run_preimport_gates`` / spectral
+    ``preview_import_from_path`` / ``measure_preimport_state`` / spectral
     analysis or, for automation jobs, the materialization helper.
 
     Covers AE4 for both force/manual and automation job types via the
     same code path used in production.
     """
 
-    def _evidence(self, source_path: str, owner_type: str, owner_id: int):
+    def _seed_evidence_for_download_log(self, db, log_id: int, source_path: str):
         from lib.quality_evidence import snapshot_audio_files
-        from tests.helpers import make_album_quality_evidence
+        return _seed_candidate_for_download_log(
+            db, log_id,
+            mb_release_id=f"mbid-front-gate-dl-{log_id}",
+            files=snapshot_audio_files(source_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3 V0",
+                spectral_grade="genuine",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+        )
 
-        return make_album_quality_evidence(
-            owner_type=owner_type,
-            owner_id=owner_id,
+    def _seed_evidence_for_import_job(self, db, job_id: int, source_path: str):
+        from lib.quality_evidence import snapshot_audio_files
+        return _seed_candidate_for_import_job(
+            db, job_id,
+            mb_release_id=f"mbid-front-gate-job-{job_id}",
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -5255,7 +5285,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             force_import_dedupe_key,
             force_import_payload,
         )
-        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as source:
@@ -5276,15 +5305,11 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            db.upsert_album_quality_evidence(self._evidence(
-                source,
-                ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                log_id,
-            ))
+            self._seed_evidence_for_download_log(db, log_id, source)
 
             sentinels = {
                 "preview_called": False,
-                "preimport_called": False,
+                "measure_called": False,
             }
 
             def _sentinel_preview(*args, **kwargs):
@@ -5293,18 +5318,18 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "preview_import_from_path must not be called when evidence is valid"
                 )
 
-            def _sentinel_preimport(*args, **kwargs):
-                sentinels["preimport_called"] = True
+            def _sentinel_measure(*args, **kwargs):
+                sentinels["measure_called"] = True
                 raise AssertionError(
-                    "run_preimport_gates must not be called when evidence is valid"
+                    "measure_preimport_state must not be called when evidence is valid"
                 )
 
             with patch(
                 "scripts.import_preview_worker.preview_import_from_path",
                 side_effect=_sentinel_preview,
             ), patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_sentinel_preimport,
+                "lib.import_preview.measure_preimport_state",
+                side_effect=_sentinel_measure,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
@@ -5312,7 +5337,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
         self.assertFalse(sentinels["preview_called"])
-        self.assertFalse(sentinels["preimport_called"])
+        self.assertFalse(sentinels["measure_called"])
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -5327,7 +5352,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             IMPORT_JOB_AUTOMATION,
             automation_import_dedupe_key,
         )
-        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
@@ -5357,15 +5381,11 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            db.upsert_album_quality_evidence(self._evidence(
-                staged,
-                ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                claimed.id,
-            ))
+            self._seed_evidence_for_import_job(db, claimed.id, staged)
 
             sentinels = {
                 "preview_called": False,
-                "preimport_called": False,
+                "measure_called": False,
                 "materialize_called": False,
             }
 
@@ -5375,10 +5395,10 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     "preview_import_from_path must not be called when evidence is valid"
                 )
 
-            def _sentinel_preimport(*args, **kwargs):
-                sentinels["preimport_called"] = True
+            def _sentinel_measure(*args, **kwargs):
+                sentinels["measure_called"] = True
                 raise AssertionError(
-                    "run_preimport_gates must not be called when evidence is valid"
+                    "measure_preimport_state must not be called when evidence is valid"
                 )
 
             def _sentinel_materialize(*args, **kwargs):
@@ -5391,8 +5411,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 "scripts.import_preview_worker.preview_import_from_path",
                 side_effect=_sentinel_preview,
             ), patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_sentinel_preimport,
+                "lib.import_preview.measure_preimport_state",
+                side_effect=_sentinel_measure,
             ), patch(
                 "lib.download._materialize_processing_dir",
                 side_effect=_sentinel_materialize,
@@ -5403,7 +5423,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
         self.assertFalse(sentinels["preview_called"])
-        self.assertFalse(sentinels["preimport_called"])
+        self.assertFalse(sentinels["measure_called"])
         self.assertFalse(sentinels["materialize_called"])
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -5433,11 +5453,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             IMPORT_JOB_MANUAL,
             manual_import_payload,
         )
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-        )
         from lib.quality_evidence import snapshot_audio_files
-        from tests.helpers import make_album_quality_evidence
 
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
@@ -5502,9 +5518,9 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             self.assertEqual(preview_claimed.preview_status, "running")
 
             # Step 5: preview persists candidate evidence and marks ready.
-            db.upsert_album_quality_evidence(make_album_quality_evidence(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=job.id,
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-requeue-cand",
                 files=snapshot_audio_files(source),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
@@ -5516,7 +5532,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="mp3 v0",
-            ))
+            )
             db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"verdict": "would_import"},
@@ -5941,11 +5957,7 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
             force_import_dedupe_key,
             force_import_payload,
         )
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            AudioQualityMeasurement,
-        )
-        from tests.helpers import make_album_quality_evidence
+        from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
         from scripts import import_preview_worker
 
@@ -5980,10 +5992,10 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
 
             def fake_preview(*args, **kwargs):
                 # Simulate production: preview persisted candidate evidence
-                # before returning.
-                db.upsert_album_quality_evidence(make_album_quality_evidence(
-                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                    owner_id=download_log_id,
+                # and wired the FK before returning.
+                _seed_candidate_for_download_log(
+                    db, download_log_id,
+                    mb_release_id="mbid-evidence-ready",
                     files=snapshot_audio_files(source),
                     measurement=AudioQualityMeasurement(
                         min_bitrate_kbps=245,
@@ -5995,7 +6007,7 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                     codec="mp3",
                     container="mp3",
                     storage_format="mp3 v0",
-                ))
+                )
                 return preview_result
 
             with patch(
@@ -6080,17 +6092,19 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
     ):
         from datetime import datetime, timezone
         from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
             AlbumQualityEvidence,
-            AlbumQualityEvidenceOwner,
             AudioQualityMeasurement,
         )
+        from lib.quality_evidence import snapshot_fingerprint
 
         return AlbumQualityEvidence(
-            owner=AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_IMPORT_JOB_CANDIDATE,
-                owner_id=owner_id,
-            ),
+            # Post migration 021: content-addressed. The job-id is folded into
+            # the synthesised mb_release_id so distinct import_jobs in the
+            # same test class get distinct evidence rows.
+            mb_release_id=f"mbid-u6-cand-{owner_id}",
+            snapshot_fingerprint=snapshot_fingerprint(files) if files else
+                f"sha256:empty-fileset-{owner_id}",
+            source_path=f"/tmp/u6-cand-{owner_id}",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate_kbps,
                 avg_bitrate_kbps=min_bitrate_kbps,
@@ -6115,6 +6129,16 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             matched_bad_audio_hash_path=matched_bad_audio_hash_path,
         )
 
+    def _wire_candidate(self, db, job_id, evidence):
+        """Upsert ``evidence`` and wire ``import_jobs.candidate_evidence_id``."""
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+
     def _build_current_evidence(
         self,
         *,
@@ -6123,15 +6147,11 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         spectral_grade="genuine",
         spectral_bitrate_kbps=None,
     ):
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AudioQualityMeasurement,
-        )
+        from lib.quality import AudioQualityMeasurement
         from tests.helpers import make_album_quality_evidence
 
         return make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=owner_id,
+            mb_release_id=f"mbid-u6-current-{owner_id}",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate_kbps,
                 avg_bitrate_kbps=min_bitrate_kbps,
@@ -6144,6 +6164,16 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             container="mp3",
             storage_format="mp3",
         )
+
+    def _wire_current(self, db, request_id, evidence):
+        """Upsert ``evidence`` and wire ``album_requests.current_evidence_id``."""
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(request_id, persisted.id)
 
     def _drive_dispatch(self, db, *, request_id, tmpdir, import_job_id, cfg):
         from lib.import_dispatch import dispatch_import_from_db
@@ -6212,16 +6242,15 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(
+            self._wire_candidate(
+                db, job.id,
                 self._build_candidate_evidence(
                     owner_id=job.id,
                     files=corrupt_files,
                     audio_corrupt=True,
-                )
+                ),
             )
-            db.upsert_album_quality_evidence(
-                self._build_current_evidence(owner_id=42),
-            )
+            self._wire_current(db, 42, self._build_current_evidence(owner_id=42))
 
             result, ext = self._drive_dispatch(
                 db, request_id=42, tmpdir=tmpdir,
@@ -6263,16 +6292,15 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 request_id=43,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(
+            self._wire_candidate(
+                db, job.id,
                 self._build_candidate_evidence(
                     owner_id=job.id,
                     files=files,
                     folder_layout="nested",
-                )
+                ),
             )
-            db.upsert_album_quality_evidence(
-                self._build_current_evidence(owner_id=43),
-            )
+            self._wire_current(db, 43, self._build_current_evidence(owner_id=43))
 
             result, ext = self._drive_dispatch(
                 db, request_id=43, tmpdir=tmpdir,
@@ -6304,17 +6332,16 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 request_id=44,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(
+            self._wire_candidate(
+                db, job.id,
                 self._build_candidate_evidence(
                     owner_id=job.id,
                     files=[],
                     audio_file_count=0,
                     folder_layout="flat",
-                )
+                ),
             )
-            db.upsert_album_quality_evidence(
-                self._build_current_evidence(owner_id=44),
-            )
+            self._wire_current(db, 44, self._build_current_evidence(owner_id=44))
 
             result, ext = self._drive_dispatch(
                 db, request_id=44, tmpdir=tmpdir,
@@ -6367,16 +6394,18 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 request_id=45,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
-            db.upsert_album_quality_evidence(
+            self._wire_candidate(
+                db, job.id,
                 self._build_candidate_evidence(
                     owner_id=job.id,
                     files=files,
                     spectral_grade="likely_transcode",
                     spectral_bitrate_kbps=128,
                     min_bitrate_kbps=128,
-                )
+                ),
             )
-            db.upsert_album_quality_evidence(
+            self._wire_current(
+                db, 45,
                 self._build_current_evidence(
                     owner_id=45,
                     min_bitrate_kbps=128,
@@ -6605,15 +6634,15 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
 
 class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
     """Hotfix coverage: ``preview_import_from_path(worker_mode=True)`` must
-    NEVER call ``run_preimport_gates``. The worker collects facts via
+    never decide accept/reject. The worker collects facts via
     ``measure_preimport_state``, persists evidence, and lets the importer's
     ``preimport_decide`` make the accept/reject call.
 
-    Reproduces the Boards-of-Canada production bug: previously preview ran
-    the legacy shim which made a ``spectral_reject`` decision, early-returned
+    Reproduces the Boards-of-Canada production bug: a pre-U8 legacy shim
+    bundled measurement with a ``spectral_reject`` decision, early-returned
     ``evidence_ready`` WITHOUT persisting evidence, and the importer's
     front-gate then fired ``evidence_persist_failed`` and re-queued the
-    request forever.
+    request forever. After U6/U8 the shim is gone — preview only measures.
     """
 
     def _seed_force_job(self, db, *, request_id, source_path):
@@ -6645,11 +6674,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         return claimed, log_id
 
     def _seed_current_evidence(self, db, *, request_id, min_bitrate_kbps, spectral_grade="genuine", spectral_bitrate_kbps=None):
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            AlbumQualityEvidenceFile,
-        )
-        from tests.helpers import make_album_quality_evidence
+        from lib.quality import AlbumQualityEvidenceFile
         files = [
             AlbumQualityEvidenceFile(
                 relative_path="01 - Old.mp3",
@@ -6660,9 +6685,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 codec="mp3",
             ),
         ]
-        evidence = make_album_quality_evidence(
-            owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_REQUEST_CURRENT,
-            owner_id=request_id,
+        _seed_current_for_request(
+            db, request_id,
+            mb_release_id=f"mbid-boc-current-{request_id}",
             files=files,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate_kbps,
@@ -6676,7 +6701,6 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             container="mp3",
             storage_format="MP3",
         )
-        db.upsert_album_quality_evidence(evidence)
 
     def test_boc_geogaddi_suspect_96k_persists_evidence_and_importer_rejects(self):
         """Production BoC bug: suspect 96kbps MP3 download vs existing 192kbps.
@@ -6689,16 +6713,14 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         full pipeline returns ``downgrade`` and the importer rejects via
         the evidence pipeline.
 
-        Pre-fix: preview's legacy shim ran ``_legacy_preimport_decision``,
-        returned ``spectral_reject``, early-returned without persisting,
-        importer's front-gate then fired ``evidence_persist_failed`` and
-        re-queued forever.
+        Pre-U8 (deleted): preview's legacy shim ran
+        ``_legacy_preimport_decision``, returned ``spectral_reject``,
+        early-returned without persisting, importer's front-gate then fired
+        ``evidence_persist_failed`` and re-queued forever. After U8 the
+        shim is gone; preview only measures.
         """
-        from lib.preimport import PreimportMeasurement
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            SpectralMeasurement,
-        )
+        from lib.measurement import PreimportMeasurement
+        from lib.quality import SpectralMeasurement
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -6744,21 +6766,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
-            sentinels = {"shim_called": False}
-
-            def _shim_sentinel(*args, **kwargs):
-                sentinels["shim_called"] = True
-                raise AssertionError(
-                    "worker_mode must NOT call run_preimport_gates"
-                )
-
             with patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
-                "lib.import_preview.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
@@ -6775,21 +6783,17 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     cast(Any, db), claimed,
                 )
 
-            # The shim must not have been invoked.
-            self.assertFalse(sentinels["shim_called"])
-
             # Preview marked the job evidence_ready.
             assert updated_job is not None
             self.assertEqual(updated_job.preview_status, "evidence_ready")
             self.assertEqual(updated_job.status, "queued")
 
-            # Candidate evidence was persisted with the correct facts.
-            from lib.quality import AlbumQualityEvidenceOwner
-            owner = AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=download_log_id,
-            )
-            persisted = db.load_album_quality_evidence(owner)
+            # Candidate evidence was persisted with the correct facts —
+            # production wires download_log.candidate_evidence_id, so walk
+            # the FK chain.
+            evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
+            self.assertIsNotNone(evidence_id)
+            persisted = db.load_album_quality_evidence_by_id(evidence_id)
             assert persisted is not None
             self.assertFalse(persisted.audio_corrupt)
             self.assertEqual(persisted.measurement.spectral_grade, "suspect")
@@ -6842,11 +6846,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         accepts (suspect upgrade). The importer continues to the quality
         gate and import path. Beets actually runs.
         """
-        from lib.preimport import PreimportMeasurement
-        from lib.quality import (
-            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-            SpectralMeasurement,
-        )
+        from lib.measurement import PreimportMeasurement
+        from lib.quality import SpectralMeasurement
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -6886,21 +6887,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
-            sentinels = {"shim_called": False}
-
-            def _shim_sentinel(*args, **kwargs):
-                sentinels["shim_called"] = True
-                raise AssertionError(
-                    "worker_mode must NOT call run_preimport_gates"
-                )
-
             with patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
-                "lib.import_preview.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
@@ -6917,16 +6904,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     cast(Any, db), claimed,
                 )
 
-            self.assertFalse(sentinels["shim_called"])
             assert updated_job is not None
             self.assertEqual(updated_job.preview_status, "evidence_ready")
 
-            from lib.quality import AlbumQualityEvidenceOwner
-            owner = AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=download_log_id,
-            )
-            persisted = db.load_album_quality_evidence(owner)
+            evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
+            self.assertIsNotNone(evidence_id)
+            persisted = db.load_album_quality_evidence_by_id(evidence_id)
             assert persisted is not None
             self.assertEqual(persisted.measurement.spectral_grade, "suspect")
             self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 256)
@@ -6935,8 +6918,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         """Audio corrupt: ffmpeg rc!=0. Preview persists evidence with
         audio_corrupt=True; importer's preimport_decide rejects on
         audio_corrupt before ever invoking beets."""
-        from lib.preimport import PreimportMeasurement
-        from lib.quality import ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE
+        from lib.measurement import PreimportMeasurement
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -6964,13 +6946,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 is_vbr=False,
             )
 
-            sentinels = {"shim_called": False, "harness_called": False}
-
-            def _shim_sentinel(*args, **kwargs):
-                sentinels["shim_called"] = True
-                raise AssertionError(
-                    "worker_mode must NOT call run_preimport_gates"
-                )
+            sentinels = {"harness_called": False}
 
             def _harness_sentinel(*args, **kwargs):
                 sentinels["harness_called"] = True
@@ -6979,12 +6955,6 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 )
 
             with patch(
-                "lib.preimport.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
-                "lib.import_preview.run_preimport_gates",
-                side_effect=_shim_sentinel,
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 return_value=measured_facts,
             ), patch(
@@ -7001,16 +6971,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     cast(Any, db), claimed,
                 )
 
-            self.assertFalse(sentinels["shim_called"])
             self.assertFalse(sentinels["harness_called"])
             assert updated_job is not None
             self.assertEqual(updated_job.preview_status, "evidence_ready")
-            from lib.quality import AlbumQualityEvidenceOwner
-            owner = AlbumQualityEvidenceOwner(
-                owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
-                owner_id=download_log_id,
-            )
-            persisted = db.load_album_quality_evidence(owner)
+            evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
+            self.assertIsNotNone(evidence_id)
+            persisted = db.load_album_quality_evidence_by_id(evidence_id)
             assert persisted is not None
             self.assertTrue(persisted.audio_corrupt)
 
@@ -7047,168 +7013,515 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             self.assertIn(("rejected", "audio_corrupt"), outcomes)
 
 
-class TestPersistEvidenceOnRejectSlice(unittest.TestCase):
-    """Auto-import reject persists candidate evidence so Wrong Matches triage is instant.
+class TestU4TriageFKChainAvoidsRemeasurement(unittest.TestCase):
+    """U4 regression guard: triage's happy path skips cold-path measurement.
 
-    Pre-fix behavior: ``_handle_rejected_result`` wrote the download_log row
-    but never persisted ``album_quality_evidence`` with
-    ``owner_type='download_log_candidate'``. First Wrong Matches triage
-    interaction with that row fell back to ``_preview_for_triage`` →
-    full re-measurement (snapshot + validate_audio + spectral_analyze +
-    V0 probe), 10-30s per album.
-
-    Post-fix: ``_persist_candidate_evidence_for_reject`` runs measurement
-    once at reject time and persists the evidence row. Triage then finds
-    the row via ``ensure_candidate_evidence_for_action`` and returns
-    ``candidate_status='reused'`` without firing the preview fallback.
+    When evidence is reachable through the FK chain
+    (``download_log.candidate_evidence_id`` direct, or via the cross-walk
+    through ``import_jobs``), ``triage_wrong_match`` must NOT trigger
+    ``measure_preimport_state``. The preview-worker contract (PR #254)
+    owns the only legitimate path that measures candidates; triage just
+    reads. This slice patches the measurement seam and asserts zero
+    calls — the regression that bit PR #256 was exactly this kind of
+    duplicate measurement on the rejection path.
     """
 
-    def test_reject_persists_candidate_evidence_for_owner_download_log(self):
-        from lib.quality import AlbumQualityEvidenceOwner
-        from lib.preimport import PreimportMeasurement
-        from lib.download import _persist_candidate_evidence_for_reject
-        from lib.import_evidence import ensure_candidate_evidence_for_action
-        from tests.helpers import make_grab_list_entry, make_download_file
+    def _seed(self, source: str) -> tuple[FakePipelineDB, int]:
+        from tests.helpers import make_request_row as _make_req
+        db = FakePipelineDB()
+        db.seed_request(_make_req(
+            id=1, status="manual", mb_release_id="mbid-1",
+        ))
+        db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "wrong_match",
+                "failed_path": source,
+            },
+        )
+        return db, db.download_logs[-1].id
+
+    def _evidence_for(self, source_dir: str, mb_release_id: str):
+        """Build content-addressed evidence matching files on disk."""
+        from datetime import datetime, timezone
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
+            AudioQualityMeasurement,
+        )
+        from lib.quality_evidence import snapshot_fingerprint
+        full = os.path.join(source_dir, "01.mp3")
+        stat = os.stat(full)
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="01.mp3",
+                size_bytes=int(stat.st_size),
+                mtime_ns=int(stat.st_mtime_ns),
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            ),
+        ]
+        return AlbumQualityEvidence(
+            mb_release_id=mb_release_id,
+            snapshot_fingerprint=snapshot_fingerprint(files),
+            source_path=source_dir,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="mp3 v0",
+                spectral_grade="genuine",
+            ),
+            measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            files=files,
+            codec="mp3",
+            container="mp3",
+            storage_format="mp3 v0",
+            audio_file_count=1,
+            filetype_band="mp3",
+            folder_layout="flat",
+        )
+
+    def _patch_beets_no_album(self):
+        """Stub BeetsDB so wrong-match cleanup runs without a real beets lib."""
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=ctx)
+        ctx.__exit__ = MagicMock(return_value=False)
+        ctx.get_album_info.return_value = None
+        return patch("lib.beets_db.BeetsDB", return_value=ctx)
+
+    def _patch_cfg(self):
+        """Pin the runtime-config loader so the test doesn't read disk."""
+        from lib.quality import QualityRankConfig
+        from types import SimpleNamespace as _SN
+        cfg = _SN(
+            quality_ranks=QualityRankConfig.defaults(),
+            verified_lossless_target="",
+            beets_directory="",
+        )
+        return patch(
+            "lib.config.read_runtime_config",
+            return_value=cfg,
+        )
+
+    def test_triage_with_fk_evidence_does_not_measure(self) -> None:
+        """Happy path: evidence reachable via FK chain → zero measurement."""
+        from lib.wrong_match_triage import triage_wrong_match
+
+        source = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as fp:
+                fp.write(b"audio")
+            db, log_id = self._seed(source)
+            evidence = self._evidence_for(source, "mbid-1")
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id="mbid-1",
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_download_log_candidate_evidence(log_id, stored.id)
+
+            with self._patch_beets_no_album(), \
+                    self._patch_cfg(), \
+                    patch("lib.measurement.measure_preimport_state") as mp, \
+                    patch(
+                        "lib.wrong_match_triage._preview_for_triage"
+                    ) as cold:
+                result = triage_wrong_match(db, log_id)
+
+            mp.assert_not_called()
+            cold.assert_not_called()
+            self.assertTrue(result.success)
+            # Verdict resolved without ever calling the cold-path preview.
+            self.assertIsNotNone(result.preview)
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(source, ignore_errors=True)
+
+
+class TestU10PostImportEvidencePropagation(unittest.TestCase):
+    """U10: ``_refresh_current_evidence_after_import`` propagates the candidate
+    measurement payload into the new library evidence row.
+
+    Renamed-only imports (same codec) inherit spectral grade, V0 lineage,
+    bad-audio-hash matches, and verified-lossless proof. Transcoded imports
+    (different codec) inherit ONLY ``verified_lossless`` /
+    ``verified_lossless_proof``; spectral and V0 fields stay NULL. The
+    candidate evidence row is preserved as the audit trail for the import
+    job, and ``album_requests.current_evidence_id`` is updated to the new
+    library evidence row.
+    """
+
+    def _stage_audio(self, tmpdir: str, *, filenames: list[str]) -> None:
+        for fname in filenames:
+            with open(os.path.join(tmpdir, fname), "wb") as handle:
+                handle.write(b"audio-bytes-" + fname.encode("utf-8"))
+
+    def test_renamed_only_flac_propagates_full_measurement_payload(self):
+        """FLAC source → FLAC library: spectral grade, V0 lineage,
+        verified-lossless proof, and bad-hash matches all carry forward.
+        ``snapshot_fingerprint`` differs (filenames changed),
+        ``source_path`` points at the library, ``audio_corrupt`` is False.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            VerifiedLosslessProof,
+        )
+        from lib.quality_evidence import (
+            audio_snapshot_matches,
+            snapshot_audio_files,
+        )
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        # Seed a download_log row first so the FakePipelineDB's owner-validation
-        # check accepts the download_log_candidate evidence upsert (real PG has
-        # the same FK constraint).
-        download_log_id = db.log_download(
-            request_id=42,
-            outcome="rejected",
-            beets_scenario="high_distance",
-            beets_detail="distance 0.5 above threshold",
-        )
+        db.seed_request(make_request_row(id=42, mb_release_id="mbid-r1"))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            failed_path = os.path.join(tmpdir, "Artist - Album")
-            os.makedirs(failed_path)
-            track_path = os.path.join(failed_path, "01 - Track.mp3")
-            with open(track_path, "wb") as f:
-                f.write(b"FAKE_MP3_DATA")
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.flac", "02 - source.flac"])
+            self._stage_audio(library_dir, filenames=["01 - Library.flac", "02 - Library.flac"])
 
-            measurement = PreimportMeasurement(
-                corrupt_files=[],
+            candidate_files = snapshot_audio_files(source_dir)
+            proof = VerifiedLosslessProof(
+                proof_origin="import_result",
+                source="flac",
+                classifier="spectral_verified_lossless",
+                detail="genuine",
+            )
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=240,
+                avg_bitrate_kbps=255,
+                median_bitrate_kbps=250,
+                source_lineage="lossless_source",
+                source_provenance="lossless_source",
+                proof_provenance="lossless-source probe",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=820,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=845,
+                format="flac",
+                is_cbr=False,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=850,
+                verified_lossless=True,
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-r1",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="flac",
+                v0_metric=v0_metric,
+                verified_lossless_proof=proof,
                 audio_corrupt=False,
-                matched_bad_hash_id=None,
-                matched_bad_track_path=None,
-                download_spectral=SimpleNamespace(
-                    grade="suspect",
-                    bitrate_kbps=128,
-                    suspect_pct=80.0,
-                ),
-                existing_spectral=SimpleNamespace(
-                    grade="genuine",
-                    bitrate_kbps=320,
-                    suspect_pct=0.0,
-                ),
-                existing_min_bitrate=320,
                 folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-                min_bitrate_kbps=192,
-                is_vbr=False,
+                audio_file_count=len(candidate_files),
+                filetype_band="lossless",
+                matched_bad_audio_hash_id=None,
+                matched_bad_audio_hash_path=None,
             )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-r1",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+            candidate_id = persisted_candidate.id
 
-            ctx = SimpleNamespace(
-                cfg=SimpleNamespace(
-                    beets_harness_path=_HARNESS,
-                    beets_distance_threshold=0.15,
+            beets_info = AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=820,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=845,
+                is_cbr=False,
+                album_path=library_dir,
+                format="flac",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=42,
+                    mb_release_id="mbid-r1",
                     quality_ranks=None,
-                    audio_check_mode="off",
-                    beets_directory="",
-                ),
-            )
-            album_data = make_grab_list_entry(
-                artist="Artist",
-                title="Album",
-                mb_release_id="mbid-42",
-                db_request_id=42,
-                files=[make_download_file(filename="01 - Track.mp3")],
-            )
-            dl_info = SimpleNamespace(
-                filetype="mp3",
-                bitrate=192000,
-                is_vbr=False,
-            )
-            bv_result = SimpleNamespace(
-                failed_path=failed_path,
-            )
-
-            with patch(
-                "lib.preimport.measure_preimport_state",
-                return_value=measurement,
-            ):
-                _persist_candidate_evidence_for_reject(
-                    db=db,
-                    ctx=ctx,  # type: ignore[arg-type]
-                    album_data=album_data,
-                    dl_info=dl_info,  # type: ignore[arg-type]
-                    bv_result=bv_result,  # type: ignore[arg-type]
-                    download_log_id=download_log_id,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=820,
+                    ),
                 )
 
-            # Evidence persisted with download_log_candidate owner.
-            owner = AlbumQualityEvidenceOwner(
-                owner_type="download_log_candidate",
-                owner_id=download_log_id,
+            request_row = db.request(42)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            self.assertNotEqual(
+                new_evidence_id, candidate_id,
+                "library evidence must be a new row, not the candidate",
             )
-            evidence = db.load_album_quality_evidence(owner)
-            self.assertIsNotNone(evidence)
-            assert evidence is not None  # type narrowing for pyright
-            self.assertEqual(evidence.measurement.spectral_grade, "suspect")
-            self.assertEqual(evidence.measurement.spectral_bitrate_kbps, 128)
-            self.assertEqual(evidence.audio_file_count, 1)
-            self.assertEqual(evidence.folder_layout, "flat")
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
 
-            # Triage's fast-path lookup finds the row.
-            triage_result = ensure_candidate_evidence_for_action(
-                db,
-                source_path=failed_path,
-                download_log_id=download_log_id,
-            )
-            self.assertTrue(triage_result.available)
+            # Renamed-only: spectral grade + V0 lineage + verified-lossless
+            # all propagate. Bitrate/format refresh from album_info (same
+            # values — dual-check passes).
+            self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 850)
+            self.assertTrue(new_evidence.measurement.verified_lossless)
+            self.assertEqual(new_evidence.measurement.format, "flac")
+            self.assertEqual(new_evidence.measurement.min_bitrate_kbps, 820)
+            self.assertIsNotNone(new_evidence.verified_lossless_proof)
+            assert new_evidence.verified_lossless_proof is not None
             self.assertEqual(
-                triage_result.provenance.candidate_status,
-                "reused",
+                new_evidence.verified_lossless_proof.classifier,
+                "spectral_verified_lossless",
+            )
+            self.assertIsNotNone(new_evidence.v0_metric)
+            assert new_evidence.v0_metric is not None
+            self.assertEqual(new_evidence.v0_metric.avg_bitrate_kbps, 255)
+            self.assertEqual(new_evidence.v0_metric.source_lineage, "lossless_source")
+            self.assertFalse(new_evidence.audio_corrupt)
+            self.assertEqual(new_evidence.codec, "flac")
+
+            # Fingerprint changed (filenames changed at library path) +
+            # source_path points at library.
+            self.assertNotEqual(
+                new_evidence.snapshot_fingerprint,
+                candidate_evidence.snapshot_fingerprint,
+            )
+            self.assertEqual(new_evidence.source_path, library_dir)
+
+            # Candidate evidence row survives as audit trail.
+            still_there = db.load_album_quality_evidence_by_id(candidate_id)
+            self.assertIsNotNone(still_there)
+
+            # Freshness check passes immediately for the library path.
+            self.assertTrue(
+                audio_snapshot_matches(library_dir, new_evidence.files)
             )
 
-    def test_persist_helper_is_defensive_when_inputs_are_missing(self):
-        """Helper must not crash when db is None, dl_id is non-int, or path is missing."""
-        from lib.download import _persist_candidate_evidence_for_reject
-        from tests.helpers import make_grab_list_entry
-
-        # None db: silent no-op.
-        _persist_candidate_evidence_for_reject(
-            db=None,
-            ctx=SimpleNamespace(cfg=SimpleNamespace()),  # type: ignore[arg-type]
-            album_data=make_grab_list_entry(artist="A", title="B"),
-            dl_info=SimpleNamespace(filetype="mp3", bitrate=192000, is_vbr=False),  # type: ignore[arg-type]
-            bv_result=SimpleNamespace(failed_path="/tmp/nonexistent"),  # type: ignore[arg-type]
-            download_log_id=1,
+    def test_transcoded_flac_to_v0_drops_spectral_and_v0_keeps_proof(self):
+        """FLAC source → V0 library: spectral grade, V0 lineage, and bad-hash
+        matches stay NULL on the library row (they describe source audio).
+        ``verified_lossless`` / ``verified_lossless_proof`` carry forward.
+        Bitrate/format reflect the V0 output from ``album_info``.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            VerifiedLosslessProof,
         )
 
-        # MagicMock dl_id (the pre-fix bug): silent no-op.
-        _persist_candidate_evidence_for_reject(
-            db=FakePipelineDB(),
-            ctx=SimpleNamespace(cfg=SimpleNamespace()),  # type: ignore[arg-type]
-            album_data=make_grab_list_entry(artist="A", title="B"),
-            dl_info=SimpleNamespace(filetype="mp3", bitrate=192000, is_vbr=False),  # type: ignore[arg-type]
-            bv_result=SimpleNamespace(failed_path="/tmp/nonexistent"),  # type: ignore[arg-type]
-            download_log_id=MagicMock(),  # type: ignore[arg-type]
-        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=43, mb_release_id="mbid-t1"))
 
-        # Empty failed_path: silent no-op.
-        _persist_candidate_evidence_for_reject(
-            db=FakePipelineDB(),
-            ctx=SimpleNamespace(cfg=SimpleNamespace()),  # type: ignore[arg-type]
-            album_data=make_grab_list_entry(artist="A", title="B"),
-            dl_info=SimpleNamespace(filetype="mp3", bitrate=192000, is_vbr=False),  # type: ignore[arg-type]
-            bv_result=SimpleNamespace(failed_path=""),  # type: ignore[arg-type]
-            download_log_id=1,
-        )
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.flac"])
+            self._stage_audio(library_dir, filenames=["01 - Library.mp3"])
+
+            from lib.quality_evidence import snapshot_audio_files
+            candidate_files = snapshot_audio_files(source_dir)
+            proof = VerifiedLosslessProof(
+                proof_origin="import_result",
+                source="flac",
+                classifier="spectral_verified_lossless",
+                detail="genuine",
+            )
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=240,
+                avg_bitrate_kbps=255,
+                median_bitrate_kbps=250,
+                source_lineage="lossless_source",
+                source_provenance="lossless_source",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=820,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=845,
+                format="flac",
+                is_cbr=False,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=850,
+                verified_lossless=True,
+                was_converted_from="flac",
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-t1",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="mp3",
+                v0_metric=v0_metric,
+                verified_lossless_proof=proof,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(candidate_files),
+                filetype_band="lossless",
+                matched_bad_audio_hash_id=99,
+                matched_bad_audio_hash_path="/some/known/bad.flac",
+            )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-t1",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+
+            # Library copy is V0 — different codec.
+            beets_info = AlbumInfo(
+                album_id=2,
+                track_count=1,
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                is_cbr=False,
+                album_path=library_dir,
+                format="MP3",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=43,
+                    mb_release_id="mbid-t1",
+                    quality_ranks=None,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=245,
+                    ),
+                )
+
+            request_row = db.request(43)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
+
+            # Transcoded: spectral + V0 lineage + bad-hash do NOT propagate.
+            self.assertIsNone(new_evidence.measurement.spectral_grade)
+            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
+            self.assertIsNone(new_evidence.v0_metric)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
+
+            # But verified-lossless proof carries forward.
+            self.assertTrue(new_evidence.measurement.verified_lossless)
+            self.assertIsNotNone(new_evidence.verified_lossless_proof)
+            assert new_evidence.verified_lossless_proof is not None
+            self.assertEqual(
+                new_evidence.verified_lossless_proof.classifier,
+                "spectral_verified_lossless",
+            )
+
+            # Bitrate / format reflect the V0 output from album_info.
+            self.assertEqual(new_evidence.measurement.min_bitrate_kbps, 245)
+            self.assertEqual(new_evidence.measurement.avg_bitrate_kbps, 256)
+            self.assertEqual(new_evidence.measurement.format, "MP3")
+            self.assertEqual(new_evidence.codec, "mp3")
+            self.assertEqual(new_evidence.container, "mp3")
+
+    def test_source_candidate_none_falls_back_to_legacy_backfill(self):
+        """When ``source_candidate is None`` the helper falls back to the
+        pre-U10 ``backfill_current_evidence_from_album_info`` path. The
+        post-refactor row matches what the legacy helper would have produced
+        — same bitrate/format from ``album_info``, same
+        ``verified_lossless_proof`` carried from the import_result.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality_evidence import backfill_current_evidence_from_album_info
+
+        db_via_helper = FakePipelineDB()
+        db_via_helper.seed_request(make_request_row(id=51, mb_release_id="mbid-fb"))
+
+        db_direct = FakePipelineDB()
+        db_direct.seed_request(make_request_row(id=51, mb_release_id="mbid-fb"))
+
+        with tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(library_dir, filenames=["01 - track.mp3"])
+
+            beets_info = AlbumInfo(
+                album_id=7,
+                track_count=1,
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                is_cbr=False,
+                album_path=library_dir,
+                format="MP3",
+            )
+
+            # 1) Helper with source_candidate=None.
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db_via_helper,  # type: ignore[arg-type]
+                    request_id=51,
+                    mb_release_id="mbid-fb",
+                    quality_ranks=None,
+                    source_candidate=None,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=245,
+                    ),
+                )
+
+            # 2) Legacy direct call producing the same row pre-U10 callers got.
+            backfill_current_evidence_from_album_info(
+                db_direct,
+                request_id=51,
+                mb_release_id="mbid-fb",
+                album_info=beets_info,
+                verified_lossless_proof=None,
+                preserve_existing_verified_lossless_proof=True,
+            )
+
+            row_helper = db_via_helper.request(51)
+            row_direct = db_direct.request(51)
+            ev_helper = db_via_helper.load_album_quality_evidence_by_id(
+                row_helper["current_evidence_id"]
+            )
+            ev_direct = db_direct.load_album_quality_evidence_by_id(
+                row_direct["current_evidence_id"]
+            )
+            assert ev_helper is not None and ev_direct is not None
+
+            # Both rows share the same content-addressed key and same
+            # post-import measurement shape (modulo measured_at, which is
+            # always "now"). Bitrate / format / fingerprint are identical.
+            self.assertEqual(
+                ev_helper.snapshot_fingerprint, ev_direct.snapshot_fingerprint
+            )
+            self.assertEqual(ev_helper.measurement.min_bitrate_kbps,
+                             ev_direct.measurement.min_bitrate_kbps)
+            self.assertEqual(ev_helper.measurement.format,
+                             ev_direct.measurement.format)
+            self.assertEqual(ev_helper.codec, ev_direct.codec)
+            # Neither carries spectral/V0/proof when both inputs are bare.
+            self.assertEqual(
+                ev_helper.measurement.spectral_grade,
+                ev_direct.measurement.spectral_grade,
+            )
+            self.assertEqual(ev_helper.v0_metric, ev_direct.v0_metric)
+            self.assertEqual(
+                ev_helper.verified_lossless_proof,
+                ev_direct.verified_lossless_proof,
+            )
 
 
 if __name__ == "__main__":
