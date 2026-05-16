@@ -2681,21 +2681,21 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
                 db_request_id=None,
             )
 
+            from lib.preimport import PreimportMeasurement
             with patch("lib.download.music_tag.load_file", return_value=MagicMock()), \
                  patch("lib.beets.beets_validate", return_value=ValidationResult(
                      valid=True,
                      distance=0.05,
                      scenario="strong_match",
                  )), \
-                 patch("lib.preimport.run_preimport_gates", return_value=MagicMock(
-                     valid=True,
-                     scenario=None,
-                     detail=None,
-                     corrupt_files=[],
-                     download_spectral=None,
-                     existing_spectral=None,
-                     existing_min_bitrate=None,
-                 )):
+                 patch(
+                     "lib.download.measure_preimport_state",
+                     return_value=PreimportMeasurement(
+                         folder_layout="flat",
+                         audio_file_count=1,
+                         filetype_band="mp3",
+                     ),
+                 ):
                 dl_mod._run_completed_processing(
                     entry,
                     42,

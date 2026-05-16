@@ -46,6 +46,7 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
 )
+from lib.preimport import measure_preimport_state
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -1144,10 +1145,18 @@ def _process_beets_validation(
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
-    After beets validation passes, delegates to ``lib.preimport.run_preimport_gates``
-    for the shared audio + spectral gates. The force/manual-import path
-    (``dispatch_import_from_db``) calls the same function — only the beets
-    distance check is path-specific.
+    After beets validation passes, the queue-backed caller (``import_job_id``
+    + ``db`` set) relies on the preview/importer evidence pipeline:
+    ``ensure_candidate_evidence_for_action`` has already persisted candidate
+    evidence, and the importer runs ``full_pipeline_decision_from_evidence``
+    downstream. The legacy non-queue fallback (CLI / test callers with no
+    ``import_job_id`` or no DB) instead measures inline via
+    ``lib.preimport.measure_preimport_state`` and surfaces only the two
+    folder/audio-integrity facts that ``_legacy_preimport_decision`` checks
+    (``audio_corrupt`` and ``bad_audio_hash``) — quality decisions belong to
+    the unified importer decider in U11. This caller does NOT write the
+    denylist: that side effect was previously bundled into the legacy
+    pre-import shim and is now the importer's concern.
 
     Returns the dispatch outcome when the auto-import path fires,
     ``None`` when beets validation rejects (``_handle_rejected_result``
@@ -1157,7 +1166,6 @@ def _process_beets_validation(
     keep the row untouched for manual recovery.
     """
     from lib.beets import beets_validate as _bv
-    from lib.preimport import run_preimport_gates
     current_path = staged_album.current_path
     bv_result = _bv(ctx.cfg.beets_harness_path, current_path,
                     album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
@@ -1197,7 +1205,16 @@ def _process_beets_validation(
                 )
 
         if not candidate_evidence_available:
-            preimport = run_preimport_gates(
+            # U7: legacy non-queue fallback. Measure only; never decide. The
+            # importer's full pipeline decider owns spectral / codec rank /
+            # quality-gate outcomes. We inline the two folder/audio-integrity
+            # facts that ``_legacy_preimport_decision`` checked pre-U7
+            # (``audio_corrupt`` and ``bad_audio_hash``) — ``nested_layout``
+            # and ``empty_fileset`` are intentionally NOT checked here, to
+            # stay bit-for-bit backward compatible with the legacy shim's
+            # scope. No denylist write: that side effect now belongs to the
+            # importer's unified reject path (U11).
+            measurement = measure_preimport_state(
                 path=current_path,
                 mb_release_id=album_data.mb_release_id or "",
                 label=f"{album_data.artist} - {album_data.title}",
@@ -1207,22 +1224,38 @@ def _process_beets_validation(
                 cfg=ctx.cfg,
                 db=db,
                 request_id=album_data.db_request_id,
-                usernames=usernames_pre,
+                propagate_download_to_existing=True,
             )
-            album_data.download_spectral = preimport.download_spectral
-            album_data.current_spectral = preimport.existing_spectral
-            album_data.current_min_bitrate = preimport.existing_min_bitrate
-            if not preimport.valid:
+            album_data.download_spectral = measurement.download_spectral
+            album_data.current_spectral = measurement.existing_spectral
+            album_data.current_min_bitrate = measurement.existing_min_bitrate
+            audio_corrupt = measurement.audio_corrupt
+            bad_audio_hash = measurement.matched_bad_hash_id is not None
+            if audio_corrupt or bad_audio_hash:
+                scenario = "audio_corrupt" if audio_corrupt else "bad_audio_hash"
+                if audio_corrupt and measurement.corrupt_files:
+                    detail = (
+                        f"{len(measurement.corrupt_files)} files failed "
+                        "ffmpeg decode"
+                    )
+                elif bad_audio_hash and measurement.matched_bad_track_path:
+                    detail = (
+                        f"matched bad_audio_hash id="
+                        f"{measurement.matched_bad_hash_id} on track "
+                        f"{measurement.matched_bad_track_path}"
+                    )
+                else:
+                    detail = scenario
                 bv_result.valid = False
-                bv_result.scenario = preimport.scenario
-                bv_result.detail = preimport.detail
-                if preimport.corrupt_files:
-                    bv_result.corrupt_files = preimport.corrupt_files
+                bv_result.scenario = scenario
+                bv_result.detail = detail
+                if audio_corrupt and measurement.corrupt_files:
+                    bv_result.corrupt_files = measurement.corrupt_files
                 # Carry bad-audio-hash gate match through to download_log via
                 # ValidationResult JSONB (plan 2026-04-29-005 / U5).
-                if preimport.matched_bad_hash_id is not None:
-                    bv_result.matched_bad_hash_id = preimport.matched_bad_hash_id
-                    bv_result.matched_bad_track_path = preimport.matched_bad_track_path
+                if bad_audio_hash:
+                    bv_result.matched_bad_hash_id = measurement.matched_bad_hash_id
+                    bv_result.matched_bad_track_path = measurement.matched_bad_track_path
 
     if bv_result.valid:
         return _handle_valid_result(
