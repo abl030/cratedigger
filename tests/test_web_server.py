@@ -607,6 +607,16 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         self.mock_db.get_log.assert_called_with(limit=50, outcome_filter="rejected")
 
+    def test_pipeline_log_limit_param(self):
+        status, data = self._get("/api/pipeline/log?outcome=rejected&limit=300")
+        self.assertEqual(status, 200)
+        self.mock_db.get_log.assert_called_with(limit=300, outcome_filter="rejected")
+
+    def test_pipeline_log_limit_param_is_capped(self):
+        status, data = self._get("/api/pipeline/log?limit=5000")
+        self.assertEqual(status, 200)
+        self.mock_db.get_log.assert_called_with(limit=500, outcome_filter=None)
+
     def test_pipeline_log_filter_invalid_ignored(self):
         status, data = self._get("/api/pipeline/log?outcome=badvalue")
         self.assertEqual(status, 200)

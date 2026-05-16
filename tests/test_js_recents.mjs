@@ -79,6 +79,16 @@ console.log('renderRecentsCounts() stays focused on history filters');
   assertExcludes(html, 'match/hr', 'match rates are not rendered in count cards');
 }
 
+console.log('recentsLogUrl() requests enough history for triage labels');
+{
+  state.recentsFilter = 'all';
+  assertContains(__test__.recentsLogUrl(), '/api/pipeline/log?limit=500',
+    'all recents requests the expanded bounded history window');
+  state.recentsFilter = 'rejected';
+  assertContains(__test__.recentsLogUrl(), '/api/pipeline/log?outcome=rejected&limit=500',
+    'filtered recents keeps outcome filter and expanded limit');
+}
+
 console.log('renderRecentsItems() shows match rates beside the first date header');
 {
   const html = __test__.renderRecentsItems([

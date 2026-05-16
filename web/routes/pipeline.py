@@ -39,6 +39,9 @@ from web import discogs as discogs_api
 from web import cache as cache_api
 from web.wrong_match_file_service import source_dirs_from_validation_result
 
+DEFAULT_PIPELINE_LOG_LIMIT = 50
+MAX_PIPELINE_LOG_LIMIT = 500
+
 
 def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
                               tracks, source):
@@ -75,6 +78,16 @@ def _server():
     from web import server
     return server
 
+
+def _pipeline_log_limit(params: dict[str, list[str]]) -> int:
+    raw = params.get("limit", [str(DEFAULT_PIPELINE_LOG_LIMIT)])[0]
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PIPELINE_LOG_LIMIT
+    return max(1, min(limit, MAX_PIPELINE_LOG_LIMIT))
+
+
 # ── GET handlers ─────────────────────────────────────────────────
 
 
@@ -82,7 +95,10 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
     outcome_filter = params.get("outcome", [None])[0]
     if outcome_filter not in (None, "imported", "rejected"):
         outcome_filter = None
-    entries = _server()._db().get_log(limit=50, outcome_filter=outcome_filter)
+    entries = _server()._db().get_log(
+        limit=_pipeline_log_limit(params),
+        outcome_filter=outcome_filter,
+    )
     mbids = list(set(e["mb_release_id"] for e in entries if e.get("mb_release_id")))
     beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
     result = []
