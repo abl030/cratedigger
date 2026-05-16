@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lib.quality import (
     ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
@@ -26,6 +26,9 @@ from lib.quality import (
     V0ProbeEvidence,
     VerifiedLosslessProof,
 )
+
+if TYPE_CHECKING:
+    from lib.preimport import PreimportMeasurement
 
 
 _AUDIO_EXTENSIONS = {
@@ -357,6 +360,73 @@ def legacy_current_lossless_v0_probe_from_request(
     )
 
 
+def _apply_measurement_facts_to_files(
+    files: list[AlbumQualityEvidenceFile],
+    measurement: "PreimportMeasurement",
+) -> list[AlbumQualityEvidenceFile]:
+    """Stamp ``decode_ok=False`` on snapshot files listed in measurement.corrupt_files.
+
+    ``snapshot_audio_files`` defaults ``decode_ok=True`` because the snapshot
+    helper does not run ffmpeg. The preimport measurement is the authority on
+    audio integrity, so when it reports corrupt files we propagate that fact
+    into the snapshot rows before persisting evidence. This lets the importer's
+    ``preimport_decide`` consume ``decode_ok=False`` flags as the per-file
+    evidence for ``audio_corrupt``.
+    """
+    if not measurement.corrupt_files:
+        return files
+    corrupt_set = {os.path.basename(name) for name in measurement.corrupt_files}
+    # Also accept full relative paths if measurement reported them that way.
+    corrupt_set.update(measurement.corrupt_files)
+    out: list[AlbumQualityEvidenceFile] = []
+    for f in files:
+        if (
+            f.relative_path in corrupt_set
+            or os.path.basename(f.relative_path) in corrupt_set
+        ):
+            out.append(AlbumQualityEvidenceFile(
+                relative_path=f.relative_path,
+                size_bytes=f.size_bytes,
+                mtime_ns=f.mtime_ns,
+                extension=f.extension,
+                container=f.container,
+                codec=f.codec,
+                decode_ok=False,
+            ))
+        else:
+            out.append(f)
+    return out
+
+
+def _filetype_band_to_format(filetype_band: str) -> str | None:
+    """Derive an ``AudioQualityMeasurement.format`` label from a filetype band.
+
+    Used for the measurement-only evidence path (audio_corrupt / bad_hash /
+    nested / empty), where the harness never ran and there is no measured
+    format string. The result must be specific enough that the importer's
+    ``policy_incomplete_reasons`` check passes (``measurement.format`` must not
+    be None). For mixed filetypes we pick the dominant lossless/lossy container.
+    """
+    band = (filetype_band or "").strip().lower()
+    if not band:
+        return None
+    if band in ("flac", "alac", "wav", "aiff", "ape"):
+        return band.upper()
+    if band in ("mp3", "aac", "m4a", "ogg", "opus", "wma"):
+        return band.upper()
+    if band == "mixed_lossless":
+        return "FLAC"
+    if band == "mixed_lossy":
+        return "MP3"
+    if band == "mixed":
+        return "MP3"
+    # Comma-separated extensions from inspect_local_files (e.g. "mp3, flac")
+    first = band.split(",")[0].strip()
+    if first:
+        return first.upper()
+    return None
+
+
 def evidence_from_import_result(
     *,
     owner: AlbumQualityEvidenceOwner,
@@ -365,8 +435,17 @@ def evidence_from_import_result(
     measured_at: datetime | None = None,
     target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
+    measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
-    """Build candidate evidence from an ``ImportResult`` and source folder."""
+    """Build candidate evidence from an ``ImportResult`` and source folder.
+
+    When ``measurement`` (a ``PreimportMeasurement``) is supplied, its U1
+    facts (``audio_corrupt``, ``folder_layout``, ``audio_file_count``,
+    ``filetype_band``, ``matched_bad_audio_hash_*``) override the values
+    derived from the snapshot files. The measurement is the authority for
+    these facts because it ran the real gates (ffmpeg decode, mp3val,
+    bad-hash lookup) — the snapshot helper only knows file sizes and paths.
+    """
 
     if import_result is None or import_result.new_measurement is None:
         return EvidenceBuildResult(None, "incomplete", "missing new measurement")
@@ -377,24 +456,136 @@ def evidence_from_import_result(
             return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
-    measurement = import_result.new_measurement
+    if measurement is not None and measurement.audio_corrupt:
+        files = _apply_measurement_facts_to_files(files, measurement)
+    audio_measurement = import_result.new_measurement
     proof = verified_lossless_proof_from_import_result(import_result)
     audio_corrupt = any(not file.decode_ok for file in files)
+    if measurement is not None:
+        audio_corrupt = audio_corrupt or measurement.audio_corrupt
+        folder_layout = measurement.folder_layout
+        audio_file_count = (
+            measurement.audio_file_count
+            if measurement.audio_file_count else len(files)
+        )
+        filetype_band = (
+            measurement.filetype_band or derive_filetype_band(files)
+        )
+        matched_bad_hash_id = measurement.matched_bad_hash_id
+        matched_bad_hash_path = measurement.matched_bad_track_path
+    else:
+        folder_layout = derive_folder_layout(files)
+        audio_file_count = len(files)
+        filetype_band = derive_filetype_band(files)
+        matched_bad_hash_id = None
+        matched_bad_hash_path = None
     evidence = AlbumQualityEvidence(
         owner=owner,
-        measurement=measurement,
+        measurement=audio_measurement,
         measured_at=measured_at or datetime.now(timezone.utc),
         files=files,
         codec=files[0].codec,
         container=files[0].container,
-        storage_format=measurement.format,
+        storage_format=audio_measurement.format,
         target_format=target_format,
         v0_metric=neutral_v0_metric_from_probe(import_result.v0_probe),
         verified_lossless_proof=proof,
         audio_corrupt=audio_corrupt,
-        folder_layout=derive_folder_layout(files),
-        audio_file_count=len(files),
-        filetype_band=derive_filetype_band(files),
+        folder_layout=folder_layout,
+        audio_file_count=audio_file_count,
+        filetype_band=filetype_band,
+        matched_bad_audio_hash_id=matched_bad_hash_id,
+        matched_bad_audio_hash_path=matched_bad_hash_path,
+    )
+    errors = evidence.storage_validation_errors()
+    if errors:
+        return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+    return EvidenceBuildResult(evidence, "ready")
+
+
+def evidence_from_measurement(
+    *,
+    owner: AlbumQualityEvidenceOwner,
+    source_path: str,
+    measurement: "PreimportMeasurement",
+    measured_at: datetime | None = None,
+    target_format: str | None = None,
+    files: list[AlbumQualityEvidenceFile] | None = None,
+) -> EvidenceBuildResult:
+    """Build candidate evidence purely from a ``PreimportMeasurement``.
+
+    Used by the preview worker when the harness cannot or should not run
+    (audio_corrupt, bad_audio_hash, nested_layout, empty_fileset). The
+    measurement carries every U1 fact the importer's ``preimport_decide``
+    needs to reject: ``audio_corrupt``, ``matched_bad_audio_hash_*``,
+    ``folder_layout``, ``audio_file_count``, and the spectral measurements.
+
+    The synthesized ``AudioQualityMeasurement`` only carries enough data to
+    satisfy ``AlbumQualityEvidence.policy_incomplete_reasons`` (format + at
+    least one bitrate metric). The importer rejects on the U1 facts upstream
+    of the quality gate, so the synthesized measurement never drives an
+    accept decision.
+
+    When ``audio_file_count=0`` and ``files`` is empty, returns ``empty_fileset``
+    evidence — ``AlbumQualityEvidence.storage_validation_errors`` accepts this
+    case (the explicit empty-inventory signal).
+    """
+
+    if files is None:
+        try:
+            files = snapshot_audio_files(source_path)
+        except OSError as exc:
+            return EvidenceBuildResult(None, "failed", str(exc))
+    files = _apply_measurement_facts_to_files(files, measurement)
+    audio_file_count = (
+        measurement.audio_file_count
+        if measurement.audio_file_count else len(files)
+    )
+    # Synthesize a minimal AudioQualityMeasurement. The importer rejects on
+    # the U1 facts (audio_corrupt, nested, etc.) before reading these,
+    # but ``policy_incomplete_reasons`` requires format + a bitrate metric.
+    filetype_band = measurement.filetype_band or derive_filetype_band(files)
+    format_label = _filetype_band_to_format(filetype_band) or "MP3"
+    min_bitrate_kbps = measurement.min_bitrate_kbps
+    if min_bitrate_kbps is None:
+        # Fall back to a placeholder so policy_incomplete_reasons passes.
+        # The actual value never drives a decision: the importer rejects on
+        # audio_corrupt/nested/empty/bad_hash/spectral_reject before reading
+        # min_bitrate_kbps.
+        min_bitrate_kbps = 0
+    download_spectral = measurement.download_spectral
+    audio_measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=min_bitrate_kbps,
+        avg_bitrate_kbps=min_bitrate_kbps,
+        median_bitrate_kbps=min_bitrate_kbps,
+        format=format_label,
+        is_cbr=measurement.is_vbr is False,
+        spectral_grade=(
+            download_spectral.grade if download_spectral is not None else None
+        ),
+        spectral_bitrate_kbps=(
+            download_spectral.bitrate_kbps if download_spectral is not None else None
+        ),
+    )
+    codec = files[0].codec if files else None
+    container = files[0].container if files else None
+    evidence = AlbumQualityEvidence(
+        owner=owner,
+        measurement=audio_measurement,
+        measured_at=measured_at or datetime.now(timezone.utc),
+        files=files,
+        codec=codec,
+        container=container,
+        storage_format=audio_measurement.format,
+        target_format=target_format,
+        v0_metric=None,
+        verified_lossless_proof=None,
+        audio_corrupt=measurement.audio_corrupt,
+        folder_layout=measurement.folder_layout,
+        audio_file_count=audio_file_count,
+        filetype_band=filetype_band,
+        matched_bad_audio_hash_id=measurement.matched_bad_hash_id,
+        matched_bad_audio_hash_path=measurement.matched_bad_track_path,
     )
     errors = evidence.storage_validation_errors()
     if errors:
@@ -470,6 +661,7 @@ def persist_candidate_evidence_from_import_result(
     import_job_id: int | None = None,
     target_format: str | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
+    measurement: "PreimportMeasurement | None" = None,
 ) -> EvidenceBuildResult:
     owners = _candidate_owners(
         download_log_id=download_log_id,
@@ -486,6 +678,67 @@ def persist_candidate_evidence_from_import_result(
         owner=owners[0],
         source_path=source_path,
         import_result=import_result,
+        target_format=target_format,
+        files=files,
+        measurement=measurement,
+    )
+    if result.evidence is not None:
+        for owner in owners:
+            db.upsert_album_quality_evidence(AlbumQualityEvidence(
+                owner=owner,
+                measurement=result.evidence.measurement,
+                measured_at=result.evidence.measured_at,
+                files=result.evidence.files,
+                codec=result.evidence.codec,
+                container=result.evidence.container,
+                storage_format=result.evidence.storage_format,
+                target_format=result.evidence.target_format,
+                v0_metric=result.evidence.v0_metric,
+                verified_lossless_proof=result.evidence.verified_lossless_proof,
+                audio_corrupt=result.evidence.audio_corrupt,
+                folder_layout=result.evidence.folder_layout,
+                audio_file_count=result.evidence.audio_file_count,
+                filetype_band=result.evidence.filetype_band,
+                matched_bad_audio_hash_id=result.evidence.matched_bad_audio_hash_id,
+                matched_bad_audio_hash_path=(
+                    result.evidence.matched_bad_audio_hash_path
+                ),
+            ))
+    return result
+
+
+def persist_candidate_evidence_from_measurement(
+    db: Any,
+    *,
+    source_path: str,
+    measurement: "PreimportMeasurement",
+    download_log_id: int | None = None,
+    import_job_id: int | None = None,
+    target_format: str | None = None,
+    files: list[AlbumQualityEvidenceFile] | None = None,
+) -> EvidenceBuildResult:
+    """Persist measurement-only candidate evidence (no ImportResult required).
+
+    Mirrors ``persist_candidate_evidence_from_import_result`` for the preview
+    code path that never invoked the harness (audio_corrupt / bad_audio_hash /
+    nested_layout / empty_fileset). The importer's ``preimport_decide`` reads
+    the persisted U1 facts and rejects upstream of the quality gate.
+    """
+    owners = _candidate_owners(
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+    )
+    if not owners:
+        return EvidenceBuildResult(None, "unowned", "no persisted candidate owner")
+    if files is None:
+        try:
+            files = snapshot_audio_files(source_path)
+        except OSError as exc:
+            return EvidenceBuildResult(None, "failed", str(exc))
+    result = evidence_from_measurement(
+        owner=owners[0],
+        source_path=source_path,
+        measurement=measurement,
         target_format=target_format,
         files=files,
     )
