@@ -28,7 +28,11 @@ IMPORT_JOB_PREVIEW_EVIDENCE_READY = "evidence_ready"
 # a follow-up cleanup confirms zero rows remain.
 IMPORT_JOB_PREVIEW_WOULD_IMPORT = "would_import"
 IMPORT_JOB_PREVIEW_CONFIDENT_REJECT = "confident_reject"
-IMPORT_JOB_PREVIEW_UNCERTAIN = "uncertain"
+# Historical: ``IMPORT_JOB_PREVIEW_UNCERTAIN`` was retired by U5 as a value
+# production code can write. The string ``'uncertain'`` remains in
+# ``IMPORT_JOB_PREVIEW_STATUSES`` so legacy rows decode cleanly, but no
+# production code path writes it after U5 — preview emits
+# ``IMPORT_JOB_PREVIEW_MEASUREMENT_FAILED`` instead.
 IMPORT_JOB_PREVIEW_MEASUREMENT_FAILED = "measurement_failed"
 IMPORT_JOB_PREVIEW_ERROR = "error"
 IMPORT_JOB_PREVIEW_STATUSES = frozenset({
@@ -37,13 +41,12 @@ IMPORT_JOB_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
     IMPORT_JOB_PREVIEW_CONFIDENT_REJECT,
-    IMPORT_JOB_PREVIEW_UNCERTAIN,
+    "uncertain",  # historical-row support only; no production writer
     IMPORT_JOB_PREVIEW_MEASUREMENT_FAILED,
     IMPORT_JOB_PREVIEW_ERROR,
 })
 IMPORT_JOB_PREVIEW_FAILURE_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_CONFIDENT_REJECT,
-    IMPORT_JOB_PREVIEW_UNCERTAIN,
     IMPORT_JOB_PREVIEW_MEASUREMENT_FAILED,
     IMPORT_JOB_PREVIEW_ERROR,
 })

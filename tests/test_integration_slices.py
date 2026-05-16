@@ -5787,5 +5787,272 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         self.assertEqual(len(db.denylist), 0)
 
 
+class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
+    """End-to-end slice: U5 preview-worker emits measurement_failed → self-heal.
+
+    Covers AE3 (nested), AE4 (empty), AE5 (snapshot stale), AE6 (source
+    vanished) at the worker level: the worker claims a job, preview returns
+    ``verdict='measurement_failed'`` with a typed ``MeasurementFailure``
+    payload, and the worker routes it through U4's self-healing helper so the
+    parent request transitions to ``wanted`` and the job is marked failed
+    with ``preview_status='measurement_failed'``.
+    """
+
+    def _setup_worker_job(self, db, request_id=42):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="downloading",
+            mb_release_id="mbid-u5",
+        ))
+        download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            validation_result={"failed_path": "/tmp/u5-vanished"},
+        )
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=force_import_dedupe_key(download_log_id),
+            payload=force_import_payload(
+                download_log_id=download_log_id,
+                failed_path="/tmp/u5-vanished",
+                source_username="alice",
+            ),
+        )
+        return db.claim_next_import_preview_job(worker_id="preview")
+
+    def test_ae6_source_vanished_self_heals_request_to_wanted(self):
+        """AE6: ffmpeg ENOENT during measurement → measurement_failed,
+        request → wanted, job → failed, download_log carries the typed
+        payload."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        claimed = self._setup_worker_job(db)
+        assert claimed is not None
+
+        payload = MeasurementFailure(
+            reason="source_vanished",
+            detail="ffmpeg returned ENOENT",
+            source_path="/tmp/u5-vanished",
+        )
+        preview_result = ImportPreviewResult(
+            mode="path",
+            verdict="measurement_failed",
+            decision="source_vanished",
+            reason="source_vanished",
+            detail="ffmpeg returned ENOENT",
+            source_path="/tmp/u5-vanished",
+            request_id=42,
+            failure=payload,
+        )
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=preview_result,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db), claimed,
+            )
+
+        assert updated is not None
+        # Worker surface: preview_status reflects the new state, job failed.
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(updated.status, "failed")
+        # U4 self-heal: request → wanted, download_log carries payload.
+        self.assertEqual(db.request(42)["status"], "wanted")
+        # Two download_log rows: the original rejected entry + the new
+        # measurement_failed one.
+        outcomes = [log.outcome for log in db.download_logs]
+        self.assertIn("measurement_failed", outcomes)
+        mf_log = next(log for log in db.download_logs
+                      if log.outcome == "measurement_failed")
+        import json as _json
+        decoded = _json.loads(mf_log.validation_result)
+        self.assertEqual(decoded["reason"], "source_vanished")
+        self.assertEqual(decoded["source_path"], "/tmp/u5-vanished")
+
+    def test_ae5_snapshot_stale_self_heals(self):
+        """AE5: snapshot mismatch after retry → measurement_failed,
+        request → wanted."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        claimed = self._setup_worker_job(db, request_id=43)
+        assert claimed is not None
+
+        payload = MeasurementFailure(
+            reason="snapshot_stale",
+            detail="source files changed while preview was running",
+            source_path="/tmp/u5-vanished",
+        )
+        preview_result = ImportPreviewResult(
+            mode="path",
+            verdict="measurement_failed",
+            decision="source_changed_during_preview",
+            reason="source_changed_during_preview",
+            detail=payload.detail,
+            source_path=payload.source_path,
+            request_id=43,
+            failure=payload,
+        )
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=preview_result,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db), claimed,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(db.request(43)["status"], "wanted")
+
+    def test_request_not_found_no_finalize_subcase(self):
+        """request_id=None subcase: helper writes log + marks job failed
+        but does NOT transition any request (there is nothing to
+        finalize). No exception bubbles up."""
+        from lib.import_preview import ImportPreviewResult
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        # Enqueue a job with request_id=None (orphan).
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=None,
+            payload=force_import_payload(
+                download_log_id=999,
+                failed_path="/tmp/gone",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        assert claimed is not None
+
+        payload = MeasurementFailure(
+            reason="request_not_found",
+            detail="album_request 999 not found",
+            source_path="",
+        )
+        preview_result = ImportPreviewResult(
+            mode="path",
+            verdict="measurement_failed",
+            decision="request_not_found",
+            reason="request_not_found",
+            detail=payload.detail,
+            request_id=None,
+            failure=payload,
+        )
+        with patch(
+            "scripts.import_preview_worker.preview_import_from_path",
+            return_value=preview_result,
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db), claimed,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(updated.status, "failed")
+        # Helper still wrote the download_log row.
+        outcomes = [log.outcome for log in db.download_logs]
+        self.assertIn("measurement_failed", outcomes)
+
+
+class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
+    """End-to-end slice: preview emits ``evidence_ready`` → job marked
+    importable for the importer to claim. Covers AE3/AE4: the nested-layout
+    and empty-fileset facts are persisted as evidence, the importer reads
+    them in U6 (out of scope here).
+    """
+
+    def test_evidence_ready_marks_job_importable(self):
+        from lib.import_preview import ImportPreviewResult
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        from lib.quality import (
+            ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+            AudioQualityMeasurement,
+        )
+        from tests.helpers import make_album_quality_evidence
+        from lib.quality_evidence import snapshot_audio_files
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        with tempfile.TemporaryDirectory() as source:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            download_log_id = db.log_download(42, outcome="rejected")
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+
+            preview_result = ImportPreviewResult(
+                mode="path",
+                verdict="evidence_ready",
+                decision="import",
+                reason="import",
+                stage_chain=["stage2_import:import"],
+                source_path=source,
+                request_id=42,
+            )
+
+            def fake_preview(*args, **kwargs):
+                # Simulate production: preview persisted candidate evidence
+                # before returning.
+                db.upsert_album_quality_evidence(make_album_quality_evidence(
+                    owner_type=ALBUM_QUALITY_EVIDENCE_OWNER_DOWNLOAD_LOG_CANDIDATE,
+                    owner_id=download_log_id,
+                    files=snapshot_audio_files(source),
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=245,
+                        avg_bitrate_kbps=256,
+                        median_bitrate_kbps=252,
+                        format="MP3 V0",
+                        spectral_grade="genuine",
+                    ),
+                    codec="mp3",
+                    container="mp3",
+                    storage_format="mp3 v0",
+                ))
+                return preview_result
+
+            with patch(
+                "scripts.import_preview_worker.preview_import_from_path",
+                side_effect=fake_preview,
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    cast(Any, db), claimed,
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertEqual(updated.status, "queued")
+        # Importable now — importer (U6) can claim it.
+        self.assertIsNotNone(updated.importable_at)
+
+
 if __name__ == "__main__":
     unittest.main()

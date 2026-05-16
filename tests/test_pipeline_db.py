@@ -889,6 +889,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNotNone(marked.importable_at)
 
     def test_preview_rejection_fails_job_with_audit(self):
+        """Post-U5: preview failures use ``preview_status='measurement_failed'``.
+
+        ``'uncertain'`` is no longer in ``IMPORT_JOB_PREVIEW_FAILURE_STATUSES``;
+        production code writes ``'measurement_failed'`` via the U4 self-healing
+        helper.
+        """
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
         queued = self.db.enqueue_import_job(
@@ -900,15 +906,15 @@ class TestImportJobQueueAPI(unittest.TestCase):
 
         failed = self.db.mark_import_job_preview_failed(
             queued.id,
-            preview_status="uncertain",
+            preview_status="measurement_failed",
             error="path_missing",
-            preview_result={"verdict": "uncertain", "reason": "path_missing"},
+            preview_result={"verdict": "measurement_failed", "reason": "path_missing"},
             message="Preview failed: path_missing",
         )
         assert failed is not None
         assert failed.preview_result is not None
         self.assertEqual(failed.status, "failed")
-        self.assertEqual(failed.preview_status, "uncertain")
+        self.assertEqual(failed.preview_status, "measurement_failed")
         self.assertEqual(failed.preview_error, "path_missing")
         self.assertEqual(failed.preview_result["reason"], "path_missing")
         self.assertEqual(failed.message, "Preview failed: path_missing")
