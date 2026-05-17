@@ -273,7 +273,7 @@ console.log('convergeWrongMatches() posts selected threshold and removes row in 
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes the emptied group locally');
 }
 
-console.log('deleteWrongMatch() posts one row and refreshes');
+console.log('deleteWrongMatch() posts one row and removes it in place — no full refresh');
 {
   installStorage();
   const dom = installDom();
@@ -293,12 +293,6 @@ console.log('deleteWrongMatch() posts one row and refreshes');
         }),
       };
     }
-    if (url === '/api/wrong-matches') {
-      return {
-        ok: true,
-        json: async () => ({ groups: [] }),
-      };
-    }
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { disabled: false, textContent: 'Delete', style: {} };
@@ -309,11 +303,12 @@ console.log('deleteWrongMatch() posts one row and refreshes');
     { download_log_id: 100 },
     'posts selected download log id',
   );
-  assert(calls.some(call => call.url === '/api/wrong-matches'), 'refreshes after row delete');
+  assert(!calls.some(call => call.url === '/api/wrong-matches'),
+    'does NOT refetch the queue after row delete (in-place removal)');
   assert(dom.toast.textContent.includes('Deleted wrong match'), 'toasts row delete result');
 }
 
-console.log('deleteWrongMatchGroup() posts request id and refreshes');
+console.log('deleteWrongMatchGroup() posts request id and removes the group in place');
 {
   installStorage();
   const dom = installDom();
@@ -331,13 +326,8 @@ console.log('deleteWrongMatchGroup() posts request id and refreshes');
           deleted: 3,
           skipped: 0,
           errors: 0,
+          remaining: 0,
         }),
-      };
-    }
-    if (url === '/api/wrong-matches') {
-      return {
-        ok: true,
-        json: async () => ({ groups: [] }),
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
@@ -345,12 +335,13 @@ console.log('deleteWrongMatchGroup() posts request id and refreshes');
   const btn = { disabled: false, textContent: 'Delete All (3)', style: {} };
   await __test__.deleteWrongMatchGroup(42, btn);
   assertEqual(calls[0].url, '/api/wrong-matches/delete-group', 'posts to group delete endpoint');
+  assert(!calls.some(call => call.url === '/api/wrong-matches'),
+    'does NOT refetch the queue after group delete (in-place removal)');
   assertDeepEqual(
     JSON.parse(calls[0].options.body),
     { request_id: 42 },
     'posts selected request id',
   );
-  assert(calls.some(call => call.url === '/api/wrong-matches'), 'refreshes after group delete');
   assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts group delete result');
 }
 
@@ -629,7 +620,7 @@ console.log('renderWrongMatchExplorer() collapses shared album tags and hides re
   assert(!html.includes('replaygain_track_gain'), 'hides replaygain track tags');
 }
 
-console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
+console.log('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <details> toggle');
 {
   installStorage();
   const dom = installDom();
@@ -690,11 +681,22 @@ console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
     };
   };
 
+  // Entry expand alone is cheap — no fetch.
   await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  assertDeepEqual(calls, [], 'entry expand does not auto-load the file explorer');
+
+  // Closed <details> toggle does nothing.
+  const closedDetails = { open: false };
+  await __test__.maybeLoadWrongMatchExplorer(100, closedDetails);
+  assertDeepEqual(calls, [], 'closed details element does not trigger a load');
+
+  // Opened <details> toggle lazy-loads exactly once.
+  const openDetails = { open: true };
+  await __test__.maybeLoadWrongMatchExplorer(100, openDetails);
   assertDeepEqual(
     calls,
     ['/api/wrong-matches/explorer?download_log_id=100'],
-    'opening an entry loads the explorer exactly once',
+    'opening the file-explorer dropdown loads the explorer exactly once',
   );
   assert(mount.innerHTML.includes('Downloaded as'), 'explorer shows the original user folder');
   assert(mount.innerHTML.includes('Scott 3'), 'explorer shows shared album tags once loaded');
@@ -704,9 +706,9 @@ console.log('toggleWrongMatchEntry() lazy-loads explorer tags and audio');
   assert(mount.innerHTML.includes('<audio'), 'explorer renders a browser audio player');
   assert(!mount.innerHTML.includes('replaygain_track_gain'), 'explorer hides replaygain noise');
 
-  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
-  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
-  assertEqual(calls.length, 1, 'reopening an entry reuses the loaded explorer state');
+  await __test__.maybeLoadWrongMatchExplorer(100, openDetails);
+  await __test__.maybeLoadWrongMatchExplorer(100, openDetails);
+  assertEqual(calls.length, 1, 'reopening the dropdown reuses the loaded explorer state');
 }
 
 console.log('cleanupSummaryToast() reports kept, skipped, and delete failures');
