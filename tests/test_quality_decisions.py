@@ -2506,6 +2506,37 @@ class TestNarrowOverrideOnDowngrade(unittest.TestCase):
         self.assertEqual(result, "lossless,mp3 v0")
 
 
+class TestNarrowOverrideOnLosslessSourceLock(unittest.TestCase):
+    """Test narrowing search_filetype_override to lossless-only after the
+    ``lossless_source_locked`` decision fires.
+
+    Pure helper; deterministic on its single argument. See origin:
+    ``docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md``
+    R6 and AE7.
+    """
+
+    # (description, current_override, expected)
+    CASES = [
+        ("none → lossless", None, "lossless"),
+        ("mp3 v0 → lossless", "mp3 v0", "lossless"),
+        ("mp3 320 → lossless", "mp3 320", "lossless"),
+        ("full ladder → lossless", "lossless,mp3 v0,mp3 320", "lossless"),
+        ("already lossless → None (idempotent)", "lossless", None),
+        ("empty string → lossless", "", "lossless"),
+    ]
+
+    def test_narrow_table(self):
+        from lib.quality import narrow_override_on_lossless_source_lock
+        for desc, current, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    narrow_override_on_lossless_source_lock(current),
+                    expected,
+                    f"{desc}: narrow_override_on_lossless_source_lock"
+                    f"({current!r}) expected {expected!r}",
+                )
+
+
 class TestRejectionBackfillOverride(unittest.TestCase):
     """Tests for rejection_backfill_override — breaks CBR 320 download loops.
 
