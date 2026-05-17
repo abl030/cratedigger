@@ -1049,5 +1049,89 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
+    """U2: ``_load_evidence_import_gate`` delegates current-evidence loading."""
+
+    def _candidate_result(self):
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-candidate",
+        )
+        provenance = ActionEvidenceProvenance(
+            candidate_status="reused",
+            snapshot_guard="matched",
+        )
+        return CandidateEvidenceActionResult(
+            evidence=evidence, provenance=provenance
+        )
+
+    def test_helper_returns_none_marks_current_missing(self):
+        """Beets has no album → current_status='missing', not fail-closed."""
+        from lib.import_dispatch import _load_evidence_import_gate
+
+        db = FakePipelineDB()
+        candidate_result = self._candidate_result()
+        with patch(
+            "lib.import_dispatch.load_current_evidence_for_action",
+            return_value=None,
+        ) as mock_helper:
+            gate = _load_evidence_import_gate(
+                db,  # type: ignore[arg-type]
+                request_id=42,
+                mb_release_id="mbid-123",
+                path="/tmp/stage",
+                quality_ranks=None,
+                candidate_import_job_id=7,
+                candidate_download_log_id=None,
+                prevalidated_candidate_result=candidate_result,
+            )
+
+        mock_helper.assert_called_once()
+        self.assertIsNone(gate.current)
+        self.assertEqual(gate.current_status, "missing")
+        self.assertFalse(gate.current_fail_closed)
+        self.assertEqual(gate.current_reason, "album not in beets")
+        self.assertEqual(gate.snapshot_guard, "matched")
+        self.assertIs(gate.candidate, candidate_result.evidence)
+
+    def test_helper_fail_closed_propagates_to_gate(self):
+        """Helper fail-closed result → gate current_fail_closed=True."""
+        from lib.import_evidence import CurrentEvidenceActionResult
+        from lib.import_dispatch import _load_evidence_import_gate
+
+        db = FakePipelineDB()
+        candidate_result = self._candidate_result()
+        fail_provenance = ActionEvidenceProvenance(
+            current_status="failed",
+            snapshot_guard="not_checked",
+            fallback_reason="RuntimeError: boom",
+            fail_closed=True,
+        )
+        fail_result = CurrentEvidenceActionResult(
+            evidence=None, provenance=fail_provenance
+        )
+        with patch(
+            "lib.import_dispatch.load_current_evidence_for_action",
+            return_value=fail_result,
+        ):
+            gate = _load_evidence_import_gate(
+                db,  # type: ignore[arg-type]
+                request_id=42,
+                mb_release_id="mbid-123",
+                path="/tmp/stage",
+                quality_ranks=None,
+                candidate_import_job_id=7,
+                candidate_download_log_id=None,
+                prevalidated_candidate_result=candidate_result,
+            )
+
+        self.assertIsNone(gate.current)
+        self.assertEqual(gate.current_status, "failed")
+        self.assertTrue(gate.current_fail_closed)
+        self.assertEqual(gate.current_reason, "RuntimeError: boom")
+        # snapshot_guard always sourced from the candidate side.
+        self.assertEqual(gate.snapshot_guard, "matched")
+        self.assertIs(gate.candidate, candidate_result.evidence)
+
+
 if __name__ == "__main__":
     unittest.main()

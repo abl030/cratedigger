@@ -45,7 +45,7 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
     CURRENT_STATUS_MISSING,
     ensure_candidate_evidence_for_action,
-    ensure_current_evidence_for_action,
+    load_current_evidence_for_action,
 )
 from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
@@ -595,47 +595,22 @@ def _load_evidence_import_gate(
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
 
-    try:
-        from lib.beets_db import BeetsDB
-        from lib.quality import QualityRankConfig
-
-        cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
-        with BeetsDB(library_root=beets_library_root) as beets:
-            album_info = beets.get_album_info(mb_release_id, cfg)
-        if album_info is None:
-            return EvidenceImportGate(
-                current=None,
-                candidate=candidate_result.evidence,
-                candidate_status=candidate_result.provenance.candidate_status,
-                candidate_reason=candidate_result.provenance.fallback_reason,
-                current_status=CURRENT_STATUS_MISSING,
-                current_reason="album not in beets",
-                current_fail_closed=False,
-                snapshot_guard=candidate_result.provenance.snapshot_guard,
-            )
-        current_result = ensure_current_evidence_for_action(
-            db,
-            request_id=request_id,
-            mb_release_id=mb_release_id,
-            quality_ranks=quality_ranks,
-            current_album_path=album_info.album_path,
-            album_info=album_info,
-            beets_library_root=beets_library_root,
-        )
-    except Exception as exc:
-        logger.debug(
-            "Failed to load/backfill current quality evidence for request %s",
-            request_id,
-            exc_info=True,
-        )
+    current_result = load_current_evidence_for_action(
+        db,
+        request_id=request_id,
+        mb_release_id=mb_release_id,
+        quality_ranks=quality_ranks,
+        beets_library_root=beets_library_root,
+    )
+    if current_result is None:
         return EvidenceImportGate(
             current=None,
             candidate=candidate_result.evidence,
             candidate_status=candidate_result.provenance.candidate_status,
             candidate_reason=candidate_result.provenance.fallback_reason,
-            current_status="failed",
-            current_reason=f"{type(exc).__name__}: {exc}",
-            current_fail_closed=True,
+            current_status=CURRENT_STATUS_MISSING,
+            current_reason="album not in beets",
+            current_fail_closed=False,
             snapshot_guard=candidate_result.provenance.snapshot_guard,
         )
 
