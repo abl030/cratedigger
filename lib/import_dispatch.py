@@ -32,6 +32,7 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          extract_usernames, is_comparable_lossless_source_probe,
                          full_pipeline_decision_from_evidence,
                          narrow_override_on_downgrade,
+                         narrow_override_on_lossless_source_lock,
                          override_bitrate_from_current_evidence,
                          rejection_backfill_override)
 from lib.quality_evidence import (
@@ -1937,6 +1938,26 @@ def dispatch_import_core(
                         except Exception:
                             logger.debug(
                                 "Failed to inspect search_filetype_override before downgrade reset")
+
+                    elif decision == "lossless_source_locked":
+                        # R7 / AE2: once the library row carries a comparable
+                        # lossless-source V0 probe, no lossy candidate can
+                        # override it. Narrow the search to lossless-only so
+                        # future cycles stop re-finding lossy candidates that
+                        # would just hit the lock again. See
+                        # docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md
+                        try:
+                            req_row = db.get_request(request_id)
+                            current_override = (
+                                req_row.get("search_filetype_override")
+                                if req_row else None
+                            )
+                            narrowed_override = narrow_override_on_lossless_source_lock(
+                                current_override)
+                        except Exception:
+                            logger.debug(
+                                "Failed to inspect search_filetype_override"
+                                " before lossless_source_locked narrow")
 
                     _record_rejection_and_maybe_requeue(
                         db, request_id, dl_info,
