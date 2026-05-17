@@ -728,5 +728,46 @@ console.log('cleanupSummaryToast() reports kept, skipped, and delete failures');
   assertEqual(body, 'Deleted 2 candidates, kept 4, skipped 5', 'summarizes cleanup outcomes');
 }
 
+console.log('renderLatestImport() distinguishes absent / in-library / verified-lossless / present states');
+{
+  // 1. No latest import, album not in library — neutral copy.
+  let html = __test__.renderLatestImport(null, { in_library: false, verified_lossless: false });
+  assert(html.includes('No previous import on disk.'), 'absent: renders neutral "no previous import" copy');
+  assert(!html.includes('Album already in library'), 'absent: does not claim album in library');
+  assert(!html.includes('Verified-lossless copy in library'), 'absent: no verified-lossless copy');
+  assert(!html.includes('No successful import on disk'), 'absent: no longer uses old "No successful import on disk" copy');
+
+  // 2. No latest import, album in library, not verified lossless — distinguishes
+  //    "no cratedigger history" from "Beets already has this MBID".
+  html = __test__.renderLatestImport(null, { in_library: true, verified_lossless: false });
+  assert(html.includes('Album already in library'), 'in_library: surfaces the in-library copy');
+  assert(html.includes('must beat current quality'), 'in_library: explains upgrade gate semantics');
+  assert(!html.includes('No previous import'), 'in_library: does not claim no prior import');
+  assert(!html.includes('No successful import'), 'in_library: no longer uses old "No successful import" copy');
+  assert(!html.includes('Verified-lossless copy in library'), 'in_library: not the verified-lossless branch');
+
+  // 3. No latest import, album in library AND verified lossless — strongest copy.
+  html = __test__.renderLatestImport(null, { in_library: true, verified_lossless: true });
+  assert(html.includes('Verified-lossless copy in library'), 'verified-lossless: surfaces the verified-lossless copy');
+  assert(html.includes('auto-clean on next sweep'), 'verified-lossless: explains the cleanup behavior');
+  assert(!html.includes('Album already in library'), 'verified-lossless: does not fall back to plain in-library copy');
+  assert(!html.includes('No previous import'), 'verified-lossless: does not fall back to absent copy');
+
+  // 4. Latest import present — render existing summary regardless of in_library.
+  html = __test__.renderLatestImport(
+    {
+      outcome: 'imported',
+      created_at: '2026-05-17T00:00:00Z',
+      actual_filetype: 'flac',
+      actual_min_bitrate: 950,
+    },
+    { in_library: true, verified_lossless: false },
+  );
+  assert(html.includes('Last import: imported'), 'present: renders existing latest-import summary');
+  assert(html.includes('FLAC 950k'), 'present: renders filetype and bitrate floor');
+  assert(!html.includes('Album already in library'), 'present: in_library flag does not override the summary');
+  assert(!html.includes('No previous import'), 'present: does not render absent copy');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
