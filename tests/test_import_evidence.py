@@ -10,10 +10,13 @@ from unittest.mock import patch
 
 from lib.beets_db import AlbumInfo
 from lib.import_evidence import (
+    ActionEvidenceProvenance,
+    CurrentEvidenceActionResult,
     ensure_candidate_evidence_for_action,
     ensure_current_evidence_for_action,
+    load_current_evidence_for_action,
 )
-from lib.quality import AlbumQualityEvidence
+from lib.quality import AlbumQualityEvidence, QualityRankConfig
 from lib.quality_evidence import (
     EvidenceBuildResult,
     snapshot_audio_files,
@@ -208,6 +211,145 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.current_status, "missing")
         self.assertIsNone(backfill.call_args.kwargs["preloaded_evidence"])
         self.assertTrue(backfill.call_args.kwargs["preloaded"])
+
+
+class TestLoadCurrentEvidenceForAction(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp()
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
+        self.album_info = AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=240,
+            avg_bitrate_kbps=250,
+            median_bitrate_kbps=245,
+            is_cbr=False,
+            album_path=self.root,
+            format="MP3",
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _available_result(self) -> CurrentEvidenceActionResult:
+        evidence = make_album_quality_evidence(mb_release_id="release-1")
+        return CurrentEvidenceActionResult(
+            evidence=evidence,
+            provenance=ActionEvidenceProvenance(
+                current_status="loaded",
+                snapshot_guard="matched",
+            ),
+        )
+
+    def test_happy_path_returns_ensure_result_unchanged(self):
+        expected = self._available_result()
+        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+            "lib.import_evidence.ensure_current_evidence_for_action",
+            return_value=expected,
+        ) as ensure:
+            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = (
+                self.album_info
+            )
+
+            result = load_current_evidence_for_action(
+                self.db,
+                request_id=42,
+                mb_release_id="release-1",
+                quality_ranks=QualityRankConfig.defaults(),
+                beets_library_root="/tmp/beets",
+            )
+
+        self.assertIs(result, expected)
+        ensure.assert_called_once()
+        kwargs = ensure.call_args.kwargs
+        self.assertEqual(kwargs["request_id"], 42)
+        self.assertEqual(kwargs["mb_release_id"], "release-1")
+        self.assertIs(kwargs["album_info"], self.album_info)
+        self.assertEqual(kwargs["current_album_path"], self.root)
+        self.assertEqual(kwargs["beets_library_root"], "/tmp/beets")
+
+    def test_beets_absent_returns_none(self):
+        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+            "lib.import_evidence.ensure_current_evidence_for_action"
+        ) as ensure:
+            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = None
+
+            result = load_current_evidence_for_action(
+                self.db,
+                request_id=42,
+                mb_release_id="release-1",
+            )
+
+        self.assertIsNone(result)
+        ensure.assert_not_called()
+
+    def test_ensure_raises_returns_fail_closed_result(self):
+        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+            "lib.import_evidence.ensure_current_evidence_for_action",
+            side_effect=RuntimeError("backfill failed"),
+        ):
+            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = (
+                self.album_info
+            )
+
+            result = load_current_evidence_for_action(
+                self.db,
+                request_id=42,
+                mb_release_id="release-1",
+            )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIsNone(result.evidence)
+        self.assertTrue(result.provenance.fail_closed)
+        self.assertEqual(result.provenance.current_status, "failed")
+        self.assertIn("RuntimeError", result.provenance.fallback_reason or "")
+        self.assertIn("backfill failed", result.provenance.fallback_reason or "")
+
+    def test_unavailable_fail_closed_passes_through(self):
+        fail_closed = CurrentEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                current_status="failed",
+                fallback_reason="snapshot drift",
+                fail_closed=True,
+            ),
+        )
+        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+            "lib.import_evidence.ensure_current_evidence_for_action",
+            return_value=fail_closed,
+        ):
+            beets_cls.return_value.__enter__.return_value.get_album_info.return_value = (
+                self.album_info
+            )
+
+            result = load_current_evidence_for_action(
+                self.db,
+                request_id=42,
+                mb_release_id="release-1",
+            )
+
+        self.assertIs(result, fail_closed)
+
+    def test_default_quality_ranks_resolves_to_defaults(self):
+        with patch("lib.beets_db.BeetsDB") as beets_cls, patch(
+            "lib.import_evidence.ensure_current_evidence_for_action",
+            return_value=self._available_result(),
+        ) as ensure:
+            get_album_info = beets_cls.return_value.__enter__.return_value.get_album_info
+            get_album_info.return_value = self.album_info
+
+            load_current_evidence_for_action(
+                self.db,
+                request_id=42,
+                mb_release_id="release-1",
+            )
+
+        get_album_info.assert_called_once()
+        passed_cfg = get_album_info.call_args.args[1]
+        self.assertEqual(passed_cfg, QualityRankConfig.defaults())
+        self.assertEqual(ensure.call_args.kwargs["quality_ranks"], QualityRankConfig.defaults())
 
 
 if __name__ == "__main__":
