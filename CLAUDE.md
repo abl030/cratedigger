@@ -279,10 +279,19 @@ deleted unless the files actually change.
 **Evidence survives the candidate → library transition.** After a
 successful import, `propagate_candidate_evidence_to_current` (U10) inherits
 the candidate's full measurement payload (spectral grade, V0 lineage,
-bad-audio-hash matches, verified_lossless_proof) for renamed-only imports.
-Transcoded imports (FLAC → V0) inherit only `verified_lossless_proof`;
-spectral and V0 fields refer to the source audio and stay NULL on the
-library row until something later measures them.
+bad-audio-hash matches, verified_lossless_proof) onto the library evidence
+row, for **both** renamed-only and transcoded imports (FLAC → V0/Opus).
+These fields describe the upstream source audio at import time, not the
+on-disk file. For transcoded imports the on-disk file has a different
+spectrum and codec, but the propagated fields remain accurate descriptions
+of the source that produced it — which is what wrong-match cleanup triage
+compares future candidates against.
+
+Known wart: library rows imported before this policy reversal landed
+(2026-05-17) have NULL spectral / V0 / bad-hash fields. They keep the old
+behaviour — wrong-match triage cannot reject same-source duplicates against
+them — until each row is re-imported or force-imported. Forward-only by
+design; no backfill. See `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.
 
 Pure decision helpers in `lib/quality.py`: `spectral_import_decision`,
 `import_quality_decision`, `transcode_detection`, `quality_gate_decision`,
