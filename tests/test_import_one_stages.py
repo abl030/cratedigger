@@ -733,10 +733,11 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
                  "-y", flac_path],
                 capture_output=True, timeout=30)
             self.assertTrue(os.path.exists(flac_path))
-            converted, failed, ext = convert_lossless(tmpdir, V0_SPEC,
-                                                      keep_source=True)
+            converted, failed, ext, channels = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
             self.assertEqual(converted, 1)
             self.assertEqual(failed, 0)
+            self.assertEqual(channels, 1, "sine source is mono")
             self.assertTrue(os.path.exists(flac_path))
             mp3_path = os.path.join(tmpdir, "track01.mp3")
             self.assertTrue(os.path.exists(mp3_path))
@@ -751,9 +752,122 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
                 ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                  "-y", flac_path],
                 capture_output=True, timeout=30)
-            converted, failed, ext = convert_lossless(tmpdir, V0_SPEC)
+            converted, failed, ext, _channels = convert_lossless(tmpdir, V0_SPEC)
             self.assertEqual(converted, 1)
             self.assertFalse(os.path.exists(flac_path))
+
+
+class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
+    """Multichannel FLAC sources must downmix to stereo on every target.
+
+    Live bug: Mott the Hoople — All the Young Dudes (request 3852, evidence
+    2424). The candidate FLAC files were ``5.1(side)`` 24-bit; libopus
+    rejects that channel layout outright (``Invalid channel layout
+    5.1(side) for specified mapping family -1``) and every per-file
+    ffmpeg invocation failed with "Nothing was written into output file".
+    Two force-import attempts both surfaced
+    ``quality_evidence_action_failed`` because ``convert_lossless`` raised
+    "10 opus 128 conversions failed" before beets ever ran.
+
+    Policy: the library is stereo-only by user requirement, so every
+    output is forced to ``-ac 2`` regardless of source layout. We also
+    record the source channel count on ``ConversionInfo.source_channels``
+    so the breadcrumb is queryable from ``download_log.import_result``.
+    """
+
+    def _make_5_1_flac(self, dst: str, duration_s: float = 0.5) -> None:
+        """Synthesize a 5.1(side) FLAC at dst using ffmpeg's lavfi source."""
+        # Six discrete sines panned across the 5.1(side) layout. The
+        # ``channelmap=channel_layout=5.1(side)`` filter is what makes
+        # libopus reject the file without ``-ac 2``.
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"sine=frequency=200:duration={duration_s}",
+            "-f", "lavfi", "-i", f"sine=frequency=300:duration={duration_s}",
+            "-f", "lavfi", "-i", f"sine=frequency=400:duration={duration_s}",
+            "-f", "lavfi", "-i", f"sine=frequency=500:duration={duration_s}",
+            "-f", "lavfi", "-i", f"sine=frequency=600:duration={duration_s}",
+            "-f", "lavfi", "-i", f"sine=frequency=700:duration={duration_s}",
+            "-filter_complex",
+            "[0:a][1:a][2:a][3:a][4:a][5:a]"
+            "amerge=inputs=6,channelmap=channel_layout=5.1(side)[a]",
+            "-map", "[a]",
+            "-c:a", "flac",
+            dst,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise unittest.SkipTest(
+                f"ffmpeg cannot synthesize 5.1(side) FLAC fixture "
+                f"(rc={result.returncode}): {result.stderr[-300:]}"
+            )
+
+    def test_5_1_flac_converts_to_opus_via_stereo_downmix(self):
+        """Pre-fix: libopus rejects 5.1(side) → 10 OPUS conversions failed.
+
+        Post-fix: ``-ac 2`` downmixes to stereo so libopus accepts the
+        stream, the conversion succeeds, and the 6-channel breadcrumb is
+        recorded.
+        """
+        from harness.import_one import (
+            convert_lossless, parse_verified_lossless_target,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "track01.flac")
+            self._make_5_1_flac(src)
+            opus_128 = parse_verified_lossless_target("opus 128")
+            converted, failed, ext, channels = convert_lossless(
+                tmpdir, opus_128, keep_source=True)
+            self.assertEqual(failed, 0, "5.1 → opus 128 must not fail")
+            self.assertEqual(converted, 1)
+            self.assertEqual(ext, "flac")
+            self.assertEqual(channels, 6,
+                             "source_channels must record the 5.1 layout")
+            self.assertTrue(os.path.exists(
+                os.path.join(tmpdir, "track01.opus")))
+
+    def test_5_1_flac_converts_to_v0_mp3_via_stereo_downmix(self):
+        """libmp3lame already auto-downmixes, but the breadcrumb must still
+        fire so the operator can see 5.1 sources in download_log even when
+        the conversion would have silently succeeded.
+        """
+        from harness.import_one import convert_lossless, V0_SPEC
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "track01.flac")
+            self._make_5_1_flac(src)
+            converted, failed, ext, channels = convert_lossless(
+                tmpdir, V0_SPEC, keep_source=True)
+            self.assertEqual(failed, 0)
+            self.assertEqual(converted, 1)
+            self.assertEqual(ext, "flac")
+            self.assertEqual(channels, 6)
+
+    def test_stereo_source_records_two_channels(self):
+        """The breadcrumb is populated for every source, not just multichannel."""
+        from harness.import_one import (
+            convert_lossless, parse_verified_lossless_target,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "track01.flac")
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
+                "-f", "lavfi", "-i", "sine=frequency=660:duration=0.5",
+                "-filter_complex", "[0:a][1:a]amerge=inputs=2[a]",
+                "-map", "[a]", "-c:a", "flac",
+                src,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=30)
+            if result.returncode != 0:
+                raise unittest.SkipTest(
+                    f"ffmpeg stereo fixture failed: {result.stderr[-300:]}")
+            opus_128 = parse_verified_lossless_target("opus 128")
+            converted, failed, _ext, channels = convert_lossless(
+                tmpdir, opus_128, keep_source=True)
+            self.assertEqual(failed, 0)
+            self.assertEqual(converted, 1)
+            self.assertEqual(channels, 2)
 
 
 class TestConvertLosslessNonUtf8Stderr(unittest.TestCase):
@@ -806,7 +920,7 @@ class TestConvertLosslessNonUtf8Stderr(unittest.TestCase):
             try:
                 os.environ["PATH"] = bin_dir + os.pathsep + saved_path
                 # Pre-fix this raises UnicodeDecodeError; post-fix it returns cleanly.
-                converted, failed, ext = convert_lossless(album, V0_SPEC)
+                converted, failed, ext, _channels = convert_lossless(album, V0_SPEC)
             finally:
                 os.environ["PATH"] = saved_path
             self.assertEqual(converted, 1, "shim wrote a non-empty output file → counted as converted")
@@ -1150,7 +1264,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             result = ImportResult()
 
             with patch("harness.import_one.convert_lossless",
-                       return_value=(1, 0, "flac")) as convert:
+                       return_value=(1, 0, "flac", 2)) as convert:
                 quality_is_transcode = (
                     import_one._materialize_quality_evidence_action(
                         work_path=album,
@@ -1181,7 +1295,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             result = ImportResult()
 
             with patch("harness.import_one.convert_lossless",
-                       return_value=(1, 0, "flac")) as convert:
+                       return_value=(1, 0, "flac", 2)) as convert:
                 quality_is_transcode = (
                     import_one._materialize_quality_evidence_action(
                         work_path=album,
@@ -1215,7 +1329,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             result = ImportResult()
 
             with patch("harness.import_one.convert_lossless",
-                       return_value=(0, 0, "flac")):
+                       return_value=(0, 0, "flac", 2)):
                 import_one._materialize_quality_evidence_action(
                     work_path=album,
                     payload=payload,

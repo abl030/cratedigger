@@ -695,6 +695,7 @@ def _temp_v0_probe(
             out_path = os.path.join(temp_dir, f"{index:03d}-{base}.mp3")
             cmd = [
                 "ffmpeg", "-i", src_path,
+                "-ac", "2",
                 "-c:a", V0_SPEC.codec, *V0_SPEC.codec_args,
                 *V0_SPEC.metadata_args,
                 "-y", out_path,
@@ -734,20 +735,53 @@ def _remove_lossless_files(folder: str) -> None:
             os.remove(os.path.join(folder, fname))
 
 
+def _probe_source_channels(path: str) -> int | None:
+    """Read the channel count from an audio file via mutagen.
+
+    Returns the integer channel count or ``None`` if the probe fails. Used
+    to detect multichannel sources before convert_lossless / _temp_v0_probe
+    invoke ffmpeg — libopus rejects ``5.1(side)`` outright (the Mott
+    /r3852 bug), and even codecs that auto-downmix (libmp3lame) silently
+    discard surround content. We always downmix to stereo on output; this
+    probe lets us log the source layout as a breadcrumb.
+    """
+    try:
+        from mutagen import File as _MutagenFile  # type: ignore[import-untyped,attr-defined]  # pyright: ignore[reportPrivateImportUsage]
+    except ImportError:
+        return None
+    try:
+        mf = _MutagenFile(path)
+    except Exception:
+        return None
+    if mf is None:
+        return None
+    channels = getattr(getattr(mf, "info", None), "channels", None)
+    if isinstance(channels, int) and channels > 0:
+        return channels
+    return None
+
+
 def convert_lossless(album_path: str, spec: ConversionSpec,
                      dry_run: bool = False,
                      keep_source: bool = False,
                      lossless_files: list[str] | None = None
-                     ) -> tuple[int, int, str | None]:
+                     ) -> tuple[int, int, str | None, int | None]:
     """Convert all lossless files using the given ConversionSpec.
 
     Single conversion function — replaces both convert_lossless_to_v0()
     and convert_lossless_to_opus(). The spec carries ffmpeg args, output
     extension, and metadata handling.
 
-    Returns (converted, failed, original_filetype) where original_filetype
-    is the extension of the first source file (e.g. "flac", "m4a", "wav"),
-    or None if no lossless files were found.
+    Returns ``(converted, failed, original_filetype, source_channels)``:
+
+    * ``original_filetype`` — extension of the first source file
+      (``"flac"``, ``"m4a"``, ``"wav"``).
+    * ``source_channels`` — channel count of the first source file as read
+      by mutagen, or ``None`` if the probe failed or the source list was
+      empty. ``> 2`` means the ffmpeg cmd downmixed to stereo via ``-ac
+      2``; we always emit stereo because libopus rejects ``5.1(side)``
+      outright (Mott /r3852) and the library is stereo-only by user
+      policy.
 
     When keep_source=True, original lossless files are preserved (used when
     a second conversion pass will run from the originals). If the target uses
@@ -759,9 +793,16 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
     else:
         lossless_files = sorted(lossless_files)
     if not lossless_files:
-        return 0, 0, None
+        return 0, 0, None, None
 
     original_ext = os.path.splitext(lossless_files[0])[1].lstrip(".").lower()
+    source_channels = _probe_source_channels(
+        os.path.join(album_path, lossless_files[0]))
+    if source_channels is not None and source_channels > 2:
+        _log(
+            f"  [DOWNMIX] {source_channels}ch source → stereo "
+            f"(target={spec.label})"
+        )
 
     converted = 0
     failed = 0
@@ -783,7 +824,13 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
             converted += 1
             continue
 
+        # ``-ac 2`` forces stereo on every output. libopus rejects
+        # ``5.1(side)`` with mapping family -1 *and* 1, and the library
+        # is stereo-only by user policy — downmix universally. Codecs
+        # that already auto-downmix (libmp3lame, aac) ignore the
+        # redundant flag.
         cmd = ["ffmpeg", "-i", src_path,
+               "-ac", "2",
                "-c:a", spec.codec, *spec.codec_args,
                *spec.metadata_args,
                "-y", temp_out_path]
@@ -821,7 +868,7 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
                 os.remove(src_path)
             converted += 1
 
-    return converted, failed, original_ext
+    return converted, failed, original_ext, source_channels
 
 
 # ---------------------------------------------------------------------------
@@ -1157,12 +1204,13 @@ def _materialize_quality_evidence_action(
             _log("[EVIDENCE] Normalizing non-FLAC lossless for Beets import")
             stage_start = time.monotonic()
             try:
-                converted, failed, original_ext = convert_lossless(
+                converted, failed, original_ext, source_channels = convert_lossless(
                     work_path, FLAC_SPEC, lossless_files=lossless_files)
             finally:
                 _log_timing("evidence_lossless_normalization", stage_start)
             r.conversion.converted = converted
             r.conversion.failed = failed
+            r.conversion.source_channels = source_channels
             if failed > 0:
                 raise RuntimeError(f"{failed} FLAC normalizations failed")
             if converted > 0:
@@ -1179,7 +1227,7 @@ def _materialize_quality_evidence_action(
     _log(f"[EVIDENCE] Materializing lossless source → {target_spec.label}")
     stage_start = time.monotonic()
     try:
-        converted, failed, original_ext = convert_lossless(
+        converted, failed, original_ext, source_channels = convert_lossless(
             work_path,
             target_spec,
             keep_source=True,
@@ -1189,6 +1237,7 @@ def _materialize_quality_evidence_action(
         _log_timing("evidence_materialization", stage_start)
     r.conversion.converted = converted
     r.conversion.failed = failed
+    r.conversion.source_channels = source_channels
     if failed > 0:
         raise RuntimeError(f"{failed} {target_spec.label} conversions failed")
     _remove_lossless_files(work_path)
@@ -1563,13 +1612,14 @@ def main():
         _log(f"[CONVERT] {work_path}")
         stage_start = time.monotonic()
         try:
-            converted, failed, original_ext = convert_lossless(
+            converted, failed, original_ext, source_channels = convert_lossless(
                 work_path, V0_SPEC,
                 keep_source=keep_v0_source)
         finally:
             _log_timing("primary_conversion", stage_start)
         r.conversion.converted = converted
         r.conversion.failed = failed
+        r.conversion.source_channels = source_channels
         if converted > 0:
             r.conversion.was_converted = True
             r.conversion.original_filetype = original_ext or "flac"
@@ -1615,12 +1665,13 @@ def main():
             _log(f"[NORMALIZE] Converting non-FLAC lossless → FLAC")
             stage_start = time.monotonic()
             try:
-                converted, failed, original_ext = convert_lossless(
+                converted, failed, original_ext, source_channels = convert_lossless(
                     work_path, FLAC_SPEC)
             finally:
                 _log_timing("lossless_normalization", stage_start)
             r.conversion.converted = converted
             r.conversion.failed = failed
+            r.conversion.source_channels = source_channels
             if converted > 0:
                 r.conversion.was_converted = True
                 r.conversion.original_filetype = original_ext
@@ -1870,8 +1921,13 @@ def main():
         if target_spec.extension == V0_SPEC.extension:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
         try:
-            target_converted, target_failed, _ = convert_lossless(
+            target_converted, target_failed, _, target_source_channels = convert_lossless(
                 work_path, target_spec, keep_source=True)
+            if (
+                target_source_channels is not None
+                and r.conversion.source_channels is None
+            ):
+                r.conversion.source_channels = target_source_channels
             if target_failed > 0:
                 r.exit_code = 1
                 r.decision = "target_conversion_failed"
