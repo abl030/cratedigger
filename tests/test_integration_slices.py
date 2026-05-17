@@ -7362,6 +7362,145 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
             self.assertEqual(result.verdict, "would_import")
 
+    def test_lossy_candidate_against_lossless_source_locks_and_narrows(self) -> None:
+        """AE2: a lossy MP3 V0 candidate vs lossless-source library row →
+        ``lossless_source_locked`` → ``OUTCOME_DELETED`` + the request's
+        ``search_filetype_override`` is narrowed to ``"lossless"``.
+
+        This is the load-bearing test for the search-narrowing
+        behavior. The Lil Wayne sibling test above exercises the
+        FLAC-vs-FLAC same-source case (decision
+        ``suspect_lossless_downgrade``) which does NOT fire the lock and
+        should NOT narrow. This test exercises the lossy-candidate
+        path which IS the lock, and asserts both the rejection and
+        the narrowing land.
+        """
+        from datetime import datetime, timezone
+        from lib.quality import AlbumQualityEvidence
+        from lib.quality_evidence import (
+            snapshot_audio_files,
+            snapshot_fingerprint,
+        )
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_DELETED,
+            cleanup_wrong_match,
+        )
+
+        db = FakePipelineDB()
+        # Seed the request with a full upgrade-tier override; narrowing
+        # must compress it to "lossless".
+        db.seed_request(make_request_row(
+            id=3781,
+            status="manual",
+            mb_release_id=self.MB_RELEASE_ID,
+            search_filetype_override="lossless,mp3 v0,mp3 320",
+        ))
+
+        with tempfile.TemporaryDirectory() as origin_dir, \
+                tempfile.TemporaryDirectory() as library_dir, \
+                tempfile.TemporaryDirectory() as dup_parent:
+
+            # First import (lossless-source FLAC → Opus library copy)
+            # establishes a lossless_source V0 probe on the library row.
+            self._stage_audio(origin_dir, filenames=["01 - Track.flac"])
+            self._stage_audio(library_dir, filenames=["01 - Track.opus"])
+            self._propagate_first_import(
+                db,
+                request_id=3781,
+                mb_release_id=self.MB_RELEASE_ID,
+                source_dir=origin_dir,
+                library_dir=library_dir,
+            )
+
+            # Build a LOSSY MP3 V0 candidate in the wrong-matches queue.
+            # No v0_metric, no spectral lineage — a clean lossy file
+            # that would normally pass the gate against a non-lossless
+            # existing, but cannot override the recorded lossless_source
+            # V0 probe.
+            duplicate_source_dir = self._make_failed_imports_dir(
+                dup_parent, "Lil Wayne - Da Drought 3 (lossy MP3 V0)",
+            )
+            self._stage_audio(
+                duplicate_source_dir, filenames=["01 - Track.mp3"],
+            )
+            dup_files = snapshot_audio_files(duplicate_source_dir)
+            dup_candidate = AlbumQualityEvidence(
+                mb_release_id=self.MB_RELEASE_ID,
+                snapshot_fingerprint=snapshot_fingerprint(dup_files),
+                source_path=duplicate_source_dir,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=240,
+                    avg_bitrate_kbps=245,
+                    median_bitrate_kbps=243,
+                    format="MP3",
+                    is_cbr=False,
+                ),
+                measured_at=datetime(2026, 5, 17, 19, 0, 0, tzinfo=timezone.utc),
+                files=dup_files,
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+                target_format="opus",
+                v0_metric=None,
+                verified_lossless_proof=None,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(dup_files),
+                filetype_band="mp3 v0",
+            )
+            db.upsert_album_quality_evidence(dup_candidate)
+            persisted_dup = db.find_album_quality_evidence(
+                mb_release_id=self.MB_RELEASE_ID,
+                snapshot_fingerprint=dup_candidate.snapshot_fingerprint,
+            )
+            assert persisted_dup is not None and persisted_dup.id is not None
+
+            log_id = self._seed_duplicate_wrong_match(
+                db,
+                request_id=3781,
+                duplicate_source_dir=duplicate_source_dir,
+                candidate_evidence_id=persisted_dup.id,
+            )
+
+            beets_info = AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=100,
+                avg_bitrate_kbps=119,
+                median_bitrate_kbps=115,
+                is_cbr=False,
+                album_path=library_dir,
+                format="Opus",
+            )
+            with self._patch_cfg(), \
+                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                result = cleanup_wrong_match(db, log_id)
+
+            # Decision: lossless_source_locked.
+            self.assertEqual(
+                result.outcome,
+                OUTCOME_DELETED,
+                f"expected lock + deletion; got outcome={result.outcome!r} "
+                f"verdict={result.verdict!r} "
+                f"preview_decision={result.preview_decision!r}",
+            )
+            self.assertEqual(result.verdict, "confident_reject")
+            self.assertEqual(
+                result.preview_decision, "lossless_source_locked",
+            )
+            self.assertTrue(result.cleanup_eligible)
+            self.assertTrue(result.success)
+
+            # Search narrowing: the request's override compressed from
+            # full upgrade ladder to lossless-only. RED before U11.
+            self.assertEqual(
+                db.request(3781)["search_filetype_override"], "lossless",
+                "lossless_source_locked cleanup must narrow the search "
+                "override to lossless-only so future cycles stop "
+                "asking Soulseek for lossy candidates that will hit "
+                "the lock and waste bandwidth.",
+            )
+
 
 class TestU10PostImportEvidencePropagation(unittest.TestCase):
     """U10: ``_refresh_current_evidence_after_import`` propagates the candidate
