@@ -1473,7 +1473,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
 
-            converted, failed, _ = convert_lossless(
+            converted, failed, _, _ = convert_lossless(
                 tmpdir, V0_SPEC, keep_source=True)
 
             self.assertEqual((converted, failed), (1, 0))
@@ -1493,7 +1493,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
 
-            converted, failed, _ = convert_lossless(
+            converted, failed, _, _ = convert_lossless(
                 tmpdir, V0_SPEC, keep_source=True)
             self.assertEqual((converted, failed), (1, 0))
             self.assertTrue(os.path.exists(flac_path))
@@ -1562,7 +1562,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
                                         _remove_files_by_ext)
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
-            converted, _, _ = convert_lossless(
+            converted, _, _, _ = convert_lossless(
                 tmpdir, V0_SPEC, keep_source=True)
             self.assertEqual(converted, 1)
             mp3_path = os.path.join(tmpdir, "01.mp3")
@@ -1596,12 +1596,12 @@ class TestPreserveSourceSlice(unittest.TestCase):
 
             # First attempt: V0 conversion with keep_source=True (both
             # FLAC and MP3 now exist).
-            converted1, _, _ = convert_lossless(
+            converted1, _, _, _ = convert_lossless(
                 tmpdir, V0_SPEC, keep_source=True)
             self.assertEqual(converted1, 1)
 
             # Second attempt: output MP3 exists — convert_lossless skips.
-            converted2, _, _ = convert_lossless(
+            converted2, _, _, _ = convert_lossless(
                 tmpdir, V0_SPEC, keep_source=True)
             self.assertEqual(converted2, 0,
                              "V0 MP3 already exists — convert_lossless "

@@ -1712,6 +1712,11 @@ class ConversionInfo(msgspec.Struct):
     post_conversion_min_bitrate: Optional[int] = None  # min bitrate after lossless→V0
     is_transcode: bool = False  # True if FLAC was actually a transcode
     final_format: Optional[str] = None  # e.g. "opus 128", "mp3 v2", "aac 128"
+    # Source channel count read off the first source file before conversion.
+    # ``> 2`` means the ffmpeg invocation downmixed multichannel → stereo;
+    # 5.1(side) FLAC otherwise breaks libopus outright (Mott / r3852). None
+    # for legacy rows or when the probe fails.
+    source_channels: Optional[int] = None
 
 
 class SpectralDetail(msgspec.Struct):

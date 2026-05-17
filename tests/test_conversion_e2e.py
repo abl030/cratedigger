@@ -486,7 +486,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, orig_ext = convert_lossless(album, V0_SPEC)
+            converted, failed, orig_ext, _ = convert_lossless(album, V0_SPEC)
             self.assertEqual(converted, 2)
             self.assertEqual(failed, 0)
             self.assertEqual(orig_ext, "flac")
@@ -505,7 +505,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=12000)
-            converted, failed, orig_ext = convert_lossless(album, V0_SPEC)
+            converted, failed, orig_ext, _ = convert_lossless(album, V0_SPEC)
             self.assertEqual(converted, 2)
             self.assertEqual(failed, 0)
             for f in os.listdir(album):
@@ -531,7 +531,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, orig_ext = convert_lossless(album, spec)
+            converted, failed, orig_ext, _ = convert_lossless(album, spec)
             self.assertEqual(converted, 2)
             self.assertEqual(failed, 0)
             exts = self._count_by_ext(album)
@@ -545,7 +545,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, _ = convert_lossless(album, spec)
+            converted, failed, _, _ = convert_lossless(album, spec)
             self.assertEqual(converted, 2)
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".mp3", 0), 2)
@@ -558,7 +558,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, _ = convert_lossless(album, spec)
+            converted, failed, _, _ = convert_lossless(album, spec)
             self.assertEqual(converted, 2)
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".m4a", 0), 2)
@@ -583,11 +583,11 @@ class TestConvertLosslessE2E(unittest.TestCase):
                 capture_output=True, check=True, timeout=30,
             )
 
-            converted, failed, _ = convert_lossless(album, V0_SPEC, keep_source=True)
+            converted, failed, _, _ = convert_lossless(album, V0_SPEC, keep_source=True)
             self.assertEqual((converted, failed), (1, 0))
 
             target_spec = parse_verified_lossless_target("aac 128")
-            converted, failed, _ = convert_lossless(album, target_spec, keep_source=True)
+            converted, failed, _, _ = convert_lossless(album, target_spec, keep_source=True)
             self.assertEqual((converted, failed), (1, 0))
 
             _remove_files_by_ext(album, "." + V0_SPEC.extension)
@@ -608,7 +608,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
                 ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                  "-y", wav],
                 capture_output=True, check=True, timeout=30)
-            converted, failed, orig_ext = convert_lossless(album, FLAC_SPEC)
+            converted, failed, orig_ext, _ = convert_lossless(album, FLAC_SPEC)
             self.assertEqual(converted, 1)
             self.assertEqual(failed, 0)
             self.assertEqual(orig_ext, "wav")
@@ -627,7 +627,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
                 ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                  "-c:a", "alac", "-y", src],
                 capture_output=True, check=True, timeout=30)
-            converted, failed, orig_ext = convert_lossless(album, FLAC_SPEC)
+            converted, failed, orig_ext, _ = convert_lossless(album, FLAC_SPEC)
             self.assertEqual(converted, 1)
             self.assertEqual(orig_ext, "m4a")
             exts = self._count_by_ext(album)
@@ -647,7 +647,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=1, cutoff_hz=15500)
-            converted, failed, _ = convert_lossless(album, FLAC_SPEC)
+            converted, failed, _, _ = convert_lossless(album, FLAC_SPEC)
             self.assertEqual(converted, 1)  # re-compresses via temp file
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".flac", 0), 1)
@@ -659,7 +659,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
             # Create a fake mp3
             with open(os.path.join(d, "track.mp3"), "w") as f:
                 f.write("not real")
-            converted, failed, orig_ext = convert_lossless(d, V0_SPEC)
+            converted, failed, orig_ext, _ = convert_lossless(d, V0_SPEC)
             self.assertEqual(converted, 0)
             self.assertEqual(failed, 0)
             self.assertIsNone(orig_ext)
@@ -670,7 +670,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=1, cutoff_hz=15500)
-            converted, failed, _ = convert_lossless(album, V0_SPEC, dry_run=True)
+            converted, failed, _, _ = convert_lossless(album, V0_SPEC, dry_run=True)
             self.assertEqual(converted, 1)
             exts = self._count_by_ext(album)
             self.assertNotIn(".mp3", exts, "Dry run should not create files")
@@ -697,7 +697,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, _ = convert_lossless(album, V0_SPEC)
+            converted, failed, _, _ = convert_lossless(album, V0_SPEC)
 
             # Measure V0 bitrate
             min_br = None
@@ -724,7 +724,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=12000)
-            converted, failed, _ = convert_lossless(album, V0_SPEC)
+            converted, failed, _, _ = convert_lossless(album, V0_SPEC)
 
             min_br = None
             for f in os.listdir(album):
@@ -752,7 +752,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
             make_test_album(album, track_count=2, cutoff_hz=15500)
 
             # Step 1: V0 verification (keep source for second pass)
-            converted, _, _ = convert_lossless(album, V0_SPEC, keep_source=True)
+            converted, _, _, _ = convert_lossless(album, V0_SPEC, keep_source=True)
 
             # Measure V0 for verification
             v0_bitrates = []
@@ -771,7 +771,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
             # Step 3: Convert FLAC → Opus (from originals, not V0)
             spec = parse_verified_lossless_target("opus 128")
-            opus_converted, opus_failed, _ = convert_lossless(album, spec)
+            opus_converted, opus_failed, _, _ = convert_lossless(album, spec)
             self.assertEqual(opus_converted, 2)
 
             # Step 4: Clean up V0 (ephemeral) + FLAC (consumed)
@@ -797,7 +797,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
             make_test_album(album, track_count=2, cutoff_hz=12000)
 
             # V0 verification (keep source because target was configured)
-            converted, _, _ = convert_lossless(album, V0_SPEC, keep_source=True)
+            converted, _, _, _ = convert_lossless(album, V0_SPEC, keep_source=True)
 
             v0_min = None
             for f in os.listdir(album):
@@ -849,7 +849,7 @@ class TestConversionPipelineE2E(unittest.TestCase):
             _remove_files_by_ext(album, "." + V0_SPEC.extension)
 
             # Step 3: Convert FLAC → MP3 V2
-            converted, failed, _ = convert_lossless(album, target_spec,
+            converted, failed, _, _ = convert_lossless(album, target_spec,
                                                     keep_source=True)
             self.assertEqual(converted, 2)
             self.assertEqual(failed, 0)
