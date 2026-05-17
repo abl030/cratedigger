@@ -495,13 +495,15 @@ function convergeToast(data) {
  * @returns {string}
  */
 function cleanupSummaryToast(data) {
-  const deleted = Number(data?.deleted || 0);
+  const deleted = Number(data?.deleted || 0)
+    + Number(data?.deleted_verified_lossless_parent || 0);
   const kept = Number(data?.kept_would_import || 0)
     + Number(data?.kept_uncertain || 0);
   const skipped = Number(data?.skipped_candidate_evidence_missing || 0)
     + Number(data?.skipped_candidate_evidence_stale || 0)
     + Number(data?.skipped_current_evidence_missing || 0)
     + Number(data?.skipped_current_evidence_stale || 0)
+    + Number(data?.skipped_current_evidence_failed || 0)
     + Number(data?.skipped_active_job || 0)
     + Number(data?.skipped_invalid_row || 0)
     + Number(data?.skipped_missing_path || 0)
@@ -820,7 +822,7 @@ function renderLatestImport(d, group) {
   const inLibrary = !!(group && group.in_library);
   const verifiedLossless = !!(group && group.verified_lossless);
   if (inLibrary && verifiedLossless) {
-    return '<div style="color:#6d6;font-size:0.78em;padding:4px 8px;">Verified-lossless copy in library — Wrong Matches against this album auto-clean on next sweep.</div>';
+    return '<div style="color:#6d6;font-size:0.78em;padding:4px 8px;">Verified-lossless copy in library — Wrong Matches against this album are cleared on the next cleanup sweep.</div>';
   }
   if (inLibrary) {
     return '<div style="color:#9bf;font-size:0.78em;padding:4px 8px;">Album already in library — any new candidate must beat current quality to import.</div>';

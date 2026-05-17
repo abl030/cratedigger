@@ -241,7 +241,7 @@ def load_current_evidence_for_action(
     *,
     request_id: int,
     mb_release_id: str,
-    quality_ranks: "QualityRankConfig | None" = None,
+    quality_ranks: QualityRankConfig | None = None,
     beets_library_root: str = "",
 ) -> CurrentEvidenceActionResult | None:
     """Look Beets up by MBID then load/backfill; return None if no album, fail-closed on error."""

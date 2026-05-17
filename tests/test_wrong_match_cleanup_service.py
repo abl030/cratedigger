@@ -658,6 +658,47 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertTrue(result.cleanup_eligible)
         self.assertEqual(decider.call_count, 0)
         cleanup_call.assert_called_once()
+        self.assertEqual(len(self.db.advisory_lock_calls), 1,
+                         "verified-lossless short-circuit must acquire the WMCL advisory lock")
+
+    def test_backfilled_verified_lossless_does_not_short_circuit(self) -> None:
+        """Backfill can carry an old verified_lossless_proof against changed files; require loaded-from-disk status."""
+        source = _make_source(self.tmp, "backfilled-verified-lossless-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source)),
+        )
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="library",
+                source="library_audit",
+                classifier="verified_lossless",
+            ),
+        )
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="backfilled"),
+            )
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
+            wraps=__import__(
+                "lib.wrong_match_cleanup_service",
+                fromlist=["full_pipeline_decision_from_evidence"],
+            ).full_pipeline_decision_from_evidence,
+        ) as decider, patch(
+            "lib.wrong_match_cleanup_service.cleanup_wrong_match_source",
+        ) as cleanup_call:
+            result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertNotEqual(result.outcome, OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT)
+        self.assertEqual(decider.call_count, 1)
+        cleanup_call.assert_not_called()
+        self.assertTrue(os.path.isdir(source))
 
     def test_candidate_missing_bails_before_verified_lossless_check(self) -> None:
         """Missing candidate evidence skips before the verified-lossless branch fires."""

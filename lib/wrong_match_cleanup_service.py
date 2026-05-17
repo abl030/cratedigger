@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 import msgspec
 
-from lib.import_evidence import load_current_evidence_for_action
+from lib.import_evidence import CURRENT_STATUS_LOADED, load_current_evidence_for_action
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
     wrong_match_cleanup_lock_key,
@@ -126,6 +126,9 @@ def cleanup_all_wrong_matches(
     """Run cleanup over the full current Wrong Matches queue."""
     if confirm_all_wrong_matches is not True:
         raise ValueError("confirm_all_wrong_matches must be true")
+
+    if cfg is None:
+        cfg = _runtime_config()
 
     results: list[WrongMatchCleanupOutcome] = []
     for row in db.get_wrong_matches():
@@ -266,6 +269,7 @@ def _cleanup_wrong_match(
     mb_release_id = str(mb_release_id_raw) if mb_release_id_raw else None
     beets_library_root = getattr(runtime_cfg, "beets_directory", "") or ""
     current_evidence: AlbumQualityEvidence | None = None
+    current_evidence_status: str | None = None
     if mb_release_id is not None:
         current_result = load_current_evidence_for_action(
             db,
@@ -294,10 +298,18 @@ def _cleanup_wrong_match(
                     or "current_evidence_unavailable",
                 )
             current_evidence = current_result.evidence
+            current_evidence_status = current_result.provenance.current_status
 
+    # Cleanup-only policy (NOT a quality decision): when the in-Beets parent is
+    # verified-lossless AND the evidence was loaded directly from disk (not
+    # backfilled, which can preserve a stale verified_lossless_proof against
+    # changed audio), any candidate in Wrong Matches against this MBID is
+    # guaranteed to lose the upgrade gate. Short-circuit deletion. The reducer
+    # is deliberately not called -- see TestVerifiedLosslessShortCircuit.
     if (
         current_evidence is not None
         and current_evidence.verified_lossless_proof is not None
+        and current_evidence_status == CURRENT_STATUS_LOADED
     ):
         return _perform_cleanup_deletion(
             db,

@@ -1088,9 +1088,11 @@ class TestPipelineRouteContracts(_WebServerCase):
         "cleanup_eligible", "decision", "reason", "stage_chain",
     }
     WRONG_MATCH_TRIAGE_REQUIRED_FIELDS = {
-        "status", "processed", "deleted", "kept_would_import", "kept_uncertain",
+        "status", "processed", "deleted", "deleted_verified_lossless_parent",
+        "kept_would_import", "kept_uncertain",
         "skipped_candidate_evidence_missing", "skipped_candidate_evidence_stale",
         "skipped_current_evidence_missing", "skipped_current_evidence_stale",
+        "skipped_current_evidence_failed",
         "skipped_active_job", "skipped_invalid_row", "skipped_missing_path",
         "skipped_operational", "delete_failed", "results",
     }
