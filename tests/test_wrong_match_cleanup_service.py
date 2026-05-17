@@ -10,11 +10,14 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import msgspec
+
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     QualityRankConfig,
+    VerifiedLosslessProof,
 )
 from lib.quality_evidence import snapshot_fingerprint
 from lib.import_evidence import (
@@ -24,6 +27,7 @@ from lib.import_evidence import (
 from lib.wrong_match_cleanup_service import (
     OUTCOME_DELETE_FAILED,
     OUTCOME_DELETED,
+    OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
     OUTCOME_KEPT_WOULD_IMPORT,
     OUTCOME_SKIPPED_ACTIVE_JOB,
     OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
@@ -603,6 +607,128 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         assert result.reason is not None
         self.assertIn("RuntimeError", result.reason)
         self.assertIn("boom", result.reason)
+
+    def test_verified_lossless_parent_short_circuits_to_deletion(self) -> None:
+        """Verified-lossless current → cleanup deletes without calling the reducer."""
+        source = _make_source(self.tmp, "verified-lossless-parent-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source)),
+        )
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="library",
+                source="library_audit",
+                classifier="verified_lossless",
+                detail="parent_lossless_proof",
+            ),
+        )
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+
+        cleanup = types.SimpleNamespace(
+            success=True,
+            error=None,
+            path_missing=False,
+            cleared_rows=1,
+            deleted_path=source,
+        )
+        with patch(
+            "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
+        ) as decider, patch(
+            "lib.wrong_match_cleanup_service.cleanup_wrong_match_source",
+            return_value=cleanup,
+        ) as cleanup_call:
+            result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(
+            result.outcome,
+            OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "parent_album_verified_lossless")
+        self.assertEqual(result.verdict, "confident_reject")
+        self.assertEqual(result.preview_decision, "verified_lossless_parent")
+        self.assertTrue(result.cleanup_eligible)
+        self.assertEqual(decider.call_count, 0)
+        cleanup_call.assert_called_once()
+
+    def test_candidate_missing_bails_before_verified_lossless_check(self) -> None:
+        """Missing candidate evidence skips before the verified-lossless branch fires."""
+        source = _make_source(self.tmp, "candidate-missing-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        # NOTE: no set_download_log_candidate_evidence → candidate loader returns None.
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="library",
+                source="library_audit",
+                classifier="verified_lossless",
+            ),
+        )
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_service.cleanup_wrong_match_source",
+        ) as cleanup_call:
+            result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(
+            result.outcome,
+            OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
+        )
+        self.mock_current_evidence_helper.assert_not_called()
+        cleanup_call.assert_not_called()
+        self.assertTrue(os.path.isdir(source))
+
+    def test_current_without_verified_lossless_reaches_reducer(self) -> None:
+        """Non-verified-lossless current evidence still flows through the reducer."""
+        source = _make_source(self.tmp, "no-verified-lossless-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source)),
+        )
+        current = _evidence(source, mb_release_id="mbid-1")
+        self.assertIsNone(current.verified_lossless_proof)
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
+            wraps=__import__(
+                "lib.wrong_match_cleanup_service",
+                fromlist=["full_pipeline_decision_from_evidence"],
+            ).full_pipeline_decision_from_evidence,
+        ) as decider:
+            result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(decider.call_count, 1)
+        _candidate_arg, current_arg = decider.call_args.args[:2]
+        self.assertIs(current_arg, current)
+        # The reducer was reached, which is the contract under test. The
+        # specific outcome depends on candidate-vs-current comparison; the
+        # only outcome this test rules out is the verified-lossless short-
+        # circuit.
+        self.assertNotEqual(
+            result.outcome,
+            OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
+        )
 
     def test_mbid_missing_passes_current_none_to_reducer(self) -> None:
         """Request without an MBID skips the helper and feeds current=None."""

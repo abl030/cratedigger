@@ -28,6 +28,7 @@ from lib.wrong_matches import cleanup_wrong_match_source, validation_failed_path
 logger = logging.getLogger("cratedigger")
 
 OUTCOME_DELETED = "deleted"
+OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT = "deleted_verified_lossless_parent"
 OUTCOME_KEPT_WOULD_IMPORT = "kept_would_import"
 OUTCOME_KEPT_UNCERTAIN = "kept_uncertain"
 OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING = "skipped_candidate_evidence_missing"
@@ -43,6 +44,7 @@ OUTCOME_DELETE_FAILED = "delete_failed"
 
 OUTCOME_KEYS: tuple[str, ...] = (
     OUTCOME_DELETED,
+    OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
     OUTCOME_KEPT_WOULD_IMPORT,
     OUTCOME_KEPT_UNCERTAIN,
     OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
@@ -59,6 +61,7 @@ OUTCOME_KEYS: tuple[str, ...] = (
 
 FINAL_AUDIT_OUTCOMES: frozenset[str] = frozenset({
     OUTCOME_DELETED,
+    OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
     OUTCOME_KEPT_WOULD_IMPORT,
     OUTCOME_KEPT_UNCERTAIN,
     OUTCOME_DELETE_FAILED,
@@ -88,6 +91,7 @@ class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
 class WrongMatchCleanupSummary(msgspec.Struct, frozen=True):
     processed: int = 0
     deleted: int = 0
+    deleted_verified_lossless_parent: int = 0
     kept_would_import: int = 0
     kept_uncertain: int = 0
     skipped_candidate_evidence_missing: int = 0
@@ -291,6 +295,26 @@ def _cleanup_wrong_match(
                 )
             current_evidence = current_result.evidence
 
+    if (
+        current_evidence is not None
+        and current_evidence.verified_lossless_proof is not None
+    ):
+        return _perform_cleanup_deletion(
+            db,
+            download_log_id=download_log_id,
+            request_id=request_id,
+            resolved_path=resolved_path,
+            candidates=tuple(candidates),
+            source_dirs=tuple(source_dirs),
+            ignore_import_job_id=ignore_import_job_id,
+            success_outcome=OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
+            reason="parent_album_verified_lossless",
+            verdict="confident_reject",
+            preview_decision="verified_lossless_parent",
+            cleanup_eligible=True,
+            decision=None,
+        )
+
     decision = full_pipeline_decision_from_evidence(
         candidate.evidence,
         current_evidence,
@@ -333,6 +357,40 @@ def _cleanup_wrong_match(
             decision=decision,
         )
 
+    return _perform_cleanup_deletion(
+        db,
+        download_log_id=download_log_id,
+        request_id=request_id,
+        resolved_path=resolved_path,
+        candidates=tuple(candidates),
+        source_dirs=tuple(source_dirs),
+        ignore_import_job_id=ignore_import_job_id,
+        success_outcome=OUTCOME_DELETED,
+        reason=reason,
+        verdict=verdict,
+        preview_decision=preview_decision,
+        cleanup_eligible=cleanup_eligible,
+        decision=decision,
+    )
+
+
+def _perform_cleanup_deletion(
+    db: Any,
+    *,
+    download_log_id: int,
+    request_id: int,
+    resolved_path: str,
+    candidates: tuple[str, ...],
+    source_dirs: tuple[str, ...],
+    ignore_import_job_id: int | None,
+    success_outcome: str,
+    reason: str | None,
+    verdict: str | None,
+    preview_decision: str | None,
+    cleanup_eligible: bool,
+    decision: dict[str, Any] | None,
+) -> WrongMatchCleanupOutcome:
+    """Acquire WMCL lock, re-check active jobs, delete the source, translate the result."""
     lock_key = wrong_match_cleanup_lock_key(
         request_id,
         download_log_id,
@@ -413,7 +471,7 @@ def _cleanup_wrong_match(
         )
     return _result(
         download_log_id,
-        OUTCOME_DELETED,
+        success_outcome,
         success=True,
         request_id=request_id,
         source_path=resolved_path,
@@ -537,6 +595,9 @@ def _summary(
     return WrongMatchCleanupSummary(
         processed=len(results),
         deleted=counts[OUTCOME_DELETED],
+        deleted_verified_lossless_parent=counts[
+            OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT
+        ],
         kept_would_import=counts[OUTCOME_KEPT_WOULD_IMPORT],
         kept_uncertain=counts[OUTCOME_KEPT_UNCERTAIN],
         skipped_candidate_evidence_missing=counts[
@@ -600,6 +661,8 @@ def _result(
 def _audit_action(outcome: str) -> str:
     if outcome == OUTCOME_DELETED:
         return "deleted_reject"
+    if outcome == OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT:
+        return "deleted_verified_lossless_parent"
     return outcome
 
 
