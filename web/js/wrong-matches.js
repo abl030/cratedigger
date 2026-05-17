@@ -658,6 +658,53 @@ function removeWrongMatchGroup(requestId) {
 }
 
 /**
+ * Remove one candidate entry from the current DOM and the in-memory cache.
+ * Updates the parent group's count badge; if the group hits zero candidates,
+ * removes the whole group. Preserves scroll position and other expanded state.
+ * @param {number|string} logId
+ */
+function removeWrongMatchEntry(logId) {
+  const id = Number(logId);
+  if (!Number.isFinite(id)) return;
+  _entryExplorerState.delete(id);
+  /** @type {any | null} */
+  let owningGroup = null;
+  if (_lastData && Array.isArray(_lastData.groups)) {
+    for (const g of _lastData.groups) {
+      const entries = Array.isArray(g.entries) ? g.entries : [];
+      const idx = entries.findIndex((/** @type {any} */ e) => Number(e.download_log_id) === id);
+      if (idx !== -1) {
+        entries.splice(idx, 1);
+        g.entries = entries;
+        if (typeof g.pending_count === 'number') g.pending_count = Math.max(0, g.pending_count - 1);
+        owningGroup = g;
+        break;
+      }
+    }
+  }
+  const card = document.getElementById(`wm-entry-card-${id}`);
+  if (card && typeof card.remove === 'function') card.remove();
+  if (owningGroup) {
+    const remaining = (owningGroup.pending_count != null)
+      ? owningGroup.pending_count
+      : (Array.isArray(owningGroup.entries) ? owningGroup.entries.length : 0);
+    if (remaining <= 0) {
+      removeWrongMatchGroup(owningGroup.request_id);
+    } else {
+      const release = document.getElementById(`wm-release-${owningGroup.request_id}`);
+      if (release) release.setAttribute('data-pending-count', String(remaining));
+      const badge = release ? release.querySelector('.badge-library') : null;
+      if (badge) badge.textContent = `${remaining} candidate${remaining !== 1 ? 's' : ''}`;
+      const groupDeleteBtn = document.getElementById(`wm-delete-group-btn-${owningGroup.request_id}`);
+      if (groupDeleteBtn) groupDeleteBtn.textContent = `Delete All (${remaining})`;
+      updateWrongMatchesSummary();
+    }
+  } else {
+    updateWrongMatchesSummary();
+  }
+}
+
+/**
  * @param {number|string} requestId
  * @param {unknown} value
  */
@@ -689,6 +736,7 @@ function renderWrongMatches(data, el) {
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
       <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <button id="wm-refresh-btn" class="p-btn" style="border-color:#888;color:#888;" onclick="event.stopPropagation(); window.refreshWrongMatches(this)" title="Refetch the queue from the server">Refresh</button>
         <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches(this)">Cleanup Wrong Matches (${counts.entries})</button>
       </div>
     </div>`;
@@ -953,9 +1001,16 @@ function renderEntry(e, thresholdMilli, requestId) {
  * @returns {string}
  */
 function renderEntryDetail(e, job) {
-  let html = '';
   const c = e.candidate;
   const sourceDirs = sourceDirsForEntry(e);
+
+  // Action buttons up top: operators are usually here to act, not browse.
+  const active = job && (job.status === 'queued' || job.status === 'running');
+  const importLabel = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
+  let html = '<div class="p-actions" style="margin-bottom:10px;">';
+  html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
+  html += `<button class="p-btn delete" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
+  html += '</div>';
 
   if (c) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${c.year})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
@@ -1026,18 +1081,14 @@ function renderEntryDetail(e, job) {
     html += '</div>';
   }
 
+  // File explorer (tags + per-file audio playback) lives behind its own
+  // disclosure so the entry expand stays cheap and the playback UI doesn't
+  // clutter the view. Lazy-loads on first open via the toggle handler.
   html += `
-    <div style="margin-top:10px;">
-      <div style="color:#6a9;font-weight:600;font-size:0.82em;">File explorer</div>
-      <div id="wm-explorer-${e.download_log_id}" style="margin-top:4px;color:#555;font-size:0.78em;">Open this candidate to inspect tags and play files.</div>
-    </div>`;
-
-  html += '<div class="p-actions" style="margin-top:10px;">';
-  const active = job && (job.status === 'queued' || job.status === 'running');
-  const label = active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import';
-  html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${label}</button>`;
-  html += `<button class="p-btn delete" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
-  html += '</div>';
+    <details class="wm-explorer-details" style="margin-top:10px;" ontoggle="window.maybeLoadWrongMatchExplorer(${e.download_log_id}, this)">
+      <summary style="cursor:pointer;color:#6a9;font-weight:600;font-size:0.82em;list-style:none;">▸ File explorer &amp; playback</summary>
+      <div id="wm-explorer-${e.download_log_id}" style="margin-top:4px;color:#555;font-size:0.78em;">Loading…</div>
+    </details>`;
 
   return html;
 }
@@ -1059,16 +1110,25 @@ export function toggleWrongMatchGroup(id) {
 export async function toggleWrongMatchEntry(id, logId) {
   const el = document.getElementById(id);
   if (!el) return;
-  const toggled = el.classList.toggle('open');
-  const isOpen = typeof toggled === 'boolean'
-    ? toggled
-    : (typeof el.classList.contains === 'function' ? el.classList.contains('open') : false);
-  const resolvedLogId = Number.isFinite(logId)
-    ? Number(logId)
-    : Number.parseInt(id.replace('wm-entry-', ''), 10);
-  if (isOpen && Number.isFinite(resolvedLogId)) {
-    await ensureWrongMatchExplorer(resolvedLogId);
-  }
+  el.classList.toggle('open');
+  // Note: file explorer no longer auto-loads on entry expand — it lives behind
+  // its own <details> disclosure inside the entry. The logId parameter is kept
+  // for backward compatibility with the renderEntry call site.
+  void logId;
+}
+
+/**
+ * Lazy-loader for the per-entry <details>-wrapped file explorer disclosure.
+ * Fires from the <details> element's ontoggle handler — loads the explorer
+ * data on first open, no-ops on subsequent toggles.
+ * @param {number} logId
+ * @param {HTMLDetailsElement} detailsEl
+ */
+export async function maybeLoadWrongMatchExplorer(logId, detailsEl) {
+  if (!detailsEl || !detailsEl.open) return;
+  const id = Number(logId);
+  if (!Number.isFinite(id)) return;
+  await ensureWrongMatchExplorer(id);
 }
 
 /**
@@ -1103,6 +1163,27 @@ async function _refreshWrongMatches() {
     }
   } catch (_refreshErr) {
     // Cache stays invalidated; next tab switch retries.
+  }
+}
+
+/**
+ * Operator-triggered queue refresh — exposed for the toolbar's Refresh button.
+ * @param {HTMLButtonElement=} btn
+ */
+export async function refreshWrongMatches(btn) {
+  const originalLabel = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Refreshing...';
+  }
+  try {
+    invalidateWrongMatches();
+    await _refreshWrongMatches();
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalLabel || 'Refresh';
+    }
   }
 }
 
@@ -1159,8 +1240,12 @@ export const __test__ = {
   formatEntryEvidence,
   greenEntries,
   isConvergeGreen,
+  maybeLoadWrongMatchExplorer,
   normalizeThreshold,
+  refreshWrongMatches,
   reloadWrongMatchExplorer,
+  removeWrongMatchEntry,
+  removeWrongMatchGroup,
   renderLatestImport,
   renderWrongMatchExplorer,
   renderWrongMatches,
@@ -1199,7 +1284,18 @@ export async function convergeWrongMatches(requestId, btn) {
       if (data.group_empty) {
         removeWrongMatchGroup(requestId);
       } else {
-        await _refreshWrongMatches();
+        // Surgical: remove every unmatched row that actually got deleted (i.e.
+        // not in the skipped list). Green rows are queued for force-import and
+        // stay visible until their job-poller completes.
+        const skippedIds = new Set((data.skipped || [])
+          .map((/** @type {any} */ s) => Number(s.download_log_id))
+          .filter((/** @type {number} */ id) => Number.isFinite(id)));
+        for (const u of (data.unmatched || [])) {
+          const id = Number(u.download_log_id);
+          if (Number.isFinite(id) && !skippedIds.has(id)) {
+            removeWrongMatchEntry(id);
+          }
+        }
       }
     } else {
       btn.disabled = false;
@@ -1267,7 +1363,7 @@ export async function deleteWrongMatch(logId, btn) {
     if (r.ok && data.status === 'ok') {
       toast(data.path_missing ? 'Cleared missing wrong match' : 'Deleted wrong match');
       invalidateWrongMatches();
-      await _refreshWrongMatches();
+      removeWrongMatchEntry(logId);
     } else {
       btn.disabled = false;
       btn.textContent = 'Delete';
@@ -1305,7 +1401,11 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       const errors = data.errors ? ` · errors ${data.errors}` : '';
       toast(`Deleted ${data.deleted || 0} candidates${skipped}${errors}`);
       invalidateWrongMatches();
-      await _refreshWrongMatches();
+      if (data.status === 'ok' || (data.remaining === 0)) {
+        removeWrongMatchGroup(requestId);
+      } else {
+        await _refreshWrongMatches();
+      }
     } else {
       btn.disabled = false;
       btn.textContent = `Delete All (${count})`;
