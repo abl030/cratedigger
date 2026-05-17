@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 import msgspec
 
+from lib.import_evidence import load_current_evidence_for_action
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
     wrong_match_cleanup_lock_key,
@@ -20,7 +21,6 @@ from lib.quality import (
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
 )
-from lib.quality_evidence import audio_snapshot_matches
 from lib.quality_evidence import load_candidate_evidence_for_source
 from lib.util import resolve_failed_path
 from lib.wrong_matches import cleanup_wrong_match_source, validation_failed_path
@@ -34,6 +34,7 @@ OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING = "skipped_candidate_evidence_missing
 OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE = "skipped_candidate_evidence_stale"
 OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING = "skipped_current_evidence_missing"
 OUTCOME_SKIPPED_CURRENT_EVIDENCE_STALE = "skipped_current_evidence_stale"
+OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED = "skipped_current_evidence_failed"
 OUTCOME_SKIPPED_ACTIVE_JOB = "skipped_active_job"
 OUTCOME_SKIPPED_INVALID_ROW = "skipped_invalid_row"
 OUTCOME_SKIPPED_MISSING_PATH = "skipped_missing_path"
@@ -48,6 +49,7 @@ OUTCOME_KEYS: tuple[str, ...] = (
     OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
     OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
     OUTCOME_SKIPPED_CURRENT_EVIDENCE_STALE,
+    OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED,
     OUTCOME_SKIPPED_ACTIVE_JOB,
     OUTCOME_SKIPPED_INVALID_ROW,
     OUTCOME_SKIPPED_MISSING_PATH,
@@ -92,6 +94,7 @@ class WrongMatchCleanupSummary(msgspec.Struct, frozen=True):
     skipped_candidate_evidence_stale: int = 0
     skipped_current_evidence_missing: int = 0
     skipped_current_evidence_stale: int = 0
+    skipped_current_evidence_failed: int = 0
     skipped_active_job: int = 0
     skipped_invalid_row: int = 0
     skipped_missing_path: int = 0
@@ -254,20 +257,43 @@ def _cleanup_wrong_match(
             reason=candidate.reason,
         )
 
-    current = _load_current_evidence(db, request, request_id)
-    if current.outcome is not None:
-        return _result(
-            download_log_id,
-            current.outcome,
-            request_id=request_id,
-            source_path=resolved_path,
-            reason=current.reason,
-        )
-
     runtime_cfg = cfg if cfg is not None else _runtime_config()
+    mb_release_id_raw = request.get("mb_release_id")
+    mb_release_id = str(mb_release_id_raw) if mb_release_id_raw else None
+    beets_library_root = getattr(runtime_cfg, "beets_directory", "") or ""
+    current_evidence: AlbumQualityEvidence | None = None
+    if mb_release_id is not None:
+        current_result = load_current_evidence_for_action(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=getattr(runtime_cfg, "quality_ranks", None),
+            beets_library_root=beets_library_root,
+        )
+        if current_result is not None:
+            if current_result.provenance.fail_closed:
+                return _result(
+                    download_log_id,
+                    OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED,
+                    request_id=request_id,
+                    source_path=resolved_path,
+                    reason=current_result.provenance.fallback_reason
+                    or "current_evidence_unavailable",
+                )
+            if not current_result.available:
+                return _result(
+                    download_log_id,
+                    OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
+                    request_id=request_id,
+                    source_path=resolved_path,
+                    reason=current_result.provenance.fallback_reason
+                    or "current_evidence_unavailable",
+                )
+            current_evidence = current_result.evidence
+
     decision = full_pipeline_decision_from_evidence(
         candidate.evidence,
-        current.evidence,
+        current_evidence,
         facts=AlbumQualityEvidenceDecisionFacts(
             import_mode="force",
             verified_lossless_target=getattr(
@@ -426,46 +452,6 @@ def _load_candidate_evidence(
     )
 
 
-def _load_current_evidence(
-    db: Any,
-    request: dict[str, Any],
-    request_id: int,
-) -> _LoadedEvidence:
-    current_path = request.get("imported_path")
-    current_required = bool(current_path) or request.get("status") == "imported"
-    if not current_required:
-        return _LoadedEvidence(None)
-
-    evidence_id = db.get_request_current_evidence_id(request_id)
-    if evidence_id is None:
-        return _LoadedEvidence(
-            None,
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
-            "current_evidence_fk_missing",
-        )
-    evidence = db.load_album_quality_evidence_by_id(evidence_id)
-    if evidence is None:
-        return _LoadedEvidence(
-            None,
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
-            f"current_evidence_id_{evidence_id}_missing",
-        )
-    if not current_path or not audio_snapshot_matches(str(current_path), evidence.files):
-        return _LoadedEvidence(
-            None,
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_STALE,
-            "current_album_changed_since_evidence_capture",
-        )
-    reasons = evidence.policy_incomplete_reasons()
-    if reasons:
-        return _LoadedEvidence(
-            None,
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
-            "; ".join(reasons),
-        )
-    return _LoadedEvidence(evidence)
-
-
 def _matching_active_jobs(
     db: Any,
     *,
@@ -564,6 +550,9 @@ def _summary(
         ],
         skipped_current_evidence_stale=counts[
             OUTCOME_SKIPPED_CURRENT_EVIDENCE_STALE
+        ],
+        skipped_current_evidence_failed=counts[
+            OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED
         ],
         skipped_active_job=counts[OUTCOME_SKIPPED_ACTIVE_JOB],
         skipped_invalid_row=counts[OUTCOME_SKIPPED_INVALID_ROW],
