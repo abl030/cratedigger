@@ -718,7 +718,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             with patch_dispatch_externals() as ext, \
                  _patch_beets_album(tmpdir, min_bitrate=128), \
                  patch(
-                     "lib.import_dispatch.ensure_current_evidence_for_action",
+                     "lib.import_evidence.ensure_current_evidence_for_action",
                      side_effect=RuntimeError("beets unavailable"),
                  ):
                 result = dispatch_import_core(

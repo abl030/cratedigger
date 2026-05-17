@@ -8,11 +8,12 @@ columns as mutation authority.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 import msgspec
 
-from lib.quality import AlbumQualityEvidence
+from lib.quality import AlbumQualityEvidence, QualityRankConfig
 from lib.quality_evidence import (
     EvidenceBuildResult,
     audio_snapshot_matches,
@@ -20,6 +21,8 @@ from lib.quality_evidence import (
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
 )
+
+logger = logging.getLogger("cratedigger")
 
 
 CANDIDATE_STATUS_REUSED = "reused"
@@ -48,6 +51,7 @@ __all__ = [
     "CurrentEvidenceActionResult",
     "ensure_candidate_evidence_for_action",
     "ensure_current_evidence_for_action",
+    "load_current_evidence_for_action",
 ]
 
 
@@ -230,6 +234,49 @@ def ensure_current_evidence_for_action(
             fail_closed=True,
         ),
     )
+
+
+def load_current_evidence_for_action(
+    db: Any,
+    *,
+    request_id: int,
+    mb_release_id: str,
+    quality_ranks: QualityRankConfig | None = None,
+    beets_library_root: str = "",
+) -> CurrentEvidenceActionResult | None:
+    """Look Beets up by MBID then load/backfill; return None if no album, fail-closed on error."""
+
+    cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
+    try:
+        from lib.beets_db import BeetsDB
+
+        with BeetsDB(library_root=beets_library_root) as beets:
+            album_info = beets.get_album_info(mb_release_id, cfg)
+        if album_info is None:
+            return None
+        return ensure_current_evidence_for_action(
+            db,
+            request_id=request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=cfg,
+            current_album_path=album_info.album_path,
+            album_info=album_info,
+            beets_library_root=beets_library_root,
+        )
+    except Exception as exc:
+        logger.debug(
+            "Failed to load/backfill current quality evidence for request %s",
+            request_id,
+            exc_info=True,
+        )
+        return CurrentEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                current_status=CURRENT_STATUS_FAILED,
+                fallback_reason=f"{type(exc).__name__}: {exc}",
+                fail_closed=True,
+            ),
+        )
 
 
 def _candidate_action_status(status: str) -> str:

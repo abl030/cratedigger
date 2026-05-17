@@ -273,6 +273,8 @@ def _stage_failure_family(stage_chain: list[str]) -> str | None:
 def _wrong_match_action_label(action: str | None) -> str | None:
     if action == "deleted_reject":
         return "deleted"
+    if action == "deleted_verified_lossless_parent":
+        return "deleted: verified-lossless parent"
     if action == "delete_failed":
         return "delete failed"
     if action == "stale_path_cleared":
@@ -308,6 +310,9 @@ def _build_wrong_match_triage_summary(
                   or _humanize_token(preview_decision)
                   or _humanize_token(preview_verdict))
         return f"deleted: {detail}" if detail else "deleted"
+
+    if action == "deleted_verified_lossless_parent":
+        return "deleted: verified-lossless parent in library"
 
     if action == "kept_would_import":
         return "kept: would import"

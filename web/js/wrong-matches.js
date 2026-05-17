@@ -495,13 +495,15 @@ function convergeToast(data) {
  * @returns {string}
  */
 function cleanupSummaryToast(data) {
-  const deleted = Number(data?.deleted || 0);
+  const deleted = Number(data?.deleted || 0)
+    + Number(data?.deleted_verified_lossless_parent || 0);
   const kept = Number(data?.kept_would_import || 0)
     + Number(data?.kept_uncertain || 0);
   const skipped = Number(data?.skipped_candidate_evidence_missing || 0)
     + Number(data?.skipped_candidate_evidence_stale || 0)
     + Number(data?.skipped_current_evidence_missing || 0)
     + Number(data?.skipped_current_evidence_stale || 0)
+    + Number(data?.skipped_current_evidence_failed || 0)
     + Number(data?.skipped_active_job || 0)
     + Number(data?.skipped_invalid_row || 0)
     + Number(data?.skipped_missing_path || 0)
@@ -792,13 +794,19 @@ function fmtTs(iso) {
  * recent success/force_import/manual_import for the release — i.e. what's
  * actually on disk — not the newest attempt. A later rejection doesn't
  * change what beets has.
- * @param {any} d
+ *
+ * When `latest_import` is absent the header distinguishes three states using
+ * the group's `in_library` / `verified_lossless` flags so the operator knows
+ * whether a new candidate has to beat anything to land.
+ *
+ * @param {any} d - latest_import payload, or null/undefined
+ * @param {{in_library?: boolean, verified_lossless?: boolean}} [group]
  * @returns {string}
  */
-function renderLatestImport(d) {
-  if (!d) return '<div style="color:#555;font-size:0.78em;padding:4px 8px;">No successful import on disk.</div>';
-  const fmtBr = d.actual_filetype ? `${String(d.actual_filetype).toUpperCase()}${d.actual_min_bitrate ? ' ' + d.actual_min_bitrate + 'k' : ''}` : '';
-  return `
+function renderLatestImport(d, group) {
+  if (d) {
+    const fmtBr = d.actual_filetype ? `${String(d.actual_filetype).toUpperCase()}${d.actual_min_bitrate ? ' ' + d.actual_min_bitrate + 'k' : ''}` : '';
+    return `
     <div style="background:#161616;border-left:3px solid #6d6;padding:6px 10px;margin:0 0 8px 0;font-size:0.78em;">
       <div style="color:#aaa;">
         <span style="color:#6d6;font-weight:600;">Last import: ${esc(d.outcome || '?')}</span>
@@ -810,6 +818,16 @@ function renderLatestImport(d) {
         ${d.beets_scenario ? ' · ' + esc(d.beets_scenario) : ''}
       </div>
     </div>`;
+  }
+  const inLibrary = !!(group && group.in_library);
+  const verifiedLossless = !!(group && group.verified_lossless);
+  if (inLibrary && verifiedLossless) {
+    return '<div style="color:#6d6;font-size:0.78em;padding:4px 8px;">Verified-lossless copy in library — Wrong Matches against this album are cleared on the next cleanup sweep.</div>';
+  }
+  if (inLibrary) {
+    return '<div style="color:#9bf;font-size:0.78em;padding:4px 8px;">Album already in library — any new candidate must beat current quality to import.</div>';
+  }
+  return '<div style="color:#555;font-size:0.78em;padding:4px 8px;">No previous import on disk.</div>';
 }
 
 /**
@@ -848,7 +866,7 @@ function renderGroup(g) {
     </div>`;
 
   const entries = (g.entries || []).map((/** @type {any} */ e) => renderEntry(e, thresholdMilli, g.request_id)).join('');
-  const latest = renderLatestImport(g.latest_import);
+  const latest = renderLatestImport(g.latest_import, g);
   const bulkActions = renderConvergeControls(g, count, thresholdMilli);
 
   return `<div id="wm-release-${g.request_id}" data-pending-count="${count}">
@@ -1143,6 +1161,7 @@ export const __test__ = {
   isConvergeGreen,
   normalizeThreshold,
   reloadWrongMatchExplorer,
+  renderLatestImport,
   renderWrongMatchExplorer,
   renderWrongMatches,
   setWrongMatchConvergeThreshold,
