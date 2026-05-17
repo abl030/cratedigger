@@ -2282,6 +2282,13 @@ class TestComputeEffectiveOverrideBitrate(unittest.TestCase):
         ("both None, genuine",                           None, None, "genuine",        None),
         ("both None, suspect",                           None, None, "suspect",        None),
         ("both None, grade None",                        None, None, None,             None),
+        # U6: transcoded-from-FLAC library rows now carry source spectral
+        # post-U5. compute_effective_override_bitrate's behaviour for the
+        # OPUS V2 case is unchanged (min(100, 128) = 100); the MP3 V0 case
+        # shifts from container (~225) to spectral (128) — searches become
+        # more permissive in line with the source's actual quality cliff.
+        ("transcoded opus v2 row, lossless_source spectral", 100, 128, "likely_transcode", 100),
+        ("transcoded mp3 v0 row, lossless_source spectral",  225, 128, "likely_transcode", 128),
     ]
 
     def test_grade_aware_table(self):
