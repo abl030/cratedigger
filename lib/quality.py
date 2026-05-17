@@ -2896,6 +2896,34 @@ def narrow_override_on_downgrade(search_filetype_override: str | None,
     return ",".join(narrowed)
 
 
+def narrow_override_on_lossless_source_lock(
+    current: str | None,
+) -> str | None:
+    """Narrow ``search_filetype_override`` to lossless-only when the
+    ``lossless_source_locked`` decision fires.
+
+    Once a library row carries a comparable lossless-source V0 probe,
+    no lossy candidate can override it -- the lock catches every lossy
+    candidate at triage and routes it to ``confident_reject`` with
+    cleanup eligibility. Without this narrowing, the search planner
+    keeps asking Soulseek for the album with no filetype filter, peer
+    after peer serves the same lossy file, each download is locked-out
+    and auto-deleted. This helper closes that wasted-cycle window by
+    pinning the search to lossless tiers.
+
+    Returns:
+        ``"lossless"`` when the override needs to change to lossless-only.
+        ``None`` when the override is already ``"lossless"`` (no-op).
+
+    Called from both the importer rejection branch
+    (``lib.import_dispatch``) and the wrong-match cleanup triage
+    (``lib.wrong_match_cleanup_service``).
+    """
+    if current == QUALITY_LOSSLESS:
+        return None
+    return QUALITY_LOSSLESS
+
+
 def rejection_backfill_override(
     *,
     is_cbr: bool,

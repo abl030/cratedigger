@@ -20,6 +20,7 @@ from lib.quality import (
     classify_full_pipeline_decision,
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
+    narrow_override_on_lossless_source_lock,
 )
 from lib.quality_evidence import load_candidate_evidence_for_source
 from lib.util import resolve_failed_path
@@ -481,6 +482,37 @@ def _perform_cleanup_deletion(
             cleared_rows=cleanup.cleared_rows,
             path_missing=True,
         )
+
+    # R8 / AE2: when the cleanup fired because of `lossless_source_locked`,
+    # narrow the request's search_filetype_override to "lossless" so the
+    # next search cycle stops asking Soulseek for lossy candidates that
+    # will only hit the lock again. The narrowing is no-op when the
+    # override is already "lossless" (helper returns None).
+    if preview_decision == "lossless_source_locked":
+        try:
+            request_row = db.get_request(request_id)
+            current_override = (
+                request_row.get("search_filetype_override")
+                if request_row else None
+            )
+            narrowed = narrow_override_on_lossless_source_lock(current_override)
+            if narrowed is not None:
+                db.update_request_fields(
+                    request_id, search_filetype_override=narrowed,
+                )
+                logger.info(
+                    "wrong_match_cleanup: narrowed search_filetype_override"
+                    " from %r to %r after lossless_source_locked"
+                    " (request_id=%s)",
+                    current_override, narrowed, request_id,
+                )
+        except Exception:
+            logger.exception(
+                "wrong_match_cleanup: failed to narrow search_filetype_override"
+                " after lossless_source_locked (request_id=%s)",
+                request_id,
+            )
+
     return _result(
         download_log_id,
         success_outcome,

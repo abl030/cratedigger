@@ -796,6 +796,42 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch(ir=ir, requeue_on_failure=False)
         self.assertNotEqual(r["db"].request(42)["status"], "wanted")
 
+    # --- lossless_source_locked + search-narrowing (R7, AE2) ---
+
+    def test_lossless_source_locked_narrows_search_filetype_override(self):
+        """R7 / AE2: when a lossy candidate hits lossless_source_locked
+        during importer dispatch, the request's search_filetype_override
+        narrows to 'lossless' so future cycles only ask for lossless
+        candidates that can actually win against the existing
+        lossless-source library row.
+
+        Without this narrowing, the search planner keeps re-asking
+        Soulseek with no filetype filter, each new peer serves the
+        same lossy file, and the lock fires repeatedly. The narrowing
+        closes that wasted-cycle window.
+        """
+        ir = make_import_result(decision="lossless_source_locked")
+        r = self._dispatch(
+            ir=ir,
+            request_overrides={
+                "search_filetype_override": "lossless,mp3 v0,mp3 320",
+            },
+        )
+        self.assertEqual(
+            r["db"].request(42)["search_filetype_override"], "lossless")
+
+    def test_lossless_source_locked_narrowing_is_idempotent(self):
+        """AE7: when the override is already 'lossless', the lock
+        firing again is a no-op (no spurious DB write that would churn
+        change tracking or audit logs)."""
+        ir = make_import_result(decision="lossless_source_locked")
+        r = self._dispatch(
+            ir=ir,
+            request_overrides={"search_filetype_override": "lossless"},
+        )
+        self.assertEqual(
+            r["db"].request(42)["search_filetype_override"], "lossless")
+
 
 class TestDispatchCoreSeams(unittest.TestCase):
     """Seam tests — assert subprocess argv construction."""

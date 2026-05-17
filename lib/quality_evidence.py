@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from lib.quality import (
+    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -798,7 +799,6 @@ def propagate_candidate_evidence_to_current(
     request_id: int,
     candidate_evidence: AlbumQualityEvidence,
     album_info: Any,
-    target_format: str | None = None,
     measured_at: datetime | None = None,
 ) -> EvidenceBuildResult:
     """Build new library-side evidence by propagating candidate measurement payload.
@@ -806,21 +806,9 @@ def propagate_candidate_evidence_to_current(
     Post-import propagation path (U10). The candidate evidence row that the
     importer worked on already paid for expensive measurements (spectral
     analysis, V0 lineage, bad-audio-hash matches, verified-lossless proof).
-    After the file rename to the library path, the candidate and library
-    rows describe audio that is bit-equal in the non-transcoded case and
-    semantically related in the transcoded case. This helper builds the
-    new library-side evidence row without re-measuring — see
+    After the file rename or transcode to the library path, this helper
+    builds the new library-side evidence row without re-measuring — see
     ``CLAUDE.md`` § "Decision architecture" and the U10 design doc.
-
-    Detection:
-
-    * The candidate's persisted ``codec`` (lowercased) is the source codec.
-    * The library copy's ``album_info.format`` (lowercased, "flac"/"mp3"/etc)
-      is the library codec.
-    * ``target_format`` (or the candidate's persisted ``target_format``) is
-      the planned target format if a conversion was configured.
-    * Transcode = ``(target_format and target_format != source_codec)`` OR
-      ``(library_codec != source_codec)``.
 
     Field policy:
 
@@ -833,18 +821,23 @@ def propagate_candidate_evidence_to_current(
       Beets's per-track bitrate measurements describe the on-disk files at
       the library path — for renamed-only this is the same audio as the
       candidate's measurement (a dual-check that catches drift); for
-      transcoded imports this describes the V0 output.
-    * Propagated when renamed-only, NULL when transcoded: ``spectral_grade``,
-      ``spectral_bitrate_kbps`` (on the inner measurement); ``v0_metric``,
-      ``matched_bad_audio_hash_id``, ``matched_bad_audio_hash_path`` (on
-      the outer evidence row). These describe the source audio's frequency
-      content / lineage / hash; under transcode the V0 output has a
-      different spectrum and no V0 lineage relative to itself.
-    * Propagated in BOTH cases: ``verified_lossless`` and
-      ``verified_lossless_proof``. These classify the source's provenance
-      and survive transcode — a V0 transcoded from a verified-lossless FLAC
-      is still verified-lossless by lineage. Also ``was_converted_from``
-      (source format before conversion) propagates as-is.
+      transcoded imports this describes the V0/Opus output.
+    * **Propagated when renamed-only OR when the source is a lossless
+      codec (FLAC / ALAC / WAV); stripped on non-lossless transcoded
+      imports:** ``spectral_grade``, ``spectral_bitrate_kbps`` (on the
+      inner measurement); ``v0_metric``, ``matched_bad_audio_hash_id``,
+      ``matched_bad_audio_hash_path`` (on the outer evidence row). The
+      gate is lossless-source-only because the source-side spectral / V0
+      lineage is only meaningfully comparable against future candidates
+      when the source audio was lossless to begin with. For non-lossless
+      transcoded imports (MP3 → Opus etc.) the source-side fields
+      describe lossy audio that has no comparable role in subsequent
+      candidate comparisons; storing them on the library row provides
+      no decision value and would mislead future triage.
+    * Propagated in ALL cases (unchanged): ``verified_lossless``,
+      ``verified_lossless_proof``, ``was_converted_from``. Verified
+      lineage survives transcode by definition; a V0 transcoded from a
+      verified-lossless FLAC is still verified-lossless by lineage.
     """
 
     album_path = getattr(album_info, "album_path", "")
@@ -855,26 +848,19 @@ def propagate_candidate_evidence_to_current(
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
 
+    # Lossless-source gate: source-side fields propagate when the source
+    # codec is lossless (FLAC/ALAC/WAV) OR when the import is renamed-only
+    # (same codec in / out). Strip otherwise. See `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.
     source_codec = (candidate_evidence.codec or "").lower() or None
-    library_codec = (getattr(album_info, "format", None) or "").lower() or None
-    effective_target = (
-        (target_format or candidate_evidence.target_format) or None
+    library_codec_from_files = files[0].codec
+    library_codec = (library_codec_from_files or "").lower() or None
+    is_transcode = (
+        source_codec is not None
+        and library_codec is not None
+        and source_codec != library_codec
     )
-    effective_target_lc = effective_target.lower() if effective_target else None
-    if (
-        effective_target_lc is not None
-        and source_codec is not None
-        and effective_target_lc != source_codec
-    ):
-        is_transcode = True
-    elif (
-        library_codec is not None
-        and source_codec is not None
-        and library_codec != source_codec
-    ):
-        is_transcode = True
-    else:
-        is_transcode = False
+    source_is_lossless = source_codec in LOSSLESS_CODECS if source_codec else False
+    strip_source_fields = is_transcode and not source_is_lossless
 
     candidate_measurement = candidate_evidence.measurement
     measurement = AudioQualityMeasurement(
@@ -884,17 +870,17 @@ def propagate_candidate_evidence_to_current(
         format=getattr(album_info, "format", None) or None,
         is_cbr=bool(getattr(album_info, "is_cbr", False)),
         spectral_grade=(
-            None if is_transcode else candidate_measurement.spectral_grade
+            None if strip_source_fields else candidate_measurement.spectral_grade
         ),
         spectral_bitrate_kbps=(
-            None if is_transcode else candidate_measurement.spectral_bitrate_kbps
+            None if strip_source_fields
+            else candidate_measurement.spectral_bitrate_kbps
         ),
         verified_lossless=candidate_measurement.verified_lossless,
         was_converted_from=candidate_measurement.was_converted_from,
     )
 
     library_filetype_band = derive_filetype_band(files)
-    library_codec_from_files = files[0].codec
     library_container_from_files = files[0].container
 
     evidence = AlbumQualityEvidence(
@@ -908,17 +894,19 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
-        v0_metric=(None if is_transcode else candidate_evidence.v0_metric),
+        v0_metric=None if strip_source_fields else candidate_evidence.v0_metric,
         verified_lossless_proof=candidate_evidence.verified_lossless_proof,
         audio_corrupt=any(not file.decode_ok for file in files),
         folder_layout=derive_folder_layout(files),
         audio_file_count=len(files),
         filetype_band=library_filetype_band,
         matched_bad_audio_hash_id=(
-            None if is_transcode else candidate_evidence.matched_bad_audio_hash_id
+            None if strip_source_fields
+            else candidate_evidence.matched_bad_audio_hash_id
         ),
         matched_bad_audio_hash_path=(
-            None if is_transcode else candidate_evidence.matched_bad_audio_hash_path
+            None if strip_source_fields
+            else candidate_evidence.matched_bad_audio_hash_path
         ),
     )
     errors = evidence.storage_validation_errors()

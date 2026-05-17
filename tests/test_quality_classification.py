@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.spectral_check import analyze_album, AlbumResult
 from lib.quality import (quality_gate_decision, full_pipeline_decision,
                          spectral_import_decision, import_quality_decision,
-                         transcode_detection, QUALITY_MIN_BITRATE_KBPS)
+                         transcode_detection, QUALITY_MIN_BITRATE_KBPS,
+                         AlbumQualityV0Metric)
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "albums")
 
@@ -771,6 +772,68 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertTrue(r["keep_searching"])
         self.assertEqual(r["final_status"], "wanted")
 
+    def test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_simulator(self):
+        """Lil Wayne - Da Drought 3 / mymedia.
+
+        Request 3779, MBID ``244322cc-51ba-4f35-b072-f7c5888fb5ce``, 2026-05-17.
+        Live download_log rows: 16564 (force-imported predecessor at 08:06 UTC,
+        transcoded FLAC → Opus V2) and 16682 (rejected duplicate at 18:32 UTC).
+
+        Live bug: wrong-match cleanup triage classified the second candidate
+        as ``kept_would_import`` because the on-disk library evidence row had
+        NULL spectral / V0 fields. The library row exists (the first import
+        succeeded and produced an Opus copy), but ``propagate_candidate_evidence_to_current``
+        used to strip source-side evidence on transcoded imports — so triage
+        had comparable evidence on the candidate side and nothing on the
+        library side, and fell through to ``provisional_lossless_upgrade``.
+
+        Correct behaviour (post-U5 propagation policy): triage sees that the
+        library row was produced from a comparable lossless source (likely_transcode
+        FLAC, spectral=128, V0 probe avg=215 min=184) and rejects the new
+        candidate as a same-source duplicate via the provisional-lossless
+        gate (``lossless_source_not_better``). ``import_mode="force"``
+        mirrors what ``cleanup_wrong_match`` actually calls
+        (lib/wrong_match_cleanup_service.py:330-343).
+
+        This is the simulator side of the parity contract — the sibling
+        ``test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence``
+        in ``TestLiveBugReproductionsThroughEvidencePipeline`` must reach
+        the same outcome through the evidence pipeline.
+        """
+        r = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            converted_count=13,
+            post_conversion_min_bitrate=184,
+            candidate_v0_probe_avg=215,
+            candidate_v0_probe_min=184,
+            # Existing-side facts mirror what the library row will look like
+            # post-U5: the previous transcoded FLAC → Opus import propagated
+            # source spectral + V0 onto the library evidence row, so triage
+            # now sees comparable evidence on both sides.
+            existing_min_bitrate=100,
+            existing_avg_bitrate=119,
+            existing_format="Opus",
+            existing_is_cbr=False,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+            existing_v0_probe_avg=215,
+            import_mode="force",
+        )
+
+        # Provisional-lossless gate: same-source comparable evidence on both
+        # sides — the candidate's likely_transcode spectral grade + lossless-
+        # source V0 probe matches the library row's propagated provenance,
+        # so the gate rejects the duplicate as ``suspect_lossless_downgrade``
+        # rather than upgrading.
+        self.assertEqual(r["stage2_import"], "suspect_lossless_downgrade")
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(r["keep_searching"])
+
     def test_heretic_pride_one_bad_track_infinite_requeue(self):
         """BUG: 13/14 tracks at 320kbps + 1 track at 192kbps → infinite requeue.
 
@@ -955,6 +1018,9 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         spectral_grade: str | None = None,
         spectral_bitrate: int | None = None,
         mb_release_id: str = "mbid-parity-candidate",
+        v0_metric: AlbumQualityV0Metric | None = None,
+        matched_bad_audio_hash_id: int | None = None,
+        matched_bad_audio_hash_path: str | None = None,
     ):
         if min_bitrate is None:
             return None
@@ -991,6 +1057,9 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             storage_format=format.lower(),
             audio_file_count=len(files),
             filetype_band=format.lower(),
+            v0_metric=v0_metric,
+            matched_bad_audio_hash_id=matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=matched_bad_audio_hash_path,
         )
 
     def test_mountain_goats_flux_provisional_lossless_via_evidence(self):
@@ -1083,6 +1152,124 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
 
         self.assertEqual(r["stage2_import"], "downgrade")
         self.assertFalse(r["imported"])
+
+    def test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence(self):
+        """Parity sibling of
+        ``TestLiveBugReproductions.test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_simulator``.
+
+        Request 3779, MBID ``244322cc-51ba-4f35-b072-f7c5888fb5ce``, 2026-05-17.
+        Encodes the post-U5 expectation: the library evidence row for the
+        previously-transcoded FLAC → Opus import carries the propagated
+        source-side spectral + V0 evidence, so triage rejects the second
+        identical-source candidate as a same-source duplicate.
+
+        Parity contract: the simulator and the evidence pipeline must
+        reach the same ``stage2_import`` decision on the same album, and
+        ``classify_full_pipeline_decision`` must mark the outcome
+        ``confident_reject`` with ``cleanup_eligible=True`` so the
+        wrong-match folder becomes eligible for cleanup.
+
+        Today (pre-U5) the library row has NULL spectral / V0 because
+        ``propagate_candidate_evidence_to_current`` strips source-side
+        evidence on transcoded imports. The current evidence row is being
+        synthesized here as the post-U5 shape, so this test will fail
+        RED until U5 makes the production path produce that state.
+        """
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityV0Metric,
+            V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+            classify_full_pipeline_decision,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            post_conversion_min_bitrate=184,
+            candidate_v0_probe_avg=215,
+            candidate_v0_probe_min=184,
+        )
+        current = self._build_current(
+            min_bitrate=100,
+            avg_bitrate=119,
+            format="Opus",
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=184,
+                avg_bitrate_kbps=215,
+                median_bitrate_kbps=215,
+                source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+                source_provenance="neutral_album_quality_evidence",
+            ),
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
+        )
+
+        # --- Parity contract -------------------------------------------------
+        # Run the simulator with the same album facts and assert it reaches
+        # the same outcome through the flat-kwargs decider. This is the
+        # load-bearing parity assertion — it fails if the two entry points
+        # ever diverge on this album, regardless of what the literal decision
+        # name happens to be. The hardcoded check below pins the current
+        # value (suspect_lossless_downgrade); the parity check guards
+        # against future drift between the simulator and evidence pipeline.
+        sim = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            converted_count=13,
+            post_conversion_min_bitrate=184,
+            candidate_v0_probe_avg=215,
+            candidate_v0_probe_min=184,
+            existing_min_bitrate=100,
+            existing_avg_bitrate=119,
+            existing_format="Opus",
+            existing_is_cbr=False,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+            existing_v0_probe_avg=215,
+            import_mode="force",
+        )
+        self.assertEqual(
+            r["stage2_import"], sim["stage2_import"],
+            "Parity contract violated: simulator and evidence pipeline "
+            "reached different stage2_import decisions on the same album "
+            f"(simulator={sim['stage2_import']!r}, "
+            f"evidence={r['stage2_import']!r})",
+        )
+        self.assertEqual(
+            r["imported"], sim["imported"],
+            "Parity contract violated: imported flag differs",
+        )
+        self.assertEqual(
+            r["denylisted"], sim["denylisted"],
+            "Parity contract violated: denylisted flag differs",
+        )
+        self.assertEqual(
+            r["keep_searching"], sim["keep_searching"],
+            "Parity contract violated: keep_searching flag differs",
+        )
+
+        # Literal value pin (sibling of the simulator test's hardcoded
+        # assertion). Both deciders currently land on suspect_lossless_downgrade
+        # for this album; if either side moves to a different reject branch,
+        # update both tests together.
+        self.assertEqual(r["stage2_import"], "suspect_lossless_downgrade")
+
+        verdict, cleanup_eligible, _reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
 
 
 class TestFourFactPreimportRejects(unittest.TestCase):
