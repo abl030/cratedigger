@@ -7506,13 +7506,25 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
     """U10: ``_refresh_current_evidence_after_import`` propagates the candidate
     measurement payload into the new library evidence row.
 
-    Renamed-only imports (same codec) inherit spectral grade, V0 lineage,
-    bad-audio-hash matches, and verified-lossless proof. Transcoded imports
-    (different codec) inherit ONLY ``verified_lossless`` /
-    ``verified_lossless_proof``; spectral and V0 fields stay NULL. The
-    candidate evidence row is preserved as the audit trail for the import
-    job, and ``album_requests.current_evidence_id`` is updated to the new
-    library evidence row.
+    Propagation is governed by a lossless-source gate (see
+    ``lib/quality_evidence.py::propagate_candidate_evidence_to_current``):
+
+    * Renamed-only imports (same codec in / out): the full source-side
+      payload propagates — spectral grade, V0 lineage, bad-audio-hash
+      matches, verified-lossless proof.
+    * Transcoded imports with a lossless source (FLAC/ALAC/WAV → V0/Opus):
+      the full payload propagates too. The source-side fields describe
+      the upstream lossless audio and remain comparable for future
+      candidates against this MBID.
+    * Transcoded imports with a lossy source (MP3 → Opus etc.): only
+      ``verified_lossless`` / ``verified_lossless_proof`` /
+      ``was_converted_from`` propagate. The source-side spectral / V0 /
+      bad-hash fields stay NULL because a lossy source has no
+      meaningfully comparable lineage to future candidates.
+
+    The candidate evidence row is preserved as the audit trail for the
+    import job, and ``album_requests.current_evidence_id`` is updated to
+    the new library evidence row.
     """
 
     def _stage_audio(self, tmpdir: str, *, filenames: list[str]) -> None:

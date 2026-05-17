@@ -640,13 +640,12 @@ def _refresh_current_evidence_after_import(
     """Persist current evidence for the just-imported Beets album.
 
     When ``source_candidate`` is supplied (the normal post-U10 path), the new
-    library-side evidence row is built by propagating the candidate's full
+    library-side evidence row is built by propagating the candidate's
     measurement payload — see
-    :func:`lib.quality_evidence.propagate_candidate_evidence_to_current`.
-    Renamed-only imports inherit spectral grade, V0 lineage, and
-    bad-audio-hash matches; transcoded imports inherit only the verified-
-    lossless proof. Bitrate/format always re-derive from ``album_info``
-    (dual-check against the candidate measurement).
+    :func:`lib.quality_evidence.propagate_candidate_evidence_to_current`
+    for the lossless-source gate that governs which fields propagate.
+    Bitrate/format always re-derive from ``album_info`` (dual-check
+    against the candidate measurement).
 
     When ``source_candidate`` is ``None`` (rare — legacy callers, an evidence
     record that vanished, or non-post-import callers reusing this helper),
