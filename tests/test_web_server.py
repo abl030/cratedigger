@@ -5999,6 +5999,14 @@ class TestWrongMatchesContract(unittest.TestCase):
         # Default: treat every failed_path as existing so the group survives
         # filtering. Individual tests override this to exercise missing-file
         # and mixed-existence cases. Converge deletion is service-backed.
+        # Regression-guard sentinel: import cleanup_wrong_match into the route
+        # module's namespace so the converge tests can assert it is NOT called.
+        # See project_converge_operator_authority memory + post_wrong_match_converge
+        # docstring — converge must route deletion through delete_wrong_match,
+        # never through cleanup_wrong_match.
+        from lib.wrong_match_cleanup_service import cleanup_wrong_match as _cwm_sentinel
+        import web.routes.imports as _imports_mod
+        _imports_mod.cleanup_wrong_match = _cwm_sentinel
         cleanup_patch = patch(
             "web.routes.imports.cleanup_wrong_match",
             side_effect=lambda _db, lid: self._cleanup_result(lid),
@@ -6021,6 +6029,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.addCleanup(manual_cleanup_patch.stop)
         self.addCleanup(manual_group_cleanup_patch.stop)
         self.addCleanup(resolve_patch.stop)
+        self.addCleanup(lambda: delattr(_imports_mod, "cleanup_wrong_match"))
 
     GROUP_REQUIRED_FIELDS = {
         "request_id", "artist", "album", "mb_release_id",
@@ -6951,13 +6960,11 @@ class TestWrongMatchesContract(unittest.TestCase):
             self._job(900, 42, 100, "/fi/a"),
             self._job(901, 42, 101, "/fi/b"),
         ]
-        self.mock_cleanup.side_effect = None
-
-        def cleanup_after_enqueue(_db, log_id):
+        def manual_delete_after_enqueue(_db, log_id, **_kwargs):
             self.assertEqual(self.mock_db.enqueue_import_job.call_count, 2)
-            return self._cleanup_result(log_id)
+            return self._manual_cleanup_result(log_id)
 
-        self.mock_cleanup.side_effect = cleanup_after_enqueue
+        self.mock_manual_cleanup.side_effect = manual_delete_after_enqueue
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
@@ -6992,7 +6999,8 @@ class TestWrongMatchesContract(unittest.TestCase):
             self.mock_db.enqueue_import_job.call_args_list[0].kwargs["payload"]["source_dirs"],
             ["u1\\Artist\\Album"],
         )
-        self.mock_cleanup.assert_called_once_with(self.mock_db, 102)
+        self.mock_manual_cleanup.assert_called_once_with(self.mock_db, 102, require_visible=True)
+        self.mock_cleanup.assert_not_called()
 
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
         """Legacy true payloads still delete non-green rows while selected rows stay visible."""
@@ -7025,9 +7033,17 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["deleted"], 1)
         self.assertEqual(data["remaining"], 2)
         self.assertFalse(data["group_empty"])
-        self.mock_cleanup.assert_called_once_with(self.mock_db, 102)
+        self.mock_manual_cleanup.assert_called_once_with(self.mock_db, 102, require_visible=True)
+        self.mock_cleanup.assert_not_called()
 
-    def test_converge_recomputes_cleanup_and_keeps_uncertain_unmatched_candidate(self):
+    def test_converge_deletes_unmatched_unconditionally_without_classifier(self):
+        """Operator-authority contract: converge does NOT route deletion through cleanup_wrong_match.
+
+        Regression guard for the issue where unmatched rows with kept_would_import
+        or stale-evidence verdicts would silently stay visible because cleanup's
+        evidence-based classifier blocked deletion. Converge has already collected
+        operator intent; the unmatched row dies.
+        """
         self.mock_db.get_wrong_matches.return_value = [
             self._row(100, 42, "u1", "/fi/a", distance=0.167),
             self._row(102, 42, "u3", "/fi/c", distance=0.226),
@@ -7041,11 +7057,6 @@ class TestWrongMatchesContract(unittest.TestCase):
         )
         self.mock_db.enqueue_import_job.return_value = self._job(900, 42, 100, "/fi/a")
 
-        self.mock_cleanup.side_effect = None
-        self.mock_cleanup.return_value = self._cleanup_result(
-            102,
-            outcome="kept_uncertain",
-        )
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
             "threshold_milli": 180,
@@ -7053,9 +7064,10 @@ class TestWrongMatchesContract(unittest.TestCase):
         })
 
         self.assertEqual(status, 202)
-        self.assertEqual(data["deleted"], 0)
-        self.assertEqual(data["remaining"], 2)
-        self.mock_cleanup.assert_called_once_with(self.mock_db, 102)
+        self.assertEqual(data["deleted"], 1)
+        self.assertEqual(data["remaining"], 1)
+        self.mock_manual_cleanup.assert_called_once_with(self.mock_db, 102, require_visible=True)
+        self.mock_cleanup.assert_not_called()
 
     def test_converge_skips_missing_green_files(self):
         """A green row with no surviving failed_path is not queued or dismissed."""
