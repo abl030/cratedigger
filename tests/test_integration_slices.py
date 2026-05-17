@@ -7667,6 +7667,230 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             self.assertEqual(new_evidence.codec, "mp3")
             self.assertEqual(new_evidence.container, "mp3")
 
+    def test_source_replacement_overwrites_stale_propagated_evidence(self):
+        """U4 / AE4: when a clean lossless-source candidate force-imports
+        over a previously-transcoded library row that propagated
+        ``likely_transcode`` / ``lossless_source`` source evidence, the
+        new candidate's evidence must overwrite the stale fields.
+
+        Two propagations against the same library snapshot fingerprint:
+        the first carries compromised source evidence
+        (``likely_transcode``, V0 avg 215); the second carries clean
+        genuine source evidence (``genuine``, V0 avg 900, verified
+        lossless proof). The library evidence row must reflect the
+        second after upsert ``ON CONFLICT DO UPDATE``.
+
+        RED today on the intermediate sanity check that the FIRST
+        propagation actually wrote ``likely_transcode`` to the library
+        row — U5 propagation policy must land first.
+        """
+        from datetime import datetime, timezone
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+        from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=44, mb_release_id="mbid-replace"))
+
+        with tempfile.TemporaryDirectory() as compromised_source_dir, \
+                tempfile.TemporaryDirectory() as clean_source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            # Stage audio for both source dirs and the library copy. The
+            # library dir's bytes do not change between the two propagations
+            # — that's the whole point of source-replacement: same album
+            # path, fresh source audio. Identical library snapshot
+            # fingerprint forces the upsert to hit the ON CONFLICT branch.
+            self._stage_audio(
+                compromised_source_dir, filenames=["01 - compromised.flac"],
+            )
+            self._stage_audio(
+                clean_source_dir, filenames=["01 - clean.flac"],
+            )
+            self._stage_audio(library_dir, filenames=["01 - Library.mp3"])
+
+            # --- First propagation: compromised source ---
+            compromised_files = snapshot_audio_files(compromised_source_dir)
+            compromised_candidate = AlbumQualityEvidence(
+                mb_release_id="mbid-replace",
+                snapshot_fingerprint=snapshot_fingerprint(compromised_files),
+                source_path=compromised_source_dir,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=820,
+                    avg_bitrate_kbps=850,
+                    median_bitrate_kbps=845,
+                    format="flac",
+                    is_cbr=False,
+                    spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128,
+                    was_converted_from="flac",
+                ),
+                measured_at=datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc),
+                files=compromised_files,
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="mp3",
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=184,
+                    avg_bitrate_kbps=215,
+                    median_bitrate_kbps=210,
+                    source_lineage="lossless_source",
+                    source_provenance="lossless_source",
+                ),
+                verified_lossless_proof=None,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(compromised_files),
+                filetype_band="lossless",
+            )
+            db.upsert_album_quality_evidence(compromised_candidate)
+            persisted_compromised = db.find_album_quality_evidence(
+                mb_release_id="mbid-replace",
+                snapshot_fingerprint=compromised_candidate.snapshot_fingerprint,
+            )
+            assert persisted_compromised is not None
+
+            beets_info = AlbumInfo(
+                album_id=3,
+                track_count=1,
+                min_bitrate_kbps=100,
+                avg_bitrate_kbps=119,
+                median_bitrate_kbps=115,
+                is_cbr=False,
+                album_path=library_dir,
+                format="MP3",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=44,
+                    mb_release_id="mbid-replace",
+                    quality_ranks=None,
+                    source_candidate=persisted_compromised,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=100,
+                    ),
+                )
+
+            # Sanity: the first propagation wrote the compromised fields
+            # onto the library row. Fails RED before U5 — propagation
+            # policy must propagate spectral on transcoded imports for
+            # source-replacement to have anything to overwrite.
+            first_evidence_id = db.request(44)["current_evidence_id"]
+            self.assertIsNotNone(first_evidence_id)
+            first_evidence = db.load_album_quality_evidence_by_id(
+                first_evidence_id,
+            )
+            assert first_evidence is not None
+            self.assertEqual(
+                first_evidence.measurement.spectral_grade,
+                "likely_transcode",
+                "U5 propagation policy must carry compromised "
+                "spectral_grade to the library row before "
+                "source-replacement has anything to overwrite.",
+            )
+            self.assertIsNotNone(first_evidence.v0_metric)
+            assert first_evidence.v0_metric is not None
+            self.assertEqual(first_evidence.v0_metric.avg_bitrate_kbps, 215)
+
+            # --- Second propagation: clean genuine source over the same
+            # library snapshot. Library fingerprint unchanged → ON CONFLICT
+            # DO UPDATE in upsert_album_quality_evidence overwrites the
+            # library evidence row in place.
+            clean_files = snapshot_audio_files(clean_source_dir)
+            clean_candidate = AlbumQualityEvidence(
+                mb_release_id="mbid-replace",
+                snapshot_fingerprint=snapshot_fingerprint(clean_files),
+                source_path=clean_source_dir,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=940,
+                    median_bitrate_kbps=935,
+                    format="flac",
+                    is_cbr=False,
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=940,
+                    verified_lossless=True,
+                    was_converted_from="flac",
+                ),
+                measured_at=datetime(2026, 5, 17, 15, 0, 0, tzinfo=timezone.utc),
+                files=clean_files,
+                codec="flac",
+                container="flac",
+                storage_format="flac",
+                target_format="mp3",
+                v0_metric=AlbumQualityV0Metric(
+                    min_bitrate_kbps=880,
+                    avg_bitrate_kbps=900,
+                    median_bitrate_kbps=895,
+                    source_lineage="lossless_source",
+                    source_provenance="lossless_source",
+                ),
+                verified_lossless_proof=VerifiedLosslessProof(
+                    proof_origin="import_result",
+                    source="flac",
+                    classifier="spectral_verified_lossless",
+                    detail="genuine",
+                ),
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(clean_files),
+                filetype_band="lossless",
+            )
+            db.upsert_album_quality_evidence(clean_candidate)
+            persisted_clean = db.find_album_quality_evidence(
+                mb_release_id="mbid-replace",
+                snapshot_fingerprint=clean_candidate.snapshot_fingerprint,
+            )
+            assert persisted_clean is not None
+
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=44,
+                    mb_release_id="mbid-replace",
+                    quality_ranks=None,
+                    source_candidate=persisted_clean,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=100,
+                    ),
+                )
+
+            # Load the library row again and assert the clean candidate's
+            # evidence overwrote the compromised fields — no stale values
+            # survive the upsert.
+            second_evidence_id = db.request(44)["current_evidence_id"]
+            self.assertIsNotNone(second_evidence_id)
+            second_evidence = db.load_album_quality_evidence_by_id(
+                second_evidence_id,
+            )
+            assert second_evidence is not None
+            self.assertEqual(
+                second_evidence.measurement.spectral_grade, "genuine",
+                "Source-replacement must overwrite stale likely_transcode "
+                "spectral_grade with the new candidate's genuine grade.",
+            )
+            self.assertEqual(
+                second_evidence.measurement.spectral_bitrate_kbps, 940,
+            )
+            self.assertIsNotNone(second_evidence.v0_metric)
+            assert second_evidence.v0_metric is not None
+            self.assertEqual(
+                second_evidence.v0_metric.avg_bitrate_kbps, 900,
+                "Source-replacement must overwrite stale V0 avg with "
+                "the new candidate's value.",
+            )
+            self.assertEqual(
+                second_evidence.v0_metric.source_lineage, "lossless_source",
+            )
+            self.assertTrue(second_evidence.measurement.verified_lossless)
+            self.assertIsNotNone(second_evidence.verified_lossless_proof)
+
     def test_source_candidate_none_falls_back_to_legacy_backfill(self):
         """When ``source_candidate is None`` the helper falls back to the
         pre-U10 ``backfill_current_evidence_from_album_info`` path. The
