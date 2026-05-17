@@ -6974,6 +6974,395 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
             _shutil.rmtree(source, ignore_errors=True)
 
 
+class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
+    """U3: AE1 end-to-end — propagate transcoded-FLAC evidence to the library
+    row, then trigger ``cleanup_wrong_match`` against an identical-source FLAC
+    sitting in the Wrong Matches queue. After U5 lands, triage must classify
+    the duplicate as ``confident_reject`` (``suspect_lossless_downgrade``) and
+    delete the folder. Before U5, the library row has NULL spectral / V0
+    fields and triage falls through to ``provisional_lossless_upgrade`` →
+    ``kept_would_import`` — this test is the RED baseline that flips to GREEN
+    when U5 reverses the propagation policy.
+
+    Live reproducer: request 3779 (Lil Wayne — *Da Drought 3*, MBID
+    ``244322cc-51ba-4f35-b072-f7c5888fb5ce``), download_log row 16682
+    (2026-05-17 18:32 UTC, 31 minutes after the original transcoded-FLAC
+    import landed at 16:06 UTC).
+    """
+
+    MB_RELEASE_ID = "mbid-lil-wayne-da-drought-3"
+
+    def _stage_audio(self, tmpdir: str, *, filenames: list[str]) -> None:
+        for fname in filenames:
+            with open(os.path.join(tmpdir, fname), "wb") as handle:
+                handle.write(b"audio-bytes-" + fname.encode("utf-8"))
+
+    def _build_transcoded_source_evidence(
+        self,
+        source_dir: str,
+        *,
+        mb_release_id: str,
+    ):
+        """Construct candidate evidence matching the live transcoded-FLAC
+        source: spectral ``likely_transcode`` at 128 kbps, V0 probe with
+        ``lossless_source`` lineage and 215 kbps avg. Files on disk are
+        snapshot-fingerprinted so freshness checks pass.
+        """
+        from datetime import datetime, timezone
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+        )
+        from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+
+        files = snapshot_audio_files(source_dir)
+        v0_metric = AlbumQualityV0Metric(
+            min_bitrate_kbps=184,
+            avg_bitrate_kbps=215,
+            median_bitrate_kbps=210,
+            source_lineage="lossless_source",
+            source_provenance="lossless_source",
+            proof_provenance="lossless-source probe",
+        )
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=820,
+            avg_bitrate_kbps=850,
+            median_bitrate_kbps=845,
+            format="flac",
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=128,
+            verified_lossless=False,
+        )
+        return AlbumQualityEvidence(
+            mb_release_id=mb_release_id,
+            snapshot_fingerprint=snapshot_fingerprint(files),
+            source_path=source_dir,
+            measurement=measurement,
+            measured_at=datetime(2026, 5, 17, 16, 0, 0, tzinfo=timezone.utc),
+            files=files,
+            codec="flac",
+            container="flac",
+            storage_format="flac",
+            target_format="mp3",
+            v0_metric=v0_metric,
+            verified_lossless_proof=None,
+            audio_corrupt=False,
+            folder_layout="flat",
+            audio_file_count=len(files),
+            filetype_band="lossless",
+        )
+
+    def _patch_cfg(self):
+        """Pin runtime config so cleanup sees ``quality_ranks`` without disk."""
+        from lib.quality import QualityRankConfig
+        from types import SimpleNamespace as _SN
+        cfg = _SN(
+            quality_ranks=QualityRankConfig.defaults(),
+            verified_lossless_target="",
+            beets_directory="",
+        )
+        return patch("lib.config.read_runtime_config", return_value=cfg)
+
+    def _seed_duplicate_wrong_match(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int,
+        duplicate_source_dir: str,
+        candidate_evidence_id: int,
+    ) -> int:
+        db.log_download(
+            request_id,
+            outcome="rejected",
+            beets_scenario="high_distance",
+            soulseek_username="testuser",
+            validation_result={
+                "scenario": "wrong_match",
+                "failed_path": duplicate_source_dir,
+                "source_dirs": [duplicate_source_dir],
+            },
+        )
+        log_id = db.download_logs[-1].id
+        db.set_download_log_candidate_evidence(log_id, candidate_evidence_id)
+        return log_id
+
+    def _make_failed_imports_dir(self, parent: str, name: str) -> str:
+        """Create a ``failed_imports/<name>`` subdir so the cleanup-deletion
+        safety check (``unsafe_failed_import_path_reason``) accepts the path.
+        """
+        failed_imports = os.path.join(parent, "failed_imports")
+        os.makedirs(failed_imports, exist_ok=True)
+        target = os.path.join(failed_imports, name)
+        os.makedirs(target, exist_ok=True)
+        return target
+
+    def _propagate_first_import(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int,
+        mb_release_id: str,
+        source_dir: str,
+        library_dir: str,
+    ):
+        """Stand in for the first transcoded-FLAC import: build candidate
+        evidence for the source, then call the real
+        ``_refresh_current_evidence_after_import`` (the propagation entry
+        point) so the library evidence row reflects production policy.
+        Returns the resulting library evidence row.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+
+        candidate = self._build_transcoded_source_evidence(
+            source_dir, mb_release_id=mb_release_id,
+        )
+        db.upsert_album_quality_evidence(candidate)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+
+        # Library copy is the V0 transcode output — different codec/bitrate
+        # from the source. Mirrors the live row's on-disk shape.
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=len(persisted.files),
+            min_bitrate_kbps=100,
+            avg_bitrate_kbps=119,
+            median_bitrate_kbps=115,
+            is_cbr=False,
+            album_path=library_dir,
+            format="Opus",
+        )
+        with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            _refresh_current_evidence_after_import(
+                db,  # type: ignore[arg-type]
+                request_id=request_id,
+                mb_release_id=mb_release_id,
+                quality_ranks=None,
+                source_candidate=persisted,
+                import_result=make_import_result(
+                    decision="import", new_min_bitrate=100,
+                ),
+            )
+
+        request_row = db.request(request_id)
+        new_evidence_id = request_row["current_evidence_id"]
+        assert new_evidence_id is not None
+        library_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+        assert library_evidence is not None
+        return library_evidence, beets_info
+
+    def test_propagation_lets_triage_reject_same_source_duplicate(self) -> None:
+        """End-to-end RED test for U3 / AE1.
+
+        1. Propagate transcoded-FLAC evidence on the first import (library
+           row inherits source-side ``likely_transcode`` / ``lossless_source``
+           fields under the new policy).
+        2. Seed an identical-source FLAC as a wrong-match candidate.
+        3. ``cleanup_wrong_match`` must classify the duplicate as
+           ``confident_reject`` + cleanup-eligible and delete the folder.
+
+        RED before U5: library evidence has NULL spectral / V0 fields, the
+        decider falls through to ``provisional_lossless_upgrade``, and
+        ``OUTCOME_KEPT_WOULD_IMPORT`` fires instead of ``OUTCOME_DELETED``.
+        """
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_DELETED,
+            cleanup_wrong_match,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=3779,
+            status="manual",
+            mb_release_id=self.MB_RELEASE_ID,
+        ))
+
+        with tempfile.TemporaryDirectory() as origin_dir, \
+                tempfile.TemporaryDirectory() as library_dir, \
+                tempfile.TemporaryDirectory() as dup_parent:
+
+            # The first transcoded-FLAC source (already imported earlier).
+            self._stage_audio(origin_dir, filenames=["01 - Track.flac"])
+            # The library-side V0 copy that was written by that import.
+            self._stage_audio(library_dir, filenames=["01 - Track.opus"])
+            # The duplicate FLAC sitting in the Wrong Matches queue. Must
+            # live under a ``failed_imports`` directory so the cleanup
+            # deletion safety check accepts the path.
+            duplicate_source_dir = self._make_failed_imports_dir(
+                dup_parent, "Lil Wayne - Da Drought 3 (duplicate)",
+            )
+            self._stage_audio(duplicate_source_dir, filenames=["01 - Track.flac"])
+
+            # Simulate the first import's propagation. After U5, the library
+            # evidence carries the propagated source-side fields.
+            library_evidence, _ = self._propagate_first_import(
+                db,
+                request_id=3779,
+                mb_release_id=self.MB_RELEASE_ID,
+                source_dir=origin_dir,
+                library_dir=library_dir,
+            )
+
+            # Sanity check: propagation actually landed before we test
+            # triage. This flips to passing once U5 reverses the policy;
+            # today it fails first, which is the correct RED signal.
+            self.assertEqual(
+                library_evidence.measurement.spectral_grade,
+                "likely_transcode",
+                "U5 propagation policy must carry source spectral_grade "
+                "to the library row; without it triage cannot reject.",
+            )
+            self.assertIsNotNone(
+                library_evidence.v0_metric,
+                "U5 propagation policy must carry source v0_metric to the "
+                "library row; without it the lossless-source lineage is lost.",
+            )
+            assert library_evidence.v0_metric is not None
+            self.assertEqual(
+                library_evidence.v0_metric.source_lineage,
+                "lossless_source",
+            )
+
+            # Seed the duplicate-source wrong-match row + its candidate
+            # evidence, then exercise the real cleanup path.
+            dup_candidate = self._build_transcoded_source_evidence(
+                duplicate_source_dir, mb_release_id=self.MB_RELEASE_ID,
+            )
+            db.upsert_album_quality_evidence(dup_candidate)
+            persisted_dup = db.find_album_quality_evidence(
+                mb_release_id=self.MB_RELEASE_ID,
+                snapshot_fingerprint=dup_candidate.snapshot_fingerprint,
+            )
+            assert persisted_dup is not None and persisted_dup.id is not None
+
+            log_id = self._seed_duplicate_wrong_match(
+                db,
+                request_id=3779,
+                duplicate_source_dir=duplicate_source_dir,
+                candidate_evidence_id=persisted_dup.id,
+            )
+
+            # The cleanup path re-reads current evidence via Beets; keep
+            # the mocked BeetsDB returning the same library album_info so
+            # ``ensure_current_evidence_for_action`` resolves to the
+            # propagated row.
+            beets_info = AlbumInfo(
+                album_id=1,
+                track_count=len(library_evidence.files),
+                min_bitrate_kbps=100,
+                avg_bitrate_kbps=119,
+                median_bitrate_kbps=115,
+                is_cbr=False,
+                album_path=library_dir,
+                format="Opus",
+            )
+
+            with self._patch_cfg(), \
+                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                result = cleanup_wrong_match(db, log_id)
+
+            # Load-bearing assertions. RED today: outcome is
+            # OUTCOME_KEPT_WOULD_IMPORT because the library row's NULL
+            # source-side fields force provisional_lossless_upgrade.
+            self.assertEqual(
+                result.outcome,
+                OUTCOME_DELETED,
+                f"expected triage to reject same-source duplicate; "
+                f"got outcome={result.outcome!r} "
+                f"verdict={result.verdict!r} "
+                f"preview_decision={result.preview_decision!r}",
+            )
+            self.assertEqual(result.verdict, "confident_reject")
+            self.assertTrue(result.cleanup_eligible)
+            self.assertTrue(result.success)
+            # The decider should land on a lossless-aware reject branch.
+            # Under U2 work this is ``suspect_lossless_downgrade``; if the
+            # decider chooses ``lossless_source_locked`` or
+            # ``lossless_source_not_better``, that is still a valid
+            # confident_reject outcome.
+            self.assertIn(
+                result.preview_decision,
+                {
+                    "suspect_lossless_downgrade",
+                    "lossless_source_locked",
+                    "lossless_source_not_better",
+                },
+                f"unexpected reject decision: {result.preview_decision!r}",
+            )
+
+    def test_without_propagation_triage_still_keeps_would_import(self) -> None:
+        """Negative regression sibling: skip the propagation step entirely
+        and confirm the result is ``OUTCOME_KEPT_WOULD_IMPORT``. Pinpoints
+        propagation as the load-bearing input for the RED→GREEN signal in
+        the main test — without it, the decider falls through to
+        ``provisional_lossless_upgrade`` and triage keeps the folder.
+
+        This test PASSES today (pre-U5) and should continue to pass — it
+        documents the failure mode the main test is RED against.
+        """
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_KEPT_WOULD_IMPORT,
+            cleanup_wrong_match,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=3780,
+            status="manual",
+            mb_release_id=self.MB_RELEASE_ID,
+        ))
+
+        with tempfile.TemporaryDirectory() as library_dir, \
+                tempfile.TemporaryDirectory() as dup_parent:
+            self._stage_audio(library_dir, filenames=["01 - Track.opus"])
+            duplicate_source_dir = self._make_failed_imports_dir(
+                dup_parent, "Lil Wayne - Da Drought 3 (no-propagation)",
+            )
+            self._stage_audio(duplicate_source_dir, filenames=["01 - Track.flac"])
+
+            # No propagation step — the library evidence row will be
+            # backfilled from album_info during the cleanup call, which
+            # produces a bare row with NULL spectral / V0 fields.
+            dup_candidate = self._build_transcoded_source_evidence(
+                duplicate_source_dir, mb_release_id=self.MB_RELEASE_ID,
+            )
+            db.upsert_album_quality_evidence(dup_candidate)
+            persisted_dup = db.find_album_quality_evidence(
+                mb_release_id=self.MB_RELEASE_ID,
+                snapshot_fingerprint=dup_candidate.snapshot_fingerprint,
+            )
+            assert persisted_dup is not None and persisted_dup.id is not None
+
+            log_id = self._seed_duplicate_wrong_match(
+                db,
+                request_id=3780,
+                duplicate_source_dir=duplicate_source_dir,
+                candidate_evidence_id=persisted_dup.id,
+            )
+
+            beets_info = AlbumInfo(
+                album_id=2,
+                track_count=1,
+                min_bitrate_kbps=100,
+                avg_bitrate_kbps=119,
+                median_bitrate_kbps=115,
+                is_cbr=False,
+                album_path=library_dir,
+                format="Opus",
+            )
+            with self._patch_cfg(), \
+                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                result = cleanup_wrong_match(db, log_id)
+
+            self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
+            self.assertEqual(result.verdict, "would_import")
+
+
 class TestU10PostImportEvidencePropagation(unittest.TestCase):
     """U10: ``_refresh_current_evidence_after_import`` propagates the candidate
     measurement payload into the new library evidence row.
