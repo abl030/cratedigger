@@ -20,9 +20,7 @@ from lib.import_queue import (
 )
 from lib.util import resolve_failed_path
 from lib.wrong_match_cleanup_service import (
-    OUTCOME_DELETED,
     cleanup_all_wrong_matches,
-    cleanup_wrong_match,
 )
 from lib.wrong_match_delete_service import (
     OUTCOME_DELETE_FAILED as DELETE_OUTCOME_FAILED,
@@ -584,8 +582,15 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
 
 
 def _delete_wrong_match_row(pdb, log_id: int):
-    """Converge helper that routes deletion through the cleanup service."""
-    return cleanup_wrong_match(pdb, log_id)
+    """Converge helper: operator-authority delete via lib/wrong_match_delete_service.
+
+    Do NOT route this through cleanup_wrong_match. Converge has already collected
+    operator intent (they picked the green candidate; everything else dies). The
+    evidence-based cleanup classifier would skip kept_would_import / stale-evidence
+    rows that converge is explicitly trying to clear. See post_wrong_match_converge
+    docstring.
+    """
+    return delete_wrong_match(pdb, log_id, require_visible=True)
 
 
 def post_wrong_match_delete(h, body: dict) -> None:
@@ -652,7 +657,25 @@ def _wrong_match_delete_group_http_status(summary) -> int:
 
 
 def post_wrong_match_converge(h, body: dict) -> None:
-    """Queue acceptable candidates and delete the rest for the release."""
+    """Queue acceptable candidates and delete the rest for the release.
+
+    ⚠ OPERATOR-AUTHORITY CONTRACT — do not route deletion through
+    cleanup_wrong_match or the evidence-based cleanup classifier.
+
+    Converge is a one-click cleanup workflow: the operator has reviewed the
+    candidates, chosen the green (acceptable-distance) ones for force-import,
+    and is explicitly asking us to remove the rest. Their judgement, not the
+    classifier's, gates the deletion. The unmatched rows are deleted via
+    lib/wrong_match_delete_service.delete_wrong_match, which preserves
+    advisory-lock + active-jobs safety but skips the candidate-evidence load,
+    the reducer, and the verified-lossless short-circuit.
+
+    Regression history: routing converge through cleanup_wrong_match caused
+    "kept_would_import" and stale-evidence rows to silently stay visible after
+    the operator hit converge — visible as a #268 follow-up bug. The fix is
+    permanent; if you find yourself reaching for cleanup_wrong_match here,
+    re-read this docstring.
+    """
     request_id = body.get("request_id")
     if request_id is None:
         h._error("Missing request_id")
@@ -766,14 +789,14 @@ def post_wrong_match_converge(h, body: dict) -> None:
     if green_candidates:
         for lid in unmatched_log_ids:
             result = _delete_wrong_match_row(pdb, lid)
-            if result.outcome == OUTCOME_DELETED:
+            if result.success:
                 deleted += 1
             else:
                 skipped.append({
                     "download_log_id": lid,
                     "reason": result.outcome,
-                    "cleanup_reason": result.reason,
-                    "cleanup_verdict": result.verdict,
+                    "delete_reason": result.reason,
+                    "delete_error": result.error,
                 })
                 remaining += 1
     else:
