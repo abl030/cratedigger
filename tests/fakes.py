@@ -2642,8 +2642,32 @@ class FakePipelineDB:
             "validation_result": entry.validation_result,
             "import_result": entry.import_result,
             "created_at": entry.created_at,
+            "candidate_evidence_id": entry.candidate_evidence_id,
         }
         row.update(entry.extra)
+        # Mirror the real LEFT JOIN to album_quality_evidence: prefer
+        # evidence-derived measurements over legacy denorm columns when
+        # the denorm value is missing. Same semantics as
+        # PipelineDB._overlay_evidence_onto_download_log_row.
+        ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
+            if entry.candidate_evidence_id is not None else None
+        if ev is not None:
+            ev_m = ev.measurement
+            ev_v0 = ev.v0_metric
+            if row.get("spectral_grade") is None \
+                    and ev_m is not None and ev_m.spectral_grade is not None:
+                row["spectral_grade"] = ev_m.spectral_grade
+            if row.get("spectral_bitrate") is None \
+                    and ev_m is not None \
+                    and ev_m.spectral_bitrate_kbps is not None:
+                row["spectral_bitrate"] = ev_m.spectral_bitrate_kbps
+            if row.get("v0_probe_kind") is None \
+                    and ev_v0 is not None and ev_v0.source_lineage is not None:
+                row["v0_probe_kind"] = ev_v0.source_lineage
+            if row.get("v0_probe_avg_bitrate") is None \
+                    and ev_v0 is not None \
+                    and ev_v0.avg_bitrate_kbps is not None:
+                row["v0_probe_avg_bitrate"] = ev_v0.avg_bitrate_kbps
         return row
 
     # --- Wrong-match review queue ---
@@ -2673,6 +2697,26 @@ class FakePipelineDB:
         rows: list[dict[str, object]] = []
         for entry in collapsed.values():
             req = self._requests.get(entry.request_id, {})
+            # Mirror the real LEFT JOIN to album_quality_evidence: prefer
+            # evidence-derived measurements over the legacy denorm columns.
+            ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
+                if entry.candidate_evidence_id is not None else None
+            ev_measurement = ev.measurement if ev is not None else None
+            ev_v0 = ev.v0_metric if ev is not None else None
+            spectral_grade = (
+                ev_measurement.spectral_grade if ev_measurement is not None
+                else None
+            ) or entry.extra.get("spectral_grade")
+            spectral_bitrate = (
+                ev_measurement.spectral_bitrate_kbps
+                if ev_measurement is not None else None
+            ) or entry.extra.get("spectral_bitrate")
+            v0_probe_kind = (
+                ev_v0.source_lineage if ev_v0 is not None else None
+            ) or entry.extra.get("v0_probe_kind")
+            v0_probe_avg_bitrate = (
+                ev_v0.avg_bitrate_kbps if ev_v0 is not None else None
+            ) or entry.extra.get("v0_probe_avg_bitrate")
             rows.append({
                 "download_log_id": entry.id,
                 "request_id": entry.request_id,
@@ -2681,10 +2725,21 @@ class FakePipelineDB:
                 "mb_release_id": req.get("mb_release_id"),
                 "soulseek_username": entry.soulseek_username,
                 "validation_result": entry.validation_result,
-                "spectral_grade": entry.extra.get("spectral_grade"),
-                "spectral_bitrate": entry.extra.get("spectral_bitrate"),
-                "v0_probe_kind": entry.extra.get("v0_probe_kind"),
-                "v0_probe_avg_bitrate": entry.extra.get("v0_probe_avg_bitrate"),
+                "spectral_grade": spectral_grade,
+                "spectral_bitrate": spectral_bitrate,
+                "v0_probe_kind": v0_probe_kind,
+                "v0_probe_avg_bitrate": v0_probe_avg_bitrate,
+                "evidence_storage_format": (
+                    ev.storage_format if ev is not None else None
+                ),
+                "evidence_min_bitrate": (
+                    ev_measurement.min_bitrate_kbps
+                    if ev_measurement is not None else None
+                ),
+                "evidence_verified_lossless": (
+                    bool(ev_measurement.verified_lossless)
+                    if ev_measurement is not None else False
+                ),
                 "request_status": req.get("status"),
                 "request_min_bitrate": req.get("min_bitrate"),
                 "request_verified_lossless": req.get("verified_lossless"),

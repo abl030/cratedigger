@@ -44,12 +44,16 @@ _DEFAULT_WRONG_MATCH_ROW = {
     "album_title": "Test Album",
     "mb_release_id": "abc-123",
     "soulseek_username": "testuser",
-    # Per-attempt evidence (denormalized download_log columns surfaced by
-    # get_wrong_matches for the candidate-evidence row payload).
+    # Per-attempt evidence — surfaced via the LEFT JOIN to
+    # album_quality_evidence in PipelineDB.get_wrong_matches (with
+    # COALESCE against the legacy denorm columns for spectral/V0).
     "spectral_grade": None,
     "spectral_bitrate": None,
     "v0_probe_kind": None,
     "v0_probe_avg_bitrate": None,
+    "evidence_storage_format": None,
+    "evidence_min_bitrate": None,
+    "evidence_verified_lossless": False,
     # album_requests quality snapshot (joined in by get_wrong_matches)
     "request_status": "wanted",
     "request_min_bitrate": None,
@@ -6051,6 +6055,11 @@ class TestWrongMatchesContract(unittest.TestCase):
         # values are None when the underlying row lacks evidence.
         "spectral_grade", "spectral_bitrate",
         "v0_probe_kind", "v0_probe_avg_bitrate",
+        # Storage format + min bitrate + computed quality rank — read
+        # from album_quality_evidence via download_log.candidate_evidence_id
+        # so wrong-match rows show their actual codec/rank instead of
+        # dashes from the legacy denorm columns. Drives entry sort order.
+        "format", "min_bitrate", "verified_lossless", "quality_rank",
     }
     DELETE_RESULT_REQUIRED_FIELDS = {
         "status", "download_log_id", "outcome", "success", "request_id",
@@ -6451,6 +6460,67 @@ class TestWrongMatchesContract(unittest.TestCase):
             self.assertFalse(
                 key.lower().startswith("preview"),
                 f"entry exposed unexpected preview-related key: {key!r}")
+
+    def test_entry_surfaces_evidence_derived_quality(self):
+        """Per-candidate format/bitrate/rank come from album_quality_evidence.
+
+        get_wrong_matches() LEFT JOINs the evidence row addressed by
+        download_log.candidate_evidence_id; the route layer surfaces
+        storage_format → entry.format, min_bitrate_kbps → entry.min_bitrate,
+        verified_lossless → entry.verified_lossless, and computes
+        quality_rank from format + bitrate via compute_library_rank.
+        """
+        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
+        row["evidence_storage_format"] = "FLAC"
+        row["evidence_min_bitrate"] = 0
+        row["evidence_verified_lossless"] = True
+        self.mock_db.get_wrong_matches.return_value = [row]
+
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        self.assertEqual(entry["format"], "FLAC")
+        self.assertEqual(entry["min_bitrate"], 0)
+        self.assertTrue(entry["verified_lossless"])
+        self.assertEqual(entry["quality_rank"], "lossless")
+
+    def test_entries_sort_best_quality_first(self):
+        """Entries within a group sort lossless → transparent → ... → unknown.
+
+        Mixed-quality reject queue: FLAC, MP3 320, MP3 192, opus 128, and
+        an evidence-less row. The frontend operator wants the best
+        candidate at the top so they can force-import without scrolling.
+        """
+        def _row(log_id: int, fmt: str | None, kbps: int | None) -> dict:
+            r = self._row(log_id, 770, f"user{log_id}", f"/fi/p{log_id}",
+                          artist="A", album="B", mb_release_id="mb-x",
+                          distance=0.20)
+            r["evidence_storage_format"] = fmt
+            r["evidence_min_bitrate"] = kbps
+            r["evidence_verified_lossless"] = fmt == "FLAC"
+            return r
+
+        self.mock_db.get_wrong_matches.return_value = [
+            _row(901, None,   None),   # unknown
+            _row(902, "opus", 128),    # transparent
+            _row(903, "MP3",  320),    # transparent
+            _row(904, "FLAC", 0),      # lossless
+            _row(905, "MP3",  192),    # good
+        ]
+        with patch("web.routes.imports.resolve_failed_path",
+                   side_effect=lambda p: p):
+            status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        entries = data["groups"][0]["entries"]
+        ranks = [e["quality_rank"] for e in entries]
+        ids = [e["download_log_id"] for e in entries]
+        # Lossless first, then transparent (two tied — broken by id desc),
+        # then good, then unknown last.
+        self.assertEqual(
+            ranks,
+            ["lossless", "transparent", "transparent", "good", "unknown"],
+            f"unexpected rank order {ranks} (ids={ids})")
+        self.assertEqual(entries[0]["download_log_id"], 904)
+        self.assertEqual(entries[-1]["download_log_id"], 901)
 
     def test_multiple_rejections_for_same_request_collapse_to_single_group(self):
         """RED for issue #113: 3 rejections on one request → 1 group with 3 entries."""
