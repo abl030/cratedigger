@@ -448,14 +448,25 @@ function convergeRequestBody(requestId, thresholdMilli) {
 
 /**
  * Format the per-candidate stored evidence cells for a wrong-match
- * entry. Pure — input is the entry payload, output is a `{spectral,
- * v0}` pair of short display strings. Absent or non-lossless-source
- * V0 evidence renders as a dash; the candidate row never starts a
- * preview job from the UI (R3) and never exposes a preview button.
+ * entry. Pure — input is the entry payload, output is a `{format,
+ * spectral, v0}` triple of short display strings. The format cell
+ * reads the canonical evidence row (storage_format + min_bitrate kbps)
+ * surfaced by /api/wrong-matches via album_quality_evidence; the
+ * candidate row never starts a preview job from the UI (R3) and never
+ * exposes a preview button.
  * @param {any} entry
- * @returns {{spectral: string, v0: string}}
+ * @returns {{format: string, spectral: string, v0: string}}
  */
 function formatEntryEvidence(entry) {
+  const fmt = entry && typeof entry.format === 'string' && entry.format
+    ? entry.format : null;
+  const minBr = entry && Number.isFinite(entry.min_bitrate)
+    ? entry.min_bitrate : null;
+  let format = '—';
+  if (fmt && minBr != null && minBr > 0) format = `${fmt} ${minBr}k`;
+  else if (fmt) format = fmt;
+  else if (minBr != null && minBr > 0) format = `${minBr}k`;
+
   const grade = entry && typeof entry.spectral_grade === 'string'
     ? entry.spectral_grade : null;
   const bitrate = entry && Number.isFinite(entry.spectral_bitrate)
@@ -469,11 +480,12 @@ function formatEntryEvidence(entry) {
     ? entry.v0_probe_kind : null;
   const avg = entry && Number.isFinite(entry.v0_probe_avg_bitrate)
     ? entry.v0_probe_avg_bitrate : null;
-  // R2: surface V0 probe evidence only for lossless-source candidates;
-  // native-lossy and on-disk research probes stay invisible at this UI.
-  const v0 = (kind === 'lossless_source_v0' && avg != null)
-    ? `V0 ≈ ${avg} kbps` : '—';
-  return { spectral, v0 };
+  // Surface V0 probe data whenever it exists. Lossless-source probes
+  // are the most actionable (they tell you what a transcode would cost),
+  // but research probes for native-lossy / on-disk are still useful at
+  // the manual-review surface where the operator wants to compare candidates.
+  const v0 = (avg != null) ? `V0 ≈ ${avg} kbps` : '—';
+  return { format, spectral, v0 };
 }
 
 /**
@@ -971,6 +983,18 @@ function renderEntry(e, thresholdMilli, requestId) {
   const distColor = green ? '#6d6' : '#aaa';
   const evidence = formatEntryEvidence(e);
 
+  // Rank badge mirrors the group-header palette so operators can sort
+  // candidates visually. Sort order is server-side (best first); the
+  // badge just reinforces it. verified_lossless gets its own marker
+  // since FLAC can show up before/after we know it's actually lossless.
+  const rank = typeof e.quality_rank === 'string' ? e.quality_rank : '';
+  const rankBadge = rank && rank !== 'unknown'
+    ? `<span class="badge" style="background:#1a1a1a;color:${rankColor(rank)};font-family:monospace;font-size:0.72em;margin-left:6px;">${esc(rank)}</span>`
+    : '';
+  const verifiedBadge = e.verified_lossless
+    ? '<span class="badge" style="background:#1a2a1a;color:#6d6;margin-left:6px;">verified lossless</span>'
+    : '';
+
   const header = `
     <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green)}" onclick="window.toggleWrongMatchEntry('${detailId}', ${e.download_log_id})">
       <div class="p-top">
@@ -978,12 +1002,13 @@ function renderEntry(e, thresholdMilli, requestId) {
           <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
           <span style="color:#6a9;margin-left:8px;">${esc(e.soulseek_username || '?')}</span>
           <span id="wm-entry-green-${e.download_log_id}" class="badge" style="${entryGreenBadgeStyle(green)}">green</span>
-          ${jobBadge}
+          ${rankBadge}${verifiedBadge}${jobBadge}
         </div>
       </div>
       <div class="p-meta">
         <span id="wm-entry-dist-${e.download_log_id}" style="color:${distColor};">dist: ${dist}</span>
         <span>${esc(e.scenario || '')}</span>
+        <span style="color:#bbb;">${esc(evidence.format)}</span>
         <span style="color:#888;">spectral: ${esc(evidence.spectral)}</span>
         <span style="color:#888;">${esc(evidence.v0)}</span>
       </div>

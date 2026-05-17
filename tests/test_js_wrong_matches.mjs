@@ -498,7 +498,9 @@ console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells
   assert(!cells.spectral.toLowerCase().includes('preview'), 'no preview trigger in spectral cell');
   assert(!cells.v0.toLowerCase().includes('preview'), 'no preview trigger in V0 cell');
 
-  // R2 — non-lossless-source V0 evidence is treated as missing for display.
+  // Wrong-match review surfaces V0 evidence regardless of source lineage —
+  // operators want to compare every candidate's bitrate at a glance, not
+  // just the lossless-source ones. Whichever probe ran, show the average.
   cells = __test__.formatEntryEvidence({
     spectral_grade: 'suspect',
     spectral_bitrate: 320,
@@ -506,8 +508,8 @@ console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells
     v0_probe_avg_bitrate: 240,
   });
   assert(cells.spectral.includes('suspect'), 'spectral cell still renders for suspect grade');
-  assertEqual(cells.v0, '—',
-    'non-lossless-source V0 probe is hidden — R2 scopes V0 display to lossless-source only');
+  assert(cells.v0.includes('240'),
+    'V0 probe surfaces regardless of source lineage for wrong-match review');
 
   // Edge: spectral present, V0 absent (rejected pre-conversion).
   cells = __test__.formatEntryEvidence({

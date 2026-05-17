@@ -2771,21 +2771,63 @@ class PipelineDB:
         finally:
             self.conn.autocommit = old_autocommit
 
+    # Evidence-overlay extension applied to every download_log read seam
+    # (single entry / per-request history / batch). The legacy denorm
+    # spectral / V0 columns on download_log are NULL whenever the
+    # candidate was rejected before the dispatch path could backfill
+    # them — every wrong-match reject hits this. The canonical
+    # measurement lives on album_quality_evidence, addressed via
+    # download_log.candidate_evidence_id. We LEFT JOIN it here and let
+    # the Python overlay step COALESCE evidence over the denorm columns
+    # before handing the row dict to downstream consumers (LogEntry,
+    # build_download_history_row, the wrong-match route, ...). Doing it
+    # at the read seam means there's exactly one place to maintain the
+    # mapping, and downstream code keeps using the existing field names.
+    _DOWNLOAD_LOG_HISTORY_SELECT = """
+        SELECT
+            dl.*,
+            e.spectral_grade        AS _evidence_spectral_grade,
+            e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+            e.v0_source_lineage     AS _evidence_v0_probe_kind,
+            e.v0_avg_bitrate_kbps   AS _evidence_v0_probe_avg_bitrate
+        FROM download_log dl
+        LEFT JOIN album_quality_evidence e
+            ON e.id = dl.candidate_evidence_id
+    """
+
+    @staticmethod
+    def _overlay_evidence_onto_download_log_row(row: dict[str, Any]) -> dict[str, Any]:
+        for legacy, overlay in (
+            ("spectral_grade",       "_evidence_spectral_grade"),
+            ("spectral_bitrate",     "_evidence_spectral_bitrate"),
+            ("v0_probe_kind",        "_evidence_v0_probe_kind"),
+            ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate"),
+        ):
+            evidence_value = row.pop(overlay, None)
+            if row.get(legacy) is None and evidence_value is not None:
+                row[legacy] = evidence_value
+        return row
+
     def get_download_log_entry(self, log_id):
         """Get a single download_log entry by its ID."""
         cur = self._execute(
-            "SELECT * FROM download_log WHERE id = %s", (log_id,)
+            self._DOWNLOAD_LOG_HISTORY_SELECT + " WHERE dl.id = %s",
+            (log_id,),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return self._overlay_evidence_onto_download_log_row(dict(row)) \
+            if row else None
 
     def get_download_history(self, request_id):
-        cur = self._execute("""
-            SELECT * FROM download_log
-            WHERE request_id = %s
-            ORDER BY id DESC
-        """, (request_id,))
-        return [dict(r) for r in cur.fetchall()]
+        cur = self._execute(
+            self._DOWNLOAD_LOG_HISTORY_SELECT
+            + " WHERE dl.request_id = %s ORDER BY dl.id DESC",
+            (request_id,),
+        )
+        return [
+            self._overlay_evidence_onto_download_log_row(dict(r))
+            for r in cur.fetchall()
+        ]
 
     def get_download_history_batch(self, request_ids: list[int]) -> dict[int, list[dict]]:
         """Batch fetch download history for multiple request IDs.
@@ -2796,12 +2838,13 @@ class PipelineDB:
             return {}
         ph = ",".join(["%s"] * len(request_ids))
         cur = self._execute(
-            f"SELECT * FROM download_log WHERE request_id IN ({ph}) ORDER BY id DESC",
+            self._DOWNLOAD_LOG_HISTORY_SELECT
+            + f" WHERE dl.request_id IN ({ph}) ORDER BY dl.id DESC",
             tuple(request_ids),
         )
         result: dict[int, list[dict]] = {}
         for row in cur.fetchall():
-            r = dict(row)
+            r = self._overlay_evidence_onto_download_log_row(dict(row))
             rid = r["request_id"]
             if rid not in result:
                 result[rid] = []
@@ -2824,6 +2867,12 @@ class PipelineDB:
         ``spectral_reject`` scenarios have their own handling and stay out of
         the manual-review queue.
         """
+        # Pull the per-candidate quality measurement straight from the
+        # canonical evidence row (FK on download_log.candidate_evidence_id).
+        # The legacy denorm columns on download_log are NULL for every
+        # wrong-match reject — they only get populated for the request's
+        # current-state row. COALESCE keeps the older audit history working
+        # if any pre-evidence rows are still around.
         cur = self._execute("""
             SELECT DISTINCT ON (dl.request_id, dl.validation_result->>'failed_path')
                 dl.id AS download_log_id,
@@ -2833,10 +2882,13 @@ class PipelineDB:
                 ar.mb_release_id,
                 dl.soulseek_username,
                 dl.validation_result,
-                dl.spectral_grade,
-                dl.spectral_bitrate,
-                dl.v0_probe_kind,
-                dl.v0_probe_avg_bitrate,
+                COALESCE(e.spectral_grade, dl.spectral_grade) AS spectral_grade,
+                COALESCE(e.spectral_bitrate_kbps, dl.spectral_bitrate) AS spectral_bitrate,
+                COALESCE(e.v0_source_lineage, dl.v0_probe_kind) AS v0_probe_kind,
+                COALESCE(e.v0_avg_bitrate_kbps, dl.v0_probe_avg_bitrate) AS v0_probe_avg_bitrate,
+                e.storage_format AS evidence_storage_format,
+                e.min_bitrate_kbps AS evidence_min_bitrate,
+                e.verified_lossless AS evidence_verified_lossless,
                 ar.status AS request_status,
                 ar.min_bitrate AS request_min_bitrate,
                 ar.verified_lossless AS request_verified_lossless,
@@ -2845,6 +2897,8 @@ class PipelineDB:
                 ar.imported_path AS request_imported_path
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
+            LEFT JOIN album_quality_evidence e
+                ON e.id = dl.candidate_evidence_id
             WHERE dl.outcome = 'rejected'
               AND dl.validation_result->>'failed_path' IS NOT NULL
               AND (dl.validation_result->>'scenario' IS NULL

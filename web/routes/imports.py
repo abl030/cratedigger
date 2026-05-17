@@ -127,6 +127,35 @@ def _is_green_distance(vr: dict[str, object], threshold_milli: int) -> bool:
     return distance is not None and distance <= threshold_milli / 1000
 
 
+# Numeric rank for the per-entry sort. Higher = better quality. Mirrors
+# QualityRank's integer ordering but keeps the route layer free of an
+# enum import; quality_rank strings here come from
+# web.server.compute_library_rank which is the single producer.
+_RANK_SORT_ORDER: dict[str, int] = {
+    "lossless":    7,
+    "transparent": 6,
+    "excellent":   5,
+    "good":        4,
+    "acceptable":  3,
+    "poor":        2,
+    "unknown":     1,
+}
+
+
+def _entry_sort_key(entry: dict[str, object]) -> tuple:
+    """Best-quality first; ties broken by distance asc, id desc."""
+    rank_name = entry.get("quality_rank")
+    rank_value = _RANK_SORT_ORDER.get(rank_name, 0) \
+        if isinstance(rank_name, str) else 0
+    distance = entry.get("distance")
+    distance_sort = float(distance) \
+        if isinstance(distance, (int, float)) and not isinstance(distance, bool) \
+        else float("inf")
+    log_id = entry.get("download_log_id")
+    log_id_int = log_id if isinstance(log_id, int) else 0
+    return (-rank_value, distance_sort, -log_id_int)
+
+
 def get_manual_import_scan(h, params: dict[str, list[str]]) -> None:
 
     complete_dir = params.get("dir", ["/mnt/data/Media/Temp/Music/Complete"])[0]
@@ -409,6 +438,17 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
             if isinstance(log_id, int) and log_id in active_jobs_by_log_id
             else None
         )
+        # Per-candidate quality measurement comes from
+        # album_quality_evidence via download_log.candidate_evidence_id
+        # (joined in by PipelineDB.get_wrong_matches). Spectral grade /
+        # V0 lineage are COALESCEd against the legacy denorm columns so
+        # pre-evidence rows still surface what little they have.
+        evidence_format = row.get("evidence_storage_format")
+        evidence_min_bitrate = row.get("evidence_min_bitrate")
+        entry_quality_rank = srv.compute_library_rank(
+            evidence_format if isinstance(evidence_format, str) else None,
+            evidence_min_bitrate if isinstance(evidence_min_bitrate, int) else None,
+        )
         entries_list.append({
             "download_log_id": log_id,
             "failed_path": resolved_path or failed_path,
@@ -422,14 +462,16 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
             "candidate": target,
             "local_items": vr.get("items", []),
             "import_job": import_job,
-            # Per-candidate stored evidence (R1+R2) — denormalized from
-            # download_log via PipelineDB.get_wrong_matches. Always
-            # present; values are None when the row pre-dates the
-            # spectral / V0-probe pipelines.
             "spectral_grade": row.get("spectral_grade"),
             "spectral_bitrate": row.get("spectral_bitrate"),
             "v0_probe_kind": row.get("v0_probe_kind"),
             "v0_probe_avg_bitrate": row.get("v0_probe_avg_bitrate"),
+            "format": evidence_format
+                if isinstance(evidence_format, str) else None,
+            "min_bitrate": evidence_min_bitrate
+                if isinstance(evidence_min_bitrate, int) else None,
+            "verified_lossless": bool(row.get("evidence_verified_lossless")),
+            "quality_rank": entry_quality_rank,
         })
         group["pending_count"] = len(entries_list)
 
@@ -442,6 +484,15 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
         for rid in order:
             rows_for_req = history.get(rid) or []
             groups[rid]["latest_import"] = _latest_import_summary(rows_for_req)
+
+    # Sort entries within each group best-quality first so the operator
+    # sees the most promising candidate (e.g. a FLAC) before the worse
+    # ones (MP3 192). Ties broken by distance ascending then download_log
+    # id descending (newest first).
+    for group in groups.values():
+        entries_list = group["entries"]
+        assert isinstance(entries_list, list)
+        entries_list.sort(key=_entry_sort_key)
 
     return [groups[rid] for rid in order]
 

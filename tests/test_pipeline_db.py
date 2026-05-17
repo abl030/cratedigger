@@ -4113,6 +4113,221 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(row["spectral_bitrate"], 280)
         self.assertEqual(row["v0_probe_avg_bitrate"], 255)
 
+    def test_result_surfaces_evidence_when_denorm_columns_are_null(self):
+        """RED guard: ``get_wrong_matches`` must join album_quality_evidence.
+
+        Live rejections write the canonical measurement to
+        ``album_quality_evidence`` and link it via
+        ``download_log.candidate_evidence_id``; the legacy denorm columns
+        on ``download_log`` (``spectral_grade`` etc.) stay NULL because
+        the wrong-match path rejects before the denorm-writing dispatch
+        runs. The SQL must LEFT JOIN the evidence row and prefer it over
+        the denorm columns; otherwise every wrong-match candidate
+        silently surfaces as ``spectral=None / format=None`` in the UI.
+
+        Reproduces the regression that motivated this slice — the route
+        was reading ``dl.spectral_grade`` directly and showing dashes for
+        every actual rejection on prod (every candidate evidence row was
+        populated; nothing surfaced).
+        """
+        from lib.quality import (
+            AlbumQualityEvidenceFile,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        # log_download intentionally writes NO denorm spectral / V0
+        # values — this mirrors the live wrong-match-reject row shape.
+        log_id = self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="alice",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/fi/evidence-only",
+            }),
+        )
+
+        # Seed canonical evidence and link it to the download_log row.
+        evidence = make_album_quality_evidence(
+            mb_release_id="wm-uuid-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=0,
+                avg_bitrate_kbps=920,
+                median_bitrate_kbps=900,
+                format="FLAC",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=21,
+                verified_lossless=True,
+            ),
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.flac",
+                    size_bytes=1000,
+                    mtime_ns=10,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ),
+            ],
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=220,
+                avg_bitrate_kbps=265,
+                median_bitrate_kbps=260,
+                source_lineage="lossless_source",
+                source_provenance="real wire shape",
+                proof_provenance="real wire shape",
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="import",
+                source="real wire shape",
+                classifier="spectral+v0",
+                detail=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, persisted.id)
+
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+
+        # Evidence-derived spectral and V0 fields (COALESCEd against the
+        # NULL denorm columns) reach the row payload.
+        self.assertEqual(row["spectral_grade"], "genuine")
+        self.assertEqual(row["spectral_bitrate"], 21)
+        self.assertEqual(row["v0_probe_kind"], "lossless_source")
+        self.assertEqual(row["v0_probe_avg_bitrate"], 265)
+
+        # New evidence-only fields surfaced for the entry quality badge.
+        self.assertEqual(row["evidence_storage_format"], "FLAC")
+        self.assertEqual(row["evidence_min_bitrate"], 0)
+        self.assertTrue(row["evidence_verified_lossless"])
+
+    def test_download_history_seams_overlay_evidence_onto_legacy_columns(self):
+        """RED guard: every download_log read seam overlays evidence.
+
+        The denorm spectral / V0 columns on download_log are NULL whenever
+        a candidate was rejected before the dispatch backfill ran. The
+        per-request download-history view (pipeline detail tab) reads
+        rows through ``get_download_history`` /
+        ``get_download_history_batch`` / ``get_download_log_entry`` and
+        feeds them to ``LogEntry.from_row`` which extracts
+        ``spectral_grade`` / ``v0_probe_kind`` directly. Without an
+        evidence overlay every wrong-match row in the audit trail
+        silently shows blank spectral / V0 evidence — same regression
+        class as ``get_wrong_matches`` itself.
+        """
+        from lib.quality import (
+            AlbumQualityEvidenceFile,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+        )
+
+        # NO denorm values on the row — only evidence.
+        log_id = self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="alice",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/fi/history-evidence-only",
+            }),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="wm-uuid-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=0,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=880,
+                format="FLAC",
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=18,
+            ),
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.flac",
+                    size_bytes=1000,
+                    mtime_ns=10,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ),
+            ],
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=200,
+                avg_bitrate_kbps=245,
+                median_bitrate_kbps=240,
+                source_lineage="lossless_source",
+                source_provenance="real wire shape",
+                proof_provenance="real wire shape",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, persisted.id)
+
+        # All three reader seams must overlay evidence onto the row.
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["spectral_grade"], "suspect")
+        self.assertEqual(entry["spectral_bitrate"], 18)
+        self.assertEqual(entry["v0_probe_kind"], "lossless_source")
+        self.assertEqual(entry["v0_probe_avg_bitrate"], 245)
+
+        history = self.db.get_download_history(self.req1)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["spectral_grade"], "suspect")
+        self.assertEqual(history[0]["v0_probe_avg_bitrate"], 245)
+
+        batch = self.db.get_download_history_batch([self.req1])
+        self.assertEqual(batch[self.req1][0]["spectral_grade"], "suspect")
+        self.assertEqual(batch[self.req1][0]["v0_probe_kind"], "lossless_source")
+
+    def test_download_history_keeps_explicit_denorm_when_evidence_missing(self):
+        """Legacy rows without an evidence FK fall back to denorm columns.
+
+        Historical download_log rows (pre-evidence) populated
+        spectral_grade directly; the overlay must leave those alone so
+        the audit trail doesn't lose data when evidence is absent.
+        """
+        log_id = self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="historical",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            spectral_grade="genuine",
+            spectral_bitrate=920,
+            validation_result=json.dumps({
+                "scenario": "high_distance",
+                "failed_path": "/fi/historical",
+            }),
+        )
+
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["spectral_grade"], "genuine")
+        self.assertEqual(entry["spectral_bitrate"], 920)
+        self.assertIsNone(entry["v0_probe_kind"])
+
     def test_result_carries_current_request_quality_fields(self):
         """Row must expose the request's on-disk quality state.
 
