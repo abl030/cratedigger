@@ -94,9 +94,11 @@ function wrongMatchesData() {
   };
 }
 
-async function runPoll(job) {
+async function runPoll(job, logId) {
+  installStorage();
   const calls = [];
   const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   globalThis.fetch = async (url) => {
     calls.push(url);
     if (String(url).startsWith('/api/import-jobs/')) {
@@ -105,40 +107,34 @@ async function runPoll(job) {
         json: async () => ({ job }),
       };
     }
-    if (url === '/api/wrong-matches') {
-      return {
-        ok: true,
-        json: async () => ({ groups: [] }),
-      };
-    }
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { textContent: '', style: {} };
-  await __test__.pollImportJob(17, btn);
+  await __test__.pollImportJob(17, btn, logId);
   return { calls, dom, btn };
 }
 
-console.log('_pollImportJob() refreshes after completed jobs');
+console.log('_pollImportJob() removes row in place after completed jobs — no full refresh');
 {
   const { calls, dom, btn } = await runPoll({
     status: 'completed',
     message: 'Import completed',
-  });
+  }, 100);
   assertEqual(btn.textContent, 'Imported', 'button shows imported');
-  assert(calls.includes('/api/wrong-matches'), 'refreshes wrong matches after completion');
-  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'renders refreshed empty state');
+  assert(!calls.includes('/api/wrong-matches'),
+    'does NOT refetch the queue on completion (in-place removal)');
   assertEqual(dom.toast.className, 'toast', 'completion toast is not an error');
 }
 
-console.log('_pollImportJob() refreshes after failed jobs');
+console.log('_pollImportJob() leaves row visible after failed jobs — no full refresh');
 {
   const { calls, dom, btn } = await runPoll({
     status: 'failed',
     message: 'Pre-import gate rejected',
-  });
+  }, 100);
   assertEqual(btn.textContent, 'Failed', 'button shows failed');
-  assert(calls.includes('/api/wrong-matches'), 'refreshes wrong matches after failure');
-  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'renders refreshed empty state');
+  assert(!calls.includes('/api/wrong-matches'),
+    'does NOT refetch the queue on failure (ambiguous source state)');
   assertEqual(dom.toast.className, 'toast error', 'failure toast is an error');
 }
 

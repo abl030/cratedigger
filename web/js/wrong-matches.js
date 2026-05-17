@@ -1191,8 +1191,11 @@ export async function refreshWrongMatches(btn) {
  * Poll a queued import job until it reaches a terminal state.
  * @param {number} jobId
  * @param {HTMLButtonElement} btn
+ * @param {number=} logId — the download_log row the import targets; used to
+ *   surgically remove the row from the queue on completion. When omitted,
+ *   completion just toasts and updates the button without touching the DOM.
  */
-async function _pollImportJob(jobId, btn) {
+async function _pollImportJob(jobId, btn, logId) {
   for (let i = 0; i < 240; i++) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     try {
@@ -1210,7 +1213,11 @@ async function _pollImportJob(jobId, btn) {
         btn.style.color = '#6d6';
         toast(job.message || 'Import completed');
         invalidateWrongMatches();
-        await _refreshWrongMatches();
+        // Import succeeded → row leaves the Wrong Matches queue. Surgical
+        // remove preserves scroll position and surrounding expanded state.
+        if (Number.isFinite(logId)) {
+          removeWrongMatchEntry(Number(logId));
+        }
         return;
       }
       if (job.status === 'failed') {
@@ -1218,7 +1225,11 @@ async function _pollImportJob(jobId, btn) {
         btn.style.color = '#f88';
         toast(job.message || job.error || 'Import failed', true);
         invalidateWrongMatches();
-        await _refreshWrongMatches();
+        // Don't refetch: failed imports may have cleaned up the source folder
+        // (confident_reject) OR left it intact (transient failure). Either way
+        // the row state is ambiguous; operator can hit Refresh if they want
+        // to reconcile. Refetching on every failed import was the jarring
+        // post-Force-Import refresh.
         return;
       }
     } catch (_e) {
@@ -1331,7 +1342,7 @@ export async function forceImportWrongMatch(logId, btn) {
       btn.style.color = '#9bf';
       toast(`Queued import: ${data.artist} - ${data.album}`);
       if (data.job_id) {
-        await _pollImportJob(data.job_id, btn);
+        await _pollImportJob(data.job_id, btn, logId);
       }
     } else {
       btn.textContent = 'Failed';
@@ -1404,7 +1415,13 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       if (data.status === 'ok' || (data.remaining === 0)) {
         removeWrongMatchGroup(requestId);
       } else {
-        await _refreshWrongMatches();
+        // Partial outcome: remove the rows that actually deleted, leave the
+        // skipped/errored rows visible so the operator can see what failed.
+        for (const result of (data.results || [])) {
+          if (result && result.success && Number.isFinite(Number(result.download_log_id))) {
+            removeWrongMatchEntry(result.download_log_id);
+          }
+        }
       }
     } else {
       btn.disabled = false;
