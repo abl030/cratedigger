@@ -1214,7 +1214,57 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"),
         )
 
-        # Parity assertion: same decision as the simulator sibling.
+        # --- Parity contract -------------------------------------------------
+        # Run the simulator with the same album facts and assert it reaches
+        # the same outcome through the flat-kwargs decider. This is the
+        # load-bearing parity assertion — it fails if the two entry points
+        # ever diverge on this album, regardless of what the literal decision
+        # name happens to be. The hardcoded check below pins the current
+        # value (suspect_lossless_downgrade); the parity check guards
+        # against future drift between the simulator and evidence pipeline.
+        sim = full_pipeline_decision(
+            is_flac=True,
+            min_bitrate=0,
+            is_cbr=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            converted_count=13,
+            post_conversion_min_bitrate=184,
+            candidate_v0_probe_avg=215,
+            candidate_v0_probe_min=184,
+            existing_min_bitrate=100,
+            existing_avg_bitrate=119,
+            existing_format="Opus",
+            existing_is_cbr=False,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+            existing_v0_probe_avg=215,
+            import_mode="force",
+        )
+        self.assertEqual(
+            r["stage2_import"], sim["stage2_import"],
+            "Parity contract violated: simulator and evidence pipeline "
+            "reached different stage2_import decisions on the same album "
+            f"(simulator={sim['stage2_import']!r}, "
+            f"evidence={r['stage2_import']!r})",
+        )
+        self.assertEqual(
+            r["imported"], sim["imported"],
+            "Parity contract violated: imported flag differs",
+        )
+        self.assertEqual(
+            r["denylisted"], sim["denylisted"],
+            "Parity contract violated: denylisted flag differs",
+        )
+        self.assertEqual(
+            r["keep_searching"], sim["keep_searching"],
+            "Parity contract violated: keep_searching flag differs",
+        )
+
+        # Literal value pin (sibling of the simulator test's hardcoded
+        # assertion). Both deciders currently land on suspect_lossless_downgrade
+        # for this album; if either side moves to a different reject branch,
+        # update both tests together.
         self.assertEqual(r["stage2_import"], "suspect_lossless_downgrade")
 
         verdict, cleanup_eligible, _reason = classify_full_pipeline_decision(r)
