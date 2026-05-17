@@ -7142,11 +7142,13 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 audio_snapshot_matches(library_dir, new_evidence.files)
             )
 
-    def test_transcoded_flac_to_v0_drops_spectral_and_v0_keeps_proof(self):
+    def test_transcoded_flac_to_v0_propagates_source_evidence(self):
         """FLAC source → V0 library: spectral grade, V0 lineage, and bad-hash
-        matches stay NULL on the library row (they describe source audio).
-        ``verified_lossless`` / ``verified_lossless_proof`` carry forward.
-        Bitrate/format reflect the V0 output from ``album_info``.
+        matches propagate forward symmetrically with the rename-only path.
+        They describe the upstream source audio at import time, not the
+        on-disk V0 file. ``verified_lossless`` / ``verified_lossless_proof``
+        also carry forward (unchanged). Bitrate/format reflect the V0
+        output from ``album_info``.
         """
         from lib.import_dispatch import _refresh_current_evidence_after_import
         from lib.quality import (
@@ -7247,12 +7249,18 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
             assert new_evidence is not None
 
-            # Transcoded: spectral + V0 lineage + bad-hash do NOT propagate.
-            self.assertIsNone(new_evidence.measurement.spectral_grade)
-            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
-            self.assertIsNone(new_evidence.v0_metric)
-            self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
-            self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
+            # Transcoded: spectral + V0 lineage + bad-hash propagate from
+            # the candidate. These fields describe the upstream source
+            # audio at import time; they remain accurate even after the
+            # source is transcoded to a different codec.
+            self.assertEqual(new_evidence.measurement.spectral_grade, "genuine")
+            self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 850)
+            self.assertEqual(new_evidence.v0_metric, v0_metric)
+            self.assertEqual(new_evidence.matched_bad_audio_hash_id, 99)
+            self.assertEqual(
+                new_evidence.matched_bad_audio_hash_path,
+                "/some/known/bad.flac",
+            )
 
             # But verified-lossless proof carries forward.
             self.assertTrue(new_evidence.measurement.verified_lossless)
