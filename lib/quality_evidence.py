@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from lib.quality import (
+    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -821,18 +822,22 @@ def propagate_candidate_evidence_to_current(
       the library path — for renamed-only this is the same audio as the
       candidate's measurement (a dual-check that catches drift); for
       transcoded imports this describes the V0/Opus output.
-    * Propagated symmetrically for both renamed-only AND transcoded
-      imports: ``spectral_grade``, ``spectral_bitrate_kbps`` (on the inner
-      measurement); ``v0_metric``, ``matched_bad_audio_hash_id``,
-      ``matched_bad_audio_hash_path`` (on the outer evidence row);
-      ``verified_lossless`` and ``verified_lossless_proof`` (on both).
-      These fields describe the upstream source audio at import time, not
-      the on-disk file. For transcoded imports the on-disk file has a
-      different spectrum and codec, but the propagated fields remain
-      accurate descriptions of the source that produced it — which is
-      what wrong-match triage compares future candidates against. Also
-      ``was_converted_from`` (source format before conversion) propagates
-      as-is.
+    * **Propagated when renamed-only OR when the source is a lossless
+      codec (FLAC / ALAC / WAV); stripped on non-lossless transcoded
+      imports:** ``spectral_grade``, ``spectral_bitrate_kbps`` (on the
+      inner measurement); ``v0_metric``, ``matched_bad_audio_hash_id``,
+      ``matched_bad_audio_hash_path`` (on the outer evidence row). The
+      gate is lossless-source-only because the source-side spectral / V0
+      lineage is only meaningfully comparable against future candidates
+      when the source audio was lossless to begin with. For non-lossless
+      transcoded imports (MP3 → Opus etc.) the source-side fields
+      describe lossy audio that has no comparable role in subsequent
+      candidate comparisons; storing them on the library row provides
+      no decision value and would mislead future triage.
+    * Propagated in ALL cases (unchanged): ``verified_lossless``,
+      ``verified_lossless_proof``, ``was_converted_from``. Verified
+      lineage survives transcode by definition; a V0 transcoded from a
+      verified-lossless FLAC is still verified-lossless by lineage.
     """
 
     album_path = getattr(album_info, "album_path", "")
@@ -843,6 +848,20 @@ def propagate_candidate_evidence_to_current(
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
 
+    # Lossless-source gate: source-side fields propagate when the source
+    # codec is lossless (FLAC/ALAC/WAV) OR when the import is renamed-only
+    # (same codec in / out). Strip otherwise. See `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.
+    source_codec = (candidate_evidence.codec or "").lower() or None
+    library_codec_from_files = files[0].codec
+    library_codec = (library_codec_from_files or "").lower() or None
+    is_transcode = (
+        source_codec is not None
+        and library_codec is not None
+        and source_codec != library_codec
+    )
+    source_is_lossless = source_codec in LOSSLESS_CODECS if source_codec else False
+    strip_source_fields = is_transcode and not source_is_lossless
+
     candidate_measurement = candidate_evidence.measurement
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
@@ -850,14 +869,18 @@ def propagate_candidate_evidence_to_current(
         median_bitrate_kbps=getattr(album_info, "median_bitrate_kbps", None),
         format=getattr(album_info, "format", None) or None,
         is_cbr=bool(getattr(album_info, "is_cbr", False)),
-        spectral_grade=candidate_measurement.spectral_grade,
-        spectral_bitrate_kbps=candidate_measurement.spectral_bitrate_kbps,
+        spectral_grade=(
+            None if strip_source_fields else candidate_measurement.spectral_grade
+        ),
+        spectral_bitrate_kbps=(
+            None if strip_source_fields
+            else candidate_measurement.spectral_bitrate_kbps
+        ),
         verified_lossless=candidate_measurement.verified_lossless,
         was_converted_from=candidate_measurement.was_converted_from,
     )
 
     library_filetype_band = derive_filetype_band(files)
-    library_codec_from_files = files[0].codec
     library_container_from_files = files[0].container
 
     evidence = AlbumQualityEvidence(
@@ -871,14 +894,20 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
-        v0_metric=candidate_evidence.v0_metric,
+        v0_metric=None if strip_source_fields else candidate_evidence.v0_metric,
         verified_lossless_proof=candidate_evidence.verified_lossless_proof,
         audio_corrupt=any(not file.decode_ok for file in files),
         folder_layout=derive_folder_layout(files),
         audio_file_count=len(files),
         filetype_band=library_filetype_band,
-        matched_bad_audio_hash_id=candidate_evidence.matched_bad_audio_hash_id,
-        matched_bad_audio_hash_path=candidate_evidence.matched_bad_audio_hash_path,
+        matched_bad_audio_hash_id=(
+            None if strip_source_fields
+            else candidate_evidence.matched_bad_audio_hash_id
+        ),
+        matched_bad_audio_hash_path=(
+            None if strip_source_fields
+            else candidate_evidence.matched_bad_audio_hash_path
+        ),
     )
     errors = evidence.storage_validation_errors()
     if errors:
