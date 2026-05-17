@@ -1,49 +1,84 @@
 ---
-title: "feat: propagate source-side evidence on transcoded imports"
+title: "feat: propagate lossless-source evidence on transcoded imports + narrow search on lossless-source lock"
 date: 2026-05-17
 deepened: 2026-05-17
+rescoped: 2026-05-17
 type: feat
 status: active
 origin: docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md
 ---
 
-# feat: Propagate Source-Side Evidence on Transcoded Imports
+# feat: Propagate Lossless-Source Evidence on Transcoded Imports + Narrow Search on Lossless-Source Lock
 
 ## Summary
 
-Reverse the propagation asymmetry in `propagate_candidate_evidence_to_current`
-(`lib/quality_evidence.py:795`). Today, transcoded imports (FLAC → V0 / Opus)
-zero the library row's `spectral_grade`, `spectral_bitrate_kbps`, `v0_metric`,
-`matched_bad_audio_hash_id`, and `matched_bad_audio_hash_path` while propagating
-only `verified_lossless_proof`. After this change, all five fields propagate
-symmetrically with the rename-only path. Forward-only; no backfill of existing
-transcoded library rows. See origin: `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.
+Two coupled changes shipped together:
+
+1. **Narrow the propagation policy in
+   `lib/quality_evidence.py::propagate_candidate_evidence_to_current`** to
+   carry source-side evidence (spectral, V0, bad-hash) forward onto the
+   library row **only when the candidate source is lossless** (FLAC / ALAC /
+   WAV). Renamed-only behavior unchanged. Non-lossless transcodes
+   (MP3 → Opus etc.) continue to strip source-side fields onto NULL.
+2. **Add `narrow_override_on_lossless_source_lock` and wire it into both
+   the importer rejection path and the wrong-match cleanup triage path**
+   so that whenever `lossless_source_locked` fires, the request's
+   `search_filetype_override` is set to `"lossless"`. Future search cycles
+   only ask Soulseek for lossless candidates that can actually win against
+   the existing lossless-source library row.
+
+Forward-only; no backfill. Fixes live bug request 3779 Lil Wayne — Da
+Drought 3 AND closes the wasted-search-cycle window the first version of
+this plan left open.
+
+This file replaces an earlier broader version of the plan that proposed
+symmetric propagation for all transcoded imports and deferred the search
+narrowing. See origin brainstorm for the rescope rationale; see git
+history for the previous shape's commits.
+
+---
+
+## Rescope Notes (read before editing)
+
+This plan was originally written against a broader scope ("symmetric
+propagation for all transcoded imports; defer search narrowing to the
+buckets work"). That scope diverged from the user's actual ask
+("propagate evidence in lossless scenarios only; narrow search when
+lossless_source-locked"). 8 commits already landed on the branch under
+the old scope; the unit list below reflects the **corrected target
+state**, not the historical sequencing.
+
+The corrective work goes on top of the existing commits as new commits
+(no rebase). Tests that pin behavior the rescope changes need to be
+adjusted; some tests will be tightened, none deleted wholesale.
 
 ---
 
 ## Problem Frame
 
-Live reproducer: request 3779 (Lil Wayne — *Da Drought 3*), MBID
-`244322cc-51ba-4f35-b072-f7c5888fb5ce`. A transcoded-FLAC import landed at
-16:06 UTC; a second identical-quality FLAC arrived at 18:32. Wrong-match
-cleanup triage (`lib/wrong_match_cleanup_service.py:330`) called
-`full_pipeline_decision_from_evidence(import_mode="force")`, found the on-disk
-evidence row had NULL `spectral_grade` / `v0_metric` / `matched_bad_audio_hash_id`,
-and fell through to `provisional_lossless_upgrade` → `kept_would_import`. The
-operator had already imported an identical source 31 minutes earlier; triage
-should have classified the new candidate as `confident_reject` and cleanup-
-deleted the wrong-match folder.
+**Gap 1 (propagation):** Today's
+`propagate_candidate_evidence_to_current` zeros spectral / V0 / bad-hash
+on every transcoded import. For the lossless-source case (FLAC → V0/Opus)
+the source-side evidence is meaningful for future candidates and should
+survive transcode; this is the gap the live bug exposed.
 
-Root cause: `propagate_candidate_evidence_to_current` strips source-side
-evidence on transcoded imports, leaving the library row blind to its own
-provenance. The triage decider has comparable evidence on the candidate side
-and nothing on the library side, so it cannot reject.
+**Gap 2 (search narrowing):** Even after Gap 1 is fixed, the
+`lossless_source_locked` rejection doesn't narrow the request's search
+plan. Future cycles re-ask for the same album with no filetype filter,
+download the same lossy candidate from a new peer, hit the lock again,
+auto-delete, repeat. The lock without narrowing is half a system.
 
-The brainstorm establishes the asymmetry as internally inconsistent —
-`verified_lossless_proof` also describes the upstream source, but survives
-transcode because lineage matters. The current rule conflates "describes source
-audio" with "proof-of-good survives, proof-of-compromised does not." Reversing
-makes the policy coherent.
+Live reproducer: request 3779 (Lil Wayne — *Da Drought 3*),
+MBID `244322cc-51ba-4f35-b072-f7c5888fb5ce`. Transcoded-FLAC import at
+16:06 UTC; identical-quality FLAC at 18:32. Today triage classifies
+`kept_would_import` (Gap 1). After Gap 1 fix alone, triage would reject
+correctly but each future cycle would re-find lossy candidates and
+re-lock — Gap 2.
+
+This PR closes both gaps in tandem because they are the same
+architectural intent: a library row's lossless-source lineage should both
+(a) be recognized on the next candidate, and (b) constrain what future
+candidates are even searched for.
 
 ---
 
@@ -53,641 +88,608 @@ From `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-require
 
 | Origin ID | Description | Addressed by |
 |-----------|-------------|--------------|
-| R1 | Propagate `spectral_grade` / `spectral_bitrate_kbps` on transcoded imports | U5 |
-| R2 | Propagate `v0_metric` (single struct holding lineage + bitrate trio) on transcoded imports | U5 |
-| R3 | Propagate `matched_bad_audio_hash_id` / `matched_bad_audio_hash_path` on transcoded imports | U5 |
-| R4 | Update docstring at lib/quality_evidence.py:825-847 to reflect reversed rule | U5 + U7 |
-| R5 | `current_spectral_grade` on `album_requests` inherits new semantic; no special-casing needed | Verified in research; no work |
-| R6 | Source-replacement overwrites stale propagated evidence | U4 (regression coverage) |
-| R7 | No backfill of existing transcoded library rows | Out-of-scope by decision |
-| R8 | Pre-change rows remain NULL — accepted known wart | Documented in U7 |
-| AE1 | Same-source duplicate is rejected by triage | U2 (parity) + U3 (round-trip) |
-| AE2 | Lossy candidate against transcoded-FLAC row is locked out by `lossless_source_locked` | U2 (parity) + U3 (round-trip) |
-| AE3 | Bad-rip hash propagates and matches future candidates | U1 (existing fixture has hash=99 ready to flip) |
-| AE4 | Source-replacement overwrites stale evidence | U4 |
-| AE5 | Renamed-only path unchanged | Regression guard via existing `test_renamed_only_flac_propagates_full_measurement_payload` |
-| Search-planner regression | `compute_effective_override_bitrate` for transcoded library rows with spectral | U6 |
+| R1 | Propagate spectral/V0/bad-hash when source is lossless | U8 |
+| R2 | Strip on non-lossless transcoded imports (unchanged) | U8 + U1 negative test |
+| R3 | Renamed-only path unchanged | U8 (unchanged code path) + AE6 regression guard |
+| R4 | verified_lossless_proof propagates always (unchanged) | No change; existing tests pin |
+| R5 | Remove unused `target_format` param | U8 |
+| R6 | New `narrow_override_on_lossless_source_lock` helper | U9 |
+| R7 | Wire helper into importer-side rejection | U10 |
+| R8 | Wire helper into wrong-match cleanup triage | U11 |
+| R9 | No plan invalidation needed | Verified during research |
+| R10 | current_spectral_grade inherits narrower rule naturally | No code change |
+| R11 | Source-replacement overwrites via ON CONFLICT (existing) | U7 regression coverage |
+| R12 | No backfill | Out-of-scope by decision |
+| R13 | Pre-change rows remain NULL — accepted known wart | Documented in U12 |
+| AE1 | Same-source duplicate rejected by triage AND search narrows | U4 + U6 |
+| AE2 | Lossy candidate against lossless-source row → lock fires + narrows | U3 + U4 |
+| AE3 | Bad-rip hash propagates on lossless-source transcoded import | U1 |
+| AE4 | Source-replacement overwrites stale propagated evidence | U7 |
+| AE5 | Non-lossless source transcoded import strips source-side evidence | U1 negative case |
+| AE6 | Renamed-only path unchanged | Existing `test_renamed_only_flac_propagates_full_measurement_payload` |
+| AE7 | Idempotent narrowing | U2 |
 
 ---
 
 ## Implementation Units
 
-### U1. Flip TestU10 transcoded-evidence propagation assertions (test-first RED)
+### U1. Adjust TestU10 transcoded propagation tests for lossless-source gate
 
-**Goal:** Convert the existing assertion that transcoded imports drop spectral
-/ V0 / bad-hash into an assertion that they now propagate. Becomes the RED
-baseline for U5's production change.
+**Goal:** The existing flipped test (`test_transcoded_flac_to_v0_propagates_source_evidence`)
+still pins the correct lossless-source case. Add a new negative test
+that pins the non-lossless-source case (MP3 → Opus): source-side fields
+must stay NULL.
 
-**Requirements:** AE3 (bad-rip hash by virtue of the fixture's existing
-`matched_bad_audio_hash_id=99`), AE5 (sibling rename-only test untouched as
-regression guard).
-
-**Dependencies:** None.
-
-**Files:**
-- `tests/test_integration_slices.py` (modify `TestU10PostImportEvidencePropagation`)
-
-**Approach:**
-- Rename `test_transcoded_flac_to_v0_drops_spectral_and_v0_keeps_proof` →
-  `test_transcoded_flac_to_v0_propagates_source_evidence`.
-- Flip the five `assertIsNone` checks at the bottom of the test
-  (`new_evidence.measurement.spectral_grade`,
-  `new_evidence.measurement.spectral_bitrate_kbps`, `new_evidence.v0_metric`,
-  `new_evidence.matched_bad_audio_hash_id`,
-  `new_evidence.matched_bad_audio_hash_path`) to `assertEqual` against the
-  candidate's seeded values. Keep `verified_lossless_proof` assertion as-is
-  (already propagates).
-- Leave `test_renamed_only_flac_propagates_full_measurement_payload`
-  untouched — it stays as the AE5 regression guard.
-
-**Execution note:** Write the assertion flip first. Run the test, watch it
-fail (RED). U5 turns it green. Do not modify production code in this unit.
-
-**Patterns to follow:** Mirror the existing sibling test's assertion shape —
-the `_build_candidate_evidence` helpers in `TestU10PostImportEvidencePropagation`
-already produce the right fixture; only the assertions change.
-
-**Test scenarios:**
-- Covers AE3. Transcoded FLAC → V0 with candidate
-  `spectral_grade="genuine"`, `spectral_bitrate_kbps=850`,
-  `v0_metric.source_lineage="lossless_source"`, `v0_metric.avg_bitrate_kbps=850`,
-  `matched_bad_audio_hash_id=99`,
-  `matched_bad_audio_hash_path="/some/known/bad.flac"`. After propagation,
-  the library row's `measurement.spectral_grade`, `measurement.spectral_bitrate_kbps`,
-  `v0_metric` (full struct equality), `matched_bad_audio_hash_id`,
-  `matched_bad_audio_hash_path` must equal the candidate's values.
-- Regression: `verified_lossless_proof` still propagates (no change).
-- Regression: `measurement.min_bitrate_kbps` / `avg_bitrate_kbps` / `format`
-  still describe the *library copy* (V0 output), not the candidate (FLAC
-  source) — these are re-derived from `album_info`, not propagated.
-
-**Verification:** Running
-`nix-shell --run "python3 -m unittest tests.test_integration_slices.TestU10PostImportEvidencePropagation.test_transcoded_flac_to_v0_propagates_source_evidence -v"`
-must fail with `AssertionError: None != ...` on each of the five propagated
-fields before U5; pass after U5.
-
----
-
-### U2. Add Lil Wayne live-bug scenario — simulator + evidence-pipeline parity (test-first RED)
-
-**Goal:** Encode the live bug (request 3779, MBID
-`244322cc-51ba-4f35-b072-f7c5888fb5ce`) as a permanent regression test.
-Establishes the parity contract: the simulator decider and the
-evidence-pipeline decider must reach the same outcome on the same album.
-
-**Requirements:** AE1, AE2 (at decision level).
+**Requirements:** AE3 (bad-hash propagates on lossless-source case; existing
+fixture has matched_bad_audio_hash_id=99), AE5 (non-lossless strip).
 
 **Dependencies:** None.
 
 **Files:**
-- `tests/test_quality_classification.py` (extend `TestLiveBugReproductions`
-  and `TestLiveBugReproductionsThroughEvidencePipeline`)
+- `tests/test_integration_slices.py` (`TestU10PostImportEvidencePropagation`)
 
 **Approach:**
-- Add one test method to `TestLiveBugReproductions` named
-  `test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_simulator`.
-  Build the candidate facts to match the live row: FLAC container, spectral
-  `likely_transcode`, spectral_bitrate `128`, v0 probe `lossless_source` avg
-  `215` min `184`. Existing library facts match the transcoded-FLAC import:
-  format `Opus`, codec `opus`, min `100`, avg `119`, plus the now-propagated
-  source-side fields (`spectral_grade=likely_transcode`,
-  `spectral_bitrate=128`, `v0_source_lineage=lossless_source`, `v0_avg=215`).
-  Call `full_pipeline_decision(...)` with `import_mode="force"`. Expected
-  outcome: reject-class decision (e.g. `suspect_lossless_downgrade` or
-  `lossless_source_not_better`); NOT `provisional_lossless_upgrade`.
-- Add the parity sibling to `TestLiveBugReproductionsThroughEvidencePipeline`
-  named `test_lil_wayne_da_drought_3_transcoded_flac_rejects_duplicate_via_evidence`.
-  Use `_build_candidate(...)` and `_build_current(...)` to construct
-  `AlbumQualityEvidence` rows matching the same facts; call
-  `full_pipeline_decision_from_evidence(candidate_evidence, current_evidence,
-  facts=AlbumQualityEvidenceDecisionFacts(import_mode="force"), cfg=...)`.
-  Assert the same decision and that `classify_full_pipeline_decision(decision)`
-  returns `verdict="confident_reject"`.
-- Both tests must reference the live row in the docstring with MBID, request
-  ID, and date for future archaeology.
+- Keep the renamed `test_transcoded_flac_to_v0_propagates_source_evidence`
+  as-is — it exercises the FLAC source → V0 library case which is
+  lossless-source-gated.
+- Add new test `test_transcoded_mp3_to_opus_strips_source_evidence` (or
+  similar). Mirrors the existing transcoded test fixture but with
+  `candidate_evidence.codec="mp3"`, `container="mp3"`, `storage_format="mp3 v0"`.
+  Library copy is Opus. Asserts the resulting library row's
+  `measurement.spectral_grade`, `measurement.spectral_bitrate_kbps`,
+  `v0_metric`, `matched_bad_audio_hash_id`, and
+  `matched_bad_audio_hash_path` are ALL NULL.
 
-**Execution note:** The simulator test may already pass today — `full_pipeline_decision`
-takes flat kwargs and will decide correctly when given the propagated
-evidence. The evidence-pipeline test is the RED test: today, no plausible
-`_build_current(...)` would carry the source-side fields (because propagation
-never wrote them), so the test will encode the *intended* state and fail
-until U5 makes the production path produce that state. Document this asymmetry
-in the test docstring.
+**Execution note:** Write the test first — it should fail RED before U8
+lands (current code propagates the fields symmetrically), pass after U8
+re-gates on source_is_lossless.
 
-**Patterns to follow:** Mirror `test_mountain_goats_bride_provisional_via_evidence`
-(parity sibling pattern) and `test_live_mountain_goats_flux_flac_source_vs_lossy_no_spectral`
-(simulator scenario shape). Use the existing `_build_candidate` / `_build_current`
-helpers; do not hand-roll `AlbumQualityEvidence` rows.
+**Patterns to follow:** Existing
+`test_transcoded_flac_to_v0_propagates_source_evidence` is the template;
+only the candidate codec and matching assertions change.
 
 **Test scenarios:**
-- Covers AE1. Simulator: transcoded-FLAC library row (propagated source
-  evidence) + identical-source FLAC candidate → reject-class decision,
-  `confident_reject` verdict.
-- Covers AE1. Evidence pipeline parity: same inputs through
-  `full_pipeline_decision_from_evidence(import_mode="force")` →
-  same decision, `confident_reject` verdict.
-- Covers AE2. Same library row but lossy MP3 V0 candidate (in the same
-  parity-test or a sibling) → `lossless_source_locked` decision,
-  `confident_reject` verdict, `cleanup_eligible=True`.
+- New: MP3 source transcoded to Opus → all source-side fields NULL on
+  library row. Verifies AE5.
+- Regression: existing FLAC → Opus propagation test still passes after U8.
+- Regression: renamed-only test still passes after U8.
 
-**Verification:** The simulator test passes immediately (decider already
-handles the inputs correctly); the evidence-pipeline test fails RED
-before U5 and passes after U5. The parity assertion (both classes return
-the same outcome) catches future drift.
+**Verification:** New test fails RED before U8; passes after. Existing
+tests unaffected.
 
 ---
 
-### U3. Integration slice: propagate → wrong-match triage round-trip (test-first RED)
+### U2. Pure tests for `narrow_override_on_lossless_source_lock`
 
-**Goal:** Prove AE1 end-to-end at the orchestration level — propagate
-transcoded-FLAC evidence on import, then exercise the real
-`cleanup_wrong_match` call path against an identical-source wrong-match
-candidate, and assert the triage outcome flips from `kept_would_import` to
-`deleted` (`confident_reject` + cleanup eligible).
+**Goal:** Pin the helper's behavior at every input case.
 
-**Requirements:** AE1 (orchestration level).
+**Requirements:** R6, AE7.
 
 **Dependencies:** None.
 
 **Files:**
-- `tests/test_integration_slices.py` (new test class
-  `TestWrongMatchTriageRejectsSameSourceDuplicate` adjacent to
-  `TestWrongMatchCleanupFKChainAvoidsRemeasurement`)
+- `tests/test_quality_decisions.py` (new test class
+  `TestNarrowOverrideOnLosslessSourceLock`)
 
 **Approach:**
-- Reuse the `_seed(source)`, `_evidence_for(source_dir, mb_release_id)`, and
-  `_patch_cfg()` builders from
-  `TestWrongMatchCleanupFKChainAvoidsRemeasurement` (or extract them into
-  module-level helpers if duplication starts hurting).
-- Stage two source dirs on disk: a `transcoded_origin` dir representing the
-  first FLAC import, and a `duplicate_source` dir representing the identical
-  second arrival. Build matching `AlbumQualityEvidence` rows for both with
-  `spectral_grade="likely_transcode"`, `spectral_bitrate_kbps=128`,
-  `v0_metric` with `source_lineage="lossless_source"` and `avg=215`.
-- Simulate the first import by calling
-  `_refresh_current_evidence_after_import(...)` with the transcoded-origin
-  candidate evidence and an `album_info` for a V0 library copy. Verify the
-  resulting library evidence row carries the propagated source fields
-  (sanity check; the real assertion is downstream).
-- Seed a `download_log` row marking the duplicate-source folder as
-  `rejected` (mirroring the live row 16682).
-- Call `cleanup_wrong_match(db, download_log_id)` with the seeded log id.
-- Assert outcome: `WrongMatchCleanupOutcome.outcome == OUTCOME_DELETED`,
-  `verdict == "confident_reject"`, `cleanup_eligible == True`,
-  `preview_decision` is a reject decision name (e.g. `suspect_lossless_downgrade`
-  or `lossless_source_locked`).
-
-**Execution note:** Test will be RED before U5 — without propagation, the
-library row's source-side fields stay NULL, triage returns
-`OUTCOME_KEPT_WOULD_IMPORT`, and the assertion against `OUTCOME_DELETED`
-fails. Document this in the test docstring.
-
-**Patterns to follow:**
-- `TestWrongMatchCleanupFKChainAvoidsRemeasurement` for the
-  seed/evidence/cfg-patch pattern.
-- `TestU10PostImportEvidencePropagation` for staging audio dirs and calling
-  `_refresh_current_evidence_after_import`.
-- `FakePipelineDB` from `tests/fakes.py` for the stateful DB.
+- subTest table with rows:
+  - `(None, "lossless")` — no override → narrow to lossless
+  - `("mp3 v0", "lossless")` — lossy override → narrow to lossless
+  - `("mp3 320", "lossless")` — lossy override → narrow to lossless
+  - `("lossless,mp3 v0,mp3 320", "lossless")` — full ladder → narrow to lossless
+  - `("lossless", None)` — already narrowest → no-op (returns None)
+- Pattern: match `TestComputeEffectiveOverrideBitrate`'s subTest CASES
+  table shape.
 
 **Test scenarios:**
-- Covers AE1. Two-source scenario: propagate evidence for the first
-  transcoded import, then call cleanup triage on the duplicate-source
-  wrong-match → `OUTCOME_DELETED`, `confident_reject`, `cleanup_eligible`.
-- Negative regression: same setup but skip the propagation step (or use a
-  bare candidate evidence with NULL source-side fields) → still
-  `OUTCOME_KEPT_WOULD_IMPORT`. Demonstrates the propagation IS the load-
-  bearing input, not some other gate.
+- Each row above; assertion shape:
+  `assertEqual(narrow_override_on_lossless_source_lock(current), expected)`.
 
-**Verification:** Test fails RED before U5 with
-`AssertionError: 'kept_would_import' != 'deleted'`; passes after U5.
+**Verification:** All subTest cases pass after U9 lands.
 
 ---
 
-### U4. Source-replacement overwrite slice (regression coverage)
+### U3. Importer-side rejection narrows override (orchestration test)
 
-**Goal:** Document and pin behaviour for AE4 — when a clean lossless-source
-candidate force-imports over a previously-transcoded library row, the new
-candidate's evidence overwrites the stale propagated fields.
+**Goal:** When `dispatch_import_from_db` (or its dispatch core) decides
+`lossless_source_locked`, the request's `search_filetype_override` ends
+up as `"lossless"` after the rejection is recorded.
 
-**Requirements:** AE4, R6.
+**Requirements:** R7, AE2.
 
 **Dependencies:** None.
 
 **Files:**
-- `tests/test_integration_slices.py` (new test method in
-  `TestU10PostImportEvidencePropagation` or a sibling class)
+- `tests/test_dispatch_core.py` (or `tests/test_integration_slices.py` if
+  the existing dispatch-core scaffolding is too tied to other flows)
 
 **Approach:**
-- Stage one library dir. Propagate evidence from a first candidate with
-  compromised source (`spectral_grade="likely_transcode"`,
-  `spectral_bitrate=128`, `v0_metric.source_lineage="lossless_source"`,
-  `v0_avg=215`). Verify the library row reflects these values.
-- Propagate evidence from a second candidate with clean genuine source
-  (`spectral_grade="genuine"`, `spectral_bitrate=900`,
-  `v0_metric.source_lineage="lossless_source"`, `v0_avg=900`,
-  `verified_lossless_proof` populated) over the same MBID + snapshot
-  fingerprint.
-- Assert the library row's `measurement.spectral_grade == "genuine"` (not
-  `"likely_transcode"`), `measurement.spectral_bitrate_kbps == 900`,
-  `v0_metric.source_lineage == "lossless_source"` with `avg == 900`,
-  `verified_lossless_proof IS NOT None`. No stale values survive.
+- Use `FakePipelineDB` with a seeded request whose
+  `search_filetype_override` is initially `"mp3 v0,mp3 320"` (or None).
+- Drive the dispatch path with a lossy candidate (`dl_info`) that
+  produces an `ImportResult` with `decision="lossless_source_locked"`.
+  Mock the `import_one.py` subprocess to return the canned result, or
+  use the existing dispatch-core fakes.
+- Assert post-call: `db.request(request_id)["search_filetype_override"]`
+  equals `"lossless"`.
 
-**Execution note:** This unit may pass before U5 if the second candidate
-also exercises the existing rename-only path (which propagates everything).
-The unit explicitly tests the transcoded → transcoded replacement case to
-exercise the new policy. If it passes immediately under U5 because
-`upsert_album_quality_evidence` uses `ON CONFLICT DO UPDATE` and the upsert
-overwrites by `(mb_release_id, snapshot_fingerprint)`, that is the
-documented success criterion — the test serves as regression coverage,
-not RED→GREEN.
+**Execution note:** Test will be RED before U10 lands.
 
-**Patterns to follow:** Reuse `TestU10PostImportEvidencePropagation`'s
-audio-staging and `_refresh_current_evidence_after_import` patterns.
+**Patterns to follow:** Existing downgrade-narrowing orchestration tests
+in test_dispatch_core.py (around the `downgrade` branch's
+`narrow_override_on_downgrade` call); mirror their shape.
 
 **Test scenarios:**
-- Covers AE4. Sequential propagation: compromised source first, clean
-  source second → library row reflects the second.
-- Edge case: the snapshot fingerprint changes between propagations
-  (different file set) → both rows coexist as separate
-  `album_quality_evidence` rows; the request's `current_evidence_id`
-  points at the second. (Optional; only add if `_refresh_current_evidence_after_import`
-  exposes this transition cleanly.)
+- Happy path: lossy candidate + lossless-source library evidence
+  → `lossless_source_locked` → override becomes `"lossless"`.
+- Idempotent: if override is already `"lossless"`, stays
+  `"lossless"` (no spurious DB write).
 
-**Verification:** Test passes after U5; documents the upsert semantic.
+**Verification:** Test fails RED before U10; passes after.
 
 ---
 
-### U5. Reverse propagation policy in lib/quality_evidence.py (production change — GREEN)
+### U4. Lil Wayne parity tests (simulator + evidence pipeline)
 
-**Goal:** Remove the `is_transcode` conditionals that zero the source-side
-fields on the library row. Update the function docstring to reflect the
-reversed rule and re-state the semantic shift.
+**Goal:** Pin the Lil Wayne (request 3779) FLAC-source same-source
+duplicate scenario as a regression test in both
+`TestLiveBugReproductions` and
+`TestLiveBugReproductionsThroughEvidencePipeline`. Encode the parity
+contract: simulator and evidence pipeline must reach the same decision.
 
-**Requirements:** R1, R2, R3, R4.
+**Requirements:** AE1 at the decision level.
 
-**Dependencies:** U1, U2, U3 (all must be RED before this lands).
+**Dependencies:** None.
 
 **Files:**
-- `lib/quality_evidence.py` (modify `propagate_candidate_evidence_to_current`,
-  lines 795-923)
+- `tests/test_quality_classification.py`
 
 **Approach:**
-- **Inner measurement (lines 886-891).** Remove the `None if is_transcode
-  else ...` conditionals on `spectral_grade` and `spectral_bitrate_kbps`.
-  After the change, both fields always equal `candidate_measurement.spectral_grade`
-  / `candidate_measurement.spectral_bitrate_kbps`.
-- **Outer row (line 911).** Remove the `None if is_transcode else ...`
-  conditional on `v0_metric`. After the change, `v0_metric` always equals
-  `candidate_evidence.v0_metric` (a single `AlbumQualityV0Metric` struct
-  holding lineage + min/avg/median).
-- **Outer row (lines 917-918, 920-921).** Remove the `None if is_transcode
-  else ...` conditionals on `matched_bad_audio_hash_id` and
-  `matched_bad_audio_hash_path`. After the change, both always equal the
-  candidate's values.
-- **`is_transcode` flag and its inputs.** Verified at plan time: the
-  detection block at lines 858-877 (and the locals `source_codec`,
-  `library_codec`, `effective_target`, `effective_target_lc` that feed it)
-  is referenced ONLY by the five conditionals being removed. After the
-  conditional removals, the entire detection block plus its input locals
-  become dead code and must be deleted in the same change. No downstream
-  call path consumes `is_transcode` from this function.
-- **Docstring (lines 825-847).** Rewrite the "Field policy" bullet that
-  starts "Propagated when renamed-only, NULL when transcoded:" to instead
-  describe the new unified rule: "Propagated in both renamed-only and
-  transcoded cases — these describe the upstream source audio at import
-  time, not the on-disk file. For transcoded imports, the on-disk file
-  has a different spectrum and codec, but the propagated fields remain
-  accurate descriptions of the source that produced it." Update the
-  surrounding paragraphs to remove the now-obsolete reasoning.
+- Existing tests from the prior plan version (already in branch history
+  on commit be30928) cover this. Inspect and verify they still match the
+  corrected scope — both candidate and existing-library inputs are FLAC,
+  which is the lossless-source case.
+- Strengthen the parity assertion: explicitly assert
+  `simulator_result["stage2_import"] ==
+  evidence_result["stage2_import"]`, not just hardcoded equality to
+  `"suspect_lossless_downgrade"` on each side independently. Pin the
+  parity contract, not the literal decision name.
 
-**Execution note:** This is the GREEN unit. Once it lands, U1's flipped
-assertions, U2's evidence-pipeline parity test, U3's triage round-trip,
-and U4's source-replacement test all turn green. The simulator side of U2
-was already green.
+**Test scenarios:**
+- Same as the existing tests; assertion strengthening only.
 
-**Patterns to follow:** The rename-only path. After the change, transcoded
-and rename-only branches differ only in whether `measurement.format` /
-`measurement.min_bitrate_kbps` etc. come from `album_info` (always re-derived
-from the library snapshot, for both cases) — the source-side fields no
-longer branch on `is_transcode`.
+**Verification:** Both tests pass; parity assertion fails if a future
+change makes the two deciders diverge.
 
-**Test scenarios:** None added in this unit (production change). All test
-coverage lives in U1-U4. Verification is "the previously-RED tests turn
-GREEN."
+---
+
+### U5. Wrong-match triage → search narrowing integration slice
+
+**Goal:** Extend the existing
+`TestWrongMatchTriageRejectsSameSourceDuplicate` (added in commit
+770ccd8) so that after triage deletes the wrong-match folder, the
+request's `search_filetype_override` is `"lossless"`.
+
+**Requirements:** R8, AE1, AE2.
+
+**Dependencies:** None.
+
+**Files:**
+- `tests/test_integration_slices.py`
+  (`TestWrongMatchTriageRejectsSameSourceDuplicate`)
+
+**Approach:**
+- Add an assertion after the existing OUTCOME_DELETED assertion:
+  `self.assertEqual(db.request(request_id)["search_filetype_override"],
+  "lossless")`.
+- Also extend the negative regression sibling test to assert the
+  override is unchanged (None or whatever it was seeded with) in the
+  no-propagation path.
+
+**Execution note:** New assertion fails RED before U11 lands.
+
+**Test scenarios:**
+- Happy path: propagation + triage deletion → override is `"lossless"`.
+- Negative: no propagation → override unchanged (regression).
+
+**Verification:** Test fails RED before U11; passes after.
+
+---
+
+### U6. AE2 lossy-candidate triage round-trip (NEW — addresses prior P0)
+
+**Goal:** Add a slice that exercises the lossy MP3 V0 candidate vs
+lossless-source library row case end-to-end through triage. This is the
+test the previous reviewer flagged as missing (P0 in the prior code
+review).
+
+**Requirements:** AE2 explicitly.
+
+**Dependencies:** None.
+
+**Files:**
+- `tests/test_integration_slices.py` (extend
+  `TestWrongMatchTriageRejectsSameSourceDuplicate` or sibling class)
+
+**Approach:**
+- Seed the same lossless-source library row from U5/U6 of the existing
+  test.
+- Seed a wrong-match download_log with a lossy MP3 V0 candidate
+  (`codec="mp3"`, no v0_metric).
+- Call `cleanup_wrong_match`.
+- Assert: outcome is `OUTCOME_DELETED`, `preview_decision ==
+  "lossless_source_locked"`, `verdict == "confident_reject"`, and the
+  request's `search_filetype_override` is `"lossless"`.
+
+**Test scenarios:**
+- Lossy MP3 V0 candidate vs lossless-source library row →
+  `lossless_source_locked` → DELETED + override narrowed.
+
+**Verification:** Test passes after U8 + U11 land (depends on both
+propagation gate behaving correctly so the library row has the V0
+probe, AND the cleanup wiring narrowing).
+
+---
+
+### U7. Source-replacement overwrite slice (regression coverage)
+
+**Goal:** Pin the AE4 behavior — when a clean lossless-source candidate
+force-imports over a previously-transcoded lossless-source library row,
+the new candidate's evidence overwrites the stale fields via the
+existing `upsert_album_quality_evidence` ON CONFLICT.
+
+**Requirements:** AE4, R11.
+
+**Dependencies:** None.
+
+**Files:**
+- `tests/test_integration_slices.py` (existing
+  `test_source_replacement_overwrites_stale_propagated_evidence`)
+
+**Approach:**
+- The test from commit 57639d2 already covers this. Verify it still
+  matches the corrected scope (both candidates are FLAC, so within the
+  lossless-source gate). No changes expected.
+
+**Verification:** Test passes; no change required.
+
+---
+
+### U8. Production change: re-gate propagation on lossless source
+
+**Goal:** Replace today's "always strip on transcode" policy with
+"strip on transcode UNLESS source is lossless." Remove the unused
+`target_format` parameter and the dead `is_transcode` detection block
+where appropriate.
+
+**Requirements:** R1, R2, R3, R4, R5.
+
+**Dependencies:** U1.
+
+**Files:**
+- `lib/quality_evidence.py::propagate_candidate_evidence_to_current`
+
+**Approach:**
+- Re-introduce a minimal `is_transcode` detection (source codec vs
+  library codec, since `target_format` param is gone). Add a
+  `source_is_lossless` check: `(candidate_evidence.codec or "").lower()
+  in LOSSLESS_CODECS`.
+- Combine: `strip_source_fields = is_transcode and not source_is_lossless`.
+- Apply the gate to the 5 fields:
+  - `measurement.spectral_grade`
+  - `measurement.spectral_bitrate_kbps`
+  - `v0_metric`
+  - `matched_bad_audio_hash_id`
+  - `matched_bad_audio_hash_path`
+- Leave `verified_lossless`, `verified_lossless_proof`,
+  `was_converted_from` propagating unchanged.
+- Update the function docstring to describe the lossless-source gate
+  precisely.
+
+**Execution note:** Production GREEN unit. Unblocks U1's negative case
+(MP3 → Opus strip) and keeps U1's positive case (FLAC → Opus propagate)
+passing.
+
+**Patterns to follow:** Today's stripped-conditional pattern that the
+earlier rewrite removed; restore selectively with the
+`source_is_lossless` check.
+
+**Test scenarios:** None added in this unit. Verification is U1, U7, and
+U2's tests all behaving correctly.
 
 **Verification:**
-- `nix-shell --run "python3 -m unittest tests.test_integration_slices.TestU10PostImportEvidencePropagation -v"`
-  passes (both U1's flipped test and U4's source-replacement test).
-- `nix-shell --run "python3 -m unittest tests.test_quality_classification.TestLiveBugReproductionsThroughEvidencePipeline -v"`
-  passes (including U2's parity test).
-- New `TestWrongMatchTriageRejectsSameSourceDuplicate` from U3 passes.
-- `nix-shell --run "bash scripts/run_tests.sh"` full suite passes — no
-  regressions in adjacent decider tests.
-- Pyright on `lib/quality_evidence.py` is clean.
+- U1's new MP3 → Opus negative case passes (strip).
+- U1's existing FLAC → Opus positive case passes (propagate).
+- Existing renamed-only test passes (unchanged).
+- `nix-shell --run "bash scripts/run_tests.sh"` full suite passes.
+- Pyright clean on `lib/quality_evidence.py`.
 
 ---
 
-### U6. Extend `TestComputeEffectiveOverrideBitrate.CASES` for transcoded library rows with spectral (search-planner coverage)
+### U9. Add `narrow_override_on_lossless_source_lock` helper
 
-**Goal:** Pin the search-planner's override-min-bitrate behaviour for the
-new world where transcoded library rows can carry `spectral_grade` /
-`spectral_bitrate_kbps`. Documents the semantic shift noted in the
-brainstorm's "Known Consequence: Temporary Wasted-Search Window" section.
+**Goal:** Pure helper that returns `"lossless"` unless the override is
+already `"lossless"` (in which case returns `None` for idempotent no-op).
 
-**Requirements:** Search-planner regression (brainstorm Test Obligations
-section, last bullet).
+**Requirements:** R6, AE7.
 
-**Dependencies:** None (pure function test; independent of U5).
+**Dependencies:** None.
 
 **Files:**
-- `tests/test_quality_decisions.py` (extend `TestComputeEffectiveOverrideBitrate.CASES`)
+- `lib/quality.py` (add helper near `narrow_override_on_downgrade`,
+  `rejection_backfill_override`)
 
 **Approach:**
-- Add subTest rows to the existing `CASES` table covering both transcoded-
-  output container bitrates:
-  - Opus V2 transcoded library row: `container_bitrate=100`,
-    `spectral_bitrate=128`, `spectral_grade="likely_transcode"`,
-    expected `100` (min wins; unchanged behaviour).
-  - MP3 V0 transcoded library row: `container_bitrate=225`,
-    `spectral_bitrate=128`, `spectral_grade="likely_transcode"`,
-    expected `128` (spectral wins; semantic shift visible).
-- The descriptions on the new rows should reference "transcoded library
-  row" so the intent is obvious from the subTest label.
+- Function shape:
+  ```
+  def narrow_override_on_lossless_source_lock(current: str | None) -> str | None:
+      if current == QUALITY_LOSSLESS:
+          return None
+      return QUALITY_LOSSLESS
+  ```
+- Tiny docstring referencing the brainstorm and the call sites that
+  use it.
 
-**Patterns to follow:** `TestComputeEffectiveOverrideBitrate.CASES` rows
-already cover the (container, spectral, grade) decision matrix exhaustively;
-add to the table, do not invent a new pattern.
+**Patterns to follow:** `narrow_override_on_downgrade` is the precedent
+in shape and naming.
 
-**Test scenarios:**
-- New: Opus V2 transcoded row with spectral=128/likely_transcode → 100
-  (container min wins).
-- New: MP3 V0 transcoded row with spectral=128/likely_transcode → 128
-  (spectral min wins, demonstrating the semantic shift).
-- Existing rows unchanged.
+**Test scenarios:** Owned by U2.
 
-**Verification:**
-`nix-shell --run "python3 -m unittest tests.test_quality_decisions.TestComputeEffectiveOverrideBitrate -v"`
-passes; new rows visible in subTest output.
+**Verification:** U2's subTest cases all pass.
 
 ---
 
-### U7. Update CLAUDE.md and acknowledge known wart
+### U10. Wire helper into importer-side rejection
 
-**Goal:** Update the living docs to reflect the reversed propagation policy
-and document the accepted asymmetry between pre-change and post-change
-transcoded library rows.
+**Goal:** When `dispatch_import_from_db` (importer worker) processes a
+`lossless_source_locked` rejection, narrow the request's
+`search_filetype_override` to `"lossless"`.
 
-**Requirements:** R4 (extends docstring updates from U5 to project-level docs),
-R8 (documents the accepted known wart).
+**Requirements:** R7.
 
-**Dependencies:** U5 (docs follow the code change in the same PR but trail
-it in the unit list for readability).
+**Dependencies:** U9.
 
 **Files:**
-- `CLAUDE.md` (lines 280-285, "Evidence survives the candidate → library
-  transition" paragraph in § "Decision architecture")
+- `lib/import_dispatch.py` (the `lossless_source_locked` rejection
+  branch around lines 1846-1858, plus a narrowing block analogous to
+  the existing downgrade branch at 1906-1939)
 
 **Approach:**
-- Rewrite the paragraph at CLAUDE.md:278-285 to describe the new rule:
-  > After a successful import, `propagate_candidate_evidence_to_current` (U10)
-  > inherits the candidate's full measurement payload (spectral grade, V0
-  > lineage, bad-audio-hash matches, verified-lossless proof) onto the
-  > library evidence row, for **both** renamed-only and transcoded imports.
-  > These fields describe the upstream source audio at import time, not the
-  > on-disk file. For transcoded imports the on-disk file has a different
-  > spectrum and codec, but the propagated fields remain accurate
-  > descriptions of the source that produced it.
-- Add a one-sentence "Known wart" follow-up paragraph:
-  > Library rows imported before this policy change have NULL
-  > spectral/V0/bad-hash fields. They retain the old behaviour (wrong-match
-  > triage cannot reject same-source duplicates against them) until they
-  > are re-imported or force-imported. Forward-only by design; no backfill.
-- No update needed in `.claude/rules/code-quality.md` (its "Quality
-  decisions live in ONE place" section covers decision purity, not
-  propagation policy — confirmed via grep during research).
-- No update needed in `docs/pipeline-db-schema.md` (no mentions of the
-  propagation policy — confirmed via grep).
-- The lib/quality_evidence.py docstring update is owned by U5; this unit
-  is project-level docs only.
+- In the `elif decision == "lossless_source_locked":` branch, compute:
+  ```
+  current_override = req_row.get("search_filetype_override")
+                     if req_row else None
+  narrowed_override = narrow_override_on_lossless_source_lock(
+      current_override)
+  ```
+  (where `req_row = db.get_request(request_id)`).
+- Ensure `narrowed_override` flows into the existing
+  `_record_rejection_and_maybe_requeue(...,
+  search_filetype_override=narrowed_override, ...)` call.
+- Log the narrowing for parity with the downgrade-branch logging
+  ("Narrowed search_filetype_override 'X' -> 'lossless' after
+  lossless_source_locked").
 
-**Patterns to follow:** Match the surrounding tone of CLAUDE.md's
-"Decision architecture" section — concise, opinionated, with a clear
-"never re-create decisions elsewhere" frame.
+**Execution note:** Production unit. Unblocks U3's test going GREEN.
 
-**Test scenarios:** Test expectation: none — docs-only change.
+**Patterns to follow:** The `downgrade` branch at lines 1906-1939 is the
+exact precedent.
 
-**Verification:**
-- `grep -n "inherit only\|stay NULL\|NULL when transcoded" CLAUDE.md` returns
-  no results after the update.
-- `grep -n "Propagated in both" CLAUDE.md` shows the new wording.
-- Manual read of the updated paragraph to confirm tone matches the section.
+**Test scenarios:** Owned by U3.
+
+**Verification:** U3 passes; full suite passes.
+
+---
+
+### U11. Wire helper into wrong-match cleanup triage
+
+**Goal:** When `cleanup_wrong_match` deletes a folder with
+`preview_decision == "lossless_source_locked"`, also narrow the request's
+`search_filetype_override` to `"lossless"`.
+
+**Requirements:** R8.
+
+**Dependencies:** U9.
+
+**Files:**
+- `lib/wrong_match_cleanup_service.py` (likely
+  `_perform_cleanup_deletion` or `_cleanup_wrong_match`)
+
+**Approach:**
+- After the successful deletion path (where outcome would be
+  `OUTCOME_DELETED`), if `preview_decision == "lossless_source_locked"`:
+  - Look up the current override on the request row.
+  - Call `narrow_override_on_lossless_source_lock(current_override)`.
+  - Persist the narrowed override via the appropriate
+    `db.set_request_*` method (or a small wrapper if no exact match
+    exists — TBD during implementation; check `lib/pipeline_db.py` for
+    the right entry point).
+- Audit: include the narrowed override in the cleanup audit payload
+  so the Recents tab can show "search narrowed to lossless" if useful.
+
+**Execution note:** Production unit. Unblocks U5 and U6 going GREEN.
+
+**Patterns to follow:** Existing `cleanup_wrong_match` already persists
+audit data via `db.record_wrong_match_triage(...)`; the override update
+is a small additional step.
+
+**Test scenarios:** Owned by U5 (FLAC same-source case) and U6 (lossy
+MP3 case).
+
+**Verification:** U5 and U6 pass; full suite passes.
+
+---
+
+### U12. Update CLAUDE.md and lib/quality_evidence.py docstring
+
+**Goal:** Update the living docs to reflect the corrected (narrower)
+propagation policy and the new search-narrowing behavior.
+
+**Requirements:** Companion to U8 and U10-U11.
+
+**Dependencies:** U8, U9, U10, U11.
+
+**Files:**
+- `CLAUDE.md` (the "Evidence survives the candidate → library transition"
+  paragraph, currently in the post-U7 state from the earlier work)
+- `lib/quality_evidence.py` (function docstring)
+
+**Approach:**
+- Rewrite the CLAUDE.md paragraph to describe:
+  - Propagation rule: full payload for renamed-only; lossless-source-only
+    for transcoded; non-lossless transcodes strip.
+  - Search-narrowing companion: lossless_source_locked → override
+    becomes "lossless" so search stops asking for non-lossless candidates.
+  - Known wart paragraph stays (pre-change rows still NULL).
+- Update the function docstring to match the gate's actual behavior
+  and remove the symmetric-propagation framing introduced earlier.
+- Also fix the stale docstring at
+  `lib/import_dispatch.py:645-648` (the `_refresh_current_evidence_after_import`
+  wrapper) which the project-standards reviewer flagged.
+- Fix the stale class docstring at
+  `tests/test_integration_slices.py:7367-7376`
+  (`TestU10PostImportEvidencePropagation`) which still says "stay NULL".
+
+**Test scenarios:** None — docs-only.
+
+**Verification:** `grep -n "stay NULL\|inherit only" CLAUDE.md
+lib/quality_evidence.py lib/import_dispatch.py
+tests/test_integration_slices.py` returns no results.
 
 ---
 
 ## Sequencing
 
 ```
-U1  (RED: flip TestU10 transcoded assertions)
-U2  (RED: Lil Wayne live-bug, simulator + evidence-pipeline parity)
-U3  (RED: propagate → triage round-trip slice)
-U4  (regression coverage: source-replacement overwrite)
-U6  (search-planner coverage: compute_effective_override_bitrate CASES)
-                    │
-                    ▼
-U5  (GREEN: production change — lib/quality_evidence.py + docstring)
-                    │
-                    ▼
-U7  (docs: CLAUDE.md policy paragraph)
+U1 (RED: TestU10 negative MP3 case)
+U2 (pure: narrow helper subTest cases)
+U3 (RED: importer-side narrowing test)
+U4 (parity test strengthening)
+U5 (RED: triage slice narrowing assertion)
+U6 (RED: AE2 lossy candidate slice)
+U7 (regression coverage check)
+              │
+              ▼
+U8 (GREEN: propagation gate re-introduction)
+U9 (GREEN: narrow helper)
+              │
+              ▼
+U10 (GREEN: importer wiring)
+U11 (GREEN: triage wiring)
+              │
+              ▼
+U12 (docs: CLAUDE.md + docstrings)
 ```
 
-U1, U2, U3, U4, U6 are independent and can be written in any order or in
-parallel. U5 must come after the RED test units to honour the strict-TDD
-posture (RED visible before GREEN). U7 follows U5 in the unit list for
-review readability but could technically land in the same commit; the
-implementer's call.
+U1-U7 are RED-first / regression-coverage units. U8 and U9 unblock most
+of them; U10 unblocks U3; U11 unblocks U5 and U6. U12 lands docs after
+behavior is verified.
 
 ---
 
 ## Key Technical Decisions
 
-- **Symmetric over scoped.** Propagate source-side fields for all transcoded
-  imports, not just lossless-source candidates. The asymmetry being fixed is
-  rename-only vs transcoded, not lossless vs lossy — the symmetric fix is the
-  coherent one. See origin: brainstorm § Key Decisions #1.
-- **Forward-only over backfill.** Existing transcoded library rows are not
-  retroactively populated. The bug is operator-visible only on new
-  wrong-matches; organic re-touch closes the asymmetry over time;
-  `migrations/021_evidence_canonical_rekey.sql` provides a clean atomic-
-  backfill precedent if operator pain warrants revisiting. See origin:
-  brainstorm § Key Decisions #2.
-- **One production change unit, one docs unit.** Splitting the policy code
-  change from the project-level docs change makes the policy shift
-  auditable in a single commit and the docs propagation reviewable in a
-  separate one. The function docstring belongs with the code (in U5)
-  because it describes function-local behaviour; CLAUDE.md belongs with
-  the docs unit (U7) because it describes project-level architecture.
-- **Test-first per unit.** U1, U2, U3 are RED tests written before U5
-  flips them green. U4 is regression coverage that may pass immediately
-  after U5 via `ON CONFLICT DO UPDATE`. U6 is pure-function coverage
-  independent of propagation. The plan structures tests as separate units
-  so each commit makes its intent visible (RED-then-GREEN over fewer-
-  larger-commits per user TDD preference).
-- **Reuse existing builders.** All test units lean on existing infrastructure
-  — `TestU10PostImportEvidencePropagation`'s audio-staging helpers,
-  `TestLiveBugReproductionsThroughEvidencePipeline._build_candidate` /
-  `_build_current`, `TestWrongMatchCleanupFKChainAvoidsRemeasurement`'s
-  `_seed` / `_evidence_for` / `_patch_cfg`, `FakePipelineDB` from
-  `tests/fakes.py`, `make_album_quality_evidence` from `tests/helpers.py`.
-  No new builders; no hand-rolled msgspec.Struct construction.
-
----
-
-## Test Strategy
-
-- **Pure tests** for `compute_effective_override_bitrate` (U6) — subTest
-  table extension.
-- **Integration slices** for propagation (U1 — flip existing; U4 —
-  source-replacement) and for the end-to-end triage round-trip (U3).
-- **Parity tests** for the live bug (U2) — simulator and evidence pipeline
-  must agree.
-- **Regression guards** are explicit: `test_renamed_only_flac_propagates_full_measurement_payload`
-  (untouched, guards AE5); existing `TestComputeEffectiveOverrideBitrate.CASES`
-  rows (untouched, guards rename-only override behaviour); full test suite
-  must pass after U5.
-
-Per `.claude/rules/code-quality.md`, no new bespoke harnesses; all test
-infrastructure already exists.
-
----
-
-## System-Wide Impact
-
-- **Decision layer (`lib/quality.py`).** No changes. Existing deciders
-  (`provisional_lossless_decision`, `spectral_import_decision`,
-  `full_pipeline_decision_from_evidence`) already handle the propagated
-  evidence shapes correctly — they were written assuming evidence might
-  be present on both sides; the current bug is that the library side was
-  artificially empty.
-- **Importer worker (`lib/import_dispatch.py`).** No changes. The importer
-  reads persisted evidence and decides via the unchanged pipeline.
-- **Preview worker (`lib/import_preview.py`).** No changes. Preview produces
-  candidate evidence; the propagation policy reversal only affects how
-  candidate evidence flows to the library row after import.
-- **Search planner (`lib/download.py:1575-1610`).** Behavioural shift for
-  newly-imported transcoded albums: `compute_effective_override_bitrate`
-  will start returning the source spectral cliff for MP3 V0 transcoded
-  library rows (e.g. drops from container ~225 to spectral 128). For
-  Opus V2 transcoded rows, behaviour is unchanged (`min(100, 128) = 100`).
-  Net effect: searches become slightly more permissive for new transcoded
-  albums; resulting lossy candidates get locked out at triage by the new
-  `lossless_source_locked` firing. Wasted slskd churn; no different files
-  on disk. Closes when the bucket model lands and search tiers narrow
-  based on existing-bucket (see `docs/brainstorms/quality-bucket-system-requirements.md`).
-- **Wrong-match cleanup triage (`lib/wrong_match_cleanup_service.py`).**
-  Intended behavioural shift: lossy candidates against transcoded-FLAC
-  library rows now classify as `confident_reject` (via
-  `lossless_source_locked`) and become cleanup-eligible. Same-source FLAC
-  duplicates against transcoded-FLAC library rows likewise classify as
-  reject (via `suspect_lossless_downgrade` or equivalent). Result: cleaner
-  wrong-matches queue for new transcoded imports.
-- **Web UI.** No changes. The Wrong Matches view consumes triage audit
-  rows via `download_log.validation_result`; new outcomes (e.g.
-  `lossless_source_locked`) already render via
-  `_wrong_match_action_label` (`web/classify.py:273-290`) without
-  additional plumbing.
-- **Pipeline DB schema.** No changes. Forward-only; no migrations.
-- **Operator workflows.** No CLI changes; no API changes; no config
-  changes. The CLI ⇄ API surface symmetry rule (§ CLAUDE.md) does not
-  apply — this is an internal policy reversal, not a new operator action.
+- **Lossless-source-gated, not symmetric.** The earlier symmetric scope
+  was scope creep; the user's actual intent is narrower. The gate is
+  `candidate_evidence.codec in LOSSLESS_CODECS` (= `{"flac", "alac",
+  "wav"}`).
+- **Search narrowing is in scope, not deferred.** A standalone helper
+  (`narrow_override_on_lossless_source_lock`) wired into two sites
+  (importer + triage) closes the wasted-cycle window the propagation
+  change would otherwise create.
+- **No `SEARCH_PLAN_GENERATOR_ID` bump.** Research confirmed
+  `generate_search_plan` produces query strategies only; filetype
+  filtering happens downstream in `enqueue.py::effective_search_tiers`
+  via the request's `search_filetype_override`. Updating that column
+  takes effect on the next cycle without plan regeneration.
+- **Reuse existing infrastructure.** All test units extend existing
+  builders (`FakePipelineDB`, `_build_candidate`/`_build_current`,
+  TestU10 audio-staging) and the production code follows the existing
+  downgrade-narrowing pattern.
+- **Forward-only over backfill.** Existing transcoded rows stay NULL.
 
 ---
 
 ## Scope Boundaries
 
 In scope:
-- Five `is_transcode` conditional removals in
-  `propagate_candidate_evidence_to_current`.
-- Docstring updates at lib/quality_evidence.py:825-847 and CLAUDE.md:278-285.
-- Test additions per U1-U4, U6.
-- No-op verification of `verified_lossless_proof` propagation (already
-  works; explicitly tested by existing assertions in U1's flipped test).
+- Lossless-source gate in `propagate_candidate_evidence_to_current`.
+- `narrow_override_on_lossless_source_lock` helper + two call sites.
+- Docstring + CLAUDE.md updates.
+- Test additions per U1-U7.
 
 Out of scope:
-- No backfill of existing transcoded library rows (Key Decision #2).
-- No changes to `full_pipeline_decision_from_evidence` or any pure decider
-  in `lib/quality.py`.
-- No changes to `import_service.py` or how `current_spectral_grade` flows
-  from library evidence back to `album_requests` (existing path inherits
-  the new semantic naturally; no special-casing).
-- No UI / copy / triage-display changes.
-- No `.claude/rules/code-quality.md` updates (decision purity rules
-  unchanged).
+- No backfill of existing transcoded library rows.
+- No changes to `full_pipeline_decision_from_evidence` or any pure
+  decider.
+- No force-import-bypass-the-lock affordance.
+- No UI / copy / triage-display changes (beyond the optional audit
+  payload extension in U11).
+- No new CLI / web API surface.
 
 ### Deferred to Follow-Up Work
 
-- **Search-plan tier narrowing on `lossless_source` lineage.** Once a
-  library row carries `v0_source_lineage="lossless_source"`, the search
-  plan could narrow to lossless tiers only, since any lossy candidate
-  will be locked out downstream. This is the natural shape of the bucket
-  work (see `docs/brainstorms/quality-bucket-system-requirements.md` R1,
-  R6) and absorbs the temporary wasted-search window from this change.
-  Not bundled into this PR.
-- **FK-chain backfill for existing transcoded library rows.** If the
-  organic re-touch rate proves too slow and false-positive triage keeps
-  remain operationally noisy, walk `album_requests.current_evidence_id` →
-  `download_log.candidate_evidence_id` and propagate the prior candidate's
-  source-side fields to the library row. Deferred behind operator
-  observation; revisit only if pain warrants.
+- **Bucket-aware search-plan tier ordering** (the full buckets work).
+  This PR mimics the bucket behavior at the lock site only; the bucket
+  rewrite generalizes it.
+- **Bad-rip ban evidence cleanup**
+  (`clear_on_disk_quality_fields` doesn't null `current_evidence_id`).
+  Pre-existing wart sharpened by this PR but separate from the
+  propagation/narrowing intent.
+- **Force-import override of `lossless_source_locked`.** Operator
+  escape hatch from the lock — needs a design decision.
+
+---
+
+## Branch History Strategy
+
+8 commits from the previous (over-scoped) shape are already on the
+branch (`feat/propagate-source-evidence-on-transcode`). The corrective
+work goes on top as new commits — do not rebase or rewrite history.
+Rationale: the evolution is real and the audit trail is part of the
+honesty of the PR. The PR description will explain the rescope explicitly.
+
+Each new commit's message references the corrected unit (e.g.,
+`test(u1-fix): add negative MP3-source case after rescope`,
+`feat(u8-fix): re-gate propagation on lossless source`, etc.) so the
+delta from the earlier shape is searchable.
 
 ---
 
 ## Risks and Mitigations
 
-- **Risk: U2's simulator test passes immediately, masking incomplete RED
-  baseline.** Mitigation: U2's docstring explicitly notes the simulator vs
-  evidence-pipeline asymmetry. The evidence-pipeline parity test is the
-  load-bearing RED; the simulator side documents the expected outcome
-  shape.
-- **Risk: `is_transcode` flag still referenced after conditional removals.**
-  Mitigation: U5 includes an explicit local read of lines 858-877 to
-  decide whether to delete the detection or preserve it with a comment.
-- **Risk: `lossless_source_locked` firing more aggressively breaks a
-  workflow we forgot.** Mitigation: U3's integration slice exercises the
-  full triage path against a real wrong-match row, and the full test suite
-  must pass after U5. Adjacent decider tests in `tests/test_quality_decisions.py`
-  exercise `provisional_lossless_decision` directly and will catch
-  unintended changes to the lock branch.
-- **Risk: Search-planner override drop (225 → 128) on MP3 V0 transcoded
-  rows causes excessive slskd churn.** Mitigation: brainstorm classifies
-  this as a known-acceptable temporary window. U6 documents the shift
-  with subTest rows. If the churn proves operationally painful, the
-  follow-up "search-plan tier narrowing" work in `Deferred to Follow-Up Work`
-  closes it.
-- **Risk: Pre-change transcoded library rows generate ongoing false-
-  positive triage keeps.** Mitigation: documented as R8 known wart in
-  brainstorm and U7. If pain warrants, FK-chain backfill in
-  `Deferred to Follow-Up Work` resolves it.
+- **Risk: gating logic accidentally re-strips renamed-only lossless
+  cases (FLAC → FLAC).** Mitigation: U1 keeps the existing
+  `test_renamed_only_flac_propagates_full_measurement_payload` and the
+  existing renamed-only FLAC test as a regression guard.
+- **Risk: `search_filetype_override = "lossless"` interacts badly with
+  user-driven re-queue paths.** Mitigation: `resolve_user_requeue_override`
+  (`lib/quality.py:84`) already preserves stricter overrides on user
+  requeue. The narrowing aligns with that contract.
+- **Risk: the wrong-match cleanup triage write of
+  `search_filetype_override` races with the importer's update on the
+  same request.** Mitigation: both update paths are guarded by
+  advisory locks per the existing architecture; verify during
+  implementation, add a test if a race is observable.
 
 ---
 
 ## Verification Checklist
 
 Before merging:
-- [ ] U1 test (`test_transcoded_flac_to_v0_propagates_source_evidence`) fails
-  with `AssertionError` on each of the five propagated fields before U5;
-  passes after.
-- [ ] U2 evidence-pipeline test fails RED before U5; passes after; parity
-  with the simulator test holds.
-- [ ] U3 round-trip test fails RED before U5 with
-  `'kept_would_import' != 'deleted'`; passes after.
-- [ ] U4 source-replacement test passes after U5; documents the upsert
-  overwrite semantic.
-- [ ] U6 subTest rows visible in test output; pass.
-- [ ] `nix-shell --run "bash scripts/run_tests.sh"` full suite passes; no
-  unrelated regressions.
-- [ ] Pyright clean on `lib/quality_evidence.py`,
-  `tests/test_integration_slices.py`,
-  `tests/test_quality_classification.py`,
-  `tests/test_quality_decisions.py`.
+- [ ] U1 negative test (MP3 → Opus strips) fails RED before U8; passes after.
+- [ ] U1 positive test (FLAC → Opus propagates) passes throughout.
+- [ ] U2 subTest cases for narrowing helper all pass.
+- [ ] U3 importer-narrowing test fails RED before U10; passes after.
+- [ ] U4 parity tests assert simulator/evidence equality (not just
+  hardcoded strings on each side).
+- [ ] U5 triage slice asserts override narrowing.
+- [ ] U6 AE2 lossy-candidate slice passes.
+- [ ] U7 source-replacement test still passes.
+- [ ] `nix-shell --run "bash scripts/run_tests.sh"` full suite passes;
+  no unrelated regressions.
+- [ ] Pyright clean on touched files.
 - [ ] CLAUDE.md grep confirms old wording removed, new wording present.
+- [ ] Stale docstrings at `lib/import_dispatch.py:645-648` and
+  `tests/test_integration_slices.py:7367-7376` updated.
 - [ ] Pre-commit hook (`scripts/pre-commit`) passes.
