@@ -7667,6 +7667,129 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             self.assertEqual(new_evidence.codec, "mp3")
             self.assertEqual(new_evidence.container, "mp3")
 
+    def test_transcoded_mp3_to_opus_strips_source_evidence(self):
+        """AE5: non-lossless-source transcoded import does NOT propagate
+        source-side evidence.
+
+        MP3 source → Opus library: the candidate's spectral_grade /
+        spectral_bitrate / v0_metric / matched_bad_audio_hash_* must NOT
+        appear on the library evidence row. The source-side fields
+        describe the MP3 source which is not a comparable lossless
+        anchor for future candidates; storing them provides no decision
+        value. Verified_lossless / verified_lossless_proof still
+        propagate (always have).
+
+        This is the negative sibling of
+        ``test_transcoded_flac_to_v0_propagates_source_evidence`` and
+        the regression guard for the lossless-source gate in
+        ``propagate_candidate_evidence_to_current`` (rescoped 2026-05-17).
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import AlbumQualityV0Metric
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=145, mb_release_id="mbid-mp3-opus"))
+
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.mp3"])
+            self._stage_audio(library_dir, filenames=["01 - Library.opus"])
+
+            from lib.quality_evidence import snapshot_audio_files
+            candidate_files = snapshot_audio_files(source_dir)
+            # Candidate carries source-side fields just like the FLAC
+            # case — the gate must strip them because the source is
+            # lossy, not because they are absent on the candidate.
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=180,
+                avg_bitrate_kbps=210,
+                median_bitrate_kbps=205,
+                source_lineage="native_lossy_research",
+                source_provenance="native_lossy_research",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                avg_bitrate_kbps=192,
+                median_bitrate_kbps=192,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=192,
+                verified_lossless=False,
+                was_converted_from="mp3",
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-mp3-opus",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 320",
+                target_format="opus",
+                v0_metric=v0_metric,
+                verified_lossless_proof=None,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(candidate_files),
+                filetype_band="mp3 320",
+                matched_bad_audio_hash_id=77,
+                matched_bad_audio_hash_path="/some/known/bad.mp3",
+            )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-mp3-opus",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+
+            beets_info = AlbumInfo(
+                album_id=4,
+                track_count=1,
+                min_bitrate_kbps=119,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=125,
+                is_cbr=False,
+                album_path=library_dir,
+                format="Opus",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=145,
+                    mb_release_id="mbid-mp3-opus",
+                    quality_ranks=None,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=119,
+                    ),
+                )
+
+            request_row = db.request(145)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
+
+            # Non-lossless-source transcode: source-side fields are
+            # stripped onto NULL. The MP3 source's spectral grade and
+            # bad-hash match describe audio that has no comparable role
+            # in future candidate comparisons.
+            self.assertIsNone(new_evidence.measurement.spectral_grade)
+            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
+            self.assertIsNone(new_evidence.v0_metric)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
+
+            # Bitrate / format reflect the Opus output from album_info.
+            self.assertEqual(new_evidence.measurement.format, "Opus")
+            self.assertEqual(new_evidence.codec, "opus")
+
     def test_source_replacement_overwrites_stale_propagated_evidence(self):
         """U4 / AE4: when a clean lossless-source candidate force-imports
         over a previously-transcoded library row that propagated
