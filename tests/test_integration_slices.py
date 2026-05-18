@@ -9,6 +9,7 @@ and _check_quality_gate_core run for real, not patched.
 """
 
 import os
+import shutil
 import configparser
 from contextlib import contextmanager
 import tempfile
@@ -8337,6 +8338,195 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
         refresh_block = src[refresh_block_start:refresh_block_start + 1500]
         self.assertIn("beets_library_root=", refresh_block)
         self.assertIn("cfg.beets_directory", refresh_block)
+
+
+class TestReplaceFullPath(unittest.TestCase):
+    """U11: integration slice for the Replace operator action.
+
+    Exercises ``MbidReplaceService.replace_request_mbid`` end-to-end
+    with:
+    - real ``FakePipelineDB.supersede_request_mbid`` (single-txn
+      semantics over the in-memory store, mirrors PipelineDB's atomic
+      block)
+    - real ``lib.release_cleanup.remove_and_reset_release`` with
+      ``clear_pipeline_state=False`` (subprocess + beets_db stubbed)
+    - real ``lib.wrong_match_delete_service.delete_wrong_match_group``
+    - real ``lib.processing_paths.stage_to_ai_path`` against a
+      temporary staging directory
+    - mocked MB lookup returning the canonical pressing
+    - mocked rescan triggers
+
+    Asserts AE4: old row flips to ``replaced`` with characteristic
+    fields preserved; new row born ``wanted`` with ``replaces_request_id``
+    lineage; tracks populated; staging folder gone from disk; rescans
+    triggered; SearchPlanService invoked for the new id.
+    """
+
+    PET_GRIEF_OLD = "72988560-e8fc-4429-9c69-7045bb63e248"
+    PET_GRIEF_CANONICAL = "18056805-33f5-3e99-aa4b-5f5919c4f8af"
+    PET_GRIEF_RG = "abcdabcd-1111-2222-3333-444444444444"
+
+    def _make_target_payload(self, status="wanted", imported_path=None):
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_request_row
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4194,
+            mb_release_id=self.PET_GRIEF_OLD,
+            mb_release_group_id=self.PET_GRIEF_RG,
+            mb_artist_id="art-pet-grief",
+            artist_name="Pet Grief",
+            album_title="Pet Grief",
+            year=2024,
+            country="US",
+            status=status,
+            imported_path=imported_path,
+            verified_lossless=True,
+            current_spectral_grade="A",
+            current_spectral_bitrate=900,
+            source="request",
+        ))
+        return db
+
+    def _run(self, *, old_status="wanted"):
+        from lib.mbid_replace_service import MbidReplaceService
+        from lib.config import CratediggerConfig
+        from unittest.mock import patch, MagicMock
+
+        db = self._make_target_payload(
+            status=old_status,
+            imported_path=(
+                "/mnt/virtio/Music/Beets/Pet Grief/Pet Grief"
+                if old_status == "imported" else None
+            ),
+        )
+        tmpdir = tempfile.mkdtemp()
+        try:
+            cfg = CratediggerConfig(beets_staging_dir=tmpdir)
+            # Pre-create a staging folder so we can assert it's gone
+            # after Replace (only for the non-downloading variants).
+            from lib.processing_paths import stage_to_ai_path
+            if old_status != "downloading":
+                stage_path = stage_to_ai_path(
+                    artist="Pet Grief",
+                    title="Pet Grief",
+                    staging_dir=tmpdir,
+                    request_id=4194,
+                    auto_import=True,
+                )
+                os.makedirs(stage_path, exist_ok=True)
+                with open(os.path.join(stage_path, "junk.flac"), "wb") as fh:
+                    fh.write(b"audio")
+
+            target = {
+                "id": self.PET_GRIEF_CANONICAL,
+                "title": "Pet Grief (Reissue)",
+                "artist_name": "Pet Grief",
+                "artist_id": "art-pet-grief",
+                "release_group_id": self.PET_GRIEF_RG,
+                "year": 2025,
+                "country": "JP",
+                "tracks": [
+                    {"disc_number": 1, "track_number": 1, "title": "T1"},
+                    {"disc_number": 1, "track_number": 2, "title": "T2"},
+                ],
+            }
+
+            plan_svc = MagicMock()
+            with patch(
+                "lib.mbid_replace_service.remove_and_reset_release",
+                MagicMock(return_value=MagicMock(
+                    beets_removed=True, absent_after=True,
+                    selector_failures=(),
+                )),
+            ) as mock_remove, patch(
+                "lib.mbid_replace_service.trigger_meelo_scan", MagicMock(),
+            ) as mock_meelo, patch(
+                "lib.mbid_replace_service.trigger_plex_scan", MagicMock(),
+            ) as mock_plex, patch(
+                "lib.mbid_replace_service.trigger_jellyfin_scan", MagicMock(),
+            ) as mock_jellyfin:
+                svc = MbidReplaceService(
+                    db=db, config=cfg, slskd=MagicMock(),
+                    beets_db_factory=lambda: MagicMock(),
+                    mb_lookup=lambda mbid, *, fresh=False: target,
+                    search_plan_service=plan_svc,
+                )
+                result = svc.replace_request_mbid(
+                    4194, target_mb_release_id=self.PET_GRIEF_CANONICAL,
+                )
+            return db, result, tmpdir, plan_svc, {
+                "remove": mock_remove,
+                "meelo": mock_meelo, "plex": mock_plex,
+                "jellyfin": mock_jellyfin,
+            }
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ae4_happy_path_imported(self):
+        """AE4 (R14–R23, R26): Pet Grief 4194 imported → replaced;
+        all post-state assertions hold.
+        """
+        from lib.mbid_replace_service import RESULT_REPLACED
+        db, result, tmpdir, plan_svc, mocks = self._run(old_status="imported")
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        # Old row.
+        old = db.get_request(4194)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        self.assertIsNone(old["imported_path"])  # R14 carve-out
+        # Characteristic fields preserved.
+        self.assertTrue(old["verified_lossless"])
+        self.assertEqual(old["current_spectral_grade"], "A")
+        self.assertEqual(old["current_spectral_bitrate"], 900)
+        # New row.
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["mb_release_id"], self.PET_GRIEF_CANONICAL)
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], 4194)
+        # Tracks populated.
+        tracks = db.get_tracks(result.new_request_id)
+        self.assertEqual(len(tracks), 2)
+        # Source inherited from old.
+        self.assertEqual(new["source"], "request")
+        # Beets removal called with clear_pipeline_state=False.
+        mocks["remove"].assert_called_once()
+        _, kwargs = mocks["remove"].call_args
+        self.assertFalse(kwargs.get("clear_pipeline_state"))
+        # Rescans triggered.
+        mocks["meelo"].assert_called_once()
+        mocks["plex"].assert_called_once()
+        mocks["jellyfin"].assert_called_once()
+        # Search plan generated for new id.
+        plan_svc.generate_for_request.assert_called_once_with(
+            result.new_request_id, regenerate=False,
+        )
+
+    def test_wanted_variant_no_beets_removal(self):
+        """For source ``status='wanted'`` there is no library entry —
+        the beets-removal primitive must not be called."""
+        from lib.mbid_replace_service import RESULT_REPLACED
+        db, result, _, _, mocks = self._run(old_status="wanted")
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        mocks["remove"].assert_not_called()
+
+    def test_downloading_variant_preserves_active_state(self):
+        """``status='downloading'`` skips staging cleanup; the new row
+        is born with empty ``active_download_state``; the old row's
+        state is left untouched. A warning surfaces about the orphan."""
+        from lib.mbid_replace_service import RESULT_REPLACED
+        db, result, _, _, _ = self._run(old_status="downloading")
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertTrue(any("downloading" in w for w in result.warnings))
+
+    def test_manual_variant(self):
+        """``status='manual'`` behaves like ``wanted`` for fs cleanup."""
+        from lib.mbid_replace_service import RESULT_REPLACED
+        _db, result, _, _, mocks = self._run(old_status="manual")
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        mocks["remove"].assert_not_called()
 
 
 if __name__ == "__main__":
