@@ -493,8 +493,14 @@ class TestReplaceHappyPath(_ServiceCase):
     """Cover RESULT_REPLACED + ordering invariants + the Pet Grief
     merged-upstream case (target redirects to canonical)."""
 
-    def _patched_externals(self):
-        return [
+    def _patch_externals(self):
+        """Patch the five external edges and register cleanup via
+        ``self.addCleanup``. Returns the patched mocks as a tuple so
+        tests can assert on them. Scoped per-test — unlike
+        ``patch.stopall`` which would stop EVERY active patch in the
+        process (including any unrelated patch the test runner is
+        holding) and is a known footgun on shared mocks."""
+        patches = [
             patch(
                 "lib.mbid_replace_service.remove_and_reset_release",
                 MagicMock(return_value=ReleaseCleanupResult(
@@ -514,6 +520,11 @@ class TestReplaceHappyPath(_ServiceCase):
                 MagicMock(),
             ),
         ]
+        mocks = []
+        for p in patches:
+            mocks.append(p.start())
+            self.addCleanup(p.stop)
+        return mocks
 
     def _replace(self, *, old_status="wanted", **service_kwargs):
         db = FakePipelineDB()
@@ -529,144 +540,120 @@ class TestReplaceHappyPath(_ServiceCase):
         return db, plan_svc, svc
 
     def test_happy_path_wanted(self):
-        for p in self._patched_externals():
-            p.start()
-        try:
-            db, plan_svc, svc = self._replace(old_status="wanted")
-            slskd = svc.slskd
-            result = svc.replace_request_mbid(
-                42, target_mb_release_id=NEW_MBID,
-            )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-            assert result.new_request_id is not None
-            # Old row flipped to replaced.
-            old = db.get_request(42)
-            assert old is not None
-            self.assertEqual(old["status"], "replaced")
-            # Characteristic fields preserved.
-            self.assertTrue(old["verified_lossless"])
-            self.assertEqual(old["current_spectral_grade"], "A")
-            # New row born wanted with lineage.
-            new = db.get_request(result.new_request_id)
-            assert new is not None
-            self.assertEqual(new["status"], "wanted")
-            self.assertEqual(new["replaces_request_id"], 42)
-            # Plan service called on the new id.
-            plan_svc.generate_for_request.assert_called_once_with(
-                result.new_request_id, regenerate=False,
-            )
-            # slskd never touched.
-            self.assertEqual(slskd.mock_calls, [])
-        finally:
-            patch.stopall()
+        self._patch_externals()
+        db, plan_svc, svc = self._replace(old_status="wanted")
+        slskd = svc.slskd
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        # Old row flipped to replaced.
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        # Characteristic fields preserved.
+        self.assertTrue(old["verified_lossless"])
+        self.assertEqual(old["current_spectral_grade"], "A")
+        # New row born wanted with lineage.
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], 42)
+        # Plan service called on the new id.
+        plan_svc.generate_for_request.assert_called_once_with(
+            result.new_request_id, regenerate=False,
+        )
+        # slskd never touched.
+        self.assertEqual(slskd.mock_calls, [])
 
     def test_happy_path_imported_calls_beets_with_clear_false(self):
-        for p in self._patched_externals():
-            p.start()
-        try:
-            db, _, svc = self._replace(old_status="imported")
-            from lib import mbid_replace_service as svcmod
-            result = svc.replace_request_mbid(
-                42, target_mb_release_id=NEW_MBID,
-            )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-            # Beets removal was called WITH clear_pipeline_state=False —
-            # regression guard so a future maintainer can't accidentally
-            # clear the OLD row's characteristic fields.
-            mock_remove = svcmod.remove_and_reset_release
-            assert isinstance(mock_remove, MagicMock)
-            mock_remove.assert_called_once()
-            _, kwargs = mock_remove.call_args
-            self.assertEqual(kwargs.get("clear_pipeline_state"), False)
-            self.assertEqual(kwargs.get("request_id"), 42)
-            self.assertEqual(kwargs.get("release_id"), OLD_MBID)
-        finally:
-            patch.stopall()
+        self._patch_externals()
+        db, _, svc = self._replace(old_status="imported")
+        from lib import mbid_replace_service as svcmod
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Beets removal was called WITH clear_pipeline_state=False —
+        # regression guard so a future maintainer can't accidentally
+        # clear the OLD row's characteristic fields.
+        mock_remove = svcmod.remove_and_reset_release
+        assert isinstance(mock_remove, MagicMock)
+        mock_remove.assert_called_once()
+        _, kwargs = mock_remove.call_args
+        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
+        self.assertEqual(kwargs.get("request_id"), 42)
+        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
-        for p in self._patched_externals():
-            p.start()
-        try:
-            db, _, svc = self._replace(old_status="downloading")
-            slskd = svc.slskd
-            result = svc.replace_request_mbid(
-                42, target_mb_release_id=NEW_MBID,
-            )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-            # Warning about orphaned transfer.
-            self.assertTrue(any("downloading" in w for w in result.warnings))
-            # slskd was never called.
-            self.assertEqual(slskd.mock_calls, [])
-        finally:
-            patch.stopall()
+        self._patch_externals()
+        db, _, svc = self._replace(old_status="downloading")
+        slskd = svc.slskd
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Warning about orphaned transfer.
+        self.assertTrue(any("downloading" in w for w in result.warnings))
+        # slskd was never called.
+        self.assertEqual(slskd.mock_calls, [])
 
     def test_happy_path_manual(self):
-        for p in self._patched_externals():
-            p.start()
-        try:
-            db, _, svc = self._replace(old_status="manual")
-            result = svc.replace_request_mbid(
-                42, target_mb_release_id=NEW_MBID,
-            )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-            old = db.get_request(42)
-            assert old is not None
-            self.assertEqual(old["status"], "replaced")
-        finally:
-            patch.stopall()
+        self._patch_externals()
+        db, _, svc = self._replace(old_status="manual")
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
 
     def test_pet_grief_merged_upstream_canonical_redirect(self):
         """AE4 representative: source MBID resolves to canonical via 301.
         The MB lookup follows the redirect; canonical_mbid != requested
         target but the RG matches the source RG, so Replace succeeds."""
-        for p in self._patched_externals():
-            p.start()
-        try:
-            CANONICAL = "18056805-33f5-3e99-aa4b-5f5919c4f8af"
-            db = FakePipelineDB()
-            self._seed_old(db, mb_release_id=OLD_MBID)
-            plan_svc = MagicMock()
-            svc = self._make_service(
-                db,
-                search_plan_service=plan_svc,
-                mb_lookup=lambda mbid, *, fresh=False: (
-                    _fake_target_payload(mbid=CANONICAL, rg_id=RG_ID)
-                ),
-            )
-            result = svc.replace_request_mbid(
-                42, target_mb_release_id="72988560-e8fc-4429-9c69-7045bb63e248",
-            )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-            assert result.new_request_id is not None
-            new = db.get_request(result.new_request_id)
-            assert new is not None
-            self.assertEqual(new["mb_release_id"], CANONICAL)
-        finally:
-            patch.stopall()
+        self._patch_externals()
+        CANONICAL = "18056805-33f5-3e99-aa4b-5f5919c4f8af"
+        db = FakePipelineDB()
+        self._seed_old(db, mb_release_id=OLD_MBID)
+        plan_svc = MagicMock()
+        svc = self._make_service(
+            db,
+            search_plan_service=plan_svc,
+            mb_lookup=lambda mbid, *, fresh=False: (
+                _fake_target_payload(mbid=CANONICAL, rg_id=RG_ID)
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id="72988560-e8fc-4429-9c69-7045bb63e248",
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["mb_release_id"], CANONICAL)
 
     def test_pet_grief_with_null_stored_rg(self):
         """Source row's mb_release_group_id is NULL; lazy-backfill via
         fresh MB lookup of OLD_MBID returns canonical RG."""
-        for p in self._patched_externals():
-            p.start()
-        try:
-            db = FakePipelineDB()
-            self._seed_old(db, mb_release_group_id=None)
+        self._patch_externals()
+        db = FakePipelineDB()
+        self._seed_old(db, mb_release_group_id=None)
 
-            def fake_lookup(mbid, *, fresh=False):
-                # Both old and new resolve to the same RG.
-                return _fake_target_payload(
-                    mbid=mbid if mbid == OLD_MBID else NEW_MBID,
-                    rg_id=RG_ID,
-                )
-
-            svc = self._make_service(db, mb_lookup=fake_lookup)
-            result = svc.replace_request_mbid(
-                42, target_mb_release_id=NEW_MBID,
+        def fake_lookup(mbid, *, fresh=False):
+            # Both old and new resolve to the same RG.
+            return _fake_target_payload(
+                mbid=mbid if mbid == OLD_MBID else NEW_MBID,
+                rg_id=RG_ID,
             )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-        finally:
-            patch.stopall()
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
 
 
 class TestReplaceWarnings(_ServiceCase):
