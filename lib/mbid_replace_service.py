@@ -25,12 +25,27 @@ for the full design.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import socket
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from urllib.error import URLError
+
+
+# MB-mirror transient errors — network blips, timeouts, malformed
+# JSON. These warrant RESULT_TRANSIENT (503 / exit 5; retryable),
+# not RESULT_TARGET_INVALID (which signals an operator input
+# violation and is not retryable).
+_TRANSIENT_LOOKUP_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    URLError,
+    TimeoutError,
+    socket.timeout,
+    ConnectionError,
+    json.JSONDecodeError,
+)
 
 from lib.config import CratediggerConfig
 from lib.pipeline_db import (
@@ -219,7 +234,8 @@ class MbidReplaceService:
             # Lazy-backfill: resolve the source MBID's RG fresh.
             try:
                 src_data = self.mb_lookup(source_mbid, fresh=True)
-            except URLError as exc:
+            except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
+                # Network blip / timeout / malformed JSON — retryable.
                 return ReplaceResult(
                     outcome=RESULT_TRANSIENT,
                     request_id=request_id,
@@ -264,7 +280,8 @@ class MbidReplaceService:
             target_data = self.mb_lookup(
                 target_mb_release_id, fresh=True
             )
-        except URLError as exc:
+        except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
+            # Network blip / timeout / malformed JSON — retryable.
             return ReplaceResult(
                 outcome=RESULT_TRANSIENT,
                 request_id=request_id,

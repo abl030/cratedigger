@@ -231,6 +231,40 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_TRANSIENT)
 
+    def test_transient_timeout_on_source_lookup(self):
+        """The lazy-backfill source lookup observes the same transient
+        classification as the target lookup. A TimeoutError must NOT be
+        collapsed into RESULT_TARGET_INVALID — the source MBID is
+        already known-good (it's in the DB); we just couldn't reach the
+        mirror."""
+        db = FakePipelineDB()
+        self._seed_old(db, mb_release_group_id=None)
+
+        def fake_lookup(mbid, *, fresh=False):
+            if mbid == OLD_MBID:
+                raise TimeoutError("mirror timed out")
+            return _fake_target_payload()
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+
+    def test_transient_json_decode_error_on_target_lookup(self):
+        """A malformed JSON payload from the MB mirror is treated as a
+        transient — the mirror returned bytes but couldn't parse them.
+        Retrying gives the operator a chance to land on a healthy
+        replica."""
+        import json as _json
+        db = FakePipelineDB()
+        self._seed_old(db)
+
+        def fake_lookup(mbid, *, fresh=False):
+            raise _json.JSONDecodeError("bad", "doc", 0)
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+
     def test_collision_precheck_active_row(self):
         db = FakePipelineDB()
         self._seed_old(db)
