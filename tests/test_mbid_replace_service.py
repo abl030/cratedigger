@@ -37,10 +37,13 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 
-OLD_MBID = "old-mbid-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-NEW_MBID = "new-mbid-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-RG_ID = "rg-uuid-1111-1111-1111-111111111111"
-OTHER_RG_ID = "rg-uuid-2222-2222-2222-222222222222"
+# NOTE: must be parseable by ``uuid.UUID`` — the service rejects
+# malformed MBIDs at the boundary with RESULT_TARGET_INVALID. Keep the
+# repeated-digit pattern for at-a-glance reading of test scenarios.
+OLD_MBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+NEW_MBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+RG_ID = "11111111-1111-1111-1111-111111111111"
+OTHER_RG_ID = "22222222-2222-2222-2222-222222222222"
 
 
 def _empty_wrong_match_summary(request_id: int) -> WrongMatchDeleteSummary:
@@ -153,6 +156,42 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(99, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_NOT_FOUND)
         self.assertIsNone(result.new_request_id)
+
+    def test_target_invalid_malformed_uuid(self):
+        """Defense-in-depth: the service rejects a non-UUID
+        ``target_mb_release_id`` at the boundary with RESULT_TARGET_INVALID,
+        even though the route regex + CLI argparse normally catch it
+        upstream. Without this guard a malformed MBID would slip past
+        Phase 0's same-as-current check (mismatched string compare) and
+        explode inside the MB mirror lookup with an unhelpful trace.
+        """
+        for bad in (
+            "not-a-uuid",
+            "12345",
+            "",
+            "00000000-0000-0000-0000-00000000000",  # 1 short hex digit
+            "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+        ):
+            with self.subTest(target=bad):
+                db = FakePipelineDB()
+                self._seed_old(db)
+                svc = self._make_service(db)
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=bad,
+                )
+                self.assertEqual(
+                    result.outcome, RESULT_TARGET_INVALID,
+                    f"malformed UUID {bad!r} did not yield "
+                    f"target_invalid (got {result.outcome})",
+                )
+                self.assertIsNotNone(result.error_message)
+                # The MB lookup must NOT have been reached — pre-Phase 0
+                # rejection. We can confirm by checking the request was
+                # never advanced past the validation step (no DB
+                # mutation).
+                src = db.get_request(42)
+                assert src is not None
+                self.assertEqual(src["status"], "wanted")
 
     def test_same_as_current(self):
         db = FakePipelineDB()
@@ -325,7 +364,8 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
             mb_release_group_id=RG_ID,
         ))
         db.seed_request(make_request_row(
-            id=43, mb_release_id="some-newer", mb_release_group_id=RG_ID,
+            id=43, mb_release_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+            mb_release_group_id=RG_ID,
             status="wanted", replaces_request_id=42,
         ))
         svc = self._make_service(db)
@@ -355,7 +395,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         # Seed the descendant the racing Replace would have created
         # so get_request_by_replaces_request_id can find it.
         db.seed_request(make_request_row(
-            id=43, mb_release_id="someone-elses-mbid",
+            id=43, mb_release_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
             mb_release_group_id=RG_ID, status="wanted",
             replaces_request_id=42,
         ))

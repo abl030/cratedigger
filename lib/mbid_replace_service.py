@@ -30,6 +30,7 @@ import logging
 import os
 import shutil
 import socket
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.error import URLError
@@ -200,6 +201,26 @@ class MbidReplaceService:
             "Replace: request_id=%d target_mb_release_id=%s",
             request_id, target_mb_release_id,
         )
+        # Step 0a — defense-in-depth UUID validation. The route regex
+        # (``^/api/pipeline/(\d+)/replace$`` + JSON body) and CLI
+        # argparse handle most malformed input upstream, but the service
+        # is the contract boundary and a malformed MBID has nothing to
+        # do downstream — the MB mirror lookup would error out anyway.
+        # Reject early with a clean message so the operator sees
+        # ``target_invalid`` (422 / exit 3) instead of a stack trace or
+        # an opaque mirror failure.
+        try:
+            uuid.UUID(str(target_mb_release_id))
+        except (ValueError, TypeError, AttributeError):
+            return ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                error_message=(
+                    f"target_mb_release_id {target_mb_release_id!r} is "
+                    "not a valid UUID"
+                ),
+            )
+
         # Phase 0 — validate.
         source = self.db.get_request(request_id)
         if source is None:
