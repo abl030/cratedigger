@@ -3,11 +3,12 @@ import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, detectSource, normalizeReleaseId } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { buildReleaseActionState } from './release_action_state.js';
-import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton } from './release_actions.js';
+import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderReplaceButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
 import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
+import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
 
 /**
  * Render the artist discography into a target element.
@@ -235,7 +236,12 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const source = opts.source || state.browseSource;
     const isDiscogs = source === 'discogs';
     const url = isDiscogs ? `${API}/api/discogs/master/${id}` : `${API}/api/release-group/${id}`;
-    const r = await fetch(url);
+    // Warm the active-rg cache in parallel — the Browse-search inverted
+    // Replace button per release row consults it. MB releases carry the
+    // release-group id in the parent ``id`` here; Discogs masters don't
+    // map to MB release-group IDs, so the button stays disabled on the
+    // Discogs path (hasActiveRg(rel.release_group_id) — undefined → false).
+    const [r] = await Promise.all([fetch(url), loadActiveRgs()]);
     if (isStale()) return;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
@@ -244,6 +250,12 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const all = (data.releases || []).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const official = all.filter(r => r.status === 'Official' || !r.status);
     const bootleg = all.filter(r => r.status && r.status !== 'Official');
+
+    // For MB release-group endpoints the parent ``id`` IS the
+    // release_group_id. For Discogs masters it is the master id, which
+    // doesn't map to an MB release-group — the button is disabled on
+    // that path because ``hasActiveRg`` will look up a non-MB id.
+    const parentRgId = isDiscogs ? null : id;
 
     function renderRelease(rel) {
       const badges = renderStatusBadges(rel);
@@ -257,13 +269,31 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       // release has an active pipeline request (see release_action_state.js
       // for the pipelineStore lookup).
       const spBtn = renderSearchPlanButton({ pipelineId: actionState.pipelineId });
+      // Inverted-mode Replace button. Hidden when the row IS the active
+      // request (acquireKind === 'remove_request' — there's nothing to
+      // replace into itself) and on the Discogs path (no MB
+      // release-group id available). Enabled only when an existing
+      // non-replaced row already targets a sibling MBID in the same RG.
+      const rgForReplace = rel.release_group_id || parentRgId;
+      const isCurrent = actionState.acquireKind === 'remove_request';
+      const replaceBtn = (!isCurrent && rgForReplace) ? renderReplaceButton({
+        mode: 'inverted',
+        targetMbid: rel.id,
+        releaseGroupId: rgForReplace,
+        targetLabel: `${state.browseArtist?.name || ''} — ${rel.title || ''}`,
+      }, {
+        className: 'btn',
+        style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
+        enabled: hasActiveRg(rgForReplace),
+        stopPropagation: true,
+      }) : '';
       return `
         <div class="release" data-release-id="${rel.id}" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
           <div class="release-info">
             <div class="release-title">${esc(rel.title)}${badges}</div>
             <div class="release-meta" style="color:#777;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</div>
           </div>
-          ${toolbar}${spBtn}
+          ${toolbar}${replaceBtn}${spBtn}
         </div>
         <div class="release-detail" id="reldet-${rel.id}"></div>
       `;
@@ -332,6 +362,11 @@ export async function addRelease(mbid, btn) {
     if (data.status === 'added') {
       btn.textContent = 'Added';
       invalidateBrowseArtist();
+      // Adding a request may bring a new release-group into the
+      // active set — invalidate so the inverted Replace button on
+      // sibling pressings flips from disabled to enabled on next
+      // render.
+      invalidateActiveRgs();
       updatePipelineStatus(requestId, 'wanted', data.id);
       toast(`Added: ${data.artist} - ${data.album} (${data.tracks} tracks)`);
     } else if (data.status === 'exists') {

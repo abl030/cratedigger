@@ -17,6 +17,7 @@ import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadW
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
 import { openReplacePicker } from './replace_picker.js';
+import { invalidateActiveRgs } from './active_rgs.js';
 import { toast } from './state.js';
 
 /**
@@ -36,6 +37,11 @@ async function openReplacePickerAndHandle(options) {
   if (status === 200) {
     const newId = body.new_request_id;
     toast(`Replaced — new request #${newId}.`, false);
+    // Replace may flip rows in/out of the active set (old row leaves,
+    // new row enters — same RG so the count stays positive, but the
+    // browse-tab cache needs to re-fetch so the per-MBID enable
+    // logic stays accurate).
+    invalidateActiveRgs();
     // Best-effort refetch on whichever tab the operator is most likely
     // on. Pipeline is the canonical viewer of an album_requests row;
     // wrong-matches and browse re-fetch on their own next interaction.
