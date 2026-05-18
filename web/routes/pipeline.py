@@ -850,10 +850,12 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
         h._error("Invalid request id")
         return
 
-    body = body or {}
-    if not isinstance(body, dict):
-        h._json({"error": "body must be a JSON object"}, status=400)
-        return
+    # The server dispatcher (web/server.py::do_POST) always passes a
+    # JSON-decoded value here; for empty bodies that's ``{}``. The
+    # picker only ever sends a dict, so no defensive type check is
+    # needed. If a list or scalar somehow slipped through, the
+    # ``.get`` below would raise and the dispatcher's outer except
+    # would surface a 500 — acceptable for a malformed request.
     target = body.get("target_mb_release_id")
     if not isinstance(target, str) or not target.strip():
         h._json({

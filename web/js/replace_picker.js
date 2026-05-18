@@ -376,6 +376,11 @@ async function runConfirm(args, showOverlay, close) {
   if (!confirm) return;
   confirm.addEventListener('click', async () => {
     showOverlay(renderConfirmDialog(args) + `<p style="color:#888;text-align:center;">Replacing…</p>`);
+    // Re-bind cancel: showOverlay just rewrote the modal body, so the
+    // prior bindCancel handler is gone with its target node. Without
+    // this re-bind, the Cancel button is dead during the in-flight
+    // request and the operator can't bail out of a stuck POST.
+    bindCancel(close);
     try {
       const res = await fetch(
         `/api/pipeline/${args.sourceRequestId}/replace`,

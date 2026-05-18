@@ -31,7 +31,7 @@ import os
 import shutil
 import socket
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 from urllib.error import URLError
 
 
@@ -98,10 +98,10 @@ class ReplaceResult:
 
     outcome: str
     request_id: int
-    new_request_id: Optional[int] = None
-    current_status: Optional[str] = None
-    descendant_request_id: Optional[int] = None
-    error_message: Optional[str] = None
+    new_request_id: int | None = None
+    current_status: str | None = None
+    descendant_request_id: int | None = None
+    error_message: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -192,6 +192,10 @@ class MbidReplaceService:
         5. Post-cleanup: regenerate search plan for the new request,
            trigger Meelo / Plex / Jellyfin rescans.
         """
+        logger.info(
+            "Replace: request_id=%d target_mb_release_id=%s",
+            request_id, target_mb_release_id,
+        )
         # Phase 0 — validate.
         source = self.db.get_request(request_id)
         if source is None:
@@ -250,7 +254,9 @@ class MbidReplaceService:
                         f"resolved: {exc}"
                     ),
                 )
-            source_rg = src_data.get("release_group_id") if src_data else None
+            # ``mb_lookup`` is typed dict[str, Any]; ``release_group_id``
+            # is None when the mirror doesn't have one.
+            source_rg = src_data.get("release_group_id")
             if not source_rg:
                 return ReplaceResult(
                     outcome=RESULT_TARGET_INVALID,
@@ -508,9 +514,10 @@ class MbidReplaceService:
                     "cleanup was skipped (see issue #278)"
                 )
             else:
-                staging_dir = getattr(
-                    self.config, "beets_staging_dir", None
-                )
+                # CratediggerConfig always has the field — empty
+                # string when unconfigured. Coerce to None so the
+                # downstream guard reads cleanly.
+                staging_dir = self.config.beets_staging_dir or None
                 if staging_dir and old_artist and old_title:
                     for auto_import in (True, False):
                         path = stage_to_ai_path(
@@ -564,6 +571,12 @@ class MbidReplaceService:
                     f"jellyfin rescan failed: {type(exc).__name__}: {exc}"
                 )
 
+        logger.info(
+            "Replace: success request_id=%d new_request_id=%d warnings=%d",
+            request_id, new_request_id, len(warnings),
+        )
+        for w in warnings:
+            logger.warning("Replace: warning request_id=%d: %s", request_id, w)
         return ReplaceResult(
             outcome=RESULT_REPLACED,
             request_id=request_id,
