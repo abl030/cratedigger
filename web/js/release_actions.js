@@ -175,7 +175,7 @@ export function renderBadRipButton(state, opts = {}) {
  * @param {'standard'|'inverted'} args.mode
  * @param {number} [args.sourceRequestId]  // standard mode
  * @param {string} [args.targetMbid]       // inverted mode
- * @param {string} args.releaseGroupId
+ * @param {string|null} [args.releaseGroupId]  // null → picker lazy-resolves
  * @param {string} [args.sourceLabel]
  * @param {string} [args.targetLabel]
  * @param {Object} [opts]
@@ -193,17 +193,21 @@ export function renderReplaceButton(args, opts = {}) {
   const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
 
   if (args.mode === 'standard') {
-    if (!args.sourceRequestId || !args.releaseGroupId) return '';
+    if (!args.sourceRequestId) return '';
+    // ``releaseGroupId`` may be null on legacy rows; the picker
+    // lazy-resolves via POST /api/pipeline/<id>/resolve-rg before
+    // fetching siblings. Encode an explicit JS ``null`` literal so the
+    // picker's ``in`` checks behave correctly.
     const sourceArg = jsArg(args.sourceLabel || '');
-    const rgArg = jsArg(args.releaseGroupId);
+    const rgArg = args.releaseGroupId ? jsArg(args.releaseGroupId) : 'null';
     return `<button class="${className}"${style} onclick="${stopPropagation}window.openReplacePicker({sourceRequestId: ${args.sourceRequestId}, releaseGroupId: ${rgArg}, sourceLabel: ${sourceArg}})">${label}</button>`;
   }
 
   // Inverted mode.
-  if (!args.targetMbid || !args.releaseGroupId) return '';
+  if (!args.targetMbid) return '';
   const enabled = opts.enabled !== false;
   const mbidArg = jsArg(args.targetMbid);
-  const rgArg = jsArg(args.releaseGroupId);
+  const rgArg = args.releaseGroupId ? jsArg(args.releaseGroupId) : 'null';
   const targetArg = jsArg(args.targetLabel || '');
   if (!enabled) {
     return `<button class="${className}"${style} disabled title="No existing request in this release group">${label}</button>`;

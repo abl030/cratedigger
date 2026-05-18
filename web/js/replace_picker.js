@@ -28,7 +28,7 @@
 /**
  * @typedef {Object} ReplacePickerOptionsStandard
  * @property {number} sourceRequestId
- * @property {string} releaseGroupId
+ * @property {string|null} [releaseGroupId]  // null → lazy-resolve via resolve-rg
  * @property {string} [sourceLabel]  // "Pet Grief — Old Pressing"
  * @property {string} [source]       // calling-tab identifier for telemetry
  */
@@ -36,7 +36,7 @@
 /**
  * @typedef {Object} ReplacePickerOptionsInverted
  * @property {string} targetMbid
- * @property {string} releaseGroupId
+ * @property {string|null} [releaseGroupId]  // null → lazy-resolve via /api/release/<mbid>
  * @property {string} [targetLabel]  // "Pet Grief — New Pressing (2025, JP)"
  * @property {string} [source]
  */
@@ -251,13 +251,43 @@ export async function openReplacePicker(options) {
  * @param {(r: ReplacePickerResult) => void} close
  */
 async function runStandard(options, showOverlay, close) {
+  // Lazy-resolve release group id for legacy null-RG rows. The endpoint
+  // both returns the RG and persists it back to the album_requests row
+  // so the next click is fast.
+  let releaseGroupId = options.releaseGroupId || null;
+  if (!releaseGroupId) {
+    showOverlay(`${renderStandardHeader(options.sourceLabel || `request #${options.sourceRequestId}`)}
+      <p>Resolving release group…</p>`);
+    try {
+      const res = await fetch(
+        `/api/pipeline/${options.sourceRequestId}/resolve-rg`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const body = await res.json();
+      if (!res.ok || !body.mb_release_group_id) {
+        const msg = body.error || `HTTP ${res.status}`;
+        showOverlay(`${renderStandardHeader(options.sourceLabel || '')}
+          <p style="color:#f66;">Failed to resolve release group: ${esc(String(msg))}</p>
+          <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
+        bindCancel(close);
+        return;
+      }
+      releaseGroupId = body.mb_release_group_id;
+    } catch (err) {
+      showOverlay(`${renderStandardHeader(options.sourceLabel || '')}
+        <p style="color:#f66;">Failed to resolve release group: ${esc(String(err))}</p>
+        <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
+      bindCancel(close);
+      return;
+    }
+  }
+
   showOverlay(`${renderStandardHeader(options.sourceLabel || `request #${options.sourceRequestId}`)}
     <p>Loading pressings…</p>`);
 
   let releases;
   let sourceMbid = '';
   try {
-    const res = await fetch(`/api/release-group/${encodeURIComponent(options.releaseGroupId)}`);
+    const res = await fetch(`/api/release-group/${encodeURIComponent(releaseGroupId)}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -305,13 +335,45 @@ async function runStandard(options, showOverlay, close) {
  * @param {(r: ReplacePickerResult) => void} close
  */
 async function runInverted(options, showOverlay, close) {
+  // Lazy-resolve release group id for legacy null-RG rows by hitting
+  // the existing /api/release/<mbid> route (the response carries
+  // ``release_group_id``). We don't persist the result anywhere — the
+  // active-requests fetch below is the only consumer.
+  let releaseGroupId = options.releaseGroupId || null;
+  if (!releaseGroupId) {
+    showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
+      <p>Resolving release group…</p>`);
+    try {
+      const res = await fetch(`/api/release/${encodeURIComponent(options.targetMbid)}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const body = await res.json();
+      const rg = body.release_group_id;
+      if (!rg) {
+        showOverlay(`${renderInvertedHeader(options.targetLabel || '')}
+          <p style="color:#f66;">Target MBID has no release group on the MB mirror.</p>
+          <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
+        bindCancel(close);
+        return;
+      }
+      releaseGroupId = rg;
+    } catch (err) {
+      showOverlay(`${renderInvertedHeader(options.targetLabel || '')}
+        <p style="color:#f66;">Failed to resolve release group: ${esc(String(err))}</p>
+        <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
+      bindCancel(close);
+      return;
+    }
+  }
+
   showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
     <p>Loading active requests…</p>`);
 
   let requests = [];
   try {
     const res = await fetch(
-      `/api/pipeline/requests-by-rg/${encodeURIComponent(options.releaseGroupId)}`);
+      `/api/pipeline/requests-by-rg/${encodeURIComponent(releaseGroupId)}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }

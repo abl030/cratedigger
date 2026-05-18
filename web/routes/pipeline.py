@@ -809,6 +809,135 @@ def post_pipeline_search_plan_advance(
     h._error(f"Unknown advance outcome: {result.outcome}", 500)
 
 
+def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
+    """``POST /api/pipeline/<id>/resolve-rg``.
+
+    Lazy-backfill ``album_requests.mb_release_group_id`` for a single
+    legacy row that was added before the RG field was populated.
+
+    Used by ``web/js/replace_picker.js`` standard-mode when the row has
+    a null RG — the picker calls this endpoint, persists the resolved
+    RG back to the row, then continues into the sibling fetch.
+
+    The persisted side-effect is intentionally idempotent: if the row
+    already has a non-null RG the route returns it untouched (no
+    redundant MB hit because ``get_release(fresh=False)`` is cache-served).
+
+    Status-code mapping:
+      * 200 — ``status='resolved'`` (RG found; row updated or already set)
+      * 404 — request id does not exist
+      * 422 — MB lookup returned no release_group_id (e.g. the row's
+              ``mb_release_id`` is a numeric Discogs id, or the upstream
+              MB release has no RG attached)
+      * 503 — transient MB-mirror error (timeout, network, malformed
+              JSON) — retryable
+    """
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    db = _server()._db()
+    row = db.get_request(request_id)
+    if row is None:
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "not_found",
+            "error": f"request {request_id} not found",
+        }, status=404)
+        return
+
+    existing_rg = row.get("mb_release_group_id")
+    if existing_rg:
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": existing_rg,
+            "status": "resolved",
+        })
+        return
+
+    mb_release_id = row.get("mb_release_id")
+    if not mb_release_id:
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "missing_release_id",
+            "error": (
+                f"request {request_id} has no mb_release_id to resolve"
+            ),
+        }, status=422)
+        return
+
+    # MB release ids are UUIDs; numeric ids are Discogs and have no
+    # release-group concept here. Surface 422 so the picker can show a
+    # clean error rather than letting the mirror return 404 / 500.
+    try:
+        import uuid as _uuid
+        _uuid.UUID(str(mb_release_id))
+    except (ValueError, TypeError, AttributeError):
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "non_mb_release_id",
+            "error": (
+                f"request {request_id}.mb_release_id "
+                f"{mb_release_id!r} is not a MusicBrainz UUID"
+            ),
+        }, status=422)
+        return
+
+    # MB-mirror transient errors (network, JSON decode) are retryable.
+    # See ``lib/mbid_replace_service.py::_TRANSIENT_LOOKUP_EXCEPTIONS``
+    # for the rationale and the same exception set.
+    import socket as _socket
+    from urllib.error import URLError
+    transient: tuple[type[BaseException], ...] = (
+        URLError, TimeoutError, _socket.timeout, ConnectionError,
+        json.JSONDecodeError,
+    )
+    try:
+        data = mb_api.get_release(mb_release_id, fresh=False)
+    except transient as exc:
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "transient",
+            "error": f"MB lookup failed (transient): {exc}",
+        }, status=503)
+        return
+    except Exception as exc:  # noqa: BLE001
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "lookup_failed",
+            "error": (
+                f"MB lookup for {mb_release_id} failed: {exc}"
+            ),
+        }, status=422)
+        return
+
+    rg_id = (data or {}).get("release_group_id") if isinstance(data, dict) else None
+    if not rg_id:
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "no_release_group",
+            "error": (
+                f"MB release {mb_release_id} has no release_group_id"
+            ),
+        }, status=422)
+        return
+
+    db.update_request_fields(request_id, mb_release_group_id=rg_id)
+    h._json({
+        "request_id": request_id,
+        "mb_release_group_id": rg_id,
+        "status": "resolved",
+    })
+
+
 def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
     """``POST /api/pipeline/<id>/replace``.
 
@@ -1783,4 +1912,6 @@ POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
      post_pipeline_search_plan_advance),
     (re.compile(r"^/api/pipeline/(\d+)/replace$"),
      post_pipeline_replace),
+    (re.compile(r"^/api/pipeline/(\d+)/resolve-rg$"),
+     post_pipeline_resolve_rg),
 ]
