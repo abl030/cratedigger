@@ -51,7 +51,7 @@ logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
-PREVIEW_STALE_AGE = timedelta(hours=1)
+PREVIEW_STALE_AGE = timedelta(minutes=15)
 
 
 def _preview_result_dict(result: ImportPreviewResult) -> dict[str, Any]:
