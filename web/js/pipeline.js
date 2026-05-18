@@ -963,13 +963,14 @@ export async function toggleDetail(elId, requestId) {
     });
     // Replace button — only shown when the row is not itself a frozen
     // audit row (R30 / scope boundary "re-replacing a replaced row is
-    // not supported") and the row has a release group to anchor the
-    // picker on.
-    if (req.status !== 'replaced' && req.mb_release_group_id) {
+    // not supported"). ``mb_release_group_id`` may be null on legacy
+    // rows; the picker lazy-resolves via
+    // ``POST /api/pipeline/<id>/resolve-rg`` before fetching siblings.
+    if (req.status !== 'replaced') {
       html += renderReplaceButton({
         mode: 'standard',
         sourceRequestId: id,
-        releaseGroupId: req.mb_release_group_id,
+        releaseGroupId: req.mb_release_group_id || null,
         sourceLabel: `${req.artist_name || ''} — ${req.album_title || ''}`,
       }, { className: 'p-btn', stopPropagation: true });
     }
