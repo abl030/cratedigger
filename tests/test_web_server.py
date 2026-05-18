@@ -988,6 +988,9 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/pipeline/(\d+)/search-plan/history$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
+        r"^/api/pipeline/(\d+)/replace$",
+        r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$",
+        "/api/pipeline/active-rgs",
         "/api/pipeline/add",
         "/api/pipeline/update",
         "/api/pipeline/upgrade",
@@ -2498,6 +2501,236 @@ class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("integer", data["error"])
         mock_adv.assert_not_called()
+
+
+class TestPipelineReplaceContract(_WebServerCase):
+    """Contract for ``POST /api/pipeline/<id>/replace`` plus the two
+    auxiliary endpoints (``GET /api/pipeline/requests-by-rg/<rg>`` and
+    ``GET /api/pipeline/active-rgs``).
+
+    The endpoint wraps ``MbidReplaceService.replace_request_mbid``. The
+    CLI counterpart (``pipeline-cli replace``) must stay in sync — see
+    ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"; touching one without
+    the other is a contract drift waiting to happen.
+
+    Status-code mapping mirrors the CLI exit codes:
+      * 200 — RESULT_REPLACED
+      * 400 — body validation failure (missing/empty target)
+      * 404 — RESULT_NOT_FOUND
+      * 409 — RESULT_WRONG_STATE, RESULT_TARGET_COLLISION_REQUEST
+      * 422 — RESULT_TARGET_INVALID, RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+              RESULT_TARGET_SAME_AS_CURRENT
+      * 503 — RESULT_TRANSIENT
+    """
+
+    REPLACE_REQUIRED_FIELDS = {
+        "outcome", "request_id", "new_request_id", "current_status",
+        "descendant_request_id", "error_message", "warnings",
+    }
+    REQUESTS_BY_RG_FIELDS = {
+        "id", "mb_release_id", "status", "artist_name", "album_title",
+    }
+
+    def setUp(self) -> None:
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+
+    def _patch_service(self, **result_kwargs):
+        from unittest.mock import patch as _patch
+        from lib.mbid_replace_service import ReplaceResult
+        return _patch(
+            "lib.mbid_replace_service.MbidReplaceService"
+            ".replace_request_mbid",
+            return_value=ReplaceResult(**result_kwargs),
+        )
+
+    def test_replace_success_returns_200(self):
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REPLACE_REQUIRED_FIELDS,
+                                "replace response")
+        self.assertEqual(data["outcome"], "replaced")
+        self.assertEqual(data["new_request_id"], 200)
+
+    def test_replace_not_found_returns_404(self):
+        with self._patch_service(
+            outcome="not_found", request_id=9999,
+            error_message="request 9999 not found",
+        ):
+            status, data = self._post(
+                "/api/pipeline/9999/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
+    def test_replace_wrong_state_lock_contention_returns_409(self):
+        with self._patch_service(
+            outcome="wrong_state", request_id=100,
+            error_message="importer holds the lock",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+        self.assertEqual(status, 409)
+        self.assertIsNone(data["descendant_request_id"])
+
+    def test_replace_wrong_state_source_already_replaced_carries_descendant(self):
+        with self._patch_service(
+            outcome="wrong_state", request_id=42, descendant_request_id=99,
+            error_message="already replaced",
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+        self.assertEqual(status, 409)
+        self.assertEqual(data["descendant_request_id"], 99)
+
+    def test_replace_collision_carries_current_status(self):
+        with self._patch_service(
+            outcome="target_collision_request", request_id=100,
+            current_status="wanted",
+            error_message="target held by request 43",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+        self.assertEqual(status, 409)
+        self.assertEqual(data["current_status"], "wanted")
+
+    def test_replace_target_invalid_returns_422(self):
+        with self._patch_service(
+            outcome="target_invalid", request_id=100,
+            error_message="MB lookup empty",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "bogus"},
+            )
+        self.assertEqual(status, 422)
+
+    def test_replace_rg_mismatch_returns_422(self):
+        with self._patch_service(
+            outcome="target_release_group_mismatch", request_id=100,
+            error_message="rg mismatch",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "other-rg"},
+            )
+        self.assertEqual(status, 422)
+
+    def test_replace_same_as_current_returns_422(self):
+        with self._patch_service(
+            outcome="target_same_as_current", request_id=100,
+            error_message="target == source",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "same-uuid"},
+            )
+        self.assertEqual(status, 422)
+
+    def test_replace_transient_returns_503(self):
+        with self._patch_service(
+            outcome="transient", request_id=100,
+            error_message="MB mirror unreachable",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+        self.assertEqual(status, 503)
+
+    def test_replace_missing_target_returns_400(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.mbid_replace_service.MbidReplaceService"
+            ".replace_request_mbid"
+        ) as mock_svc:
+            status, data = self._post(
+                "/api/pipeline/100/replace", {},
+            )
+        self.assertEqual(status, 400)
+        self.assertIn("target_mb_release_id", data["error"])
+        mock_svc.assert_not_called()
+
+    def test_replace_empty_target_returns_400(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.mbid_replace_service.MbidReplaceService"
+            ".replace_request_mbid"
+        ) as mock_svc:
+            status, _ = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "  "},
+            )
+        self.assertEqual(status, 400)
+        mock_svc.assert_not_called()
+
+    def test_requests_by_rg_returns_200_with_required_fields(self):
+        self.mock_db.list_requests_in_release_group.return_value = [
+            {
+                "id": 42, "mb_release_id": "old-uuid",
+                "mb_release_group_id": "rg-1",
+                "status": "wanted",
+                "artist_name": "Pet Grief", "album_title": "X",
+            },
+        ]
+        status, data = self._get(
+            "/api/pipeline/requests-by-rg/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("requests", data)
+        self.assertEqual(len(data["requests"]), 1)
+        _assert_required_fields(
+            self, data["requests"][0],
+            self.REQUESTS_BY_RG_FIELDS,
+            "requests-by-rg row",
+        )
+
+    def test_requests_by_rg_empty_list(self):
+        self.mock_db.list_requests_in_release_group.return_value = []
+        status, data = self._get(
+            "/api/pipeline/requests-by-rg/"
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["requests"], [])
+
+    def test_active_rgs_returns_sorted_list(self):
+        self.mock_db.list_active_release_group_ids.return_value = {
+            "rg-bbbb", "rg-aaaa",
+        }
+        status, data = self._get("/api/pipeline/active-rgs")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["release_group_ids"], ["rg-aaaa", "rg-bbbb"])
+
+    def test_active_rgs_empty(self):
+        self.mock_db.list_active_release_group_ids.return_value = set()
+        status, data = self._get("/api/pipeline/active-rgs")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["release_group_ids"], [])
 
 
 class TestPipelineSearchPlanHistoryContract(_WebServerCase):

@@ -800,6 +800,137 @@ def post_pipeline_search_plan_advance(
     h._error(f"Unknown advance outcome: {result.outcome}", 500)
 
 
+def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
+    """``POST /api/pipeline/<id>/replace``.
+
+    Supersede the source request with a new row at ``target_mb_release_id``.
+    Counterpart of ``pipeline-cli replace``. Both surfaces wrap
+    ``MbidReplaceService.replace_request_mbid`` — keep them in sync (see
+    ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Body: ``{"target_mb_release_id": "<mbid>"}``.
+
+    Status-code mapping mirrors the CLI exit codes:
+      * 200 — ``RESULT_REPLACED``
+      * 400 — body validation failure (missing/empty target)
+      * 404 — ``RESULT_NOT_FOUND``
+      * 409 — ``RESULT_WRONG_STATE`` or ``RESULT_TARGET_COLLISION_REQUEST``
+      * 422 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
+              ``RESULT_TARGET_SAME_AS_CURRENT``
+      * 503 — ``RESULT_TRANSIENT``
+    """
+    from lib.config import read_runtime_config
+    from lib.mbid_replace_service import (
+        MbidReplaceService,
+        RESULT_NOT_FOUND,
+        RESULT_REPLACED,
+        RESULT_TARGET_COLLISION_REQUEST,
+        RESULT_TARGET_INVALID,
+        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+        RESULT_TARGET_SAME_AS_CURRENT,
+        RESULT_TRANSIENT,
+        RESULT_WRONG_STATE,
+    )
+
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    body = body or {}
+    if not isinstance(body, dict):
+        h._json({"error": "body must be a JSON object"}, status=400)
+        return
+    target = body.get("target_mb_release_id")
+    if not isinstance(target, str) or not target.strip():
+        h._json({
+            "error": "target_mb_release_id must be a non-empty string",
+        }, status=400)
+        return
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = MbidReplaceService(db=db, config=cfg)
+    result = svc.replace_request_mbid(
+        request_id, target_mb_release_id=target.strip(),
+    )
+
+    payload: dict[str, object] = {
+        "outcome": result.outcome,
+        "request_id": result.request_id,
+        "new_request_id": result.new_request_id,
+        "current_status": result.current_status,
+        "descendant_request_id": result.descendant_request_id,
+        "error_message": result.error_message,
+        "warnings": list(result.warnings),
+    }
+    if result.outcome == RESULT_REPLACED:
+        h._json(payload)
+        return
+    if result.outcome == RESULT_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome in (
+        RESULT_WRONG_STATE,
+        RESULT_TARGET_COLLISION_REQUEST,
+    ):
+        payload["error"] = result.error_message or "Wrong state"
+        h._json(payload, status=409)
+        return
+    if result.outcome in (
+        RESULT_TARGET_INVALID,
+        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+        RESULT_TARGET_SAME_AS_CURRENT,
+    ):
+        payload["error"] = result.error_message or "Semantic violation"
+        h._json(payload, status=422)
+        return
+    if result.outcome == RESULT_TRANSIENT:
+        payload["error"] = result.error_message or "Transient; retry"
+        h._json(payload, status=503)
+        return
+    h._error(f"Unknown replace outcome: {result.outcome}", 500)
+
+
+def get_pipeline_requests_by_rg(h, params: dict, rg_id: str) -> None:
+    """``GET /api/pipeline/requests-by-rg/<rg_id>``.
+
+    Returns the non-replaced ``album_requests`` rows sharing the given
+    release group, in id-descending order. Used by the Browse-search
+    inverted-click picker (R7) to ask the operator which existing
+    request should be replaced.
+    """
+    db = _server()._db()
+    rows = db.list_requests_in_release_group(rg_id, exclude_replaced=True)
+    requests = [
+        {
+            "id": int(r["id"]),
+            "mb_release_id": r.get("mb_release_id"),
+            "mb_release_group_id": r.get("mb_release_group_id"),
+            "status": r.get("status"),
+            "artist_name": r.get("artist_name"),
+            "album_title": r.get("album_title"),
+        }
+        for r in rows
+    ]
+    h._json({"requests": requests})
+
+
+def get_pipeline_active_rgs(h, params: dict) -> None:
+    """``GET /api/pipeline/active-rgs``.
+
+    Returns the distinct set of ``mb_release_group_id`` values held by
+    any non-replaced ``album_requests`` row. The frontend builds a Set
+    from this list and uses ``set.has(row.release_group_id)`` per
+    Browse-search row to compute the Replace button enable state.
+    """
+    db = _server()._db()
+    ids = sorted(db.list_active_release_group_ids())
+    h._json({"release_group_ids": ids})
+
+
 def _serialize_import_job(job) -> dict[str, object]:
     if hasattr(job, "to_json_dict"):
         return job.to_json_dict()
@@ -1547,6 +1678,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/simulate": get_pipeline_simulate,
     "/api/import-jobs": get_import_jobs,
     "/api/import-jobs/timeline": get_import_jobs_timeline,
+    "/api/pipeline/active-rgs": get_pipeline_active_rgs,
 }
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
@@ -1555,6 +1687,8 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
      get_pipeline_search_plan),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
      get_pipeline_search_plan_history),
+    (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),
+     get_pipeline_requests_by_rg),
     (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
 ]
 
@@ -1574,4 +1708,6 @@ POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
      post_pipeline_search_plan_regenerate),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/advance$"),
      post_pipeline_search_plan_advance),
+    (re.compile(r"^/api/pipeline/(\d+)/replace$"),
+     post_pipeline_replace),
 ]
