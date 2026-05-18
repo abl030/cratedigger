@@ -3468,11 +3468,71 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                 "pipeline force-import response")
 
     def test_pipeline_delete_contract(self):
+        # Default: no descendant — delete succeeds.
+        self.mock_db.get_request_by_replaces_request_id.return_value = None
         status, data = self._post("/api/pipeline/delete", {"id": 100})
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
                                 "pipeline delete response")
+
+    def test_pipeline_delete_with_descendant_returns_409(self):
+        """Deleting a request that has a superseding descendant is
+        blocked by the ON DELETE RESTRICT FK on
+        ``album_requests.replaces_request_id`` (migration 023). The
+        route walks the descendant chain and returns 409 with the
+        list of descendant IDs so the operator can prune the lineage
+        leaf-first."""
+        # Reset shared-class mock state from prior tests.
+        self.mock_db.delete_request.reset_mock()
+        self.mock_db.delete_request.side_effect = None
+        # Chain: 100 → 200 → 300.
+        def descendant_of(req_id):
+            if req_id == 100:
+                return {"id": 200, "status": "wanted",
+                        "replaces_request_id": 100}
+            if req_id == 200:
+                return {"id": 300, "status": "imported",
+                        "replaces_request_id": 200}
+            return None
+        self.mock_db.get_request_by_replaces_request_id.side_effect = (
+            descendant_of
+        )
+        status, data = self._post("/api/pipeline/delete", {"id": 100})
+
+        self.assertEqual(status, 409)
+        self.assertIn("error", data)
+        self.assertIn("descendant_request_ids", data)
+        self.assertEqual(data["descendant_request_ids"], [200, 300])
+        # delete_request must NOT have been called on the route's
+        # happy path when the descendant block fires.
+        self.mock_db.delete_request.assert_not_called()
+        # Clear side_effect for downstream tests.
+        self.mock_db.get_request_by_replaces_request_id.side_effect = None
+        self.mock_db.get_request_by_replaces_request_id.return_value = None
+
+    def test_pipeline_delete_fk_violation_returns_409(self):
+        """Defensive race-window guard: a descendant landed between the
+        route's read and the delete. The FK violation surfaces as 409
+        rather than a 500, mirroring the pre-check shape."""
+        import psycopg2.errors
+        self.mock_db.get_request_by_replaces_request_id.side_effect = [
+            # First call (pre-check) sees no descendant.
+            None,
+            # Second call (post-FK error walk) sees the descendant.
+            {"id": 250, "status": "wanted", "replaces_request_id": 100},
+            # Third call (chain walk) sees no further descendants.
+            None,
+        ]
+        self.mock_db.delete_request.side_effect = (
+            psycopg2.errors.ForeignKeyViolation("descendant landed")
+        )
+        status, data = self._post("/api/pipeline/delete", {"id": 100})
+        self.assertEqual(status, 409)
+        self.assertIn("error", data)
+        self.assertEqual(data["descendant_request_ids"], [250])
+        # Reset side_effects for downstream tests.
+        self.mock_db.delete_request.side_effect = None
 
     # -- fresh=True seam (Codex review on issue #101) ----------------
 

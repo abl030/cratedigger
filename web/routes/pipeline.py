@@ -1688,11 +1688,51 @@ def post_pipeline_delete(h, body: dict) -> None:
     if not req_id:
         h._error("Missing id")
         return
-    req = s._db().get_request(int(req_id))
+    db = s._db()
+    req = db.get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
         return
-    s._db().delete_request(int(req_id))
+    # ``album_requests.replaces_request_id`` uses ON DELETE RESTRICT
+    # (migration 023) so a descendant Replace blocks deletion of the
+    # frozen ancestor. Surface 409 with the descendant chain rather
+    # than letting psycopg2 raise a 500 from the FK violation.
+    descendant = db.get_request_by_replaces_request_id(int(req_id))
+    if descendant is not None:
+        descendant_ids: list[int] = []
+        cursor: dict | None = descendant
+        while cursor is not None:
+            descendant_ids.append(int(cursor["id"]))
+            cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))
+        h._json({
+            "error": (
+                f"request {req_id} is referenced by a superseding "
+                "request — delete descendants first"
+            ),
+            "descendant_request_ids": descendant_ids,
+        }, status=409)
+        return
+    import psycopg2.errors
+    try:
+        db.delete_request(int(req_id))
+    except psycopg2.errors.ForeignKeyViolation as exc:
+        # Defensive — a descendant landed between the read above and
+        # the delete. Re-walk the chain so the operator gets the same
+        # 409 response shape.
+        descendant_ids = []
+        descendant = db.get_request_by_replaces_request_id(int(req_id))
+        cursor = descendant
+        while cursor is not None:
+            descendant_ids.append(int(cursor["id"]))
+            cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))
+        h._json({
+            "error": (
+                f"request {req_id} is referenced by a superseding "
+                f"request — delete descendants first ({exc})"
+            ),
+            "descendant_request_ids": descendant_ids,
+        }, status=409)
+        return
     h._json({"status": "ok", "id": req_id})
 
 
