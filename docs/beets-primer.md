@@ -17,15 +17,14 @@ When Cratedigger downloads an album and it passes validation, beets is what actu
 
 ## Version & Installation
 
-- **Version**: 2.5.1 (Python 3.13.11)
-- **Installed via**: Nix Home Manager on doc1 (`192.168.1.29`)
+- **Installed via**: Nix Home Manager on the host that runs cratedigger — currently **doc2** (`192.168.1.35`). Beets is colocated with cratedigger so the harness can invoke `beet import` locally without SSH.
 - **Nix module**: `/home/abl030/nixosconfig/modules/home-manager/services/beets.nix`
 - **Binary**: `/etc/profiles/per-user/abl030/bin/beet`
 - **Package override**: Custom `overrideAttrs` patches the lyrics plugin to point at local LRCLIB (`http://192.168.1.35:3300/api`) instead of public `lrclib.net`
 
 ### IMPORTANT: `musicbrainz` is a Plugin
 
-In beets 2.5.1, `musicbrainz` is a **plugin** that must be explicitly listed in the plugins string. Without it, beets returns 0 candidates for every album and all imports fail silently. This has bitten us multiple times.
+In modern beets (2.x), `musicbrainz` is a **plugin** that must be explicitly listed in the plugins string. Without it, beets returns 0 candidates for every album and all imports fail silently. This has bitten us multiple times.
 
 ## Configuration
 
@@ -350,7 +349,7 @@ The pipeline uses 0.15 as the threshold for auto-staging redownloads and 0.50 as
 
 ## Common Beets Commands
 
-These run on doc1 where beets is installed.
+These run on doc2 where beets is installed (colocated with cratedigger).
 
 ```bash
 # Search library
@@ -540,14 +539,14 @@ beet ls -a | head -5                 # Quick smoke test
 
 **IMPORTANT**: Never edit `~/.config/beets/config.yaml` directly — Home Manager will fail with "would be clobbered" on the next rebuild.
 
-## Deploying to doc2
+## Deploying beets config changes
 
-doc2 runs Cratedigger but needs access to beets via the harness. The harness shell wrapper (`run_beets_harness.sh`) bootstraps from doc1's Nix beets environment. Since both machines share `/mnt/virtio`, the harness files are accessible from doc2 without copying.
+Beets is installed on doc2 alongside cratedigger via Nix Home Manager. The harness shell wrapper (`run_beets_harness.sh`) invokes `beet` locally on doc2 — no SSH back to doc1.
 
 **NEVER cross-build from doc1** (`--target-host doc2` is slow). Always:
 ```bash
-# Push nixosconfig to GitHub first
-cd ~/nixosconfig && git push
+# Push nixosconfig to GitHub first (from doc1, which holds the push credentials)
+ssh doc1 'cd ~/nixosconfig && git push'
 
 # Then build locally on doc2
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'

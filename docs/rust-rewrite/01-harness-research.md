@@ -286,7 +286,7 @@ Key contract elements that must not silently drift:
 These are rare and not on the import hot path:
 
 - `beet ls -a -f "<format>"`, `beet missing` — only called from
-  `tagging-workspace/scripts/*`, which is operator-only on doc1.
+  `tagging-workspace/scripts/*`, which is operator-only and runs wherever beets is installed (currently doc2).
   Out of scope for the runtime binary; keep using Python beets.
 - `beet fetchart -a`, `beet embedart -a`, `beet replaygain -a`,
   `beet mbsync` — *not* currently called by anything in cratedigger.
@@ -546,7 +546,7 @@ Honest list of subprocess-contract bugs that survive:
    `art_size` config propagate? Does `albumtypes` filtering still
    work? Should be fine because the album row exists in the SQLite
    DB by the time fetchart runs — but worth a Playwright smoke on
-   doc1 with a real album before declaring it a viable strangler.
+   doc2 (where beets runs) with a real album before declaring it a viable strangler.
 4. **Daemon vs one-shot lifecycle.** The Python harness pays a
    ~1-2s plugin-load cost per spawn. A Rust binary loads in <100ms;
    per-call is fine indefinitely. No need to design a daemon for

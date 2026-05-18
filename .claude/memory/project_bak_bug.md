@@ -1,7 +1,10 @@
 ---
-name: .bak file bug in beets library
-description: 24 albums have track files renamed to .bak after import — systematic, mostly track 01. Root cause unknown.
-type: project
+name: bak-file-bug-in-beets-library
+description: "24 albums have track files renamed to .bak after import — systematic, mostly track 01. Root cause unknown."
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: deada68f-df61-4828-a3dd-87243539dee0
 ---
 
 24 albums in the beets library have a track (almost always track 01) with a .bak extension instead of .mp3. Meelo can't scan these files.
@@ -23,5 +26,5 @@ type: project
 
 **Affected albums query:**
 ```bash
-ssh doc1 'beet ls -p path::.bak$'
+ssh doc2 'beet ls -p path::.bak$'
 ```

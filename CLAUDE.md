@@ -22,7 +22,7 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
 ## Subsystems
 
 - **Web UI** (`music.ablz.au`) — single-page app, stdlib `http.server`, vanilla JS, no build step. `cratedigger-web` systemd service on doc2. Browse tab toggles between MusicBrainz and Discogs mirror; Discogs releases flow through the same pipeline as MB. See `docs/webui-primer.md`.
-- **Beets** (v2.5.1, Nix-managed on doc1) — library source of truth. All automated imports go through the JSON harness (`harness/beets_harness.py` via `run_beets_harness.sh`), never raw `beet import`. The `musicbrainz` plugin MUST be in the plugins list or beets returns 0 candidates. Always match by `candidate_id` (MB release UUID), never `candidate_index`. See `docs/beets-primer.md`.
+- **Beets** (Nix-managed via Home Manager, colocated with cratedigger — currently doc2) — library source of truth. All automated imports go through the JSON harness (`harness/beets_harness.py` via `run_beets_harness.sh`), never raw `beet import`. The `musicbrainz` plugin MUST be in the plugins list or beets returns 0 candidates. Always match by `candidate_id` (MB release UUID), never `candidate_index`. See `docs/beets-primer.md`.
 - **Meelo** — self-hosted music server on doc1 (podman), scans beets library. After every auto-import, cratedigger triggers a Meelo rescan so the new album appears immediately. See `docs/meelo-primer.md`.
 - **Plex** — second music browser, Docker container on Unraid (`tower`), reads the beets library via SMB. Cratedigger triggers a partial scan after each import via `lib/util.py::trigger_plex_scan`. **Note: Plex's refresh endpoint returns HTTP 200 for any path including invalid ones — HTTP 200 is not evidence the scan ran.** See `docs/plex-primer.md`.
 - **Discogs mirror** (`discogs.ablz.au`) — ~19M releases, Rust JSON API, nspawn PostgreSQL on doc2. Beets' Discogs plugin is patched (Nix `substituteInPlace`) to hit this mirror, so numeric IDs route through it. See `docs/discogs-mirror.md`.
@@ -33,8 +33,8 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
 
 ## Infrastructure
 
-- **doc1** (`192.168.1.29`): runs beets (Home Manager); this repo lives at `/home/abl030/cratedigger`.
-- **doc2** (`192.168.1.35`): runs cratedigger (systemd oneshot, 5-min timer), MusicBrainz mirror (`:5200`), slskd (`:5030`).
+- **doc1** (`192.168.1.29`): this repo lives at `/home/abl030/cratedigger`; primary interactive dev host.
+- **doc2** (`192.168.1.35`): runs cratedigger (systemd oneshot, 5-min timer) and beets (Home Manager), plus MusicBrainz mirror (`:5200`) and slskd (`:5030`). Beets is colocated with cratedigger so the harness can invoke `beet import` locally.
 - **Shared storage**: `/mnt/virtio` (virtiofs) — beets DB, pipeline DB data, music library are all accessible from both.
 - **Nix deployment**: cratedigger is a flake input (`cratedigger-src`) in `~/nixosconfig/flake.nix`. Downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports `inputs.cratedigger-src.nixosModules.default` and layers on sops + nspawn DB + redis + localProxy. See `docs/nixos-module.md` for the full option surface.
 
@@ -453,4 +453,4 @@ ssh doc2 'set -a; . /run/secrets/cratedigger-pgpass; set +a; export PGPASSWORD="
 ## Secrets
 
 - slskd API key: sops-managed, injected into `config.ini` at runtime via the `cratedigger-secrets-split` oneshot (see `docs/nixos-module.md`).
-- Discogs token: `~/.config/beets/secrets.yaml` on doc1 (not used by cratedigger directly).
+- Discogs token: `~/.config/beets/secrets.yaml` on the beets host (doc2; not used by cratedigger directly).
