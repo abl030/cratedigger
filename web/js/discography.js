@@ -58,9 +58,10 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
           album: rg.title,
         }).pipelineId,
       });
+      const opts = rg.is_masterless ? "{masterless:true}" : "{}";
       return `
         <div class="rg"${leafAttr}>
-          <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this)">
+          <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this, ${opts})">
             <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
           </div>
           <div class="releases" id="rel-${rg.id}"></div>
@@ -235,7 +236,16 @@ export async function loadReleaseGroup(id, el, opts = {}) {
   try {
     const source = opts.source || state.browseSource;
     const isDiscogs = source === 'discogs';
-    const url = isDiscogs ? `${API}/api/discogs/master/${id}` : `${API}/api/release-group/${id}`;
+    // Masterless Discogs releases (is_masterless from the artist endpoint)
+    // have no upstream master row; their ``id`` is a release ID. Hit the
+    // release endpoint directly and synthesise a single-pressing list so
+    // the rest of the rendering path is unchanged.
+    const masterless = isDiscogs && !!opts.masterless;
+    const url = masterless
+      ? `${API}/api/discogs/release/${id}`
+      : isDiscogs
+        ? `${API}/api/discogs/master/${id}`
+        : `${API}/api/release-group/${id}`;
     // Warm the active-rg cache in parallel — the Browse-search inverted
     // Replace button per release row consults it. MB releases carry the
     // release-group id in the parent ``id`` here; Discogs masters don't
@@ -247,7 +257,21 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const data = await r.json();
     if (isStale()) return;
     if (data.error) throw new Error(data.error);
-    const all = (data.releases || []).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    /** @type {Array<any>} */
+    const releaseRows = masterless
+      ? [{
+          id: data.id,
+          title: data.title || '',
+          date: data.date || '',
+          country: data.country || '',
+          status: data.status || 'Official',
+          track_count: (data.tracks || []).length,
+          format: (data.formats || []).map(f => f && f.name).filter(Boolean).join(', ') || '?',
+          media_count: (data.formats || []).length,
+          labels: data.labels || [],
+        }]
+      : (data.releases || []);
+    const all = releaseRows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const official = all.filter(r => r.status === 'Official' || !r.status);
     const bootleg = all.filter(r => r.status && r.status !== 'Official');
 

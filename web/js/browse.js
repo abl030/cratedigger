@@ -522,10 +522,11 @@ function compareRow(mb, discogs) {
   }) : '';
   const mbId = mb ? mb.id : '';
   const dgId = discogs ? discogs.id : '';
+  const dgMasterless = !!(discogs && discogs.is_masterless);
   return `
     <div class="rg">
       <div style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;"
-           onclick="window.toggleCompareRow(${jsArg(slot)}, ${jsArg(mbId)}, ${jsArg(dgId)})">
+           onclick="window.toggleCompareRow(${jsArg(slot)}, ${jsArg(mbId)}, ${jsArg(dgId)}, ${dgMasterless})">
         <span style="color:#888;font-size:0.8em;width:10px;display:inline-block;" id="cmp-chev-${esc(slot)}">▶</span>
         <span class="rg-year">${year}</span>
         <span class="rg-title">${esc(title)}</span>
@@ -552,8 +553,10 @@ function compareRow(mb, discogs) {
  * @param {string} slot
  * @param {string} mbId - empty string when the row has no MB side
  * @param {string} dgId - empty string when the row has no Discogs side
+ * @param {boolean} [dgMasterless] - true when the Discogs side is a
+ *   masterless release (id is a release id, not a master id).
  */
-export async function toggleCompareRow(slot, mbId, dgId) {
+export async function toggleCompareRow(slot, mbId, dgId, dgMasterless) {
   const wrap = document.getElementById('cmp-pressings-' + slot);
   const chev = document.getElementById('cmp-chev-' + slot);
   if (!wrap) return;
@@ -569,7 +572,9 @@ export async function toggleCompareRow(slot, mbId, dgId) {
   }
   if (dgId) {
     const dgEl = document.getElementById('rel-cmp-dg-' + slot);
-    if (dgEl && !dgEl.innerHTML) loadReleaseGroup(dgId, dgEl, { targetEl: dgEl, source: 'discogs' });
+    if (dgEl && !dgEl.innerHTML) loadReleaseGroup(dgId, dgEl, {
+      targetEl: dgEl, source: 'discogs', masterless: !!dgMasterless,
+    });
   }
 }
 
@@ -695,7 +700,7 @@ export async function searchArtists(q) {
         const isMasterless = isDiscogs && rg.is_master === false;
         const releaseId = isMasterless ? rg.discogs_release_id || rg.id : rg.id;
         const onclick = (isVA || isMasterless)
-          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this)`
+          ? `window.loadReleaseGroup(${jsArg(releaseId)}, this, ${isMasterless ? '{masterless:true}' : '{}'})`
           : `window.openBrowseArtist(${jsArg(rg.artist_id)}, ${jsArg(rg.artist_name)})`;
         return `
         <div class="artist" style="cursor:pointer;padding:6px 0;" onclick="${onclick}">
