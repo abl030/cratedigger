@@ -136,7 +136,7 @@ class TestDatabaseSource(unittest.TestCase):
         source._db = db
         return source, db
 
-    def test_get_wanted_returns_lidarr_shaped_records(self):
+    def test_get_wanted_returns_albumrecord_shaped_records(self):
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="test-uuid",
@@ -151,7 +151,7 @@ class TestDatabaseSource(unittest.TestCase):
         self.assertEqual(records[0].title, "Album")
         self.assertEqual(records[0].artist_name, "Test")
 
-    def test_get_tracks_lidarr_format(self):
+    def test_get_tracks_returns_track_dicts(self):
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="track-uuid",

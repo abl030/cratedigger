@@ -2010,8 +2010,6 @@ class FakePipelineDB:
             "target_format": None,
             "min_bitrate": None,
             "prev_min_bitrate": None,
-            "lidarr_album_id": None,
-            "lidarr_artist_id": None,
             "last_download_spectral_bitrate": None,
             "last_download_spectral_grade": None,
             "verified_lossless": False,

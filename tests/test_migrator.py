@@ -1253,5 +1253,36 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
             self._cleanup_request(rid)
 
 
+class TestDropLidarrColumnsSchema(unittest.TestCase):
+    """Migration 022 drops vestigial lidarr_album_id / lidarr_artist_id
+    columns from album_requests. They had no readers or writers in the
+    codebase since the soularr-fork era.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def test_schema_migrations_records_022(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 22"
+        )
+        self.assertEqual(rows, [(22,)])
+
+    def test_lidarr_columns_dropped_from_album_requests(self):
+        rows = self._query("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'album_requests'
+              AND column_name IN ('lidarr_album_id', 'lidarr_artist_id')
+        """)
+        self.assertEqual(rows, [])
+
+
 if __name__ == "__main__":
     unittest.main()
