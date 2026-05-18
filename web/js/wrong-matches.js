@@ -1,6 +1,7 @@
 // @ts-check
 import { API, toast } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel } from './util.js';
+import { renderReplaceButton } from './release_actions.js';
 
 /** @type {boolean} */
 let _loaded = false;
@@ -320,13 +321,26 @@ export async function loadWrongMatches() {
   if (!el) return;
   el.innerHTML = '<div class="loading">Loading wrong matches...</div>';
   try {
-    const r = await fetch(`${API}/api/wrong-matches`);
+    // U10: opt-in toggle persists in localStorage. Default: filtered.
+    const includeReplaced = localStorage.getItem('wrongMatches.includeReplaced') === 'true';
+    const url = `${API}/api/wrong-matches${includeReplaced ? '?include_replaced=true' : ''}`;
+    const r = await fetch(url);
     const data = await r.json();
     _loaded = true;
     renderWrongMatches(data, el);
   } catch (e) {
     el.innerHTML = '<div style="color:#f66;">Failed to load wrong matches</div>';
   }
+}
+
+/**
+ * Toggle "show replaced" filter (U10). Re-fetches with the new flag.
+ */
+export function toggleWrongMatchesReplacedFilter() {
+  const current = localStorage.getItem('wrongMatches.includeReplaced') === 'true';
+  localStorage.setItem('wrongMatches.includeReplaced', String(!current));
+  _loaded = false;
+  loadWrongMatches();
 }
 
 /**
@@ -962,6 +976,12 @@ function renderConvergeControls(g, count, thresholdMilli) {
       <div style="display:flex;align-items:center;gap:6px;">
         <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
         <button id="wm-converge-btn-${g.request_id}" class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
+        ${g.mb_release_group_id ? renderReplaceButton({
+          mode: 'standard',
+          sourceRequestId: g.request_id,
+          releaseGroupId: g.mb_release_group_id,
+          sourceLabel: `${g.artist || ''} — ${g.album || ''}`,
+        }, { className: 'p-btn', stopPropagation: true }) : ''}
       </div>
     </div>`;
 }

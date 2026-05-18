@@ -270,12 +270,21 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     all_data: dict[str, object] = {"counts": counts}
     status_items: dict[str, list[dict]] = {}
     all_ids: list[int] = []
-    for status in ("wanted", "downloading", "imported", "manual"):
+    statuses: tuple[str, ...] = ("wanted", "downloading", "imported", "manual")
+    # ``?include_replaced=true`` opt-in surfaces the frozen audit rows
+    # for operators reviewing past Replace actions (R30). Default off so
+    # the standard view stays focused on active work.
+    include_replaced = (
+        params.get("include_replaced", ["false"])[0].lower() == "true"
+    )
+    if include_replaced:
+        statuses = statuses + ("replaced",)
+    for status in statuses:
         rows = [s._serialize_row(r) for r in s._db().get_by_status(status)]
         status_items[status] = rows
         all_ids.extend([int(str(r["id"])) for r in rows])
     history_batch = s._db().get_download_history_batch(all_ids)
-    for status in ("wanted", "downloading", "imported", "manual"):
+    for status in statuses:
         all_data[status] = _attach_latest_download_history(
             status_items[status],
             history_batch,
@@ -800,6 +809,142 @@ def post_pipeline_search_plan_advance(
     h._error(f"Unknown advance outcome: {result.outcome}", 500)
 
 
+def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
+    """``POST /api/pipeline/<id>/replace``.
+
+    Supersede the source request with a new row at ``target_mb_release_id``.
+    Counterpart of ``pipeline-cli replace``. Both surfaces wrap
+    ``MbidReplaceService.replace_request_mbid`` — keep them in sync (see
+    ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Body: ``{"target_mb_release_id": "<mbid>"}``.
+
+    Status-code mapping mirrors the CLI exit codes:
+      * 200 — ``RESULT_REPLACED``
+      * 400 — body validation failure (missing/empty target)
+      * 404 — ``RESULT_NOT_FOUND``
+      * 409 — ``RESULT_WRONG_STATE`` (including supersede race —
+              ``descendant_request_id`` populated so the UI can
+              deep-link the operator to the new request) or
+              ``RESULT_TARGET_COLLISION_REQUEST``
+      * 422 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
+              ``RESULT_TARGET_SAME_AS_CURRENT``
+      * 503 — ``RESULT_TRANSIENT`` (MB-mirror unreachable etc.)
+    """
+    from lib.config import read_runtime_config
+    from lib.mbid_replace_service import (
+        MbidReplaceService,
+        RESULT_NOT_FOUND,
+        RESULT_REPLACED,
+        RESULT_TARGET_COLLISION_REQUEST,
+        RESULT_TARGET_INVALID,
+        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+        RESULT_TARGET_SAME_AS_CURRENT,
+        RESULT_TRANSIENT,
+        RESULT_WRONG_STATE,
+    )
+
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    # The server dispatcher (web/server.py::do_POST) always passes a
+    # JSON-decoded value here; for empty bodies that's ``{}``. The
+    # picker only ever sends a dict, so no defensive type check is
+    # needed. If a list or scalar somehow slipped through, the
+    # ``.get`` below would raise and the dispatcher's outer except
+    # would surface a 500 — acceptable for a malformed request.
+    target = body.get("target_mb_release_id")
+    if not isinstance(target, str) or not target.strip():
+        h._json({
+            "error": "target_mb_release_id must be a non-empty string",
+        }, status=400)
+        return
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = MbidReplaceService(db=db, config=cfg)
+    result = svc.replace_request_mbid(
+        request_id, target_mb_release_id=target.strip(),
+    )
+
+    payload: dict[str, object] = {
+        "outcome": result.outcome,
+        "request_id": result.request_id,
+        "new_request_id": result.new_request_id,
+        "current_status": result.current_status,
+        "descendant_request_id": result.descendant_request_id,
+        "error_message": result.error_message,
+        "warnings": list(result.warnings),
+    }
+    if result.outcome == RESULT_REPLACED:
+        h._json(payload)
+        return
+    if result.outcome == RESULT_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome in (
+        RESULT_WRONG_STATE,
+        RESULT_TARGET_COLLISION_REQUEST,
+    ):
+        payload["error"] = result.error_message or "Wrong state"
+        h._json(payload, status=409)
+        return
+    if result.outcome in (
+        RESULT_TARGET_INVALID,
+        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+        RESULT_TARGET_SAME_AS_CURRENT,
+    ):
+        payload["error"] = result.error_message or "Semantic violation"
+        h._json(payload, status=422)
+        return
+    if result.outcome == RESULT_TRANSIENT:
+        payload["error"] = result.error_message or "Transient; retry"
+        h._json(payload, status=503)
+        return
+    h._error(f"Unknown replace outcome: {result.outcome}", 500)
+
+
+def get_pipeline_requests_by_rg(h, params: dict, rg_id: str) -> None:
+    """``GET /api/pipeline/requests-by-rg/<rg_id>``.
+
+    Returns the non-replaced ``album_requests`` rows sharing the given
+    release group, in id-descending order. Used by the Browse-search
+    inverted-click picker (R7) to ask the operator which existing
+    request should be replaced.
+    """
+    db = _server()._db()
+    rows = db.list_requests_in_release_group(rg_id, exclude_replaced=True)
+    requests = [
+        {
+            "id": int(r["id"]),
+            "mb_release_id": r.get("mb_release_id"),
+            "mb_release_group_id": r.get("mb_release_group_id"),
+            "status": r.get("status"),
+            "artist_name": r.get("artist_name"),
+            "album_title": r.get("album_title"),
+        }
+        for r in rows
+    ]
+    h._json({"requests": requests})
+
+
+def get_pipeline_active_rgs(h, params: dict) -> None:
+    """``GET /api/pipeline/active-rgs``.
+
+    Returns the distinct set of ``mb_release_group_id`` values held by
+    any non-replaced ``album_requests`` row. The frontend builds a Set
+    from this list and uses ``set.has(row.release_group_id)`` per
+    Browse-search row to compute the Replace button enable state.
+    """
+    db = _server()._db()
+    ids = sorted(db.list_active_release_group_ids())
+    h._json({"release_group_ids": ids})
+
+
 def _serialize_import_job(job) -> dict[str, object]:
     if hasattr(job, "to_json_dict"):
         return job.to_json_dict()
@@ -874,11 +1019,18 @@ def post_pipeline_add(h, body: dict) -> None:
         # Discogs flow: store discogs ID in both columns for pipeline compat
         existing = s._db().get_request_by_release_id(discogs_id)
         if existing:
-            h._json({
+            payload: dict[str, object] = {
                 "status": "exists",
                 "id": existing["id"],
                 "current_status": existing["status"],
-            })
+            }
+            if existing["status"] == "replaced":
+                descendant = s._db().get_request_by_replaces_request_id(
+                    existing["id"])
+                if descendant is not None:
+                    payload["descendant_request_id"] = descendant["id"]
+                    payload["descendant_status"] = descendant.get("status")
+            h._json(payload)
             return
 
         # Bypass the 24h meta cache — this write path persists artist /
@@ -922,11 +1074,23 @@ def post_pipeline_add(h, body: dict) -> None:
     # MusicBrainz flow (unchanged)
     existing = s._db().get_request_by_release_id(mbid)
     if existing:
-        h._json({
+        payload: dict[str, object] = {
             "status": "exists",
             "id": existing["id"],
             "current_status": existing["status"],
-        })
+        }
+        # R33 / U10: when the existing row is a frozen audit row from a
+        # past Replace, surface the descendant id so the UI can render a
+        # "previously abandoned — active request is at /pipeline/<id>"
+        # forward-link instead of the generic "already in pipeline"
+        # message.
+        if existing["status"] == "replaced":
+            descendant = s._db().get_request_by_replaces_request_id(
+                existing["id"])
+            if descendant is not None:
+                payload["descendant_request_id"] = descendant["id"]
+                payload["descendant_status"] = descendant.get("status")
+        h._json(payload)
         return
 
     # Bypass the 24h meta cache — same reason as the Discogs branch
@@ -1526,11 +1690,51 @@ def post_pipeline_delete(h, body: dict) -> None:
     if not req_id:
         h._error("Missing id")
         return
-    req = s._db().get_request(int(req_id))
+    db = s._db()
+    req = db.get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
         return
-    s._db().delete_request(int(req_id))
+    # ``album_requests.replaces_request_id`` uses ON DELETE RESTRICT
+    # (migration 023) so a descendant Replace blocks deletion of the
+    # frozen ancestor. Surface 409 with the descendant chain rather
+    # than letting psycopg2 raise a 500 from the FK violation.
+    descendant = db.get_request_by_replaces_request_id(int(req_id))
+    if descendant is not None:
+        descendant_ids: list[int] = []
+        cursor: dict | None = descendant
+        while cursor is not None:
+            descendant_ids.append(int(cursor["id"]))
+            cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))
+        h._json({
+            "error": (
+                f"request {req_id} is referenced by a superseding "
+                "request — delete descendants first"
+            ),
+            "descendant_request_ids": descendant_ids,
+        }, status=409)
+        return
+    import psycopg2.errors
+    try:
+        db.delete_request(int(req_id))
+    except psycopg2.errors.ForeignKeyViolation as exc:
+        # Defensive — a descendant landed between the read above and
+        # the delete. Re-walk the chain so the operator gets the same
+        # 409 response shape.
+        descendant_ids = []
+        descendant = db.get_request_by_replaces_request_id(int(req_id))
+        cursor = descendant
+        while cursor is not None:
+            descendant_ids.append(int(cursor["id"]))
+            cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))
+        h._json({
+            "error": (
+                f"request {req_id} is referenced by a superseding "
+                f"request — delete descendants first ({exc})"
+            ),
+            "descendant_request_ids": descendant_ids,
+        }, status=409)
+        return
     h._json({"status": "ok", "id": req_id})
 
 
@@ -1547,6 +1751,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/simulate": get_pipeline_simulate,
     "/api/import-jobs": get_import_jobs,
     "/api/import-jobs/timeline": get_import_jobs_timeline,
+    "/api/pipeline/active-rgs": get_pipeline_active_rgs,
 }
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
@@ -1555,6 +1760,8 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
      get_pipeline_search_plan),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
      get_pipeline_search_plan_history),
+    (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),
+     get_pipeline_requests_by_rg),
     (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
 ]
 
@@ -1574,4 +1781,6 @@ POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
      post_pipeline_search_plan_regenerate),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/advance$"),
      post_pipeline_search_plan_advance),
+    (re.compile(r"^/api/pipeline/(\d+)/replace$"),
+     post_pipeline_replace),
 ]

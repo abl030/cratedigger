@@ -830,6 +830,19 @@ def _build_stats_bucket(
     )
 
 
+class MbidCollisionError(Exception):
+    """Raised by ``PipelineDB.supersede_request_mbid`` when the target MBID
+    already exists in ``album_requests`` (UNIQUE violation on insert)."""
+
+
+class SupersedeRaceError(Exception):
+    """Raised by ``PipelineDB.supersede_request_mbid`` when the old row's
+    ``UPDATE ... WHERE status != 'replaced'`` matched zero rows — another
+    session already superseded the row between our row-lock acquisition
+    and the UPDATE. Caller maps this to a transient retry outcome.
+    """
+
+
 class PipelineDB:
     """PostgreSQL-backed pipeline database.
 
@@ -1613,6 +1626,212 @@ class PipelineDB:
         if req:
             return req
         return self.get_request_by_mb_release_id(identity.release_id)
+
+    def get_request_by_replaces_request_id(
+        self, replaced_id: int
+    ) -> dict[str, Any] | None:
+        """Reverse lineage lookup: find the descendant row that points at
+        ``replaced_id`` via ``replaces_request_id``.
+
+        Returns None when no descendant exists (the chain was manually
+        broken via SQL despite the ``ON DELETE RESTRICT`` FK — defensive).
+        The partial index ``idx_album_requests_replaces_request_id``
+        (migration 023) backs this lookup.
+        """
+        cur = self._execute(
+            "SELECT * FROM album_requests "
+            "WHERE replaces_request_id = %s LIMIT 1",
+            (replaced_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_requests_in_release_group(
+        self,
+        rg_id: str,
+        *,
+        exclude_replaced: bool = True,
+        exclude_request_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List ``album_requests`` rows in the same MB release group.
+
+        - ``exclude_replaced=True`` (default) skips rows with
+          ``status='replaced'`` so the Browse-search inverted-click picker
+          only sees active rows.
+        - ``exclude_request_id`` skips a specific request id when set —
+          used by the picker to avoid offering "replace this row with
+          itself" choices.
+
+        Ordered by ``id DESC`` (newest first).
+        """
+        conditions = ["mb_release_group_id = %s"]
+        params: list[object] = [rg_id]
+        if exclude_replaced:
+            conditions.append("status != 'replaced'")
+        if exclude_request_id is not None:
+            conditions.append("id != %s")
+            params.append(exclude_request_id)
+        sql = (
+            "SELECT * FROM album_requests "
+            f"WHERE {' AND '.join(conditions)} "
+            "ORDER BY id DESC"
+        )
+        cur = self._execute(sql, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+    def list_active_release_group_ids(self) -> set[str]:
+        """Return the distinct set of ``mb_release_group_id`` values held
+        by any non-replaced ``album_requests`` row.
+
+        Used by the Browse-search Replace button to compute its enable
+        state per R7: the frontend builds a Set from this list and uses
+        ``set.has(row.release_group_id)`` per render. NULL RG values are
+        excluded.
+        """
+        cur = self._execute(
+            "SELECT DISTINCT mb_release_group_id FROM album_requests "
+            "WHERE status != 'replaced' "
+            "AND mb_release_group_id IS NOT NULL"
+        )
+        return {row["mb_release_group_id"] for row in cur.fetchall()}
+
+    def supersede_request_mbid(
+        self,
+        old_request_id: int,
+        *,
+        new_mb_release_id: str,
+        new_mb_release_group_id: str | None,
+        new_mb_artist_id: str | None,
+        new_artist_name: str,
+        new_album_title: str,
+        new_year: int | None,
+        new_country: str | None,
+        new_tracks: list[dict[str, Any]],
+    ) -> int:
+        """Atomically supersede ``old_request_id`` with a new row.
+
+        In one ``autocommit=False`` transaction:
+
+        1. ``SELECT ... FOR UPDATE`` on the old row (acquire row lock).
+        2. ``UPDATE`` old row's ``status`` to ``'replaced'``, clear
+           ``imported_path`` (R14 carve-out — Phase 4 deletes the files
+           at that path so the pointer would dangle). All other columns
+           on the old row stay untouched as historical truth.
+        3. ``INSERT`` a new ``album_requests`` row with the target MBID,
+           ``status='wanted'``, ``replaces_request_id=old_request_id``,
+           and the source inherited from the old row.
+        4. ``INSERT`` the new row's ``album_tracks`` rows.
+
+        Returns the new request_id.
+
+        Raises:
+            ``SupersedeRaceError``: the old row was already in
+                ``status='replaced'`` (rowcount=0 on the UPDATE).
+            ``MbidCollisionError``: the target MBID already exists in
+                ``album_requests`` (UNIQUE violation defensively caught).
+            Any other exception triggers automatic rollback and re-raises.
+        """
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                # 1. Row lock on the old row.
+                cur.execute(
+                    "SELECT id, source, status FROM album_requests "
+                    "WHERE id = %s FOR UPDATE",
+                    (old_request_id,),
+                )
+                old_row = cur.fetchone()
+                if old_row is None:
+                    raise SupersedeRaceError(
+                        f"old request {old_request_id} disappeared "
+                        "between Phase 0 read and Phase 3 lock"
+                    )
+                old_source = old_row["source"]
+
+                # 2. Flip old row's status; clear imported_path (R14).
+                cur.execute(
+                    "UPDATE album_requests "
+                    "SET status = 'replaced', imported_path = NULL, "
+                    "    updated_at = %s "
+                    "WHERE id = %s AND status != 'replaced' "
+                    "RETURNING id",
+                    (now, old_request_id),
+                )
+                if cur.fetchone() is None:
+                    raise SupersedeRaceError(
+                        f"old request {old_request_id} was already "
+                        "replaced (rowcount=0 on UPDATE)"
+                    )
+
+                # 3. Insert new row.
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO album_requests (
+                            mb_release_id, mb_release_group_id, mb_artist_id,
+                            artist_name, album_title, year, country,
+                            source, status, replaces_request_id,
+                            created_at, updated_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s,
+                            'wanted', %s, %s, %s
+                        )
+                        RETURNING id
+                        """,
+                        (
+                            new_mb_release_id,
+                            new_mb_release_group_id,
+                            new_mb_artist_id,
+                            new_artist_name,
+                            new_album_title,
+                            new_year,
+                            new_country,
+                            old_source,
+                            old_request_id,
+                            now,
+                            now,
+                        ),
+                    )
+                except psycopg2.errors.UniqueViolation as exc:
+                    raise MbidCollisionError(
+                        f"target MBID {new_mb_release_id} already exists"
+                    ) from exc
+                row = cur.fetchone()
+                assert row is not None, (
+                    "INSERT RETURNING should always return a row"
+                )
+                new_id = int(row["id"])
+
+                # 4. Insert tracks for the new row.
+                for t in new_tracks:
+                    cur.execute(
+                        """
+                        INSERT INTO album_tracks (
+                            request_id, disc_number, track_number,
+                            title, length_seconds
+                        ) VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (
+                            new_id,
+                            t.get("disc_number", 1),
+                            t["track_number"],
+                            t["title"],
+                            t.get("length_seconds"),
+                        ),
+                    )
+
+            self.conn.commit()
+            return new_id
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
 
     def delete_request(self, request_id: int) -> None:
         # Evidence rows are content-addressed after migration 021 — they are
@@ -2880,6 +3099,7 @@ class PipelineDB:
                 ar.artist_name,
                 ar.album_title,
                 ar.mb_release_id,
+                ar.mb_release_group_id,
                 dl.soulseek_username,
                 dl.validation_result,
                 COALESCE(e.spectral_grade, dl.spectral_grade) AS spectral_grade,

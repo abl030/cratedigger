@@ -1253,5 +1253,164 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
             self._cleanup_request(rid)
 
 
+class TestDropLidarrColumnsSchema(unittest.TestCase):
+    """Migration 022 drops vestigial lidarr_album_id / lidarr_artist_id
+    columns from album_requests. They had no readers or writers in the
+    codebase since the soularr-fork era.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def test_schema_migrations_records_022(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 22"
+        )
+        self.assertEqual(rows, [(22,)])
+
+    def test_lidarr_columns_dropped_from_album_requests(self):
+        rows = self._query("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'album_requests'
+              AND column_name IN ('lidarr_album_id', 'lidarr_artist_id')
+        """)
+        self.assertEqual(rows, [])
+
+
+class TestReplaceSupersedeSchema(unittest.TestCase):
+    """Migration 023 adds:
+    - ``album_requests.replaces_request_id`` (nullable self-FK, ON DELETE RESTRICT)
+    - partial index on the lineage FK
+    - ``'replaced'`` value in the ``album_requests_status_check`` CHECK constraint
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str, **extra) -> int:
+        cols = ["mb_release_id", "artist_name", "album_title", "source"]
+        vals = [mbid, "A", "B", "request"]
+        for k, v in extra.items():
+            cols.append(k)
+            vals.append(v)
+        placeholders = ",".join(["%s"] * len(vals))
+        sql = (
+            f"INSERT INTO album_requests ({','.join(cols)}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT (mb_release_id) DO NOTHING"
+        )
+        self._exec(sql, tuple(vals))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def _cleanup_request(self, rid: int) -> None:
+        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_schema_migrations_records_023(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 23"
+        )
+        self.assertEqual(rows, [(23,)])
+
+    def test_replaces_request_id_column_present(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_name = 'album_requests'
+              AND column_name = 'replaces_request_id'
+        """)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "replaces_request_id")
+        self.assertEqual(rows[0][1], "YES")  # nullable
+        self.assertEqual(rows[0][2], "integer")
+
+    def test_partial_index_on_replaces_request_id(self):
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE tablename = 'album_requests'
+              AND indexname = 'idx_album_requests_replaces_request_id'
+        """)
+        self.assertEqual(len(rows), 1)
+
+    def test_status_check_includes_replaced(self):
+        # Insert succeeds with the new status.
+        rid = self._make_request("mig023-replaced-mbid", status="replaced")
+        try:
+            rows = self._query(
+                "SELECT status FROM album_requests WHERE id = %s", (rid,)
+            )
+            self.assertEqual(rows, [("replaced",)])
+        finally:
+            self._cleanup_request(rid)
+
+    def test_status_check_rejects_unknown(self):
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec("""
+                INSERT INTO album_requests (mb_release_id, artist_name, album_title, source, status)
+                VALUES ('mig023-bogus', 'A', 'B', 'request', 'bogus')
+            """)
+
+    def test_replaces_request_id_fk_violation(self):
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            self._exec("""
+                INSERT INTO album_requests (
+                    mb_release_id, artist_name, album_title, source, replaces_request_id
+                ) VALUES ('mig023-fk-violation', 'A', 'B', 'request', 99999999)
+            """)
+
+    def test_on_delete_restrict_prevents_parent_deletion(self):
+        parent = self._make_request("mig023-fk-parent")
+        child = self._make_request(
+            "mig023-fk-child", replaces_request_id=parent
+        )
+        try:
+            with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+                self._exec(
+                    "DELETE FROM album_requests WHERE id = %s", (parent,)
+                )
+        finally:
+            self._cleanup_request(child)
+            self._cleanup_request(parent)
+
+    def test_chain_delete_descendants_first_succeeds(self):
+        # r1 ← r2 ← r3 lineage; deletes go r3, r2, r1.
+        r1 = self._make_request("mig023-chain-r1")
+        r2 = self._make_request("mig023-chain-r2", replaces_request_id=r1)
+        r3 = self._make_request("mig023-chain-r3", replaces_request_id=r2)
+        self._cleanup_request(r3)
+        self._cleanup_request(r2)
+        self._cleanup_request(r1)
+        rows = self._query(
+            "SELECT id FROM album_requests WHERE id IN (%s, %s, %s)",
+            (r1, r2, r3),
+        )
+        self.assertEqual(rows, [])
+
+
 if __name__ == "__main__":
     unittest.main()

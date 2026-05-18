@@ -1466,6 +1466,251 @@ class TestFakePipelineDBDiscogs(unittest.TestCase):
         self.assertEqual(result["id"], 1)
 
 
+class TestFakeSupersedeRequestMbid(unittest.TestCase):
+    """U3: ``FakePipelineDB.supersede_request_mbid`` + companions for
+    the Replace operator action.
+    """
+
+    def _seed_old(self, **overrides):
+        db = FakePipelineDB()
+        row = make_request_row(
+            id=42,
+            mb_release_id="old-mbid",
+            mb_release_group_id="rg-1",
+            mb_artist_id="art-1",
+            artist_name="Pet Grief",
+            album_title="Old Album",
+            year=2024,
+            country="US",
+            status="imported",
+            imported_path="/mnt/virtio/Music/Beets/Pet Grief/Old Album",
+            verified_lossless=True,
+            current_spectral_grade="A",
+            current_spectral_bitrate=900,
+            current_lossless_source_v0_probe_min_bitrate=235,
+            current_lossless_source_v0_probe_avg_bitrate=245,
+            current_lossless_source_v0_probe_median_bitrate=240,
+            search_filetype_override="lossless",
+            target_format="flac",
+            min_bitrate=900,
+            source="request",
+        )
+        for k, v in overrides.items():
+            row[k] = v
+        db.seed_request(row)
+        return db
+
+    def test_happy_path_flips_old_inserts_new(self):
+        db = self._seed_old()
+        new_id = db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id="art-1",
+            new_artist_name="Pet Grief",
+            new_album_title="New Album",
+            new_year=2025,
+            new_country="JP",
+            new_tracks=[
+                {"disc_number": 1, "track_number": 1, "title": "T1"},
+                {"disc_number": 1, "track_number": 2, "title": "T2"},
+            ],
+        )
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        new = db.get_request(new_id)
+        assert new is not None
+        self.assertEqual(new["mb_release_id"], "new-mbid")
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], 42)
+        self.assertEqual(new["source"], "request")  # inherited
+        self.assertEqual(len(db.get_tracks(new_id)), 2)
+
+    def test_imported_path_cleared_on_old_row(self):
+        db = self._seed_old()
+        db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id="art-1",
+            new_artist_name="Pet Grief",
+            new_album_title="New Album",
+            new_year=2025,
+            new_country="JP",
+            new_tracks=[],
+        )
+        old = db.get_request(42)
+        assert old is not None
+        self.assertIsNone(old["imported_path"])
+
+    def test_characteristic_fields_preserved_on_old_row(self):
+        db = self._seed_old()
+        db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id="art-1",
+            new_artist_name="Pet Grief",
+            new_album_title="New Album",
+            new_year=2025,
+            new_country="JP",
+            new_tracks=[],
+        )
+        old = db.get_request(42)
+        assert old is not None
+        # Characteristic fields stay frozen on the audit row.
+        self.assertEqual(old["mb_release_id"], "old-mbid")
+        self.assertEqual(old["mb_release_group_id"], "rg-1")
+        self.assertEqual(old["mb_artist_id"], "art-1")
+        self.assertEqual(old["artist_name"], "Pet Grief")
+        self.assertEqual(old["album_title"], "Old Album")
+        self.assertEqual(old["year"], 2024)
+        self.assertEqual(old["country"], "US")
+        self.assertEqual(old["min_bitrate"], 900)
+        self.assertTrue(old["verified_lossless"])
+        self.assertEqual(old["current_spectral_grade"], "A")
+        self.assertEqual(old["current_spectral_bitrate"], 900)
+        self.assertEqual(old["current_lossless_source_v0_probe_min_bitrate"], 235)
+        self.assertEqual(old["current_lossless_source_v0_probe_avg_bitrate"], 245)
+        self.assertEqual(old["current_lossless_source_v0_probe_median_bitrate"], 240)
+        self.assertEqual(old["search_filetype_override"], "lossless")
+        self.assertEqual(old["target_format"], "flac")
+
+    def test_collision_raises(self):
+        from lib.pipeline_db import MbidCollisionError
+
+        db = self._seed_old()
+        db.seed_request(make_request_row(
+            id=99, mb_release_id="collide-mbid", mb_release_group_id="rg-2",
+        ))
+        with self.assertRaises(MbidCollisionError):
+            db.supersede_request_mbid(
+                42,
+                new_mb_release_id="collide-mbid",
+                new_mb_release_group_id="rg-1",
+                new_mb_artist_id=None,
+                new_artist_name="x", new_album_title="x",
+                new_year=None, new_country=None, new_tracks=[],
+            )
+
+    def test_race_on_already_replaced_raises(self):
+        from lib.pipeline_db import SupersedeRaceError
+
+        db = self._seed_old(status="replaced")
+        with self.assertRaises(SupersedeRaceError):
+            db.supersede_request_mbid(
+                42,
+                new_mb_release_id="new-mbid",
+                new_mb_release_group_id="rg-1",
+                new_mb_artist_id=None,
+                new_artist_name="x", new_album_title="x",
+                new_year=None, new_country=None, new_tracks=[],
+            )
+
+    def test_list_requests_in_rg_excludes_replaced_by_default(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="a", mb_release_group_id="rg-x", status="wanted",
+        ))
+        db.seed_request(make_request_row(
+            id=2, mb_release_id="b", mb_release_group_id="rg-x", status="replaced",
+        ))
+        rows = db.list_requests_in_release_group("rg-x")
+        self.assertEqual([r["id"] for r in rows], [1])
+
+    def test_list_requests_in_rg_include_replaced(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="a", mb_release_group_id="rg-x", status="wanted",
+        ))
+        db.seed_request(make_request_row(
+            id=2, mb_release_id="b", mb_release_group_id="rg-x", status="replaced",
+        ))
+        rows = db.list_requests_in_release_group("rg-x", exclude_replaced=False)
+        # Newest first (id desc).
+        self.assertEqual([r["id"] for r in rows], [2, 1])
+
+    def test_list_requests_in_rg_exclude_request_id(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="a", mb_release_group_id="rg-x", status="wanted",
+        ))
+        db.seed_request(make_request_row(
+            id=2, mb_release_id="b", mb_release_group_id="rg-x", status="wanted",
+        ))
+        rows = db.list_requests_in_release_group("rg-x", exclude_request_id=1)
+        self.assertEqual([r["id"] for r in rows], [2])
+
+    def test_list_active_release_group_ids(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="a", mb_release_group_id="rg-1", status="wanted",
+        ))
+        db.seed_request(make_request_row(
+            id=2, mb_release_id="b", mb_release_group_id="rg-2", status="downloading",
+        ))
+        db.seed_request(make_request_row(
+            id=3, mb_release_id="c", mb_release_group_id="rg-3", status="replaced",
+        ))
+        db.seed_request(make_request_row(
+            id=4, mb_release_id="d", mb_release_group_id=None, status="wanted",
+        ))
+        self.assertEqual(
+            db.list_active_release_group_ids(), {"rg-1", "rg-2"}
+        )
+
+    def test_list_active_release_group_ids_empty(self):
+        db = FakePipelineDB()
+        self.assertEqual(db.list_active_release_group_ids(), set())
+
+    def test_get_request_by_replaces_request_id_found(self):
+        db = self._seed_old()
+        new_id = db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id=None,
+            new_artist_name="x", new_album_title="x",
+            new_year=None, new_country=None, new_tracks=[],
+        )
+        descendant = db.get_request_by_replaces_request_id(42)
+        assert descendant is not None
+        self.assertEqual(descendant["id"], new_id)
+
+    def test_get_request_by_replaces_request_id_none(self):
+        db = self._seed_old()
+        self.assertIsNone(db.get_request_by_replaces_request_id(42))
+
+    def test_denylist_isolation_old_keeps_new_empty(self):
+        """A supersede must not copy denylist entries from the old
+        request onto the new row — the new request starts fresh
+        (R28). The old row's denylist is preserved unchanged as part
+        of the audit trail."""
+        db = self._seed_old()
+        # Seed two denylist entries on the old row.
+        db.add_denylist(42, "bad_peer_1", reason="lossy_source")
+        db.add_denylist(42, "bad_peer_2", reason="incomplete")
+        new_id = db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id=None,
+            new_artist_name="x", new_album_title="x",
+            new_year=None, new_country=None, new_tracks=[],
+        )
+        # Old row's denylist is intact.
+        old_denylist = db.get_denylisted_users(42)
+        self.assertEqual(
+            sorted(d["username"] for d in old_denylist),
+            ["bad_peer_1", "bad_peer_2"],
+        )
+        # New row's denylist is empty — denylist is per-request and
+        # supersede does NOT propagate.
+        new_denylist = db.get_denylisted_users(new_id)
+        self.assertEqual(new_denylist, [])
+
+
 class TestFakePipelineDBNewStubs(unittest.TestCase):
     """Self-tests for fake methods retroactively added under issue #140.
 

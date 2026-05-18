@@ -486,6 +486,50 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
         self.assertFalse(result.absent_after)
         pdb.clear_on_disk_quality_fields.assert_not_called()
 
+    @patch("lib.beets_album_op.sp.run")
+    def test_clear_pipeline_state_false_skips_clear(
+            self, mock_run: MagicMock) -> None:
+        """U4: Replace passes ``clear_pipeline_state=False`` so the old
+        request row's characteristic fields stay frozen as audit truth.
+        Even when beets removal succeeds and the album is absent after,
+        ``clear_on_disk_quality_fields`` must NOT be called.
+        """
+        mock_run.return_value = _ok()
+        beets = _StubBeetsDB([
+            _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
+            _StubLocation("absent", None, ()),
+        ])
+        pdb = MagicMock()
+
+        result = remove_and_reset_release(
+            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            release_id=RELEASE_UUID, request_id=7,
+            clear_pipeline_state=False)
+
+        self.assertTrue(result.absent_after)
+        pdb.clear_on_disk_quality_fields.assert_not_called()
+
+    @patch("lib.beets_album_op.sp.run")
+    def test_clear_pipeline_state_true_default_preserves_behavior(
+            self, mock_run: MagicMock) -> None:
+        """Ban-source's default behavior is unchanged: when the kwarg
+        is omitted (or True), the wrapper still clears the pipeline row.
+        """
+        mock_run.return_value = _ok()
+        beets = _StubBeetsDB([
+            _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
+            _StubLocation("absent", None, ()),
+        ])
+        pdb = MagicMock()
+
+        result = remove_and_reset_release(
+            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            release_id=RELEASE_UUID, request_id=7,
+            clear_pipeline_state=True)
+
+        self.assertTrue(result.absent_after)
+        pdb.clear_on_disk_quality_fields.assert_called_once_with(7)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 import { state, API, toast } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
-import { renderBadRipButton } from './release_actions.js';
+import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
 
 /**
@@ -27,11 +27,24 @@ export async function loadPipeline() {
   const el = document.getElementById('pipeline-content');
   el.innerHTML = `${renderPipelineNav()}<div class="loading">Loading...</div>`;
   try {
-    const r = await fetch(`${API}/api/pipeline/all`);
+    // U10: opt-in toggle persists in localStorage. Default: filtered.
+    const includeReplaced = localStorage.getItem('pipeline.includeReplaced') === 'true';
+    const url = `${API}/api/pipeline/all${includeReplaced ? '?include_replaced=true' : ''}`;
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state.pipelineData = await r.json();
     renderPipeline();
   } catch (e) { el.innerHTML = `${renderPipelineNav()}<div class="loading">Failed to load pipeline</div>`; }
+}
+
+/**
+ * Toggle "show replaced" filter (U10). Pipeline + Wrong Matches tabs
+ * persist this preference independently in localStorage.
+ */
+export function togglePipelineReplacedFilter() {
+  const current = localStorage.getItem('pipeline.includeReplaced') === 'true';
+  localStorage.setItem('pipeline.includeReplaced', String(!current));
+  loadPipeline();
 }
 
 /**
@@ -948,6 +961,18 @@ export async function toggleDetail(elId, requestId) {
       className: 'p-btn delete',
       stopPropagation: true,
     });
+    // Replace button — only shown when the row is not itself a frozen
+    // audit row (R30 / scope boundary "re-replacing a replaced row is
+    // not supported") and the row has a release group to anchor the
+    // picker on.
+    if (req.status !== 'replaced' && req.mb_release_group_id) {
+      html += renderReplaceButton({
+        mode: 'standard',
+        sourceRequestId: id,
+        releaseGroupId: req.mb_release_group_id,
+        sourceLabel: `${req.artist_name || ''} — ${req.album_title || ''}`,
+      }, { className: 'p-btn', stopPropagation: true });
+    }
     html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>
     </div>`;
 

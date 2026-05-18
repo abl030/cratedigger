@@ -6,6 +6,7 @@
  */
 
 import { normalizeReleaseId } from './util.js';
+import { invalidateActiveRgs } from './active_rgs.js';
 
 /**
  * Stash for the search-plan detail page's back button. Captured when
@@ -98,6 +99,11 @@ export function updatePipelineStatus(mbid, status, pipelineId) {
   } else {
     pipelineStore.delete(key);
   }
+  // Any pipeline mutation (add / remove / upgrade / replace) may
+  // shift which release-groups have an active row — invalidate the
+  // Browse-search inverted Replace button cache so the next render
+  // re-fetches.
+  invalidateActiveRgs();
   // Update disambData pressings (analysis tab)
   if (state.disambData) {
     for (const rg of state.disambData.release_groups) {

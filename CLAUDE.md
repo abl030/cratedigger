@@ -16,6 +16,8 @@ Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-
 3. **nixosconfig changes MUST be made on doc1.** The repo lives at `~/nixosconfig` on doc1. Doc1 has the git push credentials; doc2 and Windows do not. SSH to doc1 first, edit, commit, push, then deploy to doc2.
 4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`, migrated from SQLite 2026-03-25). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH; for non-root SSH sessions, source `/run/secrets/cratedigger-pgpass` and export `PGPASSWORD` before running `pipeline-cli` (example below). Raw TCP reachability to `192.168.100.11:5432` exists on doc1/doc2, not on the Framework laptop by default. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
 5. **This is a curated music collection.** Multiple editions/pressings of the same album are intentional. NEVER delete or merge duplicate albums — they are different MusicBrainz releases (countries, track counts, labels) and the user wants them all. Beets must disambiguate them into separate folders.
+6. **The pipeline self-heals — the request is the source of truth, everything else is derived.** Files, beets entries, wrong-matches folders, search plans, denylist, overrides, evidence — all derived state. Operator actions that touch identity supersede the row rather than mutate it, and let the pipeline rebuild from the new row. Audit trail (the frozen old row and its content-addressed child rows) is preserved by virtue of the old row never being mutated or deleted. The Replace operator action (`lib/mbid_replace_service.py`) is the canonical example: it flips the old row to `status='replaced'`, inserts a new row with `replaces_request_id` pointing back, and lets the next 5-minute cycle re-source from the new MBID. Request statuses also include `replaced` (terminal, frozen audit row).
+7. **Don't duplicate convergence — reuse the cleanup paths that already exist.** When an operator action could leave behind orphans (in-flight slskd transfers, stale staging, dangling rows), prefer letting existing convergence pick them up over adding bespoke teardown to the action. Where convergence does not yet exist, file an issue and ship the closest direct cleanup in the action itself. Replace deliberately leaves in-flight slskd transfers running (cleanup tracked at issue #278) rather than building a partial cancellation path that would duplicate that work.
 
 ## Subsystems
 
@@ -429,7 +431,7 @@ ssh doc2 'set -a; . /run/secrets/cratedigger-pgpass; set +a; export PGPASSWORD="
 
 ## Critical rules
 
-1. **NEVER use `beet remove -d`** — deletes files permanently (exception: ban-source endpoint, explicit user action).
+1. **NEVER use `beet remove -d`** — deletes files permanently (exceptions: ban-source endpoint and Replace action, both explicit user actions composed via `lib/release_cleanup.py::remove_and_reset_release`).
 2. **NEVER import without inspecting the match** — always through the harness, never pipe blind input to `beet`.
 3. **NEVER match by `candidate_index`** — always by MB release ID. Candidate ordering is not stable.
 4. **NEVER match by release group** — always exact MB release ID. Release groups conflate pressings.
