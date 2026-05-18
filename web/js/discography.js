@@ -269,24 +269,52 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       // release has an active pipeline request (see release_action_state.js
       // for the pipelineStore lookup).
       const spBtn = renderSearchPlanButton({ pipelineId: actionState.pipelineId });
-      // Inverted-mode Replace button. Hidden when the row IS the active
-      // request (acquireKind === 'remove_request' — there's nothing to
-      // replace into itself) and on the Discogs path (no MB
-      // release-group id available). Enabled only when an existing
-      // non-replaced row already targets a sibling MBID in the same RG.
-      const rgForReplace = rel.release_group_id || parentRgId;
+      // Replace button — two variants:
+      //
+      //   - ``isCurrent`` (acquireKind === 'remove_request'): this row
+      //     IS the active/imported request. Standard mode — clicking
+      //     opens the picker on this request's release group so the
+      //     operator can switch to a sibling pressing.
+      //
+      //   - Otherwise: inverted mode. Clicking asks the operator which
+      //     active request in this RG should be replaced with the
+      //     clicked row's MBID. Enabled only when an existing
+      //     non-replaced row already targets a sibling MBID in the same
+      //     RG (``hasActiveRg``).
+      //
+      // ``releaseGroupId`` may be null for legacy rows; the picker
+      // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
+      // (standard) or ``GET /api/release/<mbid>`` (inverted) before
+      // fetching siblings.
+      const rgForReplace = rel.release_group_id || parentRgId || null;
       const isCurrent = actionState.acquireKind === 'remove_request';
-      const replaceBtn = (!isCurrent && rgForReplace) ? renderReplaceButton({
-        mode: 'inverted',
-        targetMbid: rel.id,
-        releaseGroupId: rgForReplace,
-        targetLabel: `${state.browseArtist?.name || ''} — ${rel.title || ''}`,
-      }, {
-        className: 'btn',
-        style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
-        enabled: hasActiveRg(rgForReplace),
-        stopPropagation: true,
-      }) : '';
+      let replaceBtn = '';
+      if (isCurrent) {
+        if (actionState.pipelineId) {
+          replaceBtn = renderReplaceButton({
+            mode: 'standard',
+            sourceRequestId: actionState.pipelineId,
+            releaseGroupId: rgForReplace,
+            sourceLabel: `${state.browseArtist?.name || ''} — ${rel.title || ''}`,
+          }, {
+            className: 'btn',
+            style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
+            stopPropagation: true,
+          });
+        }
+      } else {
+        replaceBtn = renderReplaceButton({
+          mode: 'inverted',
+          targetMbid: rel.id,
+          releaseGroupId: rgForReplace,
+          targetLabel: `${state.browseArtist?.name || ''} — ${rel.title || ''}`,
+        }, {
+          className: 'btn',
+          style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
+          enabled: hasActiveRg(rgForReplace),
+          stopPropagation: true,
+        });
+      }
       return `
         <div class="release" data-release-id="${rel.id}" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
           <div class="release-info">

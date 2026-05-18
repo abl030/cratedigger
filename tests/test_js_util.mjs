@@ -783,6 +783,40 @@ assert(invDisabled.includes('disabled'),
 assert(!invDisabled.includes('window.openReplacePicker'),
   'renderReplaceButton inverted disabled does not wire onclick');
 
+// Null-RG handling: legacy rows have releaseGroupId=null. The picker
+// lazy-resolves. The button must still render, with an explicit JS
+// ``null`` literal in the onclick payload so the picker can detect the
+// missing RG.
+const stdNullRg = renderReplaceButton({
+  mode: 'standard',
+  sourceRequestId: 4194,
+  releaseGroupId: null,
+  sourceLabel: 'Pet Grief — Old',
+}, { stopPropagation: true });
+assert(stdNullRg.includes('window.openReplacePicker'),
+  'renderReplaceButton standard renders with null releaseGroupId');
+assert(stdNullRg.includes('releaseGroupId: null'),
+  'renderReplaceButton standard encodes null RG as JS null literal');
+
+const invNullRg = renderReplaceButton({
+  mode: 'inverted',
+  targetMbid: 'new-mbid',
+  releaseGroupId: null,
+  targetLabel: 'Pet Grief — New',
+}, { enabled: true });
+assert(invNullRg.includes('window.openReplacePicker'),
+  'renderReplaceButton inverted renders with null releaseGroupId');
+assert(invNullRg.includes('releaseGroupId: null'),
+  'renderReplaceButton inverted encodes null RG as JS null literal');
+
+// Standard mode without sourceRequestId still returns empty.
+const stdNoSource = renderReplaceButton({
+  mode: 'standard',
+  releaseGroupId: 'rg-1',
+});
+assertEqual(stdNoSource, '',
+  'renderReplaceButton standard returns empty without sourceRequestId');
+
 // Active-RG Set lookup — U9 enable logic
 const activeRgSet = new Set(['rg-1', 'rg-2']);
 assertEqual(activeRgSet.has('rg-1'), true, 'active-RG Set hit');
