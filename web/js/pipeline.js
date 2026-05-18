@@ -27,11 +27,24 @@ export async function loadPipeline() {
   const el = document.getElementById('pipeline-content');
   el.innerHTML = `${renderPipelineNav()}<div class="loading">Loading...</div>`;
   try {
-    const r = await fetch(`${API}/api/pipeline/all`);
+    // U10: opt-in toggle persists in localStorage. Default: filtered.
+    const includeReplaced = localStorage.getItem('pipeline.includeReplaced') === 'true';
+    const url = `${API}/api/pipeline/all${includeReplaced ? '?include_replaced=true' : ''}`;
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state.pipelineData = await r.json();
     renderPipeline();
   } catch (e) { el.innerHTML = `${renderPipelineNav()}<div class="loading">Failed to load pipeline</div>`; }
+}
+
+/**
+ * Toggle "show replaced" filter (U10). Pipeline + Wrong Matches tabs
+ * persist this preference independently in localStorage.
+ */
+export function togglePipelineReplacedFilter() {
+  const current = localStorage.getItem('pipeline.includeReplaced') === 'true';
+  localStorage.setItem('pipeline.includeReplaced', String(!current));
+  loadPipeline();
 }
 
 /**

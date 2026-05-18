@@ -354,7 +354,9 @@ def _latest_import_summary(rows: list[dict[str, object]]
     }
 
 
-def _build_wrong_match_groups() -> list[dict[str, object]]:
+def _build_wrong_match_groups(
+    *, include_replaced: bool = False,
+) -> list[dict[str, object]]:
     """Group wrong-match rejections by release (issue #113).
 
     Each ``album_requests`` row becomes one group; every rejected
@@ -392,6 +394,8 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
     order: list[int] = []
 
     for row in rows:
+        if not include_replaced and row.get("request_status") == "replaced":
+            continue
         vr = _parse_validation_result(row.get("validation_result"))
         failed_path_raw = vr.get("failed_path")
         failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
@@ -499,8 +503,18 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
 
 
 def get_wrong_matches(h, params: dict[str, list[str]]) -> None:
-    """Return grouped wrong-match rejections for the manual-review UI."""
-    h._json({"groups": _build_wrong_match_groups()})
+    """Return grouped wrong-match rejections for the manual-review UI.
+
+    ``?include_replaced=true`` opts into showing rows whose parent
+    ``album_requests`` row is ``status='replaced'``. The default
+    (``false``) filters them out so the Wrong Matches tab focuses on
+    actionable rejections, not frozen audit history (R31).
+    """
+    include_replaced = (
+        params.get("include_replaced", ["false"])[0].lower() == "true"
+    )
+    h._json({"groups": _build_wrong_match_groups(
+        include_replaced=include_replaced)})
 
 
 def _download_log_id_from_params(params: dict[str, list[str]]) -> int:

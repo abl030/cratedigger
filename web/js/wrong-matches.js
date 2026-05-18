@@ -321,13 +321,26 @@ export async function loadWrongMatches() {
   if (!el) return;
   el.innerHTML = '<div class="loading">Loading wrong matches...</div>';
   try {
-    const r = await fetch(`${API}/api/wrong-matches`);
+    // U10: opt-in toggle persists in localStorage. Default: filtered.
+    const includeReplaced = localStorage.getItem('wrongMatches.includeReplaced') === 'true';
+    const url = `${API}/api/wrong-matches${includeReplaced ? '?include_replaced=true' : ''}`;
+    const r = await fetch(url);
     const data = await r.json();
     _loaded = true;
     renderWrongMatches(data, el);
   } catch (e) {
     el.innerHTML = '<div style="color:#f66;">Failed to load wrong matches</div>';
   }
+}
+
+/**
+ * Toggle "show replaced" filter (U10). Re-fetches with the new flag.
+ */
+export function toggleWrongMatchesReplacedFilter() {
+  const current = localStorage.getItem('wrongMatches.includeReplaced') === 'true';
+  localStorage.setItem('wrongMatches.includeReplaced', String(!current));
+  _loaded = false;
+  loadWrongMatches();
 }
 
 /**

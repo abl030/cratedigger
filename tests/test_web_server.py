@@ -2503,6 +2503,79 @@ class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
         mock_adv.assert_not_called()
 
 
+class TestReplacedFilterContract(_WebServerCase):
+    """U10 backend tests for the ``?include_replaced`` query parameter
+    on pipeline + wrong-matches list endpoints, plus the descendant_*
+    fields surfaced from ``post_pipeline_add`` when the existing row is
+    ``status='replaced'``.
+    """
+
+    def setUp(self) -> None:
+        # Default mock for the supersede-lookup so the add-flow tests
+        # below can override per-test.
+        self.mock_db.get_request_by_replaces_request_id.return_value = None
+
+    def test_pipeline_all_default_excludes_replaced(self):
+        captured: list[tuple[str, ...]] = []
+        def fake_get_by_status(status):
+            captured.append((status,))
+            return []
+        self.mock_db.get_by_status.side_effect = fake_get_by_status
+        self.mock_db.count_by_status.return_value = {}
+        self.mock_db.get_download_history_batch.return_value = {}
+        status, _ = self._get("/api/pipeline/all")
+        self.assertEqual(status, 200)
+        statuses = [c[0] for c in captured]
+        self.assertNotIn("replaced", statuses)
+
+    def test_pipeline_all_include_replaced_true_fetches_replaced(self):
+        captured: list[tuple[str, ...]] = []
+        def fake_get_by_status(status):
+            captured.append((status,))
+            return []
+        self.mock_db.get_by_status.side_effect = fake_get_by_status
+        self.mock_db.count_by_status.return_value = {}
+        self.mock_db.get_download_history_batch.return_value = {}
+        status, _ = self._get("/api/pipeline/all?include_replaced=true")
+        self.assertEqual(status, 200)
+        statuses = [c[0] for c in captured]
+        self.assertIn("replaced", statuses)
+
+    def test_post_pipeline_add_with_replaced_existing_surfaces_descendant(self):
+        # The harness routes get_request_by_release_id through
+        # get_request_by_mb_release_id (see _make_server), so mock that.
+        self.mock_db.get_request_by_mb_release_id.return_value = {
+            "id": 42, "status": "replaced",
+            "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        }
+        self.mock_db.get_request_by_replaces_request_id.return_value = {
+            "id": 99, "status": "wanted",
+            "mb_release_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        }
+        status, data = self._post(
+            "/api/pipeline/add",
+            {"mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(data["current_status"], "replaced")
+        self.assertEqual(data["descendant_request_id"], 99)
+        self.assertEqual(data["descendant_status"], "wanted")
+
+    def test_post_pipeline_add_with_non_replaced_existing_omits_descendant(self):
+        self.mock_db.get_request_by_mb_release_id.return_value = {
+            "id": 42, "status": "wanted",
+            "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        }
+        status, data = self._post(
+            "/api/pipeline/add",
+            {"mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["current_status"], "wanted")
+        self.assertNotIn("descendant_request_id", data)
+
+
 class TestPipelineReplaceContract(_WebServerCase):
     """Contract for ``POST /api/pipeline/<id>/replace`` plus the two
     auxiliary endpoints (``GET /api/pipeline/requests-by-rg/<rg>`` and

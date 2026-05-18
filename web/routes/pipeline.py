@@ -270,12 +270,21 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     all_data: dict[str, object] = {"counts": counts}
     status_items: dict[str, list[dict]] = {}
     all_ids: list[int] = []
-    for status in ("wanted", "downloading", "imported", "manual"):
+    statuses: tuple[str, ...] = ("wanted", "downloading", "imported", "manual")
+    # ``?include_replaced=true`` opt-in surfaces the frozen audit rows
+    # for operators reviewing past Replace actions (R30). Default off so
+    # the standard view stays focused on active work.
+    include_replaced = (
+        params.get("include_replaced", ["false"])[0].lower() == "true"
+    )
+    if include_replaced:
+        statuses = statuses + ("replaced",)
+    for status in statuses:
         rows = [s._serialize_row(r) for r in s._db().get_by_status(status)]
         status_items[status] = rows
         all_ids.extend([int(str(r["id"])) for r in rows])
     history_batch = s._db().get_download_history_batch(all_ids)
-    for status in ("wanted", "downloading", "imported", "manual"):
+    for status in statuses:
         all_data[status] = _attach_latest_download_history(
             status_items[status],
             history_batch,
@@ -1005,11 +1014,18 @@ def post_pipeline_add(h, body: dict) -> None:
         # Discogs flow: store discogs ID in both columns for pipeline compat
         existing = s._db().get_request_by_release_id(discogs_id)
         if existing:
-            h._json({
+            payload: dict[str, object] = {
                 "status": "exists",
                 "id": existing["id"],
                 "current_status": existing["status"],
-            })
+            }
+            if existing["status"] == "replaced":
+                descendant = s._db().get_request_by_replaces_request_id(
+                    existing["id"])
+                if descendant is not None:
+                    payload["descendant_request_id"] = descendant["id"]
+                    payload["descendant_status"] = descendant.get("status")
+            h._json(payload)
             return
 
         # Bypass the 24h meta cache — this write path persists artist /
@@ -1053,11 +1069,23 @@ def post_pipeline_add(h, body: dict) -> None:
     # MusicBrainz flow (unchanged)
     existing = s._db().get_request_by_release_id(mbid)
     if existing:
-        h._json({
+        payload: dict[str, object] = {
             "status": "exists",
             "id": existing["id"],
             "current_status": existing["status"],
-        })
+        }
+        # R33 / U10: when the existing row is a frozen audit row from a
+        # past Replace, surface the descendant id so the UI can render a
+        # "previously abandoned — active request is at /pipeline/<id>"
+        # forward-link instead of the generic "already in pipeline"
+        # message.
+        if existing["status"] == "replaced":
+            descendant = s._db().get_request_by_replaces_request_id(
+                existing["id"])
+            if descendant is not None:
+                payload["descendant_request_id"] = descendant["id"]
+                payload["descendant_status"] = descendant.get("status")
+        h._json(payload)
         return
 
     # Bypass the 24h meta cache — same reason as the Discogs branch

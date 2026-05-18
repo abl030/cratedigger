@@ -344,7 +344,19 @@ export async function addRelease(mbid, btn) {
       } else {
         btn.textContent = data.current_status;
       }
-      toast(`Already in pipeline (${data.current_status})`);
+      // R33 / U10: surface the "previously abandoned" warning with a
+      // forward-link to the active descendant when the existing row is
+      // a frozen audit row from a past Replace.
+      if (data.current_status === 'replaced' && data.descendant_request_id) {
+        toast(
+          `This MBID was previously abandoned via Replace. ` +
+          `Active request: #${data.descendant_request_id} ` +
+          `(${data.descendant_status || 'unknown'}).`,
+          true,
+        );
+      } else {
+        toast(`Already in pipeline (${data.current_status})`);
+      }
     } else {
       btn.textContent = 'Error';
       toast(data.error || 'Unknown error', true);
