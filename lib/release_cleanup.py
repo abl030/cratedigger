@@ -185,14 +185,28 @@ def remove_and_reset_release(
     pipeline_db: "PipelineDB",
     release_id: str,
     request_id: int,
+    *,
+    clear_pipeline_state: bool = True,
 ) -> ReleaseCleanupResult:
-    """Atomically remove a release from beets and clear pipeline ghost state.
+    """Atomically remove a release from beets and (optionally) clear
+    pipeline ghost state.
 
     Thin wrapper around ``remove_album_by_selectors`` that adds the
-    pipeline-DB cleanup: iff the album is absent afterwards, clear
-    stale ``current_spectral_*`` / ``imported_path`` /
-    ``verified_lossless`` so downstream consumers don't reason about
-    ghost state left behind by the removed album.
+    pipeline-DB cleanup: iff the album is absent afterwards AND
+    ``clear_pipeline_state=True`` (the default), clear stale
+    ``current_spectral_*`` / ``imported_path`` / ``verified_lossless``
+    so downstream consumers don't reason about ghost state left
+    behind by the removed album.
+
+    Set ``clear_pipeline_state=False`` to perform the beets removal
+    without touching the pipeline row's characteristic fields. The
+    Replace operator action uses this mode: the old request row has
+    already been frozen via supersede (`status='replaced'`) and its
+    spectral / V0 / verified_lossless fields stay as historical
+    truth on the audit row. Replace clears ``imported_path`` itself
+    via the supersede transaction (R14 carve-out); leaving the
+    other characteristic fields intact is intentional. Ban-source
+    keeps the default ``clear_pipeline_state=True``.
 
     See ``ReleaseCleanupResult`` for the return contract.
 
@@ -204,7 +218,7 @@ def remove_and_reset_release(
 
     result = remove_album_by_selectors(beets_db, release_id)
 
-    if result.absent_after:
+    if result.absent_after and clear_pipeline_state:
         pipeline_db.clear_on_disk_quality_fields(request_id)
 
     return result
