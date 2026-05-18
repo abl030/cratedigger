@@ -1713,6 +1713,89 @@ def cmd_search_plan_regenerate(db, args):
     return 1
 
 
+def cmd_replace(db, args):
+    """Supersede a request with a new row at a different MBID.
+
+    Counterpart of ``POST /api/pipeline/<id>/replace``. Both surfaces
+    wrap ``MbidReplaceService.replace_request_mbid`` — keep them in
+    sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Exit codes:
+      * 0 — ``RESULT_REPLACED``
+      * 2 — ``RESULT_NOT_FOUND``
+      * 3 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
+            ``RESULT_TARGET_SAME_AS_CURRENT`` (semantic input violations)
+      * 4 — ``RESULT_WRONG_STATE``, ``RESULT_TARGET_COLLISION_REQUEST``
+      * 5 — ``RESULT_TRANSIENT`` (retryable; MB lookup or supersede race)
+    """
+    from lib.config import read_runtime_config
+    from lib.mbid_replace_service import (
+        MbidReplaceService,
+        RESULT_NOT_FOUND,
+        RESULT_REPLACED,
+        RESULT_TARGET_COLLISION_REQUEST,
+        RESULT_TARGET_INVALID,
+        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+        RESULT_TARGET_SAME_AS_CURRENT,
+        RESULT_TRANSIENT,
+        RESULT_WRONG_STATE,
+    )
+
+    cfg = read_runtime_config()
+    svc = MbidReplaceService(db=db, config=cfg)
+    result = svc.replace_request_mbid(
+        int(args.id),
+        target_mb_release_id=args.target_mb_release_id,
+    )
+
+    payload = {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "new_request_id": result.new_request_id,
+        "current_status": result.current_status,
+        "descendant_request_id": result.descendant_request_id,
+        "error_message": result.error_message,
+        "warnings": list(result.warnings),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:        {payload['request_id']}")
+        print(f"  Outcome:           {result.outcome}")
+        if result.new_request_id is not None:
+            print(f"  New request id:    {result.new_request_id}")
+        if result.current_status is not None:
+            print(f"  Holder status:     {result.current_status}")
+        if result.descendant_request_id is not None:
+            print(f"  Descendant id:     {result.descendant_request_id}")
+        if result.error_message:
+            print(f"  Error message:     {result.error_message}")
+        if result.warnings:
+            print("  Warnings:")
+            for w in result.warnings:
+                print(f"    - {w}")
+
+    if result.outcome == RESULT_REPLACED:
+        return 0
+    if result.outcome == RESULT_NOT_FOUND:
+        return 2
+    if result.outcome in (
+        RESULT_TARGET_INVALID,
+        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+        RESULT_TARGET_SAME_AS_CURRENT,
+    ):
+        return 3
+    if result.outcome in (
+        RESULT_WRONG_STATE,
+        RESULT_TARGET_COLLISION_REQUEST,
+    ):
+        return 4
+    if result.outcome == RESULT_TRANSIENT:
+        return 5
+    return 1
+
+
 def cmd_search_plan_advance(db, args):
     """Forward-only operator advance of the search-plan cursor.
 
@@ -2080,6 +2163,18 @@ def main():
     p_repair.add_argument("--dry-run", action="store_true",
                           help="Show what would be repaired without changing anything")
 
+    # replace
+    p_replace = sub.add_parser(
+        "replace",
+        help="Supersede a request with a new row at a different MBID "
+             "in the same release group")
+    p_replace.add_argument("id", type=int, help="Source request ID")
+    p_replace.add_argument(
+        "--to", dest="target_mb_release_id", required=True,
+        help="Target MB release ID (must share the source's release group)")
+    p_replace.add_argument("--json", action="store_true",
+                           help="Print structured JSON instead of text")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -2110,6 +2205,7 @@ def main():
         "wrong-match-delete": cmd_wrong_match_delete,
         "wrong-match-delete-group": cmd_wrong_match_delete_group,
         "repair-spectral": cmd_repair_spectral,
+        "replace": cmd_replace,
     }
     search_plan_commands = {
         "show": cmd_search_plan_show,

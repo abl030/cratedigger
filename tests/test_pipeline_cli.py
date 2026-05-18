@@ -2099,6 +2099,95 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
         self.assertEqual(payload["new_query"], "Love Till Tuesday")
 
 
+class TestCmdReplace(unittest.TestCase):
+    """``pipeline-cli replace`` wraps
+    ``MbidReplaceService.replace_request_mbid``. Counterpart of the
+    API endpoint ``POST /api/pipeline/<id>/replace`` — both must stay
+    in sync; see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"."""
+
+    def _run(self, *, mock_outcome, mock_kwargs=None, json_out=False,
+             req_id=42, target_mbid="new-mbid"):
+        from lib.mbid_replace_service import ReplaceResult
+
+        result = ReplaceResult(
+            outcome=mock_outcome,
+            request_id=req_id,
+            **(mock_kwargs or {}),
+        )
+        args = SimpleNamespace(
+            id=req_id, target_mb_release_id=target_mbid, json=json_out,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg, \
+                 patch("lib.mbid_replace_service.MbidReplaceService") as MS:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                MS.return_value.replace_request_mbid.return_value = result
+                rc = pipeline_cli.cmd_replace(MagicMock(), args)
+        return rc, stdout.getvalue()
+
+    def test_exit_0_on_replaced(self):
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={"new_request_id": 99},
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("replaced", out)
+        self.assertIn("99", out)
+
+    def test_exit_2_on_not_found(self):
+        rc, _ = self._run(mock_outcome="not_found")
+        self.assertEqual(rc, 2)
+
+    def test_exit_3_on_semantic_violations(self):
+        for outcome in (
+            "target_invalid",
+            "target_release_group_mismatch",
+            "target_same_as_current",
+        ):
+            with self.subTest(outcome=outcome):
+                rc, _ = self._run(mock_outcome=outcome)
+                self.assertEqual(rc, 3)
+
+    def test_exit_4_on_wrong_state_and_collision(self):
+        for outcome in (
+            "wrong_state",
+            "target_collision_request",
+        ):
+            with self.subTest(outcome=outcome):
+                rc, _ = self._run(mock_outcome=outcome)
+                self.assertEqual(rc, 4)
+
+    def test_exit_5_on_transient(self):
+        rc, _ = self._run(mock_outcome="transient")
+        self.assertEqual(rc, 5)
+
+    def test_json_output_carries_full_payload(self):
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={"new_request_id": 99, "warnings": ("w1",)},
+            json_out=True,
+        )
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "replaced")
+        self.assertEqual(payload["new_request_id"], 99)
+        self.assertEqual(payload["warnings"], ["w1"])
+
+    def test_argparse_rejects_missing_to(self):
+        parser_test_argv = ["replace", "42"]
+        with patch.object(sys, "argv", ["pipeline-cli"] + parser_test_argv), \
+             redirect_stderr(io.StringIO()), \
+             self.assertRaises(SystemExit) as cm:
+            pipeline_cli.main()
+        # argparse exits with code 2 for missing required args.
+        self.assertEqual(cm.exception.code, 2)
+
+
 class TestCmdSearchPlanHistory(unittest.TestCase):
     """``pipeline-cli search-plan history`` wraps
     ``SearchPlanService.history_for_request``. Counterpart of the API
