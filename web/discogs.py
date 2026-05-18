@@ -201,16 +201,61 @@ def search_artists(query: str) -> list[dict]:
     return _cache.memoize_meta(f"discogs:search:artists:{cache_query}", _fetch)
 
 
+def _normalize_artist_master_entry(r: dict) -> dict:
+    """Shape one row from /api/artists/{id}/{masters,appearances} into our schema.
+
+    Masterless releases come back with id ``release-<n>``; we strip the prefix
+    so the bare release id flows through downstream lookups (the row gets
+    ``is_masterless=True`` + a ``discogs_release_id`` so the UI knows to expand
+    via the release endpoint, not the master endpoint).
+    """
+    raw_id = r.get("id")
+    is_masterless = bool(r.get("is_masterless"))
+    if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
+        bare_id = raw_id[len("release-"):]
+        return {
+            "id": bare_id,
+            "title": r.get("title", ""),
+            "type": r.get("type", ""),
+            "secondary_types": [],
+            "first_release_date": r.get("first_release_date", ""),
+            "artist_credit": r.get("artist_credit", ""),
+            "primary_artist_id": str(r.get("primary_artist_id") or ""),
+            "is_masterless": True,
+            "discogs_release_id": bare_id,
+        }
+    return {
+        "id": str(raw_id),
+        "title": r.get("title", ""),
+        "type": r.get("type", ""),
+        "secondary_types": [],
+        "first_release_date": r.get("first_release_date", ""),
+        "artist_credit": r.get("artist_credit", ""),
+        "primary_artist_id": str(r.get("primary_artist_id") or ""),
+    }
+
+
 def get_artist_releases(artist_id: int) -> list[dict]:
     """Get an artist's discography grouped by master. Mirrors mb.get_artist_release_groups().
 
-    Uses /api/artists/{id}/masters which returns master-level entries with
-    inferred type (Album/Single/EP/Other). Masterless releases come back with
-    id "release-<n>" and is_masterless=True; we strip the prefix so the bare
-    release ID is usable for downstream lookups.
+    Merges two mirror endpoints:
+
+    * ``/api/artists/{id}/masters`` — releases where the artist is on the
+      master/release-level credit. Paginated; we walk all pages.
+    * ``/api/artists/{id}/appearances`` — releases where the artist appears
+      only via a track-level credit (compilations, guest spots, samplers).
+      Single response, no pagination.
+
+    Dedupe by ``id``: a master that already came back from ``/masters`` (i.e.
+    the artist is a primary credit on at least one of its releases) wins —
+    we don't downgrade it to an appearance even when it ALSO has releases
+    where the artist is only a track-level credit (cf. the Wilderness
+    "Sentimental Noise / Future Seats" split, which sits in the same master
+    as a Various-credited "Sentimental Noise" compilation).
     """
     def _fetch() -> list[dict]:
-        entries: list[dict] = []
+        entries: dict[str, dict] = {}
+
         page = 1
         while True:
             data = _get(
@@ -220,41 +265,26 @@ def get_artist_releases(artist_id: int) -> list[dict]:
             if not results:
                 break
             for r in results:
-                raw_id = r.get("id")
-                is_masterless = bool(r.get("is_masterless"))
-                if is_masterless and isinstance(raw_id, str) and raw_id.startswith("release-"):
-                    bare_id = raw_id[len("release-"):]
-                    entry = {
-                        "id": bare_id,
-                        "title": r.get("title", ""),
-                        "type": r.get("type", ""),
-                        "secondary_types": [],
-                        "first_release_date": r.get("first_release_date", ""),
-                        "artist_credit": r.get("artist_credit", ""),
-                        "primary_artist_id": str(r.get("primary_artist_id") or ""),
-                        "is_masterless": True,
-                        "discogs_release_id": bare_id,
-                    }
-                else:
-                    entry = {
-                        "id": str(raw_id),
-                        "title": r.get("title", ""),
-                        "type": r.get("type", ""),
-                        "secondary_types": [],
-                        "first_release_date": r.get("first_release_date", ""),
-                        "artist_credit": r.get("artist_credit", ""),
-                        "primary_artist_id": str(r.get("primary_artist_id") or ""),
-                    }
-                entries.append(entry)
+                entry = _normalize_artist_master_entry(r)
+                entries.setdefault(entry["id"], entry)
             total = data.get("total", 0)
             if page * data.get("per_page", 100) >= total:
                 break
-            if len(entries) >= 500:
-                break
             page += 1
-        return entries
 
-    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases", _fetch)
+        appearances = _get(
+            f"{DISCOGS_API_BASE}/api/artists/{artist_id}/appearances"
+        )
+        for r in appearances.get("results", []):
+            entry = _normalize_artist_master_entry(r)
+            entries.setdefault(entry["id"], entry)
+
+        return sorted(
+            entries.values(),
+            key=lambda e: (e.get("first_release_date") or "", e.get("id", "")),
+        )
+
+    return _cache.memoize_meta(f"discogs:artist:{artist_id}:releases:v2", _fetch)
 
 
 def get_master_releases(master_id: int) -> dict:

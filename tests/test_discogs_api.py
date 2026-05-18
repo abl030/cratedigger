@@ -313,8 +313,30 @@ class TestSearchArtists(unittest.TestCase):
         self.assertLess(len(cache_key), len(f"discogs:search:artists:{long_query}"))
 
 
+def _mock_urlopen_by_url(responses: dict):
+    """Mock urllib.request.urlopen with per-URL-substring responses.
+
+    ``responses`` is a dict mapping a substring of the URL to the JSON payload
+    that should come back. Each match is independent — callers can mock
+    /masters and /appearances with different bodies in the same context.
+    """
+
+    def _side_effect(req, *args, **kwargs):
+        url = req.full_url
+        for needle, payload in responses.items():
+            if needle in url:
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps(payload).encode()
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                return mock_resp
+        raise AssertionError(f"no mock response configured for URL: {url}")
+
+    return patch("web.discogs.urllib.request.urlopen", side_effect=_side_effect)
+
+
 class TestGetArtistReleases(unittest.TestCase):
-    """get_artist_releases() now hits /api/artists/{id}/masters (master-grouped)."""
+    """get_artist_releases() merges /masters + /appearances from the mirror."""
 
     MASTERS_DATA = {
         "results": [
@@ -351,12 +373,18 @@ class TestGetArtistReleases(unittest.TestCase):
         "per_page": 100,
     }
 
+    EMPTY_APPEARANCES = {"results": [], "total": 0, "page": 1, "per_page": 1}
+
     def test_normalizes_master_discography(self):
-        with _mock_urlopen(self.MASTERS_DATA) as mock:
+        with _mock_urlopen_by_url({
+            "/masters": self.MASTERS_DATA,
+            "/appearances": self.EMPTY_APPEARANCES,
+        }) as mock:
             results = get_artist_releases(3840)
 
-        called_url = mock.call_args[0][0].full_url
-        self.assertIn("/api/artists/3840/masters", called_url)
+        called_urls = [c.args[0].full_url for c in mock.call_args_list]
+        self.assertTrue(any("/api/artists/3840/masters" in u for u in called_urls))
+        self.assertTrue(any("/api/artists/3840/appearances" in u for u in called_urls))
 
         self.assertEqual(len(results), 3)
 
@@ -373,6 +401,67 @@ class TestGetArtistReleases(unittest.TestCase):
         self.assertEqual(masterless["id"], "83182")  # "release-" prefix stripped
         self.assertEqual(masterless["discogs_release_id"], "83182")
         self.assertTrue(masterless["is_masterless"])
+
+    def test_appearances_merged_and_classified_as_non_primary(self):
+        appearances = {
+            "results": [
+                {
+                    "id": 555,
+                    "title": "Indie 1996",
+                    "type": "Album",
+                    "first_release_date": "1996",
+                    "artist_credit": "Various",
+                    "primary_artist_id": 194,
+                    "is_masterless": False,
+                },
+            ],
+            "total": 1,
+            "page": 1,
+            "per_page": 1,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": self.MASTERS_DATA,
+            "/appearances": appearances,
+        }):
+            results = get_artist_releases(3840)
+        comp = next(r for r in results if r["title"] == "Indie 1996")
+        self.assertEqual(comp["primary_artist_id"], "194")
+        self.assertEqual(comp["artist_credit"], "Various")
+        # The JS classifier reads primary_artist_id !== artist_id to route into
+        # the Appearances section — so it must NOT equal the queried artist id.
+        self.assertNotEqual(comp["primary_artist_id"], "3840")
+        self.assertEqual(len(results), 4)
+
+    def test_dedup_masters_wins_over_appearances(self):
+        """When a master shows up in BOTH endpoints (split release where the
+        artist is a primary credit on one release and a track-only credit on
+        a sibling release in the same master), the /masters classification
+        wins — we don't downgrade an own-work master to an appearance."""
+        appearance_dup = {
+            "results": [
+                {
+                    "id": 13344,  # same master id as Pablo Honey in /masters
+                    "title": "Pablo Honey (Various comp version)",
+                    "type": "Album",
+                    "first_release_date": "1993",
+                    "artist_credit": "Various",
+                    "primary_artist_id": 194,
+                    "is_masterless": False,
+                },
+            ],
+            "total": 1,
+            "page": 1,
+            "per_page": 1,
+        }
+        with _mock_urlopen_by_url({
+            "/masters": self.MASTERS_DATA,
+            "/appearances": appearance_dup,
+        }):
+            results = get_artist_releases(3840)
+        self.assertEqual(len(results), 3)
+        pablo = next(r for r in results if r["id"] == "13344")
+        self.assertEqual(pablo["artist_credit"], "Radiohead")
+        self.assertEqual(pablo["primary_artist_id"], "3840")
 
 
 class TestGetArtistName(unittest.TestCase):
