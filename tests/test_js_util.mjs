@@ -745,6 +745,49 @@ assertEqual(replaceEsc('<script>'), '&lt;script&gt;', 'esc escapes <');
 assertEqual(replaceEsc('a&b'), 'a&amp;b', 'esc escapes &');
 assertEqual(replaceEsc('"x"'), '&quot;x&quot;', 'esc escapes "');
 
+// renderReplaceButton (release_actions.js) — U9
+import { renderReplaceButton } from '../web/js/release_actions.js';
+
+const stdBtn = renderReplaceButton({
+  mode: 'standard',
+  sourceRequestId: 4194,
+  releaseGroupId: 'rg-1',
+  sourceLabel: 'Pet Grief — Old',
+}, { stopPropagation: true });
+assert(stdBtn.includes('window.openReplacePicker'),
+  'renderReplaceButton standard wires through window.openReplacePicker');
+assert(stdBtn.includes('sourceRequestId: 4194'),
+  'renderReplaceButton standard carries sourceRequestId');
+assert(stdBtn.includes('releaseGroupId'),
+  'renderReplaceButton standard carries releaseGroupId');
+
+const invEnabled = renderReplaceButton({
+  mode: 'inverted',
+  targetMbid: 'new-mbid',
+  releaseGroupId: 'rg-1',
+  targetLabel: 'Pet Grief — New',
+}, { enabled: true });
+assert(invEnabled.includes('targetMbid'),
+  'renderReplaceButton inverted enabled wires targetMbid');
+assert(!invEnabled.includes('disabled'),
+  'renderReplaceButton inverted enabled is not disabled');
+
+const invDisabled = renderReplaceButton({
+  mode: 'inverted',
+  targetMbid: 'new-mbid',
+  releaseGroupId: 'rg-1',
+  targetLabel: 'Pet Grief — New',
+}, { enabled: false });
+assert(invDisabled.includes('disabled'),
+  'renderReplaceButton inverted disabled carries disabled attr');
+assert(!invDisabled.includes('window.openReplacePicker'),
+  'renderReplaceButton inverted disabled does not wire onclick');
+
+// Active-RG Set lookup — U9 enable logic
+const activeRgSet = new Set(['rg-1', 'rg-2']);
+assertEqual(activeRgSet.has('rg-1'), true, 'active-RG Set hit');
+assertEqual(activeRgSet.has('rg-not-active'), false, 'active-RG Set miss');
+
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -154,6 +154,64 @@ export function renderBadRipButton(state, opts = {}) {
 }
 
 /**
+ * Render the Replace button for the operator action.
+ *
+ * Two modes:
+ *
+ *   Standard mode (`opts.mode === 'standard'`): the row IS the request
+ *   being replaced. Used on Pipeline, Wrong Matches, and Browse-library
+ *   surfaces. Click → ``window.openReplacePicker({sourceRequestId,
+ *   releaseGroupId, sourceLabel})``.
+ *
+ *   Inverted mode (`opts.mode === 'inverted'`): the row IS the new
+ *   MBID. Used on Browse-search rows. Enabled only when there is an
+ *   existing non-replaced request in the same release group
+ *   (``opts.enabled === true``); disabled otherwise so the affordance
+ *   communicates "nothing to replace here" without requiring a click.
+ *   Click → ``window.openReplacePicker({targetMbid, releaseGroupId,
+ *   targetLabel})``.
+ *
+ * @param {Object} args
+ * @param {'standard'|'inverted'} args.mode
+ * @param {number} [args.sourceRequestId]  // standard mode
+ * @param {string} [args.targetMbid]       // inverted mode
+ * @param {string} args.releaseGroupId
+ * @param {string} [args.sourceLabel]
+ * @param {string} [args.targetLabel]
+ * @param {Object} [opts]
+ * @param {boolean} [opts.enabled]  // inverted-mode enable flag
+ * @param {string} [opts.className]
+ * @param {string} [opts.style]
+ * @param {string} [opts.label]
+ * @param {boolean} [opts.stopPropagation]
+ * @returns {string}
+ */
+export function renderReplaceButton(args, opts = {}) {
+  const className = opts.className || 'btn';
+  const label = opts.label || 'Replace';
+  const style = opts.style ? ` style="${opts.style}"` : '';
+  const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
+
+  if (args.mode === 'standard') {
+    if (!args.sourceRequestId || !args.releaseGroupId) return '';
+    const sourceArg = jsArg(args.sourceLabel || '');
+    const rgArg = jsArg(args.releaseGroupId);
+    return `<button class="${className}"${style} onclick="${stopPropagation}window.openReplacePicker({sourceRequestId: ${args.sourceRequestId}, releaseGroupId: ${rgArg}, sourceLabel: ${sourceArg}})">${label}</button>`;
+  }
+
+  // Inverted mode.
+  if (!args.targetMbid || !args.releaseGroupId) return '';
+  const enabled = opts.enabled !== false;
+  const mbidArg = jsArg(args.targetMbid);
+  const rgArg = jsArg(args.releaseGroupId);
+  const targetArg = jsArg(args.targetLabel || '');
+  if (!enabled) {
+    return `<button class="${className}"${style} disabled title="No existing request in this release group">${label}</button>`;
+  }
+  return `<button class="${className}"${style} onclick="${stopPropagation}window.openReplacePicker({targetMbid: ${mbidArg}, releaseGroupId: ${rgArg}, targetLabel: ${targetArg}})">${label}</button>`;
+}
+
+/**
  * Render the toolbar HTML for one row.
  *
  * @param {ReleaseActionState} state

@@ -416,6 +416,7 @@ def _build_wrong_match_groups() -> list[dict[str, object]]:
                 "artist": row["artist_name"],
                 "album": row["album_title"],
                 "mb_release_id": row.get("mb_release_id"),
+                "mb_release_group_id": row.get("mb_release_group_id"),
                 "in_library": in_library,
                 "pending_count": 0,
                 "entries": [],

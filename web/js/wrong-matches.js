@@ -1,6 +1,7 @@
 // @ts-check
 import { API, toast } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel } from './util.js';
+import { renderReplaceButton } from './release_actions.js';
 
 /** @type {boolean} */
 let _loaded = false;
@@ -962,6 +963,12 @@ function renderConvergeControls(g, count, thresholdMilli) {
       <div style="display:flex;align-items:center;gap:6px;">
         <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
         <button id="wm-converge-btn-${g.request_id}" class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
+        ${g.mb_release_group_id ? renderReplaceButton({
+          mode: 'standard',
+          sourceRequestId: g.request_id,
+          releaseGroupId: g.mb_release_group_id,
+          sourceLabel: `${g.artist || ''} — ${g.album || ''}`,
+        }, { className: 'p-btn', stopPropagation: true }) : ''}
       </div>
     </div>`;
 }

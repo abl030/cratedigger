@@ -2836,6 +2836,7 @@ class FakePipelineDB:
                 "artist_name": req.get("artist_name"),
                 "album_title": req.get("album_title"),
                 "mb_release_id": req.get("mb_release_id"),
+                "mb_release_group_id": req.get("mb_release_group_id"),
                 "soulseek_username": entry.soulseek_username,
                 "validation_result": entry.validation_result,
                 "spectral_grade": spectral_grade,

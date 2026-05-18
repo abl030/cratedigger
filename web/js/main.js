@@ -16,7 +16,45 @@ import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './an
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
+import { openReplacePicker } from './replace_picker.js';
 import { toast } from './state.js';
+
+/**
+ * Replace-picker wrapper that surfaces success / failure toasts and
+ * refetches the affected tab so the new request appears immediately.
+ *
+ * Called from inline onclick handlers in `release_actions.js`. The
+ * picker's confirm-stage POST handles the network round-trip; this
+ * wrapper only does post-completion UX.
+ *
+ * @param {import('./replace_picker.js').ReplacePickerOptions} options
+ */
+async function openReplacePickerAndHandle(options) {
+  const result = await openReplacePicker(options);
+  if (result.outcome !== 'confirmed') return;
+  const { status, body } = result.response || { status: 0, body: {} };
+  if (status === 200) {
+    const newId = body.new_request_id;
+    toast(`Replaced — new request #${newId}.`, false);
+    // Best-effort refetch on whichever tab the operator is most likely
+    // on. Pipeline is the canonical viewer of an album_requests row;
+    // wrong-matches and browse re-fetch on their own next interaction.
+    const pipeSection = document.getElementById('pipeline-section');
+    if (pipeSection && pipeSection.classList.contains('active')) {
+      loadPipeline();
+    }
+    const manualSection = document.getElementById('manual-section');
+    if (manualSection && manualSection.classList.contains('active')) {
+      loadWrongMatches();
+    }
+  } else if (status === 409 && body && body.descendant_request_id) {
+    toast(`Already replaced. New request is #${body.descendant_request_id}.`, true);
+  } else if (body && body.error) {
+    toast(`Replace failed: ${body.error}`, true);
+  } else {
+    toast(`Replace failed (HTTP ${status})`, true);
+  }
+}
 
 // --- Tab management ---
 const tabOrder = ['browse', 'recents', 'pipeline', 'decisions', 'manual'];
@@ -172,5 +210,8 @@ Object.assign(window, {
   searchPlanRefreshDetail,
   searchPlanSubmitAdvance,
   searchPlanCancelAdvance,
+  // Replace operator action — U9 binding so cross-module onclick
+  // handlers in `release_actions.js` can call into the picker.
+  openReplacePicker: openReplacePickerAndHandle,
   toast,
 });

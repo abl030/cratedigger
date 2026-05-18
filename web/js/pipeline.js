@@ -2,7 +2,7 @@
 import { state, API, toast } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
-import { renderBadRipButton } from './release_actions.js';
+import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
 
 /**
@@ -948,6 +948,18 @@ export async function toggleDetail(elId, requestId) {
       className: 'p-btn delete',
       stopPropagation: true,
     });
+    // Replace button — only shown when the row is not itself a frozen
+    // audit row (R30 / scope boundary "re-replacing a replaced row is
+    // not supported") and the row has a release group to anchor the
+    // picker on.
+    if (req.status !== 'replaced' && req.mb_release_group_id) {
+      html += renderReplaceButton({
+        mode: 'standard',
+        sourceRequestId: id,
+        releaseGroupId: req.mb_release_group_id,
+        sourceLabel: `${req.artist_name || ''} — ${req.album_title || ''}`,
+      }, { className: 'p-btn', stopPropagation: true });
+    }
     html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>
     </div>`;
 

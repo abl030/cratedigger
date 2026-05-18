@@ -3099,6 +3099,7 @@ class PipelineDB:
                 ar.artist_name,
                 ar.album_title,
                 ar.mb_release_id,
+                ar.mb_release_group_id,
                 dl.soulseek_username,
                 dl.validation_result,
                 COALESCE(e.spectral_grade, dl.spectral_grade) AS spectral_grade,
