@@ -683,6 +683,68 @@ assertParse(
   'Discogs marketplace URL rejected (deferred per Scope Boundaries)',
 );
 
+// ============================================================
+// replace_picker.js — U8
+// ============================================================
+import {
+  renderPressingsList,
+  renderRequestsList,
+  renderConfirmDialog,
+  renderStandardHeader,
+  renderInvertedHeader,
+  esc as replaceEsc,
+} from '../web/js/replace_picker.js';
+
+assertEqual(
+  renderPressingsList([], 'whatever').includes('No pressings'),
+  true,
+  'renderPressingsList empty → friendly message',
+);
+
+const sample = [
+  { id: 'aaa', title: 'Pressing A', date: '2020-01-01', country: 'US', track_count: 12, format: 'CD' },
+  { id: 'bbb', title: 'Pressing B', date: '2021-05-01', country: 'JP', track_count: 13, format: 'LP' },
+];
+const pressingsHtml = renderPressingsList(sample, 'aaa');
+assert(pressingsHtml.includes('data-mbid="aaa"'), 'renderPressingsList includes current as data-mbid');
+assert(pressingsHtml.includes('disabled'), 'renderPressingsList marks current pressing disabled');
+assert(pressingsHtml.includes('current pressing'), 'renderPressingsList labels current pressing');
+assert(pressingsHtml.includes('data-mbid="bbb"'), 'renderPressingsList includes sibling');
+assert(!/<button[^>]*data-mbid="bbb"[^>]*disabled/.test(pressingsHtml),
+  'renderPressingsList does not disable non-current siblings');
+
+assertEqual(
+  renderRequestsList([]).includes('No active requests'),
+  true,
+  'renderRequestsList empty → friendly message',
+);
+const reqHtml = renderRequestsList([
+  { id: 42, mb_release_id: 'old-uuid', status: 'wanted', artist_name: 'Pet Grief', album_title: 'X' },
+]);
+assert(reqHtml.includes('data-rid="42"'), 'renderRequestsList carries id');
+assert(reqHtml.includes('Pet Grief'), 'renderRequestsList includes artist');
+
+const dlg = renderConfirmDialog({
+  sourceRequestId: 4194,
+  targetMbid: '18056805-33f5-3e99-aa4b-5f5919c4f8af',
+  targetLabel: 'Pet Grief — New Pressing',
+});
+assert(dlg.includes('Replace request #4194'), 'confirm dialog includes source id');
+assert(dlg.includes('18056805-33f5-3e99-aa4b-5f5919c4f8af'), 'confirm dialog includes target mbid');
+assert(dlg.includes('issue #278'), 'confirm dialog mentions orphan transfer issue #278');
+assert(dlg.includes('replace-picker-cancel'), 'confirm dialog has cancel button id');
+assert(dlg.includes('replace-picker-confirm'), 'confirm dialog has confirm button id');
+assert(dlg.includes('frozen for audit'), 'confirm dialog explains supersede semantics');
+
+assert(renderStandardHeader('Pet Grief — Old').includes('Switch'),
+  'renderStandardHeader carries "Switch" verb');
+assert(renderInvertedHeader('Pet Grief — New').includes('replace an existing request'),
+  'renderInvertedHeader carries inverted-mode verb');
+
+assertEqual(replaceEsc('<script>'), '&lt;script&gt;', 'esc escapes <');
+assertEqual(replaceEsc('a&b'), 'a&amp;b', 'esc escapes &');
+assertEqual(replaceEsc('"x"'), '&quot;x&quot;', 'esc escapes "');
+
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
