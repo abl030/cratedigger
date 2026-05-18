@@ -43,6 +43,9 @@ _DEFAULT_WRONG_MATCH_ROW = {
     "artist_name": "Test Artist",
     "album_title": "Test Album",
     "mb_release_id": "abc-123",
+    # Release-group id surfaces in the wrong-matches group payload
+    # so the frontend can render the Replace button (R7).
+    "mb_release_group_id": "rg-abc-123",
     "soulseek_username": "testuser",
     # Per-attempt evidence — surfaced via the LEFT JOIN to
     # album_quality_evidence in PipelineDB.get_wrong_matches (with
@@ -1041,7 +1044,12 @@ class TestPipelineRouteContracts(_WebServerCase):
         "id", "artist_name", "album_title", "year", "format", "country",
         "source", "created_at", "status", "search_attempts",
         "download_attempts", "validation_attempts", "beets_distance",
-        "mb_release_id", "imported_path", "current_spectral_bitrate",
+        "mb_release_id",
+        # Release-group id surfaces so the pipeline-row Replace button
+        # (R7) can render — both the standard-mode source label and
+        # the picker's inverted-row sibling lookup need it.
+        "mb_release_group_id",
+        "imported_path", "current_spectral_bitrate",
         "last_download_spectral_bitrate", "current_spectral_grade",
         "last_download_spectral_grade", "verified_lossless",
     }
@@ -2601,7 +2609,8 @@ class TestPipelineReplaceContract(_WebServerCase):
         "descendant_request_id", "error_message", "warnings",
     }
     REQUESTS_BY_RG_FIELDS = {
-        "id", "mb_release_id", "status", "artist_name", "album_title",
+        "id", "mb_release_id", "mb_release_group_id", "status",
+        "artist_name", "album_title",
     }
 
     def setUp(self) -> None:
@@ -6403,6 +6412,9 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     GROUP_REQUIRED_FIELDS = {
         "request_id", "artist", "album", "mb_release_id",
+        # Release-group id surfaces so the frontend can render the
+        # Replace button (R7) — it asks "what RG is this row in?".
+        "mb_release_group_id",
         "in_library", "pending_count", "entries",
         # Quality summary for the collapsed card (issue: "show quality on disk").
         "status", "min_bitrate", "format", "verified_lossless",
