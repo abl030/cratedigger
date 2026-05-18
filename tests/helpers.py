@@ -85,6 +85,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "plan_cycle_count": 0,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
+        # Migration 023 — supersede lineage.
+        "replaces_request_id": None,
         "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
     }

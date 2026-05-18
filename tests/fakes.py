@@ -2026,10 +2026,125 @@ class FakePipelineDB:
             "plan_cycle_count": 0,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
+            # Migration 023 — supersede lineage.
+            "replaces_request_id": None,
             "created_at": now,
             "updated_at": now,
         }
         return rid
+
+    def supersede_request_mbid(
+        self,
+        old_request_id: int,
+        *,
+        new_mb_release_id: str,
+        new_mb_release_group_id: str | None,
+        new_mb_artist_id: str | None,
+        new_artist_name: str,
+        new_album_title: str,
+        new_year: int | None,
+        new_country: str | None,
+        new_tracks: list[dict[str, Any]],
+    ) -> int:
+        """In-memory mirror of ``PipelineDB.supersede_request_mbid``.
+
+        Raises ``MbidCollisionError`` when ``new_mb_release_id`` already
+        exists in any row; ``SupersedeRaceError`` when the old row is
+        missing or already ``status='replaced'``.
+        """
+        from lib.pipeline_db import (
+            MbidCollisionError,
+            SupersedeRaceError,
+        )
+
+        old_row = self._requests.get(old_request_id)
+        if old_row is None:
+            raise SupersedeRaceError(
+                f"old request {old_request_id} not found"
+            )
+        if old_row.get("status") == "replaced":
+            raise SupersedeRaceError(
+                f"old request {old_request_id} already replaced"
+            )
+        # Collision check.
+        for r in self._requests.values():
+            if r.get("mb_release_id") == new_mb_release_id:
+                raise MbidCollisionError(
+                    f"target MBID {new_mb_release_id} already exists"
+                )
+
+        now = _utcnow()
+        old_source = old_row.get("source", "request")
+        # Flip old row: status=replaced + clear imported_path. Nothing
+        # else is mutated — characteristic fields stay frozen.
+        old_row["status"] = "replaced"
+        old_row["imported_path"] = None
+        old_row["updated_at"] = now
+
+        # Insert new row via add_request to inherit the seeded defaults,
+        # then patch the supersede-only fields.
+        new_id = self.add_request(
+            artist_name=new_artist_name,
+            album_title=new_album_title,
+            source=old_source,
+            mb_release_id=new_mb_release_id,
+            mb_release_group_id=new_mb_release_group_id,
+            mb_artist_id=new_mb_artist_id,
+            year=new_year,
+            country=new_country,
+            status="wanted",
+        )
+        self._requests[new_id]["replaces_request_id"] = old_request_id
+
+        # Insert tracks.
+        self._tracks[new_id] = [
+            {
+                "disc_number": t.get("disc_number", 1),
+                "track_number": t["track_number"],
+                "title": t["title"],
+                "length_seconds": t.get("length_seconds"),
+            }
+            for t in new_tracks
+        ]
+        return new_id
+
+    def get_request_by_replaces_request_id(
+        self, replaced_id: int
+    ) -> dict[str, Any] | None:
+        """Reverse-lookup the descendant row of ``replaced_id``."""
+        for row in self._requests.values():
+            if row.get("replaces_request_id") == replaced_id:
+                return copy.deepcopy(row)
+        return None
+
+    def list_requests_in_release_group(
+        self,
+        rg_id: str,
+        *,
+        exclude_replaced: bool = True,
+        exclude_request_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List rows in the same MB release group (newest id first)."""
+        out: list[dict[str, Any]] = []
+        for row in self._requests.values():
+            if row.get("mb_release_group_id") != rg_id:
+                continue
+            if exclude_replaced and row.get("status") == "replaced":
+                continue
+            if exclude_request_id is not None and row.get("id") == exclude_request_id:
+                continue
+            out.append(copy.deepcopy(row))
+        out.sort(key=lambda r: r["id"], reverse=True)
+        return out
+
+    def list_active_release_group_ids(self) -> set[str]:
+        """Distinct set of RG ids across non-replaced rows."""
+        return {
+            row["mb_release_group_id"]
+            for row in self._requests.values()
+            if row.get("status") != "replaced"
+            and row.get("mb_release_group_id") is not None
+        }
 
     def delete_request(self, request_id: int) -> None:
         """Delete a request and cascade to child tables.
