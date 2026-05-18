@@ -2733,6 +2733,12 @@ class TestPipelineReplaceContract(_WebServerCase):
         self.assertEqual(status, 422)
 
     def test_replace_transient_returns_503(self):
+        """503 maps to RESULT_TRANSIENT — typically an MB-mirror
+        network blip / timeout / JSON decode error during the fresh
+        target lookup. The response body must still carry the full
+        REPLACE_REQUIRED_FIELDS contract so the frontend can show the
+        "Retry" affordance and the error message uniformly with the
+        other outcomes."""
         with self._patch_service(
             outcome="transient", request_id=100,
             error_message="MB mirror unreachable",
@@ -2742,6 +2748,20 @@ class TestPipelineReplaceContract(_WebServerCase):
                 {"target_mb_release_id": "new-uuid"},
             )
         self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.REPLACE_REQUIRED_FIELDS,
+            "replace 503 response",
+        )
+        self.assertEqual(data["outcome"], "transient")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(
+            data["error_message"], "MB mirror unreachable",
+        )
+        # Optional payload fields stay null on a transient outcome
+        # (no new row, no current_status, no descendant).
+        self.assertIsNone(data["new_request_id"])
+        self.assertIsNone(data["current_status"])
+        self.assertIsNone(data["descendant_request_id"])
 
     def test_replace_missing_target_returns_400(self):
         from unittest.mock import patch as _patch
