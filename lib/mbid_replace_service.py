@@ -426,9 +426,22 @@ class MbidReplaceService:
                     ),
                 )
             except SupersedeRaceError as exc:
+                # A concurrent Replace (double-click) landed first
+                # while we held the lock. The descendant row already
+                # exists — surface a deep-link rather than telling the
+                # operator to retry; retrying a race that has already
+                # succeeded is misleading. Mirrors the Phase 0 step 1a
+                # early-exit shape (RESULT_WRONG_STATE +
+                # descendant_request_id).
+                descendant = self.db.get_request_by_replaces_request_id(
+                    request_id
+                )
                 return ReplaceResult(
-                    outcome=RESULT_TRANSIENT,
+                    outcome=RESULT_WRONG_STATE,
                     request_id=request_id,
+                    descendant_request_id=(
+                        int(descendant["id"]) if descendant else None
+                    ),
                     error_message=(
                         f"supersede race on request {request_id}: {exc}"
                     ),

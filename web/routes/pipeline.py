@@ -823,10 +823,13 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
       * 200 — ``RESULT_REPLACED``
       * 400 — body validation failure (missing/empty target)
       * 404 — ``RESULT_NOT_FOUND``
-      * 409 — ``RESULT_WRONG_STATE`` or ``RESULT_TARGET_COLLISION_REQUEST``
+      * 409 — ``RESULT_WRONG_STATE`` (including supersede race —
+              ``descendant_request_id`` populated so the UI can
+              deep-link the operator to the new request) or
+              ``RESULT_TARGET_COLLISION_REQUEST``
       * 422 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
               ``RESULT_TARGET_SAME_AS_CURRENT``
-      * 503 — ``RESULT_TRANSIENT``
+      * 503 — ``RESULT_TRANSIENT`` (MB-mirror unreachable etc.)
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (

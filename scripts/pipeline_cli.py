@@ -1725,8 +1725,10 @@ def cmd_replace(db, args):
       * 2 — ``RESULT_NOT_FOUND``
       * 3 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
             ``RESULT_TARGET_SAME_AS_CURRENT`` (semantic input violations)
-      * 4 — ``RESULT_WRONG_STATE``, ``RESULT_TARGET_COLLISION_REQUEST``
-      * 5 — ``RESULT_TRANSIENT`` (retryable; MB lookup or supersede race)
+      * 4 — ``RESULT_WRONG_STATE`` (including supersede race —
+            double-click landed first; descendant_request_id is set),
+            ``RESULT_TARGET_COLLISION_REQUEST``
+      * 5 — ``RESULT_TRANSIENT`` (retryable; MB-mirror unreachable etc.)
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (

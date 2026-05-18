@@ -310,7 +310,36 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         self.assertEqual(result.outcome, RESULT_WRONG_STATE)
         self.assertIsNone(result.descendant_request_id)
 
-    def test_transient_supersede_race(self):
+    def test_supersede_race_maps_to_wrong_state_with_descendant(self):
+        """SupersedeRaceError (double-click landed first) maps to
+        RESULT_WRONG_STATE with descendant_request_id populated, NOT
+        RESULT_TRANSIENT. Retrying a race that has already succeeded
+        is unhelpful — the UI should deep-link the operator to the
+        new request the first click produced."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        # Seed the descendant the racing Replace would have created
+        # so get_request_by_replaces_request_id can find it.
+        db.seed_request(make_request_row(
+            id=43, mb_release_id="someone-elses-mbid",
+            mb_release_group_id=RG_ID, status="wanted",
+            replaces_request_id=42,
+        ))
+        with patch.object(
+            db, "supersede_request_mbid",
+            side_effect=SupersedeRaceError("row already replaced"),
+        ):
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.descendant_request_id, 43)
+
+    def test_supersede_race_without_descendant(self):
+        """If the descendant lookup also raced (unlikely but possible),
+        we still report wrong_state with descendant_request_id=None
+        rather than transient."""
         db = FakePipelineDB()
         self._seed_old(db)
         with patch.object(
@@ -321,7 +350,8 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertIsNone(result.descendant_request_id)
 
     def test_canonical_equals_source(self):
         """MB lookup follows a 301 redirect and the canonical MBID is
