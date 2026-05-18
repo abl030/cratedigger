@@ -323,6 +323,107 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
             )
         self.assertEqual(result.outcome, RESULT_TRANSIENT)
 
+    def test_canonical_equals_source(self):
+        """MB lookup follows a 301 redirect and the canonical MBID is
+        the source's own current MBID. Treated as a self-collision —
+        the operator effectively asked to Replace into a value that
+        normalises to the same MBID."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+
+        def fake_lookup(mbid, *, fresh=False):
+            # Target redirects to source's MBID.
+            return _fake_target_payload(mbid=OLD_MBID, rg_id=RG_ID)
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(
+            result.outcome, RESULT_TARGET_COLLISION_REQUEST
+        )
+        self.assertEqual(result.current_status, "wanted")
+
+    def test_canonical_redirects_to_other_request(self):
+        """MB lookup follows a 301 to a canonical MBID that's already
+        held by a different active request. The redirect-recheck branch
+        in Phase 0 catches it and reports the holder's status."""
+        CANONICAL = "canonical-cccccccc-cccc-cccc-cccc-cccccccccccc"
+        db = FakePipelineDB()
+        self._seed_old(db)
+        # Third request holds the canonical the redirect resolves to.
+        db.seed_request(make_request_row(
+            id=44, mb_release_id=CANONICAL, mb_release_group_id=RG_ID,
+            status="imported",
+        ))
+
+        def fake_lookup(mbid, *, fresh=False):
+            # NEW_MBID redirects to CANONICAL.
+            return _fake_target_payload(mbid=CANONICAL, rg_id=RG_ID)
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(
+            result.outcome, RESULT_TARGET_COLLISION_REQUEST
+        )
+        self.assertEqual(result.current_status, "imported")
+
+    def test_state_capture_under_lock_sees_fresh_imported_status(self):
+        """Race-window guard (P0 fix): the importer finishes between
+        Phase 0 (source loaded as ``downloading``) and Phase 1 (lock
+        acquired). Without the fix the service would see the stale
+        ``downloading`` status and skip beets cleanup. With the fix
+        the state-capture inside the lock re-reads the row and Phase 4
+        routes through ``remove_and_reset_release``."""
+
+        db = FakePipelineDB()
+        self._seed_old(db, status="downloading")
+
+        # The importer mutation: when the lock is acquired, flip the
+        # row to ``imported`` with an ``imported_path``.
+        def lock_callable(namespace, key):
+            row = db._requests[42]
+            row["status"] = "imported"
+            row["imported_path"] = "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing"
+            return True
+
+        db.set_advisory_lock_result(lock_callable)
+
+        # Patch every external. ``remove_and_reset_release`` MUST be
+        # called — that's the assertion.
+        with patch(
+            "lib.mbid_replace_service.remove_and_reset_release",
+            MagicMock(return_value=ReleaseCleanupResult(
+                beets_removed=True,
+                absent_after=True,
+                selector_failures=(),
+            )),
+        ) as mock_remove, patch(
+            "lib.mbid_replace_service.delete_wrong_match_group",
+            side_effect=_empty_wrong_match_summary,
+        ), patch(
+            "lib.mbid_replace_service.trigger_meelo_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_plex_scan"
+        ) as mock_plex, patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan"
+        ):
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Fresh status was seen → beets removal ran.
+        mock_remove.assert_called_once()
+        _, kwargs = mock_remove.call_args
+        self.assertEqual(kwargs.get("clear_pipeline_state"), False)
+        self.assertEqual(kwargs.get("release_id"), OLD_MBID)
+        # Fresh imported_path was seen → Plex partial scan routed to it.
+        mock_plex.assert_called_once()
+        _, plex_kwargs = mock_plex.call_args
+        self.assertEqual(
+            plex_kwargs.get("imported_path"),
+            "/mnt/virtio/Music/Beets/Pet Grief/Old Pressing",
+        )
+
 
 class TestReplaceHappyPath(_ServiceCase):
     """Cover RESULT_REPLACED + ordering invariants + the Pet Grief
