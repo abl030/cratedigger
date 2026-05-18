@@ -14,7 +14,7 @@ from typing import Any, Literal, Optional, Sequence
 
 import msgspec
 
-QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320"
+QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320,aac,opus,ogg"
 QUALITY_LOSSLESS = "lossless"
 V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
 V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
@@ -91,10 +91,10 @@ def resolve_user_requeue_override(existing_override: str | None) -> str:
     only when no override is currently set.
 
     Without this, clicking Upgrade on an imported album would overwrite a
-    gate-narrowed ``"lossless"`` with the full ``"lossless,mp3 v0,mp3 320"``
-    ladder, re-enqueuing MP3 320 sources that the pipeline has already
-    established can't produce an upgrade — each one gets rejected as a
-    downgrade and the user sees a loop.
+    gate-narrowed ``"lossless"`` with the full upgrade ladder, re-enqueuing
+    MP3 320 sources that the pipeline has already established can't produce
+    an upgrade — each one gets rejected as a downgrade and the user sees a
+    loop.
     """
     return existing_override or QUALITY_UPGRADE_TIERS
 

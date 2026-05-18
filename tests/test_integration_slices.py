@@ -7394,7 +7394,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             id=3781,
             status="manual",
             mb_release_id=self.MB_RELEASE_ID,
-            search_filetype_override="lossless,mp3 v0,mp3 320",
+            search_filetype_override=QUALITY_UPGRADE_TIERS,
         ))
 
         with tempfile.TemporaryDirectory() as origin_dir, \

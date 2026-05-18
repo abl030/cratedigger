@@ -17,6 +17,7 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
+    QUALITY_UPGRADE_TIERS,
     compute_effective_override_bitrate,
     full_pipeline_decision,
     rejection_backfill_override,
@@ -154,7 +155,7 @@ ALBUM_STATES = [
     # covered until this entry.
     AlbumState("unter_null_failure_epiphany", 152, False,
                "likely_transcode", 96, False,
-               "lossless,mp3 v0,mp3 320",
+               QUALITY_UPGRADE_TIERS,
                avg_bitrate=225,
                existing_format="MP3"),
     # Brian Eno - Generative Music I (req 1486). After a successful MP3
@@ -333,7 +334,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
     elif gate == "accept":
         override_after = None  # production clears search_filetype_override on accept
     elif gate == "requeue_upgrade":
-        override_after = "lossless,mp3 v0,mp3 320"
+        override_after = QUALITY_UPGRADE_TIERS
     elif gate == "requeue_lossless":
         override_after = "lossless"
     else:
