@@ -713,6 +713,188 @@ class TestReplaceWarnings(_ServiceCase):
                     for w in result.warnings)
             )
 
+    def test_selector_failures_collected_as_warnings(self):
+        """``remove_and_reset_release`` returns selector_failures (e.g.
+        beets ``beet remove`` reported a timeout or nonzero rc). The
+        outcome is still RESULT_REPLACED — Phase 4 errors are
+        non-fatal — but each failure surfaces as a warning string."""
+        from lib.beets_album_op import BeetsOpFailure
+        result_with_failures = ReleaseCleanupResult(
+            beets_removed=True,
+            absent_after=True,
+            selector_failures=(
+                BeetsOpFailure(
+                    reason="timeout", detail="60s",
+                    selector="id:42",
+                ),
+                BeetsOpFailure(
+                    reason="nonzero_rc", detail="rc=1",
+                    selector="mb_albumid:abc",
+                ),
+            ),
+        )
+        with patch(
+            "lib.mbid_replace_service.remove_and_reset_release",
+            MagicMock(return_value=result_with_failures),
+        ), patch(
+            "lib.mbid_replace_service.delete_wrong_match_group",
+            side_effect=_empty_wrong_match_summary,
+        ), patch(
+            "lib.mbid_replace_service.trigger_meelo_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_plex_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan"
+        ):
+            db = FakePipelineDB()
+            self._seed_old(
+                db, status="imported",
+                imported_path="/mnt/virtio/Music/Beets/X",
+            )
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Both failures surfaced; assertion is order-independent.
+        self.assertTrue(
+            any("id:42" in w for w in result.warnings),
+            f"selector id:42 missing from warnings: {result.warnings}",
+        )
+        self.assertTrue(
+            any("mb_albumid:abc" in w for w in result.warnings),
+            f"selector mb_albumid:abc missing from warnings: "
+            f"{result.warnings}",
+        )
+
+    def test_staging_rmtree_permission_error_warns(self):
+        """``shutil.rmtree`` failure on the staging dir (e.g. permission
+        denied) becomes a warning; outcome stays RESULT_REPLACED."""
+        import tempfile
+        import os as _os
+        import shutil as _shutil
+        tmpdir = tempfile.mkdtemp(prefix="cratedigger-test-staging-")
+        # Register cleanup before the patch context so it runs after
+        # the patch is rolled back; otherwise the patched rmtree would
+        # be called here and raise PermissionError again.
+        self.addCleanup(_shutil.rmtree, tmpdir, True)
+        cfg = CratediggerConfig()
+        # Re-bind beets_staging_dir to the temp root so stage_to_ai_path
+        # produces a path under it that we can pre-create.
+        object.__setattr__(cfg, "beets_staging_dir", tmpdir)
+        # Pre-create the staging path the rmtree branch will target.
+        from lib.processing_paths import stage_to_ai_path
+        target = stage_to_ai_path(
+            artist="Pet Grief", title="Old Pressing",
+            staging_dir=tmpdir, request_id=42, auto_import=True,
+        )
+        _os.makedirs(target, exist_ok=True)
+
+        with patch(
+            "lib.mbid_replace_service.delete_wrong_match_group",
+            side_effect=_empty_wrong_match_summary,
+        ), patch(
+            "lib.mbid_replace_service.trigger_meelo_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_plex_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan"
+        ), patch(
+            "lib.mbid_replace_service.shutil.rmtree",
+            side_effect=PermissionError("simulated denied"),
+        ):
+            db = FakePipelineDB()
+            self._seed_old(db, status="wanted")
+            svc = self._make_service(db, cfg=cfg)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertTrue(
+            any("staging rmtree failed" in w and "PermissionError" in w
+                for w in result.warnings),
+            f"PermissionError warning missing: {result.warnings}",
+        )
+
+
+class TestReplaceCallOrder(_ServiceCase):
+    """Ordering invariants — call-order matters because:
+
+    - supersede MUST land before any fs helper (otherwise we'd be
+      cleaning up filesystem state for a still-live request).
+    - Rescan helpers MUST run AFTER fs cleanup (so Meelo / Plex see
+      the deleted folder, not the pre-cleanup view).
+    - slskd.transfers.cancel_download MUST never be called (R23 —
+      Replace intentionally never touches in-flight transfers).
+    """
+
+    def test_supersede_before_fs_helpers_and_rescans_after_cleanup(self):
+        manager = MagicMock()
+        # Wrap db.supersede_request_mbid so it lands in the manager.
+        db = FakePipelineDB()
+        self._seed_old(db, status="imported",
+                       imported_path="/mnt/virtio/Music/Beets/X")
+        real_supersede = db.supersede_request_mbid
+
+        def supersede_recording(*args, **kwargs):
+            manager.supersede(*args, **kwargs)
+            return real_supersede(*args, **kwargs)
+
+        with patch.object(
+            db, "supersede_request_mbid",
+            side_effect=supersede_recording,
+        ), patch(
+            "lib.mbid_replace_service.remove_and_reset_release",
+            MagicMock(return_value=ReleaseCleanupResult(
+                beets_removed=True, absent_after=True,
+                selector_failures=(),
+            )),
+        ) as mock_remove, patch(
+            "lib.mbid_replace_service.delete_wrong_match_group",
+            side_effect=_empty_wrong_match_summary,
+        ) as mock_wm_delete, patch(
+            "lib.mbid_replace_service.trigger_meelo_scan",
+        ) as mock_meelo, patch(
+            "lib.mbid_replace_service.trigger_plex_scan",
+        ) as mock_plex, patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan",
+        ) as mock_jelly:
+            manager.attach_mock(mock_remove, "remove_and_reset_release")
+            manager.attach_mock(mock_wm_delete, "delete_wrong_match_group")
+            manager.attach_mock(mock_meelo, "trigger_meelo_scan")
+            manager.attach_mock(mock_plex, "trigger_plex_scan")
+            manager.attach_mock(mock_jelly, "trigger_jellyfin_scan")
+
+            svc = self._make_service(db)
+            slskd_calls_before = list(svc.slskd.mock_calls)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+            slskd_calls_after = list(svc.slskd.mock_calls)
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Extract the recorded call sequence as method names.
+        call_names = [c[0] for c in manager.mock_calls]
+        # Supersede comes first.
+        self.assertEqual(call_names[0], "supersede")
+        # Filesystem cleanup helpers must precede every rescan helper.
+        first_rescan_idx = min(
+            call_names.index(name) for name in (
+                "trigger_meelo_scan",
+                "trigger_plex_scan",
+                "trigger_jellyfin_scan",
+            )
+        )
+        for fs_helper in ("remove_and_reset_release",
+                          "delete_wrong_match_group"):
+            self.assertLess(
+                call_names.index(fs_helper), first_rescan_idx,
+                f"{fs_helper} ran after a rescan helper "
+                f"(call order: {call_names})",
+            )
+        # slskd was never touched (R23).
+        self.assertEqual(slskd_calls_before, slskd_calls_after)
+
 
 if __name__ == "__main__":
     unittest.main()

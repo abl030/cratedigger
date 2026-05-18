@@ -1682,6 +1682,34 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         db = self._seed_old()
         self.assertIsNone(db.get_request_by_replaces_request_id(42))
 
+    def test_denylist_isolation_old_keeps_new_empty(self):
+        """A supersede must not copy denylist entries from the old
+        request onto the new row — the new request starts fresh
+        (R28). The old row's denylist is preserved unchanged as part
+        of the audit trail."""
+        db = self._seed_old()
+        # Seed two denylist entries on the old row.
+        db.add_denylist(42, "bad_peer_1", reason="lossy_source")
+        db.add_denylist(42, "bad_peer_2", reason="incomplete")
+        new_id = db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id=None,
+            new_artist_name="x", new_album_title="x",
+            new_year=None, new_country=None, new_tracks=[],
+        )
+        # Old row's denylist is intact.
+        old_denylist = db.get_denylisted_users(42)
+        self.assertEqual(
+            sorted(d["username"] for d in old_denylist),
+            ["bad_peer_1", "bad_peer_2"],
+        )
+        # New row's denylist is empty — denylist is per-request and
+        # supersede does NOT propagate.
+        new_denylist = db.get_denylisted_users(new_id)
+        self.assertEqual(new_denylist, [])
+
 
 class TestFakePipelineDBNewStubs(unittest.TestCase):
     """Self-tests for fake methods retroactively added under issue #140.
