@@ -158,8 +158,13 @@ class MbidReplaceService:
            canonical-redirect re-check.
         1. Acquire the per-request IMPORT advisory lock; refuse on
            contention (no pre-emption — the importer worker holds it).
-        2. Capture pre-supersede state (artist/title for staging path,
+        2. Re-read the source row under the lock and capture
+           pre-supersede state (artist/title for staging path,
            imported_path for Plex partial scan, old release id, status).
+           The fresh re-read closes the race window where the importer
+           worker finished between Phase 0 and Phase 1 — stale
+           ``old_status`` would skip beets cleanup; stale
+           ``old_imported_path`` would mis-route the Plex rescan.
         3. DB transaction: ``supersede_request_mbid`` atomically flips
            the old row's status, clears ``imported_path``, inserts the
            new row, inserts tracks.
@@ -341,14 +346,10 @@ class MbidReplaceService:
                     ),
                 )
 
-        # Phase 2 — capture pre-supersede state.
-        old_artist = source.get("artist_name") or ""
-        old_title = source.get("album_title") or ""
-        old_imported_path = source.get("imported_path")
-        old_release_id = source_mbid
-        old_status = source.get("status")
-
-        # Phase 1 — acquire IMPORT advisory lock.
+        # Phase 1 — acquire IMPORT advisory lock. See docs/advisory-locks.md.
+        # We acquire BEFORE re-reading the source row so the importer
+        # worker cannot finish (and flip status / set imported_path)
+        # between our state capture and the supersede mutation.
         warnings: list[str] = []
         with self.db.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT, request_id
@@ -362,6 +363,46 @@ class MbidReplaceService:
                         f"{request_id}; retry in a few seconds"
                     ),
                 )
+
+            # Phase 2 — re-read source under the lock and capture
+            # pre-supersede state. The lock guarantees no other writer
+            # holds this row's IMPORT lock concurrently, so a fresh
+            # ``get_request`` is sufficient — we don't need explicit
+            # SELECT ... FOR UPDATE semantics here.
+            source_locked = self.db.get_request(request_id)
+            if source_locked is None:
+                # Vanishingly rare — row was deleted between Phase 0
+                # validation and lock acquire. Treat as not_found.
+                return ReplaceResult(
+                    outcome=RESULT_NOT_FOUND,
+                    request_id=request_id,
+                    error_message=(
+                        f"request {request_id} disappeared after "
+                        "advisory lock acquisition"
+                    ),
+                )
+            # Re-check the double-click guard under the lock — if the
+            # importer flipped status to ``replaced`` (it doesn't, but
+            # defensively) or a concurrent Replace landed first, bail.
+            if source_locked.get("status") == "replaced":
+                descendant = self.db.get_request_by_replaces_request_id(
+                    request_id
+                )
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    descendant_request_id=(
+                        int(descendant["id"]) if descendant else None
+                    ),
+                    error_message=(
+                        f"request {request_id} was replaced concurrently"
+                    ),
+                )
+            old_artist = source_locked.get("artist_name") or ""
+            old_title = source_locked.get("album_title") or ""
+            old_imported_path = source_locked.get("imported_path")
+            old_release_id = source_locked.get("mb_release_id") or source_mbid
+            old_status = source_locked.get("status")
 
             # Phase 3 — DB transaction.
             try:
