@@ -189,8 +189,12 @@ class MbidReplaceService:
              stay frozen on the audit row)
            - wrong-matches group delete
            - staging folder rmtree (skipped when old was downloading)
-        5. Post-cleanup: regenerate search plan for the new request,
-           trigger Meelo / Plex / Jellyfin rescans.
+        5. Post-cleanup (advisory lock RELEASED first): regenerate
+           search plan for the new request, trigger Meelo / Plex /
+           Jellyfin rescans. The lock is dropped before these run
+           because rescans each carry their own ~10s timeout and the
+           new request has ``active_plan_id=NULL`` until SearchPlanService
+           runs, so no importer worker would contend for it anyway.
         """
         logger.info(
             "Replace: request_id=%d target_mb_release_id=%s",
@@ -539,37 +543,43 @@ class MbidReplaceService:
                                 f"{type(exc).__name__}: {exc}"
                             )
 
-            # Phase 5 — search plan + rescans.
-            try:
-                self.search_plan_service.generate_for_request(
-                    new_request_id, regenerate=False,
-                )
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(
-                    f"search-plan generation failed for new request "
-                    f"{new_request_id}: {type(exc).__name__}: {exc}"
-                )
+        # Phase 5 — search plan + rescans (OUTSIDE the advisory lock).
+        # Rescans each carry their own ~10s timeout; holding the IMPORT
+        # lock across them buys nothing because the new request's
+        # ``active_plan_id`` is NULL until the search plan is generated,
+        # and the importer worker only acquires the per-request lock when
+        # it has work to do. Releasing early caps lock-hold at fs
+        # cleanup (sub-second) rather than ~30s worst case.
+        try:
+            self.search_plan_service.generate_for_request(
+                new_request_id, regenerate=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"search-plan generation failed for new request "
+                f"{new_request_id}: {type(exc).__name__}: {exc}"
+            )
 
-            try:
-                trigger_meelo_scan(self.config)
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(
-                    f"meelo rescan failed: {type(exc).__name__}: {exc}"
-                )
-            try:
-                trigger_plex_scan(
-                    self.config, imported_path=old_imported_path
-                )
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(
-                    f"plex rescan failed: {type(exc).__name__}: {exc}"
-                )
-            try:
-                trigger_jellyfin_scan(self.config)
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(
-                    f"jellyfin rescan failed: {type(exc).__name__}: {exc}"
-                )
+        try:
+            trigger_meelo_scan(self.config)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"meelo rescan failed: {type(exc).__name__}: {exc}"
+            )
+        try:
+            trigger_plex_scan(
+                self.config, imported_path=old_imported_path
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"plex rescan failed: {type(exc).__name__}: {exc}"
+            )
+        try:
+            trigger_jellyfin_scan(self.config)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"jellyfin rescan failed: {type(exc).__name__}: {exc}"
+            )
 
         logger.info(
             "Replace: success request_id=%d new_request_id=%d warnings=%d",

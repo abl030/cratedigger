@@ -849,6 +849,111 @@ class TestReplaceCallOrder(_ServiceCase):
       Replace intentionally never touches in-flight transfers).
     """
 
+    def test_rescans_run_after_advisory_lock_release(self):
+        """Phase 5 (search plan + Meelo/Plex/Jellyfin rescans) must run
+        AFTER the IMPORT advisory lock is released. Holding the lock
+        across ~10s rescan timeouts is wasted contention — the new
+        request's ``active_plan_id`` is NULL until SearchPlanService
+        runs, so the importer worker wouldn't grab the lock anyway.
+
+        The fake's ``advisory_lock`` records every entry / exit on the
+        manager. The assertion is order-only: the lock context-manager
+        must have exited before the first rescan helper fires.
+        """
+        manager = MagicMock()
+        lock_released = {"flag": False}
+
+        # Wrap the fake's advisory_lock so we observe enter/exit.
+        db = FakePipelineDB()
+        self._seed_old(db, status="wanted")
+        real_lock = db.advisory_lock
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def recording_lock(namespace, key):
+            manager.advisory_lock_enter(namespace, key)
+            with real_lock(namespace, key) as acquired:
+                yield acquired
+            manager.advisory_lock_exit(namespace, key)
+            lock_released["flag"] = True
+
+        # search_plan + each rescan records on the manager, and asserts
+        # the lock has already been released when they fire.
+        plan_svc = MagicMock()
+
+        def assert_released_search_plan(*args, **kwargs):
+            manager.search_plan(*args, **kwargs)
+            assert lock_released["flag"], (
+                "search-plan generation ran while the IMPORT advisory "
+                "lock was still held"
+            )
+
+        plan_svc.generate_for_request.side_effect = (
+            assert_released_search_plan
+        )
+
+        def assert_released_meelo(*args, **kwargs):
+            manager.trigger_meelo_scan(*args, **kwargs)
+            assert lock_released["flag"], (
+                "Meelo rescan ran while the IMPORT advisory lock was "
+                "still held"
+            )
+
+        def assert_released_plex(*args, **kwargs):
+            manager.trigger_plex_scan(*args, **kwargs)
+            assert lock_released["flag"], (
+                "Plex rescan ran while the IMPORT advisory lock was "
+                "still held"
+            )
+
+        def assert_released_jellyfin(*args, **kwargs):
+            manager.trigger_jellyfin_scan(*args, **kwargs)
+            assert lock_released["flag"], (
+                "Jellyfin rescan ran while the IMPORT advisory lock "
+                "was still held"
+            )
+
+        with patch.object(
+            db, "advisory_lock", side_effect=recording_lock,
+        ), patch(
+            "lib.mbid_replace_service.delete_wrong_match_group",
+            side_effect=_empty_wrong_match_summary,
+        ), patch(
+            "lib.mbid_replace_service.trigger_meelo_scan",
+            side_effect=assert_released_meelo,
+        ), patch(
+            "lib.mbid_replace_service.trigger_plex_scan",
+            side_effect=assert_released_plex,
+        ), patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan",
+            side_effect=assert_released_jellyfin,
+        ):
+            svc = self._make_service(db, search_plan_service=plan_svc)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Each Phase 5 helper recorded its call AFTER the lock exit was
+        # recorded. Independently of order, the in-line assertions inside
+        # the side_effects would have raised if a helper fired with the
+        # lock still held.
+        call_names = [c[0] for c in manager.mock_calls]
+        lock_exit_idx = call_names.index("advisory_lock_exit")
+        for helper_name in (
+            "search_plan",
+            "trigger_meelo_scan",
+            "trigger_plex_scan",
+            "trigger_jellyfin_scan",
+        ):
+            self.assertIn(helper_name, call_names)
+            self.assertGreater(
+                call_names.index(helper_name), lock_exit_idx,
+                f"{helper_name} ran before advisory_lock_exit "
+                f"(call order: {call_names})",
+            )
+
     def test_supersede_before_fs_helpers_and_rescans_after_cleanup(self):
         manager = MagicMock()
         # Wrap db.supersede_request_mbid so it lands in the manager.
