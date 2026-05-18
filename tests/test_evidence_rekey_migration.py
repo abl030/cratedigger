@@ -555,12 +555,15 @@ class TestMigration021Idempotence(_Mig021CaseBase):
             "FROM album_quality_evidence"
         )
 
-        # Run apply_migrations again against the full dir — must skip 021.
+        # Run apply_migrations again against the full dir — 021 must be
+        # skipped (schema_migrations records it). Migrations newer than
+        # 021 (022, 023, …) may legitimately apply because this test
+        # base only seeds up to 020 + then jumps to 021.
         applied = apply_migrations(self.dsn, DEFAULT_MIGRATIONS_DIR)
-        self.assertEqual(
+        self.assertNotIn(
+            21,
             [m.version for m in applied],
-            [],
-            "Second apply must not run any migration",
+            "Second apply must not re-run migration 021",
         )
 
         second = self._query(
