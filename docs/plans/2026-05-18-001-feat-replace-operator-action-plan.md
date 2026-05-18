@@ -174,7 +174,7 @@ web/routes/pipeline.py                [U6, U10]
 - `migrations/022_drop_lidarr_columns.sql` (new)
 - `tests/helpers.py` (modify — strip `lidarr_album_id` / `lidarr_artist_id` from `make_request_row` defaults at lines 72-73)
 - `tests/fakes.py` (modify — strip `lidarr_album_id` / `lidarr_artist_id` at lines 2013-2014; verified present during review)
-- `scripts/migrate_to_postgres.py` (leave references in place — historical one-shot)
+- `scripts/migrate_to_postgres.py` (DELETED in this PR — historical one-shot SQLite→Postgres importer ran 2026-03-25 and was the only reference to ``lidarr_album_id`` / ``lidarr_artist_id`` outside the dropped schema; no production code paths reach it)
 
 **Approach:** Plain `ALTER TABLE album_requests DROP COLUMN lidarr_album_id, DROP COLUMN lidarr_artist_id;` per existing migration style. No defensive `IF EXISTS`. No FK considerations (verified: only `001_initial.sql` declares them).
 
