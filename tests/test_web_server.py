@@ -992,6 +992,7 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
         r"^/api/pipeline/(\d+)/replace$",
+        r"^/api/pipeline/(\d+)/resolve-rg$",
         r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$",
         "/api/pipeline/active-rgs",
         "/api/pipeline/add",
@@ -2833,6 +2834,163 @@ class TestPipelineReplaceContract(_WebServerCase):
         status, data = self._get("/api/pipeline/active-rgs")
         self.assertEqual(status, 200)
         self.assertEqual(data["release_group_ids"], [])
+
+
+class TestPipelineResolveRgContract(_WebServerCase):
+    """Contract for ``POST /api/pipeline/<id>/resolve-rg``.
+
+    Lazy-backfill ``mb_release_group_id`` for legacy rows. The Replace
+    picker calls this in standard mode when the row has a null RG so the
+    sibling-fetch can proceed.
+
+    Status-code mapping:
+      * 200 — ``status='resolved'`` (RG found or already set)
+      * 404 — request not found
+      * 422 — non-UUID release id (Discogs) or MB returned no RG
+      * 503 — transient MB-mirror failure
+    """
+
+    RESOLVE_RG_REQUIRED_FIELDS = {
+        "request_id", "mb_release_group_id", "status",
+    }
+
+    def setUp(self) -> None:
+        # _WebServerCase shares ``mock_db`` across tests in the class via
+        # setUpClass; reset call counts here so per-test assertions don't
+        # see stale calls from earlier tests in the same class.
+        self.mock_db.reset_mock()
+
+    def test_resolve_rg_already_set_returns_200(self):
+        """Idempotent: row already has a RG → return it untouched
+        and do NOT hit the MB mirror or write to the DB."""
+        self.mock_db.get_request.return_value = {
+            "id": 42,
+            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "mb_release_group_id": "rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr",
+        }
+        with patch("web.mb.get_release") as mock_mb:
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg already-set response",
+        )
+        self.assertEqual(data["status"], "resolved")
+        self.assertEqual(
+            data["mb_release_group_id"],
+            "rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr",
+        )
+        mock_mb.assert_not_called()
+        self.mock_db.update_request_fields.assert_not_called()
+
+    def test_resolve_rg_lazy_backfill_happy_path_returns_200(self):
+        """Row has no RG → MB lookup → UPDATE row → 200."""
+        self.mock_db.get_request.return_value = {
+            "id": 42,
+            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "mb_release_group_id": None,
+        }
+        with patch(
+            "web.mb.get_release",
+            return_value={"release_group_id": "rrrr-rrrr-rrrr"},
+        ) as mock_mb:
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg happy-path response",
+        )
+        self.assertEqual(data["status"], "resolved")
+        self.assertEqual(
+            data["mb_release_group_id"], "rrrr-rrrr-rrrr",
+        )
+        mock_mb.assert_called_once_with(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", fresh=False,
+        )
+        self.mock_db.update_request_fields.assert_called_once_with(
+            42, mb_release_group_id="rrrr-rrrr-rrrr",
+        )
+
+    def test_resolve_rg_not_found_returns_404(self):
+        self.mock_db.get_request.return_value = None
+        with patch("web.mb.get_release") as mock_mb:
+            status, data = self._post(
+                "/api/pipeline/9999/resolve-rg", {},
+            )
+        self.assertEqual(status, 404)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg not-found response",
+        )
+        self.assertEqual(data["status"], "not_found")
+        self.assertIsNone(data["mb_release_group_id"])
+        mock_mb.assert_not_called()
+
+    def test_resolve_rg_no_release_group_returns_422(self):
+        """MB returns a payload but no release_group_id (e.g. mirror
+        anomaly, or a release whose RG is missing upstream)."""
+        self.mock_db.get_request.return_value = {
+            "id": 42,
+            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "mb_release_group_id": None,
+        }
+        with patch(
+            "web.mb.get_release",
+            return_value={"release_group_id": None},
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 422)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg 422 response",
+        )
+        self.assertEqual(data["status"], "no_release_group")
+        self.mock_db.update_request_fields.assert_not_called()
+
+    def test_resolve_rg_discogs_release_id_returns_422(self):
+        """Numeric Discogs release id → 422 short-circuit, no MB hit."""
+        self.mock_db.get_request.return_value = {
+            "id": 42,
+            "mb_release_id": "12345",
+            "mb_release_group_id": None,
+        }
+        with patch("web.mb.get_release") as mock_mb:
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 422)
+        self.assertEqual(data["status"], "non_mb_release_id")
+        mock_mb.assert_not_called()
+        self.mock_db.update_request_fields.assert_not_called()
+
+    def test_resolve_rg_transient_returns_503(self):
+        """Network blip / timeout → 503 retryable."""
+        from urllib.error import URLError
+        self.mock_db.get_request.return_value = {
+            "id": 42,
+            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "mb_release_group_id": None,
+        }
+        with patch(
+            "web.mb.get_release",
+            side_effect=URLError("connection refused"),
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg 503 response",
+        )
+        self.assertEqual(data["status"], "transient")
+        self.mock_db.update_request_fields.assert_not_called()
 
 
 class TestPipelineSearchPlanHistoryContract(_WebServerCase):
