@@ -1227,13 +1227,21 @@ def post_pipeline_add(h, body: dict) -> None:
     # an extra MB mirror round trip on add.
     release = mb_api.get_release(mbid, fresh=True)
 
+    # U4: persist release-group year alongside release year so the
+    # generator (U5) can emit a year-anchored slot that matches how
+    # users on Soulseek actually file reissues. ``get_release_group_year``
+    # returns None on 404 / unparseable date; column accepts NULL.
+    rg_id = release.get("release_group_id")
+    rg_year = mb_api.get_release_group_year(rg_id) if rg_id else None
+
     req_id = s._db().add_request(
         mb_release_id=mbid,
-        mb_release_group_id=release.get("release_group_id"),
+        mb_release_group_id=rg_id,
         mb_artist_id=release.get("artist_id"),
         artist_name=release["artist_name"],
         album_title=release["title"],
         year=release.get("year"),
+        release_group_year=rg_year,
         country=release.get("country"),
         source=source,
     )
@@ -1379,12 +1387,21 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
+            # U4: persist release-group year alongside release year. See
+            # ``post_pipeline_add`` for rationale.
+            rg_id_upgrade = release.get("release_group_id")
+            rg_year_upgrade = (
+                mb_api.get_release_group_year(rg_id_upgrade)
+                if rg_id_upgrade else None
+            )
             req_id = s._db().add_request(
                 mb_release_id=mbid,
+                mb_release_group_id=rg_id_upgrade,
                 mb_artist_id=release.get("artist_id"),
                 artist_name=release["artist_name"],
                 album_title=release["title"],
                 year=release.get("year"),
+                release_group_year=rg_year_upgrade,
                 country=release.get("country"),
                 source="request",
             )

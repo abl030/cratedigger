@@ -131,6 +131,39 @@ def fetch_mb_release(mb_release_id):
         return None
 
 
+def fetch_mb_release_group_year(rg_mbid):
+    """Return the release-group's first-release year as an int, or None.
+
+    U4 enqueue-time companion to ``fetch_mb_release``. Returns ``None``
+    on 404 / unparseable date / network blip — callers persist NULL on
+    the new ``release_group_year`` column rather than failing the add.
+    Mirrors ``web/mb.py::get_release_group_year`` but goes through
+    ``urllib`` directly so the CLI stays decoupled from the Redis-backed
+    web client.
+    """
+    url = f"{MB_API}/release-group/{rg_mbid}?fmt=json"
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "pipeline-cli/1.0")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
+        return None
+    except urllib.error.URLError as e:
+        print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
+        return None
+    date = data.get("first-release-date", "")
+    if not isinstance(date, str) or len(date) < 4:
+        return None
+    try:
+        return int(date[:4])
+    except ValueError:
+        return None
+
+
 def tracks_from_mb_release(release_data):
     """Extract track list from MB API release response.
 
@@ -254,6 +287,12 @@ def _cmd_add_mb(db, mbid, source):
     if release.get("date"):
         year = int(release["date"][:4]) if len(release["date"]) >= 4 else None
 
+    # U4: persist release-group year so the generator (U5) can emit a
+    # year-anchored slot matching how users on Soulseek file reissues.
+    # ``fetch_mb_release_group_year`` is 404/error tolerant; column
+    # accepts NULL.
+    rg_year = fetch_mb_release_group_year(rg_id) if rg_id else None
+
     req_id = db.add_request(
         mb_release_id=mbid,
         mb_release_group_id=rg_id,
@@ -261,6 +300,7 @@ def _cmd_add_mb(db, mbid, source):
         artist_name=artist_name,
         album_title=release.get("title", "Unknown"),
         year=year,
+        release_group_year=rg_year,
         country=release.get("country"),
         source=source,
     )

@@ -3393,8 +3393,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.mock_db.add_request.return_value = 501
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
 
+    @patch("web.routes.pipeline.mb_api.get_release_group_year",
+           return_value=2024)
     @patch("web.routes.pipeline.mb_api.get_release")
-    def test_pipeline_add_contract(self, mock_get_release):
+    def test_pipeline_add_contract(self, mock_get_release, _mock_rgy):
         mock_get_release.return_value = {
             "release_group_id": "rg-1",
             "artist_id": "artist-1",
@@ -3411,8 +3413,12 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add response")
 
+    @patch("web.routes.pipeline.mb_api.get_release_group_year",
+           return_value=2014)
     @patch("web.routes.pipeline.mb_api.get_release")
-    def test_pipeline_add_runs_plan_generation_after_set_tracks(self, mock_get_release):
+    def test_pipeline_add_runs_plan_generation_after_set_tracks(
+        self, mock_get_release, _mock_rgy,
+    ):
         """Web add path generates a search plan after `set_tracks()`,
         consistent with the CLI add path. Failures must not break the
         HTTP response."""
@@ -3459,6 +3465,146 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_persists_release_group_year_reissue(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: reissue MB release → ``release_group_year`` is fetched
+        from the mirror and passed through to ``add_request``."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-kid-a",
+            "artist_id": "rh-1",
+            "artist_name": "Radiohead",
+            "title": "Kid A",
+            "year": 2008,  # reissue
+            "country": "US",
+            "tracks": [{"title": "Everything In Its Right Place"}],
+        }
+        mock_rgy.return_value = 2000  # release-group's first year
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "kid-a-mbid"})
+
+        self.assertEqual(status, 200)
+        mock_rgy.assert_called_once_with("rg-kid-a")
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["year"], 2008)
+        self.assertEqual(add_kwargs["release_group_year"], 2000)
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_persists_release_group_year_original(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: original release MB release → ``release_group_year``
+        equals the per-release year."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-self",
+            "artist_id": "willow-1",
+            "artist_name": "Willow",
+            "title": "Willow",
+            "year": 2007,
+            "country": "AU",
+            "tracks": [{"title": "And Finally I Can Breathe"}],
+        }
+        mock_rgy.return_value = 2007
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "willow-mbid"})
+
+        self.assertEqual(status, 200)
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["year"], 2007)
+        self.assertEqual(add_kwargs["release_group_year"], 2007)
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_release_group_404_leaves_column_null(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: 404 from the release-group fetch → ``release_group_year``
+        is NULL on the new row, no error raised, request still added."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-missing",
+            "artist_id": "a-1",
+            "artist_name": "A",
+            "title": "T",
+            "year": 2020,
+            "country": "US",
+            "tracks": [{"title": "Track"}],
+        }
+        mock_rgy.return_value = None  # mirror returned 404 / unparseable
+
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-rgmiss"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
+                                "pipeline add response (rg 404)")
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["year"], 2020)
+        self.assertIsNone(add_kwargs["release_group_year"])
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_skips_rgy_lookup_when_no_rg_id(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: when MB doesn't return a ``release_group_id`` (e.g. very
+        old data), the helper isn't called and ``release_group_year`` is
+        left NULL."""
+        mock_get_release.return_value = {
+            # No release_group_id key — get() returns None.
+            "artist_id": "a-1",
+            "artist_name": "A",
+            "title": "T",
+            "year": 2020,
+            "country": "US",
+            "tracks": [{"title": "Track"}],
+        }
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-norg"})
+
+        self.assertEqual(status, 200)
+        mock_rgy.assert_not_called()
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertIsNone(add_kwargs["release_group_year"])
+
+    def test_pipeline_add_mb_integration_persists_release_group_year(self):
+        """U4 integration: full add-from-web flow against ``FakePipelineDB``
+        creates the new row with ``release_group_year`` populated and
+        the request reads back correctly."""
+        import web.server as srv
+        fake_db = FakePipelineDB()
+        with patch("web.routes.pipeline.mb_api.get_release") as mock_rel, \
+             patch("web.routes.pipeline.mb_api.get_release_group_year",
+                   return_value=2000) as mock_rgy, \
+             patch.object(srv, "db", fake_db):
+            mock_rel.return_value = {
+                "release_group_id": "rg-kid-a",
+                "artist_id": "rh-1",
+                "artist_name": "Radiohead",
+                "title": "Kid A",
+                "year": 2008,
+                "country": "US",
+                "tracks": [
+                    {"title": "Everything In Its Right Place",
+                     "track_number": 1, "disc_number": 1},
+                ],
+            }
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "kid-a-int"})
+
+        self.assertEqual(status, 200)
+        new_id = data["id"]
+        row = fake_db.get_request(new_id)
+        assert row is not None
+        self.assertEqual(row["year"], 2008)
+        self.assertEqual(row["release_group_year"], 2000)
+        mock_rgy.assert_called_once_with("rg-kid-a")
 
     def test_pipeline_add_duplicate_does_not_regenerate(self):
         """Duplicate add returns the existing request without generating
@@ -3724,8 +3870,12 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
     # -- fresh=True seam (Codex review on issue #101) ----------------
 
+    @patch("routes.pipeline.mb_api.get_release_group_year",
+           return_value=2024)
     @patch("routes.pipeline.mb_api.get_release")
-    def test_pipeline_add_mb_fetches_release_fresh(self, mock_get_release):
+    def test_pipeline_add_mb_fetches_release_fresh(
+        self, mock_get_release, _mock_rgy,
+    ):
         """POST /api/pipeline/add (MusicBrainz) MUST bypass the 24h meta
         cache — the fetched metadata is persisted into `album_requests`
         and `request_tracks`. A stale cached payload from an earlier
