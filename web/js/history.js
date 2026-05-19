@@ -103,14 +103,24 @@ export function renderDownloadHistoryItem(h) {
   // populated from their avg bitrate measurement — useful for
   // backend policy decisions, but redundant with the Bitrate row in
   // the UI, where the same number already appears.
+  //
+  // For the "(was X)" suffix, prefer the existing-side V0 probe avg
+  // (a true apples-to-apples comparison when the library album was
+  // also lossless) but fall back to the existing raw min bitrate when
+  // that's the only "before" data we have. The fallback isn't strictly
+  // the same metric, but the operator still wants to see what the
+  // library album was before this candidate showed up.
   if (
     h.v0_probe_avg_bitrate
     && h.v0_probe_kind === 'lossless_source_v0'
   ) {
     const candidate = formatV0Probe(h.v0_probe_avg_bitrate, h.v0_probe_kind);
-    const was = h.existing_v0_probe_avg_bitrate
-      ? `${esc(h.existing_v0_probe_avg_bitrate)}kbps avg`
-      : null;
+    let was = null;
+    if (h.existing_v0_probe_avg_bitrate) {
+      was = `${esc(h.existing_v0_probe_avg_bitrate)}kbps avg`;
+    } else if (h.existing_min_bitrate) {
+      was = `${esc(h.existing_min_bitrate)}kbps`;
+    }
     rows.push(['V0 probe', withWas(candidate, was)]);
   }
 
