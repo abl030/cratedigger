@@ -181,7 +181,7 @@ from lib.matching import (
     check_ratio,
     get_album_by_id,
 )
-from lib.quality import top_candidates
+from lib.quality import top_candidates_with_skip_split
 
 
 def filter_list(albums: Sequence[Any], filter_cfg: CratediggerConfig) -> list[Any] | None:
@@ -860,7 +860,10 @@ def _log_search_result(album, result, ctx) -> None:
     # a candidate concept" (error, timeout, empty_query — those write NULL).
     OUTCOMES_WITH_CANDIDATE_CONCEPT = ("no_results", "no_match", "found")
     if result.candidates:
-        top: list | None = top_candidates(result.candidates)
+        # U2 of search-plan-entropy: split into scored + up to 5
+        # pre-filter-skip samples so the blob keeps room for both
+        # without exceeding the historical top-20 cap.
+        top: list | None = top_candidates_with_skip_split(result.candidates)
     elif outcome in OUTCOMES_WITH_CANDIDATE_CONCEPT:
         top = []
     else:
@@ -911,6 +914,7 @@ def _log_search_result(album, result, ctx) -> None:
                     peers_browsed=result.peers_browsed,
                     peers_browsed_lazy=result.peers_browsed_lazy,
                     fanout_waves=result.fanout_waves,
+                    pre_filter_skip_count=result.pre_filter_skip_count,
                     apply_scheduler_attempt=True,
                     scheduler_success=scheduler_success,
                 )
@@ -947,6 +951,7 @@ def _log_search_result(album, result, ctx) -> None:
                 elapsed_s=result.elapsed_s or None,
                 final_state=result.final_state,
                 apply_scheduler_attempt=True,
+                pre_filter_skip_count=result.pre_filter_skip_count,
             )
         )
     except Exception:
@@ -1008,6 +1013,9 @@ def _apply_find_download_result(
     # find_download result onto the SearchResult so `_log_search_result` can
     # persist the top-20 to `search_log.candidates`.
     result.candidates = tuple(find_result.candidates)
+    # Aggregate pre-filter skip count from the find_download walk gets
+    # persisted on ``search_log.pre_filter_skip_count``.
+    result.pre_filter_skip_count = find_result.pre_filter_skip_count
     if ctx is not None and getattr(find_result, "metrics", None) is not None:
         metrics = find_result.metrics
         result.browse_time_s = metrics.browse_time_s

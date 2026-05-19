@@ -555,6 +555,11 @@ class ConsumedAttemptInput:
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
+    # Count of dirs the asymmetric pre-filter rejected before browse
+    # during this search's find_download walk; persisted on
+    # ``search_log.pre_filter_skip_count``. Default 0 keeps existing
+    # callers compatible.
+    pre_filter_skip_count: int = 0
     # Plan-item count required by wrap detection. The executor reads it
     # from the active plan it executed; passing it explicitly avoids a
     # second SELECT inside the transaction.
@@ -594,6 +599,10 @@ class NonConsumingAttemptInput:
     final_state: str | None = None
     error_message: str | None = None
     apply_scheduler_attempt: bool = True
+    # Pre-filter skip count for the failed attempt. Almost always 0
+    # because the matcher rarely runs on pre-attempt failures, but
+    # plumbed through so the column is consistently populated.
+    pre_filter_skip_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -626,6 +635,40 @@ class SearchLogHistoryPage:
 
     rows: list[dict[str, object]]
     next_before_id: int | None
+
+
+@dataclass(frozen=True)
+class SaturationSummary:
+    """U7: aggregate saturation/forensic counts for one request over a window.
+
+    Returned by ``PipelineDB.get_saturation_summary``. A search counts as
+    "saturated" when its ``final_state`` contains ``LimitReached`` (e.g.
+    ``Completed, ResponseLimitReached`` or ``Completed, FileLimitReached``)
+    — slskd hit its response/file ceiling before the search naturally
+    finished, so the result set is a truncated head sample rather than
+    the full picture. High saturation rates indicate the queries are too
+    generic for the album the operator is trying to find.
+
+    ``total_pre_filter_skips`` rolls up the U2 ``pre_filter_skip_count``
+    column — how many candidate peer dirs the asymmetric matcher
+    pre-filter rejected before browse over the same window.
+
+    ``saturation_rate`` is ``saturated_searches / total_searches`` with
+    an explicit ``0.0`` fallback when ``total_searches == 0`` (NOT NaN
+    — callers serialise this to JSON and NaN would break the
+    contract). Computed in Python after the aggregate fetch.
+
+    The summary is the data layer for the future search-plan dashboard
+    (see ``docs/brainstorms/2026-05-09-search-plan-per-request-dashboard-requirements.md``);
+    today it ships via ``pipeline-cli search-plan saturation`` and
+    ``GET /api/pipeline/<id>/search-plan/saturation``.
+    """
+
+    total_searches: int
+    saturated_searches: int
+    saturation_rate: float
+    total_pre_filter_skips: int
+    window_days: int
 
 
 @dataclass(frozen=True)
@@ -1560,19 +1603,24 @@ class PipelineDB:
                     mb_artist_id=None, discogs_release_id=None,
                     year=None, country=None, format=None,
                     source_path=None, reasoning=None,
-                    status="wanted"):
+                    status="wanted",
+                    release_group_year=None):
         now = datetime.now(timezone.utc)
         cur = self._execute("""
             INSERT INTO album_requests (
                 mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
-                artist_name, album_title, year, country, format,
+                artist_name, album_title, year, release_group_year,
+                country, format,
                 source, source_path, reasoning, status,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             RETURNING id
         """, (
             mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
-            artist_name, album_title, year, country, format,
+            artist_name, album_title, year, release_group_year,
+            country, format,
             source, source_path, reasoning, status,
             now, now,
         ))
@@ -1916,6 +1964,54 @@ class PipelineDB:
     ) -> None:
         """Write spectral state pairs together, including explicit NULLs."""
         self.update_request_fields(request_id, **update.as_update_fields())
+
+    def get_requests_missing_release_group_year(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List requests that need ``release_group_year`` populated.
+
+        Returns the rows where ``mb_release_group_id IS NOT NULL`` and
+        ``release_group_year IS NULL``. Used by the U3 deploy backfill
+        script (``scripts/backfill_release_group_year.py``); the WHERE
+        clause is what makes the backfill idempotent — re-running skips
+        rows that already have a value.
+
+        ``limit`` is honoured so the backfill can process in deterministic
+        chunks and test setups can constrain the result set.
+        """
+        sql = (
+            "SELECT id, mb_release_group_id, artist_name, album_title "
+            "FROM album_requests "
+            "WHERE mb_release_group_id IS NOT NULL "
+            "  AND release_group_year IS NULL "
+            "ORDER BY id"
+        )
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+        cur = self._execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+    def set_release_group_year(
+        self,
+        request_id: int,
+        year: int | None,
+    ) -> None:
+        """Set ``album_requests.release_group_year`` (U3 / R9).
+
+        ``year`` may be ``None`` (column reset to NULL) or an int (the
+        release-group's first-release year as returned by the MB mirror).
+        Used by the U3 deploy backfill and by U4's enqueue path. Thin
+        wrapper around ``update_request_fields`` — exists so call sites
+        carry the column name as part of the method, which makes the
+        backfill / enqueue intent grep-able.
+        """
+        self.update_request_fields(
+            request_id, release_group_year=year,
+        )
 
     def update_v0_probe_state(
         self,
@@ -3218,7 +3314,8 @@ class PipelineDB:
                    match_time_s: float = 0.0,
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
-                   fanout_waves: int = 0) -> None:
+                   fanout_waves: int = 0,
+                   pre_filter_skip_count: int = 0) -> None:
         """Record one search attempt for an album request.
 
         ``candidates`` is the top-N forensic ``CandidateScore`` list (already
@@ -3227,6 +3324,11 @@ class PipelineDB:
         NULL — error / submission-failure rows have no scoring data to
         report. See ``.claude/rules/code-quality.md`` § Wire-boundary types
         for the symmetric encode/decode contract.
+
+        ``pre_filter_skip_count`` (U2 of search-plan-entropy) is the
+        aggregate count of dirs the matcher's asymmetric pre-filter
+        rejected before browse. NOT NULL on the column; default 0 keeps
+        pre-attempt / error rows uniformly populated.
         """
         candidates_json: str | None = None
         if candidates is not None:
@@ -3236,12 +3338,14 @@ class PipelineDB:
             INSERT INTO search_log (
                 request_id, query, result_count, elapsed_s, outcome,
                 candidates, variant, final_state, browse_time_s, match_time_s,
-                peers_browsed, peers_browsed_lazy, fanout_waves
+                peers_browsed, peers_browsed_lazy, fanout_waves,
+                pre_filter_skip_count
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (request_id, query, result_count, elapsed_s, outcome,
               candidates_json, variant, final_state, browse_time_s, match_time_s,
-              peers_browsed, peers_browsed_lazy, fanout_waves))
+              peers_browsed, peers_browsed_lazy, fanout_waves,
+              pre_filter_skip_count))
         self.conn.commit()
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:
@@ -3275,6 +3379,72 @@ class PipelineDB:
             ORDER BY id DESC
         """, (request_id,))
         return [dict(r) for r in cur.fetchall()]
+
+    def get_saturation_summary(
+        self, request_id: int, *, window_days: int = 14,
+    ) -> "SaturationSummary":
+        """U7: saturation rate + pre-filter skip total for one request.
+
+        Aggregates ``search_log`` rows for ``request_id`` whose
+        ``created_at`` falls inside the last ``window_days`` days.
+        Returns a :class:`SaturationSummary` with:
+
+        * ``total_searches`` — count of rows in window
+        * ``saturated_searches`` — rows whose ``final_state`` matches
+          ``%LimitReached%`` (slskd hit its response/file ceiling)
+        * ``saturation_rate`` — ratio in ``[0.0, 1.0]``; ``0.0`` when
+          ``total_searches == 0`` (explicit, NOT NaN — the value is
+          serialised to JSON downstream)
+        * ``total_pre_filter_skips`` — sum of the U2
+          ``pre_filter_skip_count`` column over the same window
+        * ``window_days`` — echoed back so callers don't need to
+          remember which window they asked for
+
+        ``window_days`` is a non-negative int. The route handler and
+        CLI both bound it before calling (negative or huge values are
+        operator errors); the DB layer trusts the caller. ``0`` reduces
+        the SQL to an empty window and returns all zeros — that's a
+        defensible read (operator asked for the past zero days).
+
+        Returns an empty summary (all zeros, ``saturation_rate=0.0``)
+        when the request has no logged searches in window. This method
+        does NOT consult ``album_requests`` — the caller decides
+        whether to translate "no rows" into a 404 by looking up the
+        request row separately. See the service-layer
+        ``SearchPlanService.saturation_for_request`` for that mapping.
+        """
+        cur = self._execute("""
+            SELECT
+              COUNT(*) AS total_searches,
+              COUNT(*) FILTER (WHERE final_state LIKE %s)
+                AS saturated_searches,
+              COALESCE(SUM(pre_filter_skip_count), 0)
+                AS total_pre_filter_skips
+            FROM search_log
+            WHERE request_id = %s
+              AND created_at > NOW() - make_interval(days => %s)
+        """, ("%LimitReached%", request_id, int(window_days)))
+        row = cur.fetchone()
+        if row is None:
+            # Defensive — aggregate queries always return one row, but
+            # keep the type-checker happy and the helper total.
+            return SaturationSummary(
+                total_searches=0,
+                saturated_searches=0,
+                saturation_rate=0.0,
+                total_pre_filter_skips=0,
+                window_days=int(window_days),
+            )
+        total = int(row["total_searches"] or 0)
+        saturated = int(row["saturated_searches"] or 0)
+        rate = (saturated / total) if total > 0 else 0.0
+        return SaturationSummary(
+            total_searches=total,
+            saturated_searches=saturated,
+            saturation_rate=rate,
+            total_pre_filter_skips=int(row["total_pre_filter_skips"] or 0),
+            window_days=int(window_days),
+        )
 
     def get_legacy_search_log_summary(
         self, request_id: int, *, limit: int,
@@ -5553,7 +5723,8 @@ class PipelineDB:
                         plan_repeat_group, plan_generator_id,
                         execution_stage, attempt_consumed,
                         cursor_update_status, stale_reason,
-                        plan_cycle_snapshot
+                        plan_cycle_snapshot,
+                        pre_filter_skip_count
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
@@ -5564,6 +5735,7 @@ class PipelineDB:
                         %s, %s,
                         %s, %s,
                         %s, %s,
+                        %s,
                         %s
                     )
                     RETURNING id
@@ -5594,6 +5766,7 @@ class PipelineDB:
                         cursor_update_status,
                         stale_reason,
                         attempt.cycle_count_snapshot,
+                        attempt.pre_filter_skip_count,
                     ),
                 )
                 log_row = cur.fetchone()
@@ -5712,7 +5885,8 @@ class PipelineDB:
                         plan_strategy, plan_canonical_query_key,
                         plan_repeat_group, plan_generator_id,
                         execution_stage, attempt_consumed,
-                        cursor_update_status, plan_cycle_snapshot
+                        cursor_update_status, plan_cycle_snapshot,
+                        pre_filter_skip_count
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s,
@@ -5720,7 +5894,8 @@ class PipelineDB:
                         %s, %s,
                         %s, %s,
                         %s, %s,
-                        %s, %s
+                        %s, %s,
+                        %s
                     )
                     RETURNING id
                     """,
@@ -5742,6 +5917,7 @@ class PipelineDB:
                         False,  # attempt_consumed
                         CURSOR_UPDATE_UNCHANGED,
                         cycle_snapshot,
+                        attempt.pre_filter_skip_count,
                     ),
                 )
                 log_row = cur.fetchone()

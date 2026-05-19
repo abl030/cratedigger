@@ -60,7 +60,10 @@ from lib.import_queue import (
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.import_preview import ImportPreviewValues
 from lib.release_identity import detect_release_source, normalize_release_id
-from lib.util import resolve_failed_path as _shared_resolve_failed_path
+from lib.util import (
+    parse_mb_first_release_year,
+    resolve_failed_path as _shared_resolve_failed_path,
+)
 
 MB_API = "http://192.168.1.35:5200/ws/2"
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
@@ -129,6 +132,33 @@ def fetch_mb_release(mb_release_id):
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         print(f"  [ERROR] MB API: {e}", file=sys.stderr)
         return None
+
+
+def fetch_mb_release_group_year(rg_mbid):
+    """Return the release-group's first-release year as an int, or None.
+
+    U4 enqueue-time companion to ``fetch_mb_release``. Returns ``None``
+    on 404 / unparseable date / network blip — callers persist NULL on
+    the new ``release_group_year`` column rather than failing the add.
+    Mirrors ``web/mb.py::get_release_group_year`` but goes through
+    ``urllib`` directly so the CLI stays decoupled from the Redis-backed
+    web client.
+    """
+    url = f"{MB_API}/release-group/{rg_mbid}?fmt=json"
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "pipeline-cli/1.0")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
+        return None
+    except urllib.error.URLError as e:
+        print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
+        return None
+    return parse_mb_first_release_year(data)
 
 
 def tracks_from_mb_release(release_data):
@@ -200,14 +230,58 @@ def _build_search_plan_service(db):
     return SearchPlanService(db, read_runtime_config())
 
 
+def _search_plan_exit_code(outcome: str) -> int:
+    """CLI ⇄ API exit-code mapping for search-plan read/advance subcommands.
+
+    Per CLAUDE.md § "CLI ⇄ API surface symmetry":
+    0=success, 2=not_found, 3=input_validation, 4=wrong_state, 5=transient.
+
+    Covers the outcome strings emitted by ``dry_run_for_request``,
+    ``saturation_for_request``, ``advance_for_request`` and
+    ``history_for_request``. Regenerate has its own ladder
+    (``failed_transient`` → 4 there, predating this convention).
+    """
+    from lib.search_plan_service import (
+        RESULT_ADVANCED,
+        RESULT_DRY_RUN_GENERATION_FAILED,
+        RESULT_DRY_RUN_SUCCESS,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_HISTORY_PAGE_INPUT_INVALID,
+        RESULT_HISTORY_PAGE_SUCCESS,
+        RESULT_INVALID_TARGET,
+        RESULT_NO_ACTIVE_PLAN,
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SATURATION_INPUT_INVALID,
+        RESULT_SATURATION_SUCCESS,
+    )
+    mapping: dict[str, int] = {
+        RESULT_DRY_RUN_SUCCESS: 0,
+        RESULT_DRY_RUN_GENERATION_FAILED: 0,
+        RESULT_SATURATION_SUCCESS: 0,
+        RESULT_ADVANCED: 0,
+        RESULT_HISTORY_PAGE_SUCCESS: 0,
+        RESULT_REQUEST_NOT_FOUND: 2,
+        RESULT_SATURATION_INPUT_INVALID: 3,
+        RESULT_INVALID_TARGET: 3,
+        RESULT_HISTORY_PAGE_INPUT_INVALID: 3,
+        RESULT_NO_ACTIVE_PLAN: 4,
+        RESULT_FAILED_TRANSIENT: 5,
+    }
+    return mapping.get(outcome, 1)
+
+
 def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
-                              tracks, source):
+                              tracks, source, release_group_year=None):
     """Run plan generation for a freshly-added request.
 
     Failures are non-fatal: a deterministic / transient failure is
     recorded as a `search_plans` row and the CLI prints a one-liner so
     the operator knows the request is wanted-but-not-searchable until
     repaired.
+
+    ``release_group_year`` (U5 of search-plan-entropy) feeds the
+    generator's conditional ``unwild_rg_year`` slot. ``None`` is fine
+    — the generator handles it gracefully.
     """
     from lib.search_plan_service import (
         RESULT_FAILED_DETERMINISTIC,
@@ -223,6 +297,7 @@ def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
         year=year,
         tracks=tracks,
         source=source,
+        release_group_year=release_group_year,
     )
     if result.outcome == RESULT_SUCCESS:
         print(f"  Plan: active id={result.plan_id}")
@@ -254,6 +329,12 @@ def _cmd_add_mb(db, mbid, source):
     if release.get("date"):
         year = int(release["date"][:4]) if len(release["date"]) >= 4 else None
 
+    # Persist release-group year so the generator can emit a
+    # year-anchored slot matching how users on Soulseek file reissues.
+    # ``fetch_mb_release_group_year`` is 404/error tolerant; column
+    # accepts NULL.
+    rg_year = fetch_mb_release_group_year(rg_id) if rg_id else None
+
     req_id = db.add_request(
         mb_release_id=mbid,
         mb_release_group_id=rg_id,
@@ -261,6 +342,7 @@ def _cmd_add_mb(db, mbid, source):
         artist_name=artist_name,
         album_title=release.get("title", "Unknown"),
         year=year,
+        release_group_year=rg_year,
         country=release.get("country"),
         source=source,
     )
@@ -277,6 +359,7 @@ def _cmd_add_mb(db, mbid, source):
         year=year,
         tracks=tracks,
         source=source,
+        release_group_year=rg_year,
     )
 
 
@@ -1883,6 +1966,178 @@ def cmd_beets_distance(db, args):
     return 1
 
 
+def cmd_search_plan_dry_run(db, args):
+    """U6: ``pipeline-cli search-plan dry-run <request_id>``.
+
+    Read-only simulator: runs the current generator against the
+    request's persisted snapshot and prints the slot list without
+    writing anything. Counterpart of ``GET /api/pipeline/<id>/search-plan/dry-run``.
+    Both surfaces wrap ``SearchPlanService.dry_run_for_request`` — keep
+    them in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Use this during generator development (see
+    ``.claude/rules/code-quality.md`` § "Pipeline Decision Debugging
+    — Simulator-First TDD") to validate that the next cycle's
+    generator output matches expectations before bumping
+    ``SEARCH_PLAN_GENERATOR_ID``.
+
+    Exit codes:
+      * 0 — ``RESULT_DRY_RUN_SUCCESS`` or
+        ``RESULT_DRY_RUN_GENERATION_FAILED`` (generator returned a
+        deterministic generation failure — informational, not a CLI
+        error; the operator still wants to see ``failure_reason`` and
+        provenance).
+      * 2 — ``RESULT_REQUEST_NOT_FOUND``.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        SearchPlanService,
+        dry_run_payload,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.dry_run_for_request(
+        int(args.id),
+        prepend_artist=bool(getattr(args, "prepend_artist", False)),
+    )
+    row = db.get_request(int(args.id))
+    has_active = False
+    if row is not None:
+        try:
+            active = db.get_active_search_plan(int(args.id))
+            has_active = active is not None
+        except Exception:  # noqa: BLE001
+            has_active = False
+    payload = dry_run_payload(
+        result,
+        current_generator_id=svc.generator_id,
+        request_row=row,
+        has_active_plan=has_active,
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:             {payload['request_id']}")
+        print(f"  Outcome:                {payload['outcome']}")
+        print(
+            f"  Current generator id:   {payload['current_generator_id']}")
+        if payload["request"] is not None:
+            req = payload["request"]
+            print(f"  Artist:                 {req.get('artist_name')}")
+            print(f"  Album:                  {req.get('album_title')}")
+            print(f"  Status:                 {req.get('status')}")
+            print(f"  Year:                   {req.get('year') or '-'}")
+            rg = req.get("release_group_year")
+            print(f"  Release-group year:     {rg if rg is not None else '-'}")
+            print(
+                f"  Would supersede active: "
+                f"{'yes' if payload['would_supersede_active'] else 'no'}")
+        plan = payload["plan"]
+        if plan is None:
+            print(f"  Plan:                   (none)")
+            if result.error_message:
+                print(f"  Error message:          {result.error_message}")
+        else:
+            print(f"  Plan generator_id:      {plan['generator_id']}")
+            print(f"  Plan status:            {plan['status']}")
+            if plan["failure_reason"]:
+                print(
+                    f"  Plan failure_reason:    {plan['failure_reason']}")
+            items = plan["items"]
+            print(f"  Plan items ({len(items)}):")
+            for it in items:
+                head = (
+                    f"    [{it['ordinal']:>2}] strategy={it['strategy']}"
+                    f"  query={it['query']!r}")
+                if it.get("canonical_query_key"):
+                    head += f"  key={it['canonical_query_key']}"
+                if it.get("repeat_group"):
+                    head += f"  repeat={it['repeat_group']}"
+                print(head)
+                prov = it.get("provenance") or {}
+                for key, value in prov.items():
+                    print(f"          provenance.{key}: {value}")
+            prov_plan = plan.get("provenance") or {}
+            if prov_plan:
+                print(f"  Plan provenance:")
+                for key, value in prov_plan.items():
+                    if isinstance(value, list):
+                        print(f"    {key}: {len(value)} item(s)")
+                        for entry in value[:5]:
+                            print(f"      - {entry}")
+                        if len(value) > 5:
+                            print(f"      ... +{len(value) - 5} more")
+                    else:
+                        print(f"    {key}: {value}")
+
+    return _search_plan_exit_code(result.outcome)
+
+
+def cmd_search_plan_saturation(db, args):
+    """U7: ``pipeline-cli search-plan saturation <request_id>``.
+
+    Read-only telemetry aggregator: reports the saturation rate (rows
+    whose ``final_state`` contains ``LimitReached``) and total
+    ``pre_filter_skip_count`` over the last ``--window-days`` (default
+    14) of ``search_log`` rows. Counterpart of
+    ``GET /api/pipeline/<id>/search-plan/saturation``; both surfaces
+    wrap ``SearchPlanService.saturation_for_request`` — keep them in
+    sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Exit codes:
+      * 0 — ``RESULT_SATURATION_SUCCESS`` (zeros are still success —
+        the request exists, the window is just quiet)
+      * 2 — ``RESULT_REQUEST_NOT_FOUND``
+      * 3 — ``RESULT_SATURATION_INPUT_INVALID`` (argparse normally
+        bounds this; the branch is defensive parity with the API's
+        400)
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        SATURATION_WINDOW_DEFAULT_DAYS,
+        SearchPlanService,
+        saturation_payload,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    # ``None`` means "argparse default" (operator omitted the flag);
+    # treat 0 / negative as explicit and let the service flag them
+    # invalid so the operator sees the failure rather than silently
+    # widening to 14.
+    raw_window = getattr(args, "window_days", None)
+    window_days = int(
+        raw_window if raw_window is not None
+        else SATURATION_WINDOW_DEFAULT_DAYS)
+    result = svc.saturation_for_request(
+        int(args.id), window_days=window_days,
+    )
+    payload = saturation_payload(result)
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:             {payload['request_id']}")
+        print(f"  Outcome:                {payload['outcome']}")
+        print(f"  Window (days):          {payload['window_days']}")
+        print(f"  Total searches:         {payload['total_searches']}")
+        print(f"  Saturated searches:     {payload['saturated_searches']}")
+        # Render the rate as a percentage with one decimal so the
+        # number is human-readable at a glance.
+        rate_pct = 100.0 * float(payload['saturation_rate'])
+        print(f"  Saturation rate:        {rate_pct:.1f}%")
+        print(
+            f"  Pre-filter skips total: {payload['total_pre_filter_skips']}")
+        if payload.get("error_message"):
+            print(f"  Error message:          {payload['error_message']}")
+
+    return _search_plan_exit_code(result.outcome)
+
+
 def cmd_search_plan_advance(db, args):
     """Forward-only operator advance of the search-plan cursor.
 
@@ -1900,11 +2155,6 @@ def cmd_search_plan_advance(db, args):
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_ADVANCED,
-        RESULT_FAILED_TRANSIENT,
-        RESULT_INVALID_TARGET,
-        RESULT_NO_ACTIVE_PLAN,
-        RESULT_REQUEST_NOT_FOUND,
         SearchPlanService,
     )
 
@@ -1945,17 +2195,7 @@ def cmd_search_plan_advance(db, args):
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
 
-    if result.outcome == RESULT_ADVANCED:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    if result.outcome == RESULT_INVALID_TARGET:
-        return 3
-    if result.outcome == RESULT_NO_ACTIVE_PLAN:
-        return 4
-    if result.outcome == RESULT_FAILED_TRANSIENT:
-        return 5
-    return 1
+    return _search_plan_exit_code(result.outcome)
 
 
 def cmd_search_plan_history(db, args):
@@ -1978,9 +2218,7 @@ def cmd_search_plan_history(db, args):
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
         HISTORY_PAGE_DEFAULT_LIMIT,
-        RESULT_HISTORY_PAGE_INPUT_INVALID,
         RESULT_HISTORY_PAGE_SUCCESS,
-        RESULT_REQUEST_NOT_FOUND,
         SearchPlanService,
     )
 
@@ -2041,13 +2279,7 @@ def cmd_search_plan_history(db, args):
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
 
-    if result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    if result.outcome == RESULT_HISTORY_PAGE_INPUT_INVALID:
-        return 3
-    return 1
+    return _search_plan_exit_code(result.outcome)
 
 
 def main():
@@ -2131,6 +2363,28 @@ def main():
              "(e.g. `track`, `unwild_year`)")
     p_sp_advance.add_argument("--json", action="store_true",
                               help="Print structured JSON instead of text")
+    p_sp_dry_run = sp_sub.add_parser(
+        "dry-run",
+        help="Run the generator against the request's snapshot without "
+             "persisting (U6 simulator)")
+    p_sp_dry_run.add_argument("id", type=int, help="Request ID")
+    p_sp_dry_run.add_argument("--prepend-artist", action="store_true",
+                              dest="prepend_artist",
+                              help="Prepend artist name to album title in "
+                              "generated queries")
+    p_sp_dry_run.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
+    p_sp_saturation = sp_sub.add_parser(
+        "saturation",
+        help="Show per-request saturation rate + pre-filter skip total "
+             "over the recent search_log window (U7 telemetry)")
+    p_sp_saturation.add_argument("id", type=int, help="Request ID")
+    p_sp_saturation.add_argument(
+        "--window-days", type=int, default=None, dest="window_days",
+        help="Window in days; defaults to 14; valid range [1, 90]")
+    p_sp_saturation.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON instead of text")
     p_sp_history = sp_sub.add_parser(
         "history",
         help="Cursor-paginated read of one request's search_log rows "
@@ -2312,6 +2566,8 @@ def main():
         "regenerate": cmd_search_plan_regenerate,
         "advance": cmd_search_plan_advance,
         "history": cmd_search_plan_history,
+        "dry-run": cmd_search_plan_dry_run,
+        "saturation": cmd_search_plan_saturation,
     }
     try:
         if args.command == "search-plan":

@@ -26,7 +26,7 @@ _PERTH_TZ = ZoneInfo("Australia/Perth")
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
-    from lib.pipeline_db import SearchLogHistoryPage
+    from lib.pipeline_db import SaturationSummary, SearchLogHistoryPage
 
 from lib.import_queue import (
     ImportJob,
@@ -162,6 +162,10 @@ class SearchLogRow:
     cursor_update_status: str | None = None
     stale_reason: str | None = None
     plan_cycle_snapshot: int | None = None
+    # U2 of search-plan-entropy: pre-filter skip count. NOT NULL on
+    # the real column with default 0; mirror that here so test asserts
+    # never see None on the field.
+    pre_filter_skip_count: int = 0
 
 
 @dataclass
@@ -1954,6 +1958,39 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
+    def set_release_group_year(
+        self,
+        request_id: int,
+        year: int | None,
+    ) -> None:
+        """In-memory mirror of ``PipelineDB.set_release_group_year``."""
+        self.update_request_fields(request_id, release_group_year=year)
+
+    def get_requests_missing_release_group_year(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """In-memory mirror of
+        ``PipelineDB.get_requests_missing_release_group_year``.
+        """
+        out: list[dict[str, Any]] = []
+        for rid in sorted(self._requests.keys()):
+            row = self._requests[rid]
+            if not row.get("mb_release_group_id"):
+                continue
+            if row.get("release_group_year") is not None:
+                continue
+            out.append({
+                "id": row["id"],
+                "mb_release_group_id": row["mb_release_group_id"],
+                "artist_name": row["artist_name"],
+                "album_title": row["album_title"],
+            })
+            if limit is not None and len(out) >= limit:
+                break
+        return out
+
     # --- Session lifecycle ---
 
     def close(self) -> None:
@@ -1971,7 +2008,8 @@ class FakePipelineDB:
                     format: str | None = None,
                     source_path: str | None = None,
                     reasoning: str | None = None,
-                    status: str = "wanted") -> int:
+                    status: str = "wanted",
+                    release_group_year: int | None = None) -> int:
         """Insert an album_requests row.
 
         Seeds the full ``album_requests`` column set (matching
@@ -1992,6 +2030,9 @@ class FakePipelineDB:
             "artist_name": artist_name,
             "album_title": album_title,
             "year": year,
+            # U3 / R9 — release-group's first-release year. Populated by
+            # the deploy-time backfill or U4's enqueue path; nullable.
+            "release_group_year": release_group_year,
             "country": country,
             "format": format,
             "source": source,
@@ -2953,7 +2994,8 @@ class FakePipelineDB:
                    match_time_s: float = 0.0,
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
-                   fanout_waves: int = 0) -> None:
+                   fanout_waves: int = 0,
+                   pre_filter_skip_count: int = 0) -> None:
         """Mirror PipelineDB.log_search wire boundary.
 
         ``candidates`` is encoded via ``msgspec.json.encode`` (same as the
@@ -2981,6 +3023,7 @@ class FakePipelineDB:
             peers_browsed=peers_browsed,
             peers_browsed_lazy=peers_browsed_lazy,
             fanout_waves=fanout_waves,
+            pre_filter_skip_count=pre_filter_skip_count,
         ))
 
     def get_search_history(self,
@@ -3033,6 +3076,43 @@ class FakePipelineDB:
             assert isinstance(extra_id, int)
             next_before_id = extra_id
         return _Page(rows=rows, next_before_id=next_before_id)
+
+    def get_saturation_summary(
+        self, request_id: int, *, window_days: int = 14,
+    ) -> "SaturationSummary":
+        """U7 mirror of ``PipelineDB.get_saturation_summary``.
+
+        Replicates the SQL aggregate against ``self.search_logs``:
+        rows whose ``final_state`` contains ``LimitReached`` count as
+        saturated; ``pre_filter_skip_count`` is summed. The window cut
+        uses Python ``datetime`` arithmetic so tests can rewind
+        ``SearchLogRow.created_at`` deterministically.
+
+        ``saturation_rate`` is ``0.0`` (not NaN) when the window
+        contains no rows — same explicit fallback the real DB returns.
+        """
+        from lib.pipeline_db import SaturationSummary as _SatSummary
+        cutoff = _utcnow() - timedelta(days=int(window_days))
+        total = 0
+        saturated = 0
+        skips = 0
+        for entry in self.search_logs:
+            if entry.request_id != request_id:
+                continue
+            if entry.created_at <= cutoff:
+                continue
+            total += 1
+            if entry.final_state is not None and "LimitReached" in entry.final_state:
+                saturated += 1
+            skips += int(entry.pre_filter_skip_count or 0)
+        rate = (saturated / total) if total > 0 else 0.0
+        return _SatSummary(
+            total_searches=total,
+            saturated_searches=saturated,
+            saturation_rate=rate,
+            total_pre_filter_skips=skips,
+            window_days=int(window_days),
+        )
 
     def get_legacy_search_log_summary(
         self, request_id: int, *, limit: int,
@@ -3114,6 +3194,7 @@ class FakePipelineDB:
             "cursor_update_status": entry.cursor_update_status,
             "stale_reason": entry.stale_reason,
             "plan_cycle_snapshot": entry.plan_cycle_snapshot,
+            "pre_filter_skip_count": entry.pre_filter_skip_count,
         }
 
     # --- User cooldowns ---
@@ -3734,6 +3815,7 @@ class FakePipelineDB:
                 cursor_update_status=cursor_update_status,
                 stale_reason=stale_reason,
                 plan_cycle_snapshot=attempt.cycle_count_snapshot,
+                pre_filter_skip_count=attempt.pre_filter_skip_count,
             ))
 
             now = _utcnow()
@@ -3803,6 +3885,7 @@ class FakePipelineDB:
             attempt_consumed=False,
             cursor_update_status=CURSOR_UPDATE_UNCHANGED,
             plan_cycle_snapshot=cycle_snapshot,
+            pre_filter_skip_count=attempt.pre_filter_skip_count,
         ))
         if attempt.apply_scheduler_attempt:
             now = _utcnow()

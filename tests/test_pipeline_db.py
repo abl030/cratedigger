@@ -1433,6 +1433,26 @@ class TestSearchLog(unittest.TestCase):
         self.assertEqual(history[0]["variant"], "v1_year")
         self.assertEqual(history[0]["final_state"], "TimedOut")
 
+    def test_log_search_persists_pre_filter_skip_count(self):
+        """U2 of search-plan-entropy: ``pre_filter_skip_count`` writes to
+        the dedicated column. NOT NULL with default 0; this asserts the
+        explicit non-zero path actually round-trips, AND that omitting
+        the kwarg defaults to 0 in the persisted row."""
+        # Explicit non-zero round-trip.
+        self.db.log_search(
+            request_id=self.req_id, query="q", outcome="no_match",
+            candidates=None, pre_filter_skip_count=42,
+        )
+        # Default (kwarg omitted) writes 0.
+        self.db.log_search(
+            request_id=self.req_id, query="q2", outcome="found",
+            candidates=None,
+        )
+        history = self.db.get_search_history(self.req_id)
+        # history is newest-first; index 0 == second insert (default).
+        self.assertEqual(history[0]["pre_filter_skip_count"], 0)
+        self.assertEqual(history[1]["pre_filter_skip_count"], 42)
+
     def test_log_search_candidates_decode_rejects_wrong_type(self):
         """Wire-boundary regression: msgspec.convert raises on type drift.
 
@@ -1453,6 +1473,137 @@ class TestSearchLog(unittest.TestCase):
         }]
         with self.assertRaises(msgspec.ValidationError):
             msgspec.convert(wrong, type=list[CandidateScore])
+
+
+@requires_postgres
+class TestGetSaturationSummary(unittest.TestCase):
+    """U7: ``PipelineDB.get_saturation_summary`` aggregates one request's
+    search_log rows in the recent window. Saturation = rows whose
+    ``final_state`` matches ``%LimitReached%`` (slskd hit response /
+    file ceiling). ``total_pre_filter_skips`` rolls up the U2 column.
+
+    ``saturation_rate`` is computed in Python so the explicit ``0.0``
+    fallback survives the empty-window case (NaN would break JSON
+    serialisation downstream).
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="saturation-uuid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_empty_request_returns_zeros(self):
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 0)
+        self.assertEqual(summary.saturated_searches, 0)
+        # Critical invariant: 0.0, not NaN.
+        self.assertEqual(summary.saturation_rate, 0.0)
+        self.assertEqual(summary.total_pre_filter_skips, 0)
+        self.assertEqual(summary.window_days, 14)
+
+    def test_counts_only_saturated_final_states(self):
+        # Only rows whose final_state contains "LimitReached" count
+        # as saturated. The slskd state strings are comma-joined so
+        # the match must be a substring, not equality.
+        for state in (
+            "Completed, ResponseLimitReached",
+            "Completed, FileLimitReached",
+            "Completed",  # not saturated
+            "Cancelled",  # not saturated
+            None,         # not saturated
+        ):
+            self.db.log_search(
+                request_id=self.req_id, query="q", outcome="found",
+                final_state=state,
+            )
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 5)
+        self.assertEqual(summary.saturated_searches, 2)
+        self.assertAlmostEqual(summary.saturation_rate, 2 / 5)
+
+    def test_sums_pre_filter_skip_count(self):
+        for skip in (4, 1, 0, 8):
+            self.db.log_search(
+                request_id=self.req_id, query="q", outcome="found",
+                final_state="Completed", pre_filter_skip_count=skip,
+            )
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 4)
+        self.assertEqual(summary.saturated_searches, 0)
+        self.assertEqual(summary.total_pre_filter_skips, 13)
+
+    def test_window_days_filters_old_rows(self):
+        # Insert two recent rows, then backdate a third via direct SQL
+        # so we can test the window cut without sleeping.
+        self.db.log_search(
+            request_id=self.req_id, query="recent_a",
+            outcome="found",
+            final_state="Completed, ResponseLimitReached",
+            pre_filter_skip_count=2,
+        )
+        self.db.log_search(
+            request_id=self.req_id, query="recent_b",
+            outcome="found", final_state="Completed",
+            pre_filter_skip_count=1,
+        )
+        self.db.log_search(
+            request_id=self.req_id, query="old",
+            outcome="found",
+            final_state="Completed, FileLimitReached",
+            pre_filter_skip_count=10,
+        )
+        # Backdate the most recent row 10 days into the past.
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - INTERVAL '10 days' "
+            "WHERE query = %s",
+            ("old",),
+        )
+        # 7-day window: old row out, two recent rows in.
+        seven = self.db.get_saturation_summary(self.req_id, window_days=7)
+        self.assertEqual(seven.total_searches, 2)
+        self.assertEqual(seven.saturated_searches, 1)
+        self.assertEqual(seven.total_pre_filter_skips, 3)
+        self.assertEqual(seven.window_days, 7)
+        # 14-day window: all three rows are in scope.
+        fourteen = self.db.get_saturation_summary(
+            self.req_id, window_days=14)
+        self.assertEqual(fourteen.total_searches, 3)
+        self.assertEqual(fourteen.saturated_searches, 2)
+        self.assertEqual(fourteen.total_pre_filter_skips, 13)
+
+    def test_isolates_by_request_id(self):
+        # Rows for a different request must not bleed into this
+        # request's saturation roll-up.
+        other = self.db.add_request(
+            mb_release_id="other-uuid",
+            artist_name="X", album_title="Y", source="request",
+        )
+        self.db.log_search(
+            request_id=other, query="other",
+            outcome="found",
+            final_state="Completed, ResponseLimitReached",
+            pre_filter_skip_count=99,
+        )
+        self.db.log_search(
+            request_id=self.req_id, query="mine",
+            outcome="found", final_state="Completed",
+            pre_filter_skip_count=2,
+        )
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 1)
+        self.assertEqual(summary.saturated_searches, 0)
+        self.assertEqual(summary.total_pre_filter_skips, 2)
+
+    def test_window_days_echoes_back(self):
+        # The summary echoes window_days so callers don't have to
+        # remember what they asked for.
+        summary = self.db.get_saturation_summary(self.req_id, window_days=30)
+        self.assertEqual(summary.window_days, 30)
 
 
 @requires_postgres
@@ -2486,6 +2637,86 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertFalse(req["verified_lossless"])
         self.assertIsNone(req["current_spectral_grade"])
         self.assertIsNone(req["current_spectral_bitrate"])
+
+
+@requires_postgres
+class TestReleaseGroupYearColumn(unittest.TestCase):
+    """U3 / R9 — ``album_requests.release_group_year`` column wiring.
+
+    The migration is verified in ``tests/test_migrator.py``. These tests
+    cover ``PipelineDB.set_release_group_year`` and
+    ``get_requests_missing_release_group_year`` against real PostgreSQL.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_get_request_round_trips_release_group_year(self):
+        rid = self.db.add_request(
+            mb_release_id="rg-year-roundtrip",
+            mb_release_group_id="rg-uuid-1",
+            artist_name="A", album_title="B", source="request",
+        )
+        req = self.db.get_request(rid)
+        assert req is not None
+        # Default is NULL — the column has no default in the migration.
+        self.assertIsNone(req["release_group_year"])
+
+        self.db.set_release_group_year(rid, 2000)
+        req2 = self.db.get_request(rid)
+        assert req2 is not None
+        self.assertEqual(req2["release_group_year"], 2000)
+
+    def test_set_to_none_clears_the_column(self):
+        rid = self.db.add_request(
+            mb_release_id="rg-year-clear",
+            mb_release_group_id="rg-uuid-clear",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.db.set_release_group_year(rid, 1980)
+        self.db.set_release_group_year(rid, None)
+        req = self.db.get_request(rid)
+        assert req is not None
+        self.assertIsNone(req["release_group_year"])
+
+    def test_get_requests_missing_release_group_year_filters_correctly(self):
+        # Has RG, no year → returned.
+        needs = self.db.add_request(
+            mb_release_id="needs-year",
+            mb_release_group_id="rg-needs",
+            artist_name="A", album_title="B", source="request",
+        )
+        # Has RG and year → excluded.
+        has = self.db.add_request(
+            mb_release_id="has-year",
+            mb_release_group_id="rg-has",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.db.set_release_group_year(has, 1999)
+        # No RG → excluded (the generator's RG slot wouldn't fire either).
+        no_rg = self.db.add_request(
+            discogs_release_id="555",
+            artist_name="A", album_title="B", source="request",
+        )
+
+        rows = self.db.get_requests_missing_release_group_year()
+        ids = {r["id"] for r in rows}
+        self.assertIn(needs, ids)
+        self.assertNotIn(has, ids)
+        self.assertNotIn(no_rg, ids)
+
+    def test_missing_year_query_respects_limit(self):
+        for i in range(5):
+            self.db.add_request(
+                mb_release_id=f"rg-limit-{i}",
+                mb_release_group_id=f"rg-limit-uuid-{i}",
+                artist_name="A", album_title="B", source="request",
+            )
+        rows = self.db.get_requests_missing_release_group_year(limit=2)
+        self.assertEqual(len(rows), 2)
 
 
 @requires_postgres

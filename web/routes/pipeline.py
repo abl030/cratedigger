@@ -44,13 +44,17 @@ MAX_PIPELINE_LOG_LIMIT = 500
 
 
 def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
-                              tracks, source):
+                              tracks, source, release_group_year=None):
     """Run shared plan generation after `set_tracks()` on the add path.
 
     Failures are recorded but never bubble up — the request is repairable
     via startup reconciliation or explicit regeneration. This keeps the
     add API contract stable: a 200 response means the request landed,
     even if plan generation needs another attempt.
+
+    ``release_group_year`` (U5 of search-plan-entropy) feeds the
+    generator's conditional ``unwild_rg_year`` slot for reissues. Pass
+    ``None`` when unknown — the generator handles it gracefully.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import SearchPlanService
@@ -64,6 +68,7 @@ def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
             year=year,
             tracks=tracks or [],
             source=source,
+            release_group_year=release_group_year,
         )
     except Exception as exc:  # noqa: BLE001
         # Never fail the HTTP request because plan generation hiccupped.
@@ -516,6 +521,158 @@ def get_pipeline_search_plan(
         h._error("Not found", 404)
         return
     h._json(payload)
+
+
+def get_pipeline_search_plan_dry_run(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """U6: ``GET /api/pipeline/<id>/search-plan/dry-run``.
+
+    Read-only generator simulator. Runs ``generate_search_plan``
+    against the current persisted snapshot for ``<id>`` and returns
+    the resulting plan items without writing anything. Counterpart of
+    ``pipeline-cli search-plan dry-run``; both surfaces wrap
+    ``SearchPlanService.dry_run_for_request`` — keep them in sync
+    (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Query string:
+      * ``prepend_artist`` — ``1`` to enable (defaults to runtime
+        config's ``album_prepend_artist``).
+
+    Status-code mapping:
+      * 200 — ``RESULT_DRY_RUN_SUCCESS`` or
+        ``RESULT_DRY_RUN_GENERATION_FAILED`` (the latter is a
+        deterministic generator outcome the operator wants to see in
+        the body — the route is informational, not a hard error).
+      * 404 — ``RESULT_REQUEST_NOT_FOUND``.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_DRY_RUN_GENERATION_FAILED,
+        RESULT_DRY_RUN_SUCCESS,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+        dry_run_payload,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    prepend_artist_raw = params.get("prepend_artist", [None])[0]
+    prepend_artist: bool | None
+    if prepend_artist_raw is None or prepend_artist_raw == "":
+        prepend_artist = None
+    else:
+        prepend_artist = prepend_artist_raw == "1"
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.dry_run_for_request(
+        request_id, prepend_artist=prepend_artist,
+    )
+    row = db.get_request(request_id)
+    has_active = False
+    if row is not None:
+        try:
+            active = db.get_active_search_plan(request_id)
+            has_active = active is not None
+        except Exception:  # noqa: BLE001
+            has_active = False
+    payload = dry_run_payload(
+        result,
+        current_generator_id=svc.generator_id,
+        request_row=row,
+        has_active_plan=has_active,
+    )
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome in (
+            RESULT_DRY_RUN_SUCCESS, RESULT_DRY_RUN_GENERATION_FAILED):
+        h._json(payload)
+        return
+    # Defensive fallback for any future outcome string.
+    h._error(f"Unknown dry-run outcome: {result.outcome}", 500)
+
+
+def get_pipeline_search_plan_saturation(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """U7: ``GET /api/pipeline/<id>/search-plan/saturation``.
+
+    Read-only telemetry aggregator. Returns the saturation rate (rows
+    whose ``final_state`` contains ``LimitReached``) and total
+    ``pre_filter_skip_count`` over the last ``window_days`` (default
+    14) of ``search_log`` rows for ``<id>``. Counterpart of
+    ``pipeline-cli search-plan saturation``; both surfaces wrap
+    ``SearchPlanService.saturation_for_request`` — keep them in sync
+    (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Query string:
+      * ``window_days`` — int in
+        ``[SATURATION_WINDOW_MIN_DAYS, SATURATION_WINDOW_MAX_DAYS]``;
+        defaults to ``SATURATION_WINDOW_DEFAULT_DAYS``.
+
+    Status-code mapping:
+      * 200 — ``RESULT_SATURATION_SUCCESS`` (counts may be zero — a
+        valid "found but quiet" state).
+      * 400 — ``window_days`` not parseable as int, or
+        ``RESULT_SATURATION_INPUT_INVALID``.
+      * 404 — ``RESULT_REQUEST_NOT_FOUND`` (request_id does not exist
+        in ``album_requests``; distinct from a real request whose
+        window happens to be empty).
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SATURATION_INPUT_INVALID,
+        RESULT_SATURATION_SUCCESS,
+        SATURATION_WINDOW_DEFAULT_DAYS,
+        SearchPlanService,
+        saturation_payload,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    window_raw = params.get("window_days", [None])[0]
+    if window_raw is None or window_raw == "":
+        window_days = SATURATION_WINDOW_DEFAULT_DAYS
+    else:
+        try:
+            window_days = int(window_raw)
+        except (TypeError, ValueError):
+            h._error(
+                f"window_days must be an integer; got {window_raw!r}",
+                status=400,
+            )
+            return
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.saturation_for_request(
+        request_id, window_days=window_days,
+    )
+    payload = saturation_payload(result)
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome == RESULT_SATURATION_INPUT_INVALID:
+        payload["error"] = (
+            result.error_message or "Invalid window_days")
+        h._json(payload, status=400)
+        return
+    if result.outcome == RESULT_SATURATION_SUCCESS:
+        h._json(payload)
+        return
+    # Defensive fallback for any future outcome string.
+    h._error(f"Unknown saturation outcome: {result.outcome}", 500)
 
 
 def get_pipeline_search_plan_history(
@@ -1227,13 +1384,21 @@ def post_pipeline_add(h, body: dict) -> None:
     # an extra MB mirror round trip on add.
     release = mb_api.get_release(mbid, fresh=True)
 
+    # Persist release-group year alongside release year so the generator
+    # can emit a year-anchored slot matching how users on Soulseek file
+    # reissues. ``get_release_group_year`` returns None on 404 /
+    # unparseable date; column accepts NULL.
+    rg_id = release.get("release_group_id")
+    rg_year = mb_api.get_release_group_year(rg_id) if rg_id else None
+
     req_id = s._db().add_request(
         mb_release_id=mbid,
-        mb_release_group_id=release.get("release_group_id"),
+        mb_release_group_id=rg_id,
         mb_artist_id=release.get("artist_id"),
         artist_name=release["artist_name"],
         album_title=release["title"],
         year=release.get("year"),
+        release_group_year=rg_year,
         country=release.get("country"),
         source=source,
     )
@@ -1248,6 +1413,7 @@ def post_pipeline_add(h, body: dict) -> None:
         year=release.get("year"),
         tracks=release.get("tracks") or [],
         source=source,
+        release_group_year=rg_year,
     )
 
     h._json({
@@ -1361,6 +1527,8 @@ def post_pipeline_upgrade(h, body: dict) -> None:
     else:
         # Brand-new request — no prior override to preserve.
         quality = QUALITY_UPGRADE_TIERS
+        # Discogs upgrade leaves release_group_year NULL (no MB release-group).
+        rg_year_upgrade: int | None = None
         # Bypass the 24h meta cache — both branches persist metadata
         # into the pipeline DB (artist / title / tracks). Stale cache
         # reads would silently bake pre-correction data from an earlier
@@ -1379,12 +1547,19 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
+            rg_id_upgrade = release.get("release_group_id")
+            rg_year_upgrade = (
+                mb_api.get_release_group_year(rg_id_upgrade)
+                if rg_id_upgrade else None
+            )
             req_id = s._db().add_request(
                 mb_release_id=mbid,
+                mb_release_group_id=rg_id_upgrade,
                 mb_artist_id=release.get("artist_id"),
                 artist_name=release["artist_name"],
                 album_title=release["title"],
                 year=release.get("year"),
+                release_group_year=rg_year_upgrade,
                 country=release.get("country"),
                 source="request",
             )
@@ -1397,6 +1572,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             year=release.get("year"),
             tracks=release.get("tracks") or [],
             source="request",
+            release_group_year=rg_year_upgrade,
         )
         # Newly added request — status is already 'wanted', set quality override
         transitions.finalize_request(
@@ -1988,6 +2164,10 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
      get_pipeline_search_plan),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/dry-run$"),
+     get_pipeline_search_plan_dry_run),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/saturation$"),
+     get_pipeline_search_plan_saturation),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
      get_pipeline_search_plan_history),
     (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),

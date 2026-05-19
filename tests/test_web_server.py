@@ -485,7 +485,7 @@ def _make_server():
             ],
         },
         "plan_readiness": {
-            "generator_id": "search-plan/2026-05-08-1",
+            "generator_id": "search-plan/2026-05-19-1",
             "wanted_total": 10,
             "wanted_searchable": 7,
             "wanted_legacy": 1,
@@ -988,6 +988,8 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/simulate",
         r"^/api/pipeline/(\d+)$",
         r"^/api/pipeline/(\d+)/search-plan$",
+        r"^/api/pipeline/(\d+)/search-plan/dry-run$",
+        r"^/api/pipeline/(\d+)/search-plan/saturation$",
         r"^/api/pipeline/(\d+)/search-plan/history$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
@@ -1917,7 +1919,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
 
     def _make_active(
         self, *,
-        generator_id: str = "search-plan/2026-05-08-1",
+        generator_id: str = "search-plan/2026-05-19-1",
         items_count: int = 2,
         next_ordinal: int = 0,
         cycle_count: int = 0,
@@ -1959,7 +1961,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         status: str,
         failure_class: str,
         error_message: str = "boom",
-        generator_id: str = "search-plan/2026-05-08-1",
+        generator_id: str = "search-plan/2026-05-19-1",
     ):
         from datetime import datetime, timezone
         from lib.pipeline_db import SearchPlanRow, SearchPlanProvenance
@@ -2154,6 +2156,312 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         self.assertEqual(
             data["currentness"]["active_plan_generator_id"],
             "search-plan/2026-01-01-old")
+
+
+class TestPipelineSearchPlanDryRunContract(_WebServerCase):
+    """U6 contract for ``GET /api/pipeline/<id>/search-plan/dry-run``.
+
+    Read-only generator simulator. The route wraps
+    ``SearchPlanService.dry_run_for_request``; both this route and
+    ``pipeline-cli search-plan dry-run`` go through the same service
+    method so input semantics + outcome mapping cannot drift. The
+    contract guarantees the payload shape used by the future search-
+    plan dashboard.
+    """
+
+    REQUIRED_FIELDS = {
+        "request_id",
+        "outcome",
+        "current_generator_id",
+        "request",
+        "plan",
+        "would_supersede_active",
+        "error_message",
+    }
+    REQUEST_REQUIRED_FIELDS = {
+        "id", "status", "artist_name", "album_title",
+        "mb_release_id", "discogs_release_id", "year",
+        "release_group_year", "source",
+    }
+    PLAN_REQUIRED_FIELDS = {
+        "generator_id", "status", "items", "provenance",
+        "failure_reason", "metadata_snapshot",
+    }
+    ITEM_REQUIRED_FIELDS = {
+        "ordinal", "strategy", "query",
+        "canonical_query_key", "repeat_group", "provenance",
+    }
+
+    def setUp(self) -> None:
+        from tests.helpers import make_request_row
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="wanted",
+            artist_name="Radiohead", album_title="Kid A",
+            year=2008, release_group_year=2000,
+        )
+        self.mock_db.get_tracks.return_value = [
+            {"disc_number": 1, "track_number": 1,
+             "title": "Everything In Its Right Place"},
+            {"disc_number": 1, "track_number": 2, "title": "Kid A"},
+            {"disc_number": 1, "track_number": 3,
+             "title": "The National Anthem"},
+        ]
+        self.mock_db.get_active_search_plan.return_value = None
+        # Route reads runtime config — patch to a default CratediggerConfig.
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+        self.mock_db.get_active_search_plan.reset_mock(
+            return_value=True, side_effect=True)
+        self.mock_db.get_tracks.return_value = []
+
+    def test_dry_run_happy_path_returns_200_with_required_fields(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.REQUIRED_FIELDS, "dry-run")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(data["outcome"], "success")
+        self.assertIsNotNone(data["request"])
+        _assert_required_fields(
+            self, data["request"], self.REQUEST_REQUIRED_FIELDS,
+            "dry-run request")
+        self.assertEqual(data["request"]["release_group_year"], 2000)
+        self.assertIsNotNone(data["plan"])
+        _assert_required_fields(
+            self, data["plan"], self.PLAN_REQUIRED_FIELDS,
+            "dry-run plan")
+        self.assertGreater(len(data["plan"]["items"]), 0)
+        for item in data["plan"]["items"]:
+            _assert_required_fields(
+                self, item, self.ITEM_REQUIRED_FIELDS,
+                "dry-run plan.items[]")
+        # Ordinals must be sorted.
+        ordinals = [it["ordinal"] for it in data["plan"]["items"]]
+        self.assertEqual(ordinals, sorted(ordinals))
+        # No active plan was wired — would_supersede_active is False.
+        self.assertFalse(data["would_supersede_active"])
+
+    def test_dry_run_reports_active_plan_would_be_superseded(self):
+        # When an active plan exists, the response flags
+        # would_supersede_active=True so operators understand the
+        # current plan would be replaced by a real regeneration call.
+        self.mock_db.get_active_search_plan.return_value = MagicMock()
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["would_supersede_active"])
+
+    def test_dry_run_request_not_found_returns_404(self):
+        self.mock_db.get_request.return_value = None
+        status, data = self._get(
+            "/api/pipeline/9999/search-plan/dry-run")
+        self.assertEqual(status, 404)
+        # 404 body must carry the same structured shape so clients can
+        # introspect outcome / plan without status-code branching.
+        _assert_required_fields(
+            self, data, self.REQUIRED_FIELDS, "dry-run 404")
+        self.assertEqual(data["outcome"], "request_not_found")
+        self.assertEqual(data["request_id"], 9999)
+        self.assertIsNone(data["plan"])
+        self.assertIsNone(data["request"])
+        self.assertIn("error", data)
+
+    def test_dry_run_request_with_no_tracks_succeeds(self):
+        # Generator handles empty tracks — emits a plan without
+        # track-fallback slots; the dry-run reflects exactly that.
+        self.mock_db.get_tracks.return_value = []
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "success")
+        self.assertIsNotNone(data["plan"])
+        # No track_* slots should appear.
+        strategies = [
+            it["strategy"] for it in data["plan"]["items"]
+        ]
+        self.assertFalse(
+            any(s.startswith("track_") for s in strategies),
+            f"unexpected track-fallback slots in zero-tracks plan: "
+            f"{strategies}")
+
+    def test_dry_run_does_not_persist_or_write_plan_rows(self):
+        # The simulator must never call into create_successful_search_plan
+        # / supersede_search_plan_with_replacement / create_failed_search_plan.
+        self.mock_db.create_successful_search_plan.reset_mock()
+        self.mock_db.supersede_search_plan_with_replacement.reset_mock()
+        self.mock_db.create_failed_search_plan.reset_mock()
+        status, _ = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.mock_db.create_successful_search_plan.assert_not_called()
+        self.mock_db.supersede_search_plan_with_replacement.assert_not_called()
+        self.mock_db.create_failed_search_plan.assert_not_called()
+
+    def test_dry_run_carries_current_generator_id(self):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            data["current_generator_id"], SEARCH_PLAN_GENERATOR_ID)
+        # The plan the simulator emits must be pinned to the same id.
+        self.assertEqual(
+            data["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
+
+
+class TestPipelineSearchPlanSaturationContract(_WebServerCase):
+    """U7 contract for ``GET /api/pipeline/<id>/search-plan/saturation``.
+
+    Read-only telemetry aggregator. The route wraps
+    ``SearchPlanService.saturation_for_request``; both this route and
+    ``pipeline-cli search-plan saturation`` go through the same
+    service method so input semantics + outcome mapping cannot drift.
+    The contract guarantees the payload shape consumed by the future
+    search-plan dashboard.
+    """
+
+    REQUIRED_FIELDS = {
+        "total_searches",
+        "saturated_searches",
+        "saturation_rate",
+        "total_pre_filter_skips",
+        "window_days",
+    }
+    FULL_REQUIRED_FIELDS = REQUIRED_FIELDS | {
+        "request_id", "outcome", "error_message",
+    }
+
+    def setUp(self) -> None:
+        from tests.helpers import make_request_row
+        # Production-shape mock: use real datetime + UUID values on the
+        # request row so the JSON encoder path is exercised end-to-end.
+        # The route does not consult timestamps directly, but the
+        # ``get_request`` call walks through the JSON encoder boundary
+        # if anything else does — keep the row shape honest.
+        import uuid
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="wanted",
+            artist_name="Radiohead", album_title="Kid A",
+            mb_release_id=str(uuid.uuid4()),
+        )
+        # Route reads runtime config — patch to a default config.
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+        # Default saturation summary — happy-path scenario.
+        from lib.pipeline_db import SaturationSummary
+        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
+            total_searches=30,
+            saturated_searches=10,
+            saturation_rate=10 / 30,
+            total_pre_filter_skips=50,
+            window_days=14,
+        )
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+        self.mock_db.get_saturation_summary.reset_mock(
+            return_value=True, side_effect=True)
+
+    def test_happy_path_returns_200_with_required_fields(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation")
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.FULL_REQUIRED_FIELDS, "saturation")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(data["outcome"], "success")
+        self.assertEqual(data["total_searches"], 30)
+        self.assertEqual(data["saturated_searches"], 10)
+        self.assertAlmostEqual(data["saturation_rate"], 10 / 30)
+        self.assertEqual(data["total_pre_filter_skips"], 50)
+        self.assertEqual(data["window_days"], 14)
+        self.assertIsNone(data["error_message"])
+
+    def test_empty_window_is_200_with_zeros_not_404(self):
+        # Found-but-quiet: request exists, window is just empty.
+        from lib.pipeline_db import SaturationSummary
+        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
+            total_searches=0, saturated_searches=0,
+            saturation_rate=0.0, total_pre_filter_skips=0,
+            window_days=14,
+        )
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "success")
+        # Crucial: rate is 0.0, NOT NaN — JSON parses cleanly.
+        self.assertEqual(data["saturation_rate"], 0.0)
+        self.assertEqual(data["total_searches"], 0)
+
+    def test_request_not_found_returns_404(self):
+        self.mock_db.get_request.return_value = None
+        status, data = self._get(
+            "/api/pipeline/9999/search-plan/saturation")
+        self.assertEqual(status, 404)
+        _assert_required_fields(
+            self, data, self.FULL_REQUIRED_FIELDS, "saturation 404")
+        self.assertEqual(data["outcome"], "request_not_found")
+        self.assertEqual(data["request_id"], 9999)
+        # All summary counts zero-filled — clients can read without
+        # branching on status code first.
+        self.assertEqual(data["total_searches"], 0)
+        self.assertEqual(data["saturation_rate"], 0.0)
+        self.assertIn("error", data)
+        # The DB aggregator must NOT be called when the request row
+        # itself is missing — wastes a query and risks misleading zeros.
+        self.mock_db.get_saturation_summary.assert_not_called()
+
+    def test_window_days_query_string_propagates_to_service(self):
+        from lib.pipeline_db import SaturationSummary
+        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
+            total_searches=5, saturated_searches=1,
+            saturation_rate=0.2, total_pre_filter_skips=3,
+            window_days=7,
+        )
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation?window_days=7")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["window_days"], 7)
+        # The aggregator was called with the requested window.
+        self.mock_db.get_saturation_summary.assert_called_with(
+            100, window_days=7)
+
+    def test_invalid_window_days_non_int_returns_400(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation?window_days=abc")
+        self.assertEqual(status, 400)
+
+    def test_invalid_window_days_out_of_range_returns_400(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation?window_days=0")
+        self.assertEqual(status, 400)
+        _assert_required_fields(
+            self, data, self.FULL_REQUIRED_FIELDS, "saturation 400")
+        self.assertEqual(data["outcome"], "input_invalid")
+
+    def test_default_window_is_14_when_omitted(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["window_days"], 14)
 
 
 class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
@@ -3393,8 +3701,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.mock_db.add_request.return_value = 501
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
 
+    @patch("web.routes.pipeline.mb_api.get_release_group_year",
+           return_value=2024)
     @patch("web.routes.pipeline.mb_api.get_release")
-    def test_pipeline_add_contract(self, mock_get_release):
+    def test_pipeline_add_contract(self, mock_get_release, _mock_rgy):
         mock_get_release.return_value = {
             "release_group_id": "rg-1",
             "artist_id": "artist-1",
@@ -3411,8 +3721,12 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add response")
 
+    @patch("web.routes.pipeline.mb_api.get_release_group_year",
+           return_value=2014)
     @patch("web.routes.pipeline.mb_api.get_release")
-    def test_pipeline_add_runs_plan_generation_after_set_tracks(self, mock_get_release):
+    def test_pipeline_add_runs_plan_generation_after_set_tracks(
+        self, mock_get_release, _mock_rgy,
+    ):
         """Web add path generates a search plan after `set_tracks()`,
         consistent with the CLI add path. Failures must not break the
         HTTP response."""
@@ -3459,6 +3773,146 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_persists_release_group_year_reissue(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: reissue MB release → ``release_group_year`` is fetched
+        from the mirror and passed through to ``add_request``."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-kid-a",
+            "artist_id": "rh-1",
+            "artist_name": "Radiohead",
+            "title": "Kid A",
+            "year": 2008,  # reissue
+            "country": "US",
+            "tracks": [{"title": "Everything In Its Right Place"}],
+        }
+        mock_rgy.return_value = 2000  # release-group's first year
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "kid-a-mbid"})
+
+        self.assertEqual(status, 200)
+        mock_rgy.assert_called_once_with("rg-kid-a")
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["year"], 2008)
+        self.assertEqual(add_kwargs["release_group_year"], 2000)
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_persists_release_group_year_original(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: original release MB release → ``release_group_year``
+        equals the per-release year."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-self",
+            "artist_id": "willow-1",
+            "artist_name": "Willow",
+            "title": "Willow",
+            "year": 2007,
+            "country": "AU",
+            "tracks": [{"title": "And Finally I Can Breathe"}],
+        }
+        mock_rgy.return_value = 2007
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "willow-mbid"})
+
+        self.assertEqual(status, 200)
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["year"], 2007)
+        self.assertEqual(add_kwargs["release_group_year"], 2007)
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_release_group_404_leaves_column_null(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: 404 from the release-group fetch → ``release_group_year``
+        is NULL on the new row, no error raised, request still added."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-missing",
+            "artist_id": "a-1",
+            "artist_name": "A",
+            "title": "T",
+            "year": 2020,
+            "country": "US",
+            "tracks": [{"title": "Track"}],
+        }
+        mock_rgy.return_value = None  # mirror returned 404 / unparseable
+
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-rgmiss"})
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
+                                "pipeline add response (rg 404)")
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertEqual(add_kwargs["year"], 2020)
+        self.assertIsNone(add_kwargs["release_group_year"])
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_skips_rgy_lookup_when_no_rg_id(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4: when MB doesn't return a ``release_group_id`` (e.g. very
+        old data), the helper isn't called and ``release_group_year`` is
+        left NULL."""
+        mock_get_release.return_value = {
+            # No release_group_id key — get() returns None.
+            "artist_id": "a-1",
+            "artist_name": "A",
+            "title": "T",
+            "year": 2020,
+            "country": "US",
+            "tracks": [{"title": "Track"}],
+        }
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-norg"})
+
+        self.assertEqual(status, 200)
+        mock_rgy.assert_not_called()
+        add_kwargs = self.mock_db.add_request.call_args.kwargs
+        self.assertIsNone(add_kwargs["release_group_year"])
+
+    def test_pipeline_add_mb_integration_persists_release_group_year(self):
+        """U4 integration: full add-from-web flow against ``FakePipelineDB``
+        creates the new row with ``release_group_year`` populated and
+        the request reads back correctly."""
+        import web.server as srv
+        fake_db = FakePipelineDB()
+        with patch("web.routes.pipeline.mb_api.get_release") as mock_rel, \
+             patch("web.routes.pipeline.mb_api.get_release_group_year",
+                   return_value=2000) as mock_rgy, \
+             patch.object(srv, "db", fake_db):
+            mock_rel.return_value = {
+                "release_group_id": "rg-kid-a",
+                "artist_id": "rh-1",
+                "artist_name": "Radiohead",
+                "title": "Kid A",
+                "year": 2008,
+                "country": "US",
+                "tracks": [
+                    {"title": "Everything In Its Right Place",
+                     "track_number": 1, "disc_number": 1},
+                ],
+            }
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "kid-a-int"})
+
+        self.assertEqual(status, 200)
+        new_id = data["id"]
+        row = fake_db.get_request(new_id)
+        assert row is not None
+        self.assertEqual(row["year"], 2008)
+        self.assertEqual(row["release_group_year"], 2000)
+        mock_rgy.assert_called_once_with("rg-kid-a")
 
     def test_pipeline_add_duplicate_does_not_regenerate(self):
         """Duplicate add returns the existing request without generating
@@ -3724,8 +4178,12 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
     # -- fresh=True seam (Codex review on issue #101) ----------------
 
+    @patch("routes.pipeline.mb_api.get_release_group_year",
+           return_value=2024)
     @patch("routes.pipeline.mb_api.get_release")
-    def test_pipeline_add_mb_fetches_release_fresh(self, mock_get_release):
+    def test_pipeline_add_mb_fetches_release_fresh(
+        self, mock_get_release, _mock_rgy,
+    ):
         """POST /api/pipeline/add (MusicBrainz) MUST bypass the 24h meta
         cache — the fetched metadata is persisted into `album_requests`
         and `request_tracks`. A stale cached payload from an earlier

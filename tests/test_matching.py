@@ -421,7 +421,15 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         )
 
         self.assertFalse(self._matched(result))
-        self.assertEqual(self._candidates(result), [])
+        # U2 of search-plan-entropy: pre-filter skips now emit a flagged
+        # sample CandidateScore for forensic visibility (one per skip up
+        # to ``PRE_FILTER_SKIP_SAMPLE_CAP``).
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(candidates[0].pre_filter_skip)
+        self.assertEqual(candidates[0].file_count, 30)
+        self.assertEqual(candidates[0].matched_tracks, 0)
+        self.assertEqual(result.pre_filter_skip_count, 1)
         self.assertIn(
             (self.username, "dirLong", 2, "mp3 v0"),
             self.ctx.negative_matches,
@@ -606,6 +614,369 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
             candidates[0].missing_titles, ["QQQQQQQQQQQ"],
         )
         self.assertEqual(candidates[0].file_count, 3)
+
+
+# ---------------------------------------------------------------------------
+# Asymmetric pre-filter (U1 of search-plan-entropy plan)
+#
+# The pre-filter rule is `search_count > 2 * track_num` — junk-dir guard only,
+# not a tight-fit filter. This lets track-fallback queries (search_count=1
+# vs track_num=4) reach `album_track_num` so the dir can be browsed and
+# scored. The codec guard (`cached_codecs <= 1`) still bypasses the
+# pre-filter so multi-codec dirs are never skipped on count alone.
+# ---------------------------------------------------------------------------
+
+class TestCheckForMatchAsymmetricPreFilter(unittest.TestCase):
+    """The pre-filter only skips dirs whose audio count exceeds 2 * track_num.
+
+    Track-fallback queries (one track in the search response) MUST reach the
+    browse + score path; the bidirectional `abs() > 2` rule used to silently
+    skip them.
+    """
+
+    def setUp(self) -> None:
+        self.cfg = _make_cfg()
+        self.ctx = _make_ctx(self.cfg, album_id=1, album_title="Cool Album")
+        self.username = "user1"
+        # 4-track album — the canonical scenario from the plan.
+        self.tracks = [
+            _track(1, "Alpha"),
+            _track(1, "Bravo"),
+            _track(1, "Charlie"),
+            _track(1, "Delta"),
+        ]
+        self.full_files = [
+            _file("Alpha.flac"),
+            _file("Bravo.flac"),
+            _file("Charlie.flac"),
+            _file("Delta.flac"),
+        ]
+
+    def _set_browse(self, file_dir: str, files: list[SlskdFile]) -> None:
+        self.ctx.folder_cache.setdefault(self.username, {})[file_dir] = {
+            "directory": file_dir,
+            "files": files,
+        }
+
+    def _set_search_count(self, file_dir: str, count: int) -> None:
+        """Populate search_dir_audio_count and search_cache so the pre-filter
+        actually consults the cached count for this dir."""
+        self.ctx.search_dir_audio_count = {
+            self.username: {file_dir: count},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "flac": [file_dir],
+                },
+            },
+        }
+
+    @staticmethod
+    def _matched(result: Any) -> bool:
+        return result.matched if hasattr(result, "matched") else result[0]
+
+    @staticmethod
+    def _candidates(result: Any) -> list[CandidateScore]:
+        if hasattr(result, "candidates"):
+            return result.candidates
+        return result[3]
+
+    def test_search_count_equals_track_num_passes_prefilter(self) -> None:
+        """Happy path: search_count=4, track_num=4 — passes pre-filter,
+        browse + score proceeds, dir matches."""
+        self._set_search_count("dirA", 4)
+        self._set_browse("dirA", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertTrue(self._matched(result))
+        self.assertNotIn(
+            (self.username, "dirA", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+
+    def test_track_fallback_search_count_one_passes_prefilter(self) -> None:
+        """The bug fix: track-fallback queries return one file but the album
+        has many tracks. Under the old `abs() > 2` rule this was skipped;
+        under the new `2n` rule it must reach the browse + score path."""
+        self._set_search_count("dirA", 1)
+        # Files match the full album — the dir on the peer IS the album,
+        # the search response just only had one file in it.
+        self._set_browse("dirA", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertTrue(self._matched(result))
+        self.assertNotIn(
+            (self.username, "dirA", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+
+    def test_search_count_at_2n_boundary_passes_prefilter(self) -> None:
+        """Boundary: search_count=8, track_num=4 — `8 > 8` is false, so the
+        pre-filter does NOT skip. The dir is browsed; the post-browse strict
+        -count gate at line 451 then writes its own negative_matches entry
+        because 8 != 4. We verify the pre-filter passed by checking that
+        a CandidateScore was recorded (pre-filter skips produce zero
+        candidates; the strict-count gate produces a cheap one)."""
+        self._set_search_count("dirA", 8)
+        # Dir actually contains the 4 tracks plus 4 extras — the post-browse
+        # strict-count gate will fail (8 != 4), but the pre-filter must pass.
+        self._set_browse("dirA", self.full_files + [
+            _file("Bonus1.flac"),
+            _file("Bonus2.flac"),
+            _file("Bonus3.flac"),
+            _file("Bonus4.flac"),
+        ])
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        # Pre-filter did NOT skip — at least one candidate was recorded.
+        # (A pre-filter skip produces zero candidates per
+        # test_search_count_just_over_2n_is_skipped.)
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        # The candidate is the cheap one from the strict-count gate
+        # (file_count=8 != track_num=4 → matched_tracks=0).
+        self.assertEqual(candidates[0].file_count, 8)
+        self.assertEqual(candidates[0].matched_tracks, 0)
+
+    def test_search_count_just_over_2n_is_skipped(self) -> None:
+        """Edge case: search_count=9, track_num=4 — `9 > 8`, dir is skipped,
+        negative-cache entry written, U2 emits a flagged skip sample."""
+        self._set_search_count("dirA", 9)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        # U2 of search-plan-entropy: pre-filter skip is recorded as both
+        # a scalar counter and a flagged sample CandidateScore row.
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(candidates[0].pre_filter_skip)
+        self.assertEqual(candidates[0].file_count, 9)
+        self.assertEqual(candidates[0].matched_tracks, 0)
+        self.assertEqual(result.pre_filter_skip_count, 1)
+        self.assertIn(
+            (self.username, "dirA", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+        # Pre-filter rejected without ever browsing this user.
+        self.assertNotIn(self.username, self.ctx.folder_cache)
+
+    def test_junk_dir_well_over_2n_is_skipped(self) -> None:
+        """Junk-dir case: search_count=50, track_num=4 — large dump folder.
+        Pre-filter must continue to catch this case (and U2 records it)."""
+        self._set_search_count("dirJunk", 50)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirJunk"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(candidates[0].pre_filter_skip)
+        self.assertEqual(candidates[0].file_count, 50)
+        self.assertEqual(result.pre_filter_skip_count, 1)
+        self.assertIn(
+            (self.username, "dirJunk", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+        self.assertNotIn(self.username, self.ctx.folder_cache)
+
+    def test_codec_guard_bypasses_prefilter_on_large_dir(self) -> None:
+        """Codec-guard case: search_count=50, track_num=4 BUT the dir is
+        present in the search_cache under multiple concrete codecs — the
+        `len(cached_codecs) <= 1` guard bypasses the pre-filter so the
+        multi-codec dir is browsed and scored."""
+        # Multi-codec presence: both "flac" and "mp3" tiers contain dirMulti.
+        self.ctx.search_dir_audio_count = {
+            self.username: {"dirMulti": 50},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "flac": ["dirMulti"],
+                    "mp3": ["dirMulti"],
+                },
+            },
+        }
+        self._set_browse("dirMulti", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirMulti"], self.username, self.ctx,
+        )
+
+        # Pre-filter did NOT add a negative_matches entry — codec guard fired.
+        self.assertNotIn(
+            (self.username, "dirMulti", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+        # And the dir was actually browsed + scored.
+        self.assertTrue(self._matched(result))
+
+
+# ---------------------------------------------------------------------------
+# U2 of search-plan-entropy: pre-filter skip telemetry.
+#
+# Asserts the contract: ``check_for_match`` returns
+# ``MatchResult.pre_filter_skip_count`` as the authoritative scalar count
+# of dirs the asymmetric pre-filter rejected, and emits up to
+# ``PRE_FILTER_SKIP_SAMPLE_CAP`` flagged ``CandidateScore`` sample rows
+# inside the ``candidates`` list for forensic visibility.
+# ---------------------------------------------------------------------------
+
+class TestCheckForMatchPreFilterSkipTelemetry(unittest.TestCase):
+    """U2 contract: ``pre_filter_skip_count`` aggregates ALL skips,
+    sample rows are capped, and happy paths emit zero skip telemetry."""
+
+    def setUp(self) -> None:
+        self.cfg = _make_cfg()
+        self.ctx = _make_ctx(self.cfg, album_id=1, album_title="Cool Album")
+        self.username = "user1"
+        self.tracks = [
+            _track(1, "Alpha"),
+            _track(1, "Bravo"),
+            _track(1, "Charlie"),
+            _track(1, "Delta"),
+        ]
+        self.full_files = [
+            _file("Alpha.flac"),
+            _file("Bravo.flac"),
+            _file("Charlie.flac"),
+            _file("Delta.flac"),
+        ]
+
+    def _set_browse(self, file_dir: str, files: list[SlskdFile]) -> None:
+        self.ctx.folder_cache.setdefault(self.username, {})[file_dir] = {
+            "directory": file_dir,
+            "files": files,
+        }
+
+    def test_happy_path_no_skips_zero_count_no_samples(self) -> None:
+        """All dirs pass pre-filter → count=0, no flagged samples."""
+        # Single dir, search_count == track_num: passes pre-filter.
+        self.ctx.search_dir_audio_count = {self.username: {"dirA": 4}}
+        self.ctx.search_cache = {
+            1: {self.username: {"flac": ["dirA"]}},
+        }
+        self._set_browse("dirA", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertEqual(result.pre_filter_skip_count, 0)
+        # The one CandidateScore is from the post-browse match path,
+        # NOT a pre-filter skip sample.
+        self.assertEqual(len(result.candidates), 1)
+        self.assertFalse(result.candidates[0].pre_filter_skip)
+
+    def test_skip_count_above_sample_cap_truncates_samples(self) -> None:
+        """17 skipped dirs → count=17 but only ``PRE_FILTER_SKIP_SAMPLE_CAP``
+        flagged sample rows. The scalar count is authoritative, the
+        candidates list is bounded so the JSONB blob stays small even for
+        pathological junk-peer searches."""
+        from lib.matching import PRE_FILTER_SKIP_SAMPLE_CAP
+
+        # 17 dirs, all over the 2*track_num=8 threshold.
+        dir_names = [f"dir{i}" for i in range(17)]
+        self.ctx.search_dir_audio_count = {
+            self.username: {d: 100 for d in dir_names},
+        }
+        self.ctx.search_cache = {
+            1: {self.username: {"flac": dir_names}},
+        }
+
+        result = check_for_match(
+            self.tracks, "flac", dir_names, self.username, self.ctx,
+        )
+
+        self.assertFalse(result.matched)
+        # Authoritative count: every skip is counted exactly once.
+        self.assertEqual(result.pre_filter_skip_count, 17)
+        # Sample rows: bounded by the cap. All entries are flagged.
+        self.assertEqual(len(result.candidates), PRE_FILTER_SKIP_SAMPLE_CAP)
+        self.assertTrue(all(c.pre_filter_skip for c in result.candidates))
+        # Each sample row carries the cached file_count from the search
+        # response so operators can see the noisy peer's profile.
+        self.assertTrue(all(c.file_count == 100 for c in result.candidates))
+
+    def test_skip_count_exactly_at_cap_emits_all_samples(self) -> None:
+        """Exactly ``PRE_FILTER_SKIP_SAMPLE_CAP`` skips → count and samples
+        match. Boundary check that the cap is inclusive."""
+        from lib.matching import PRE_FILTER_SKIP_SAMPLE_CAP
+
+        dir_names = [f"dir{i}" for i in range(PRE_FILTER_SKIP_SAMPLE_CAP)]
+        self.ctx.search_dir_audio_count = {
+            self.username: {d: 100 for d in dir_names},
+        }
+        self.ctx.search_cache = {
+            1: {self.username: {"flac": dir_names}},
+        }
+
+        result = check_for_match(
+            self.tracks, "flac", dir_names, self.username, self.ctx,
+        )
+
+        self.assertEqual(result.pre_filter_skip_count, PRE_FILTER_SKIP_SAMPLE_CAP)
+        self.assertEqual(len(result.candidates), PRE_FILTER_SKIP_SAMPLE_CAP)
+        self.assertTrue(all(c.pre_filter_skip for c in result.candidates))
+
+
+class TestCandidateScorePreFilterRoundTrip(unittest.TestCase):
+    """Wire-boundary parity: a flagged ``CandidateScore`` survives msgspec
+    encode → decode. This is the regression guard for the JSONB blob.
+
+    Per ``.claude/rules/code-quality.md`` § Wire-boundary types: every
+    Struct field needs at least one RED-style assertion that it survives
+    the round-trip with the value the producer would have written.
+    """
+
+    def test_pre_filter_skip_true_survives_json_round_trip(self) -> None:
+        import msgspec
+
+        flagged = CandidateScore(
+            username="alice",
+            dir="Music/Albums/Foo",
+            filetype="flac",
+            matched_tracks=0,
+            total_tracks=12,
+            avg_ratio=0.0,
+            missing_titles=[],
+            file_count=200,
+            pre_filter_skip=True,
+        )
+        encoded = msgspec.json.encode(flagged)
+        decoded = msgspec.json.decode(encoded, type=CandidateScore)
+        self.assertTrue(decoded.pre_filter_skip)
+        self.assertEqual(decoded.file_count, 200)
+        self.assertEqual(decoded.username, "alice")
+
+    def test_pre_filter_skip_default_false_when_field_omitted(self) -> None:
+        """Historic JSONB blobs written before U2 do not carry the new
+        field. Decoding must tolerate the omission and default to False."""
+        import msgspec
+
+        # Legacy on-wire shape: no pre_filter_skip key.
+        legacy_json = (
+            b'{"username":"bob","dir":"x","filetype":"flac",'
+            b'"matched_tracks":4,"total_tracks":4,"avg_ratio":0.95,'
+            b'"missing_titles":[],"file_count":4}'
+        )
+        decoded = msgspec.json.decode(legacy_json, type=CandidateScore)
+        self.assertFalse(decoded.pre_filter_skip)
+        self.assertEqual(decoded.matched_tracks, 4)
 
 
 if __name__ == "__main__":

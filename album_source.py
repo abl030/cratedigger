@@ -58,6 +58,12 @@ class AlbumRecord:
     db_mb_release_id: str
     db_search_filetype_override: str | None
     db_target_format: str | None
+    # Release-group's first-release year, populated from the local MB
+    # mirror at enqueue time or via the deploy-time backfill. NULL for
+    # pre-backfill rows, Discogs-only rows, and rows missing
+    # ``mb_release_group_id``. The generator emits a year-suffixed slot
+    # when this differs from ``release_date``'s year.
+    db_release_group_year: int | None = None
 
     @staticmethod
     def from_db_row(row: dict[str, object], tracks: list[dict[str, object]]) -> AlbumRecord:
@@ -123,6 +129,8 @@ class AlbumRecord:
         assert isinstance(search_filetype_override, (str, type(None)))
         target_format = row.get("target_format")
         assert isinstance(target_format, (str, type(None)))
+        release_group_year = row.get("release_group_year")
+        assert isinstance(release_group_year, (int, type(None)))
 
         return AlbumRecord(
             id=row_id * -1,
@@ -137,6 +145,7 @@ class AlbumRecord:
             db_mb_release_id=mb_release_id or "",
             db_search_filetype_override=search_filetype_override,
             db_target_format=target_format,
+            db_release_group_year=release_group_year,
         )
 
 

@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -99,6 +100,67 @@ class TestCmdAdd(unittest.TestCase):
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
         pipeline_cli.cmd_add(self.db, args)
         mock_fetch.assert_not_called()
+
+    @patch("scripts.pipeline_cli.fetch_mb_release_group_year")
+    @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_add_with_mbid_persists_release_group_year_reissue(
+        self, mock_fetch, mock_fetch_rgy,
+    ):
+        """U4: reissue MB release → release_group_year populated and
+        differs from the per-release year."""
+        mock_fetch.return_value = SAMPLE_MB_RELEASE  # date=2014, rg=rg-uuid
+        mock_fetch_rgy.return_value = 2008
+        args = MagicMock(
+            mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
+        )
+        pipeline_cli.cmd_add(self.db, args)
+
+        req = self.db.get_request_by_mb_release_id(
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        assert req is not None
+        self.assertEqual(req["year"], 2014)
+        self.assertEqual(req["release_group_year"], 2008)
+        mock_fetch_rgy.assert_called_once_with("rg-uuid")
+
+    @patch("scripts.pipeline_cli.fetch_mb_release_group_year")
+    @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_add_with_mbid_persists_release_group_year_original(
+        self, mock_fetch, mock_fetch_rgy,
+    ):
+        """U4: original release MB release → release_group_year matches
+        the per-release year."""
+        mock_fetch.return_value = SAMPLE_MB_RELEASE  # date=2014
+        mock_fetch_rgy.return_value = 2014
+        args = MagicMock(
+            mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
+        )
+        pipeline_cli.cmd_add(self.db, args)
+
+        req = self.db.get_request_by_mb_release_id(
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        assert req is not None
+        self.assertEqual(req["year"], 2014)
+        self.assertEqual(req["release_group_year"], 2014)
+
+    @patch("scripts.pipeline_cli.fetch_mb_release_group_year")
+    @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_add_with_mbid_release_group_404_leaves_column_null(
+        self, mock_fetch, mock_fetch_rgy,
+    ):
+        """U4: 404 / missing release-group → ``release_group_year`` is
+        NULL on the new row, no error raised."""
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+        mock_fetch_rgy.return_value = None
+        args = MagicMock(
+            mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
+        )
+        pipeline_cli.cmd_add(self.db, args)
+
+        req = self.db.get_request_by_mb_release_id(
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        assert req is not None
+        self.assertEqual(req["year"], 2014)
+        self.assertIsNone(req["release_group_year"])
 
 
 class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
@@ -1917,6 +1979,265 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         self.assertEqual(active.plan.id, old_plan_id)
 
 
+class TestCmdSearchPlanDryRun(unittest.TestCase):
+    """U6: ``pipeline-cli search-plan dry-run`` wraps
+    ``SearchPlanService.dry_run_for_request`` — read-only generator
+    simulator. Mirrors the same exit-code convention as ``search-plan
+    show``: success = 0, request_not_found = 2.
+    """
+
+    def _seed_request(
+        self, *, status: str = "wanted",
+        artist: str = "Radiohead", title: str = "Kid A",
+        year: int = 2008, release_group_year: int | None = 2000,
+        tracks: list[dict] | None = None,
+    ):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name=artist, album_title=title,
+            source="request", year=year, status=status,
+        )
+        if release_group_year is not None:
+            db._requests[rid]["release_group_year"] = release_group_year
+        if tracks is None:
+            tracks = [
+                {"track_number": 1, "title": "Everything In Its Right Place"},
+                {"track_number": 2, "title": "Kid A"},
+                {"track_number": 3, "title": "The National Anthem"},
+            ]
+        if tracks:
+            db.set_tracks(rid, tracks)
+        return db, rid
+
+    def _run(self, db, rid, *, json_out: bool = False, prepend: bool = False):
+        args = SimpleNamespace(
+            id=rid, json=json_out, prepend_artist=prepend)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_dry_run(db, args)
+        return rc, stdout.getvalue()
+
+    def test_dry_run_happy_path_prints_plan_items_without_persisting(self):
+        db, rid = self._seed_request()
+        plans_before = len(db.search_plans)
+        items_before = len(db.search_plan_items)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Outcome:", out)
+        self.assertIn("success", out)
+        self.assertIn("Plan items", out)
+        # Persistence invariant: dry-run never writes plan rows.
+        self.assertEqual(len(db.search_plans), plans_before)
+        self.assertEqual(len(db.search_plan_items), items_before)
+        # Request row's active_plan_id is untouched.
+        self.assertIsNone(db._requests[rid]["active_plan_id"])
+
+    def test_dry_run_json_returns_full_payload(self):
+        db, rid = self._seed_request()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        for key in ("request_id", "outcome", "current_generator_id",
+                    "request", "plan", "would_supersede_active",
+                    "error_message"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["request_id"], rid)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertIsNotNone(payload["plan"])
+        # release_group_year reflected in request payload (U5 input).
+        self.assertEqual(
+            payload["request"]["release_group_year"], 2000)
+        # Plan items shape is the documented contract.
+        self.assertGreater(len(payload["plan"]["items"]), 0)
+        item = payload["plan"]["items"][0]
+        for key in ("ordinal", "strategy", "query",
+                    "canonical_query_key", "repeat_group", "provenance"):
+            self.assertIn(key, item)
+
+    def test_dry_run_missing_request_returns_2(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_dry_run_missing_request_json_is_structured(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999, json_out=True)
+        self.assertEqual(rc, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "request_not_found")
+        self.assertEqual(payload["request_id"], 9999)
+        self.assertIsNone(payload["plan"])
+        self.assertIsNone(payload["request"])
+
+    def test_dry_run_request_with_no_tracks_succeeds_no_track_slots(self):
+        db, rid = self._seed_request(tracks=[])
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "success")
+        # No track-fallback slots when the request has zero tracks.
+        strategies = [
+            it["strategy"] for it in payload["plan"]["items"]
+        ]
+        self.assertFalse(
+            any(s.startswith("track_") for s in strategies),
+            f"unexpected track slots: {strategies}")
+
+    def test_dry_run_flags_active_plan_would_be_superseded(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db, rid = self._seed_request()
+        db.create_successful_search_plan(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="prior",
+                canonical_query_key="k0")],
+            set_active=True,
+        )
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["would_supersede_active"])
+
+    def test_dry_run_uses_current_generator_id(self):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db, rid = self._seed_request()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(
+            payload["current_generator_id"], SEARCH_PLAN_GENERATOR_ID)
+        self.assertEqual(
+            payload["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
+
+
+class TestCmdSearchPlanSaturation(unittest.TestCase):
+    """U7: ``pipeline-cli search-plan saturation`` wraps
+    ``SearchPlanService.saturation_for_request``. Exit-code convention:
+    success = 0 (even when window is empty — found-but-quiet is still
+    success), request_not_found = 2, input_invalid = 3.
+    """
+
+    def _seed(self, *, rid: int = 1):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=rid, artist_name="Radiohead", album_title="Kid A",
+            source="request",
+        ))
+        return db, rid
+
+    def _run(self, db, rid, *, json_out: bool = False,
+             window_days: int | None = None):
+        args = SimpleNamespace(
+            id=rid, json=json_out, window_days=window_days)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_saturation(db, args)
+        return rc, stdout.getvalue()
+
+    def test_happy_path_prints_human_summary(self):
+        db, rid = self._seed()
+        for i in range(10):
+            final_state = (
+                "Completed, ResponseLimitReached" if i < 3
+                else "Completed")
+            db.log_search(request_id=rid, query=f"q{i}",
+                          outcome="found", final_state=final_state,
+                          pre_filter_skip_count=4)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Outcome:", out)
+        self.assertIn("success", out)
+        self.assertIn("Total searches:", out)
+        self.assertIn("10", out)
+        self.assertIn("Saturated searches:", out)
+        self.assertIn("Saturation rate:", out)
+        # Pre-filter skip total surfaces in human view.
+        self.assertIn("Pre-filter skips total:", out)
+        self.assertIn("40", out)
+
+    def test_json_returns_full_payload(self):
+        db, rid = self._seed()
+        db.log_search(request_id=rid, query="q",
+                      outcome="found",
+                      final_state="Completed, FileLimitReached",
+                      pre_filter_skip_count=3)
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        for key in ("request_id", "outcome", "total_searches",
+                    "saturated_searches", "saturation_rate",
+                    "total_pre_filter_skips", "window_days",
+                    "error_message"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["request_id"], rid)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertEqual(payload["total_searches"], 1)
+        self.assertEqual(payload["saturated_searches"], 1)
+        self.assertEqual(payload["saturation_rate"], 1.0)
+        self.assertEqual(payload["total_pre_filter_skips"], 3)
+        self.assertEqual(payload["window_days"], 14)
+
+    def test_empty_window_exits_0_with_zeros(self):
+        # Found-but-quiet — exit 0, all zeros, NOT 404.
+        db, rid = self._seed()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertEqual(payload["total_searches"], 0)
+        self.assertEqual(payload["saturation_rate"], 0.0)
+
+    def test_missing_request_returns_2(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_missing_request_json_is_structured(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999, json_out=True)
+        self.assertEqual(rc, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "request_not_found")
+        # All summary fields zero-filled so clients can read without
+        # branching on outcome.
+        self.assertEqual(payload["total_searches"], 0)
+        self.assertEqual(payload["saturation_rate"], 0.0)
+
+    def test_invalid_window_days_returns_3(self):
+        db, rid = self._seed()
+        rc, out = self._run(db, rid, window_days=0)
+        self.assertEqual(rc, 3)
+        self.assertIn("input_invalid", out)
+
+    def test_window_days_default_is_14(self):
+        db, rid = self._seed()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["window_days"], 14)
+
+
 class TestStaleCompletionRacingRegeneration(unittest.TestCase):
     """U8: a stale plan-A completion arriving after regeneration must
     log against plan A but never advance plan B's cursor. Integration
@@ -2392,6 +2713,78 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
         self.assertIn("request_id", payload)
         self.assertIn("rows", payload)
         self.assertIn("next_before_id", payload)
+
+
+class TestFetchMbReleaseGroupYear(unittest.TestCase):
+    """U4 pure-function coverage of the MB release-group-year client.
+
+    Mirrors the contract of ``web/mb.py::get_release_group_year``: 404
+    → None, unparseable / missing date → None, otherwise the 4-digit
+    year prefix as an int.
+    """
+
+    def _fake_urlopen(self, payload: dict):
+        """Build a context-manager fake whose ``read()`` returns
+        ``json.dumps(payload).encode()``."""
+
+        class _Resp:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self._body
+
+        return lambda req, timeout=15: _Resp(json.dumps(payload).encode())
+
+    @patch("scripts.pipeline_cli.urllib.request.urlopen")
+    def test_returns_year_from_first_release_date(self, mock_urlopen):
+        mock_urlopen.side_effect = self._fake_urlopen(
+            {"first-release-date": "2000-10-02"})
+        self.assertEqual(
+            pipeline_cli.fetch_mb_release_group_year("rg-x"), 2000)
+
+    @patch("scripts.pipeline_cli.urllib.request.urlopen")
+    def test_returns_none_when_date_missing(self, mock_urlopen):
+        mock_urlopen.side_effect = self._fake_urlopen({})
+        self.assertIsNone(
+            pipeline_cli.fetch_mb_release_group_year("rg-x"))
+
+    @patch("scripts.pipeline_cli.urllib.request.urlopen")
+    def test_returns_none_when_date_short(self, mock_urlopen):
+        mock_urlopen.side_effect = self._fake_urlopen(
+            {"first-release-date": "200"})
+        self.assertIsNone(
+            pipeline_cli.fetch_mb_release_group_year("rg-x"))
+
+    @patch("scripts.pipeline_cli.urllib.request.urlopen")
+    def test_returns_none_on_404(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "http://mb/x", 404, "Not Found", {}, None,  # type: ignore[arg-type]
+        )
+        self.assertIsNone(
+            pipeline_cli.fetch_mb_release_group_year("rg-x"))
+
+    @patch("scripts.pipeline_cli.urllib.request.urlopen")
+    def test_returns_none_on_other_http_error(self, mock_urlopen):
+        """500/503/etc. also fall back to None — caller persists NULL
+        rather than blocking the add."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "http://mb/x", 503, "Service Unavailable", {}, None,  # type: ignore[arg-type]
+        )
+        self.assertIsNone(
+            pipeline_cli.fetch_mb_release_group_year("rg-x"))
+
+    @patch("scripts.pipeline_cli.urllib.request.urlopen")
+    def test_returns_none_on_url_error(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+        self.assertIsNone(
+            pipeline_cli.fetch_mb_release_group_year("rg-x"))
 
 
 if __name__ == "__main__":

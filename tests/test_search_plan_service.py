@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from datetime import timedelta
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -924,6 +925,290 @@ class TestSearchPlanServiceHistoryPage(unittest.TestCase):
         result = self.svc.history_for_request(
             1, limit=10, before_id=2147483647)
         self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_SUCCESS)
+
+
+class TestSearchPlanServiceDryRun(unittest.TestCase):
+    """U6 service contract: ``SearchPlanService.dry_run_for_request``.
+
+    Pure read-only simulator — no DB writes, no advisory lock, no
+    ``active_plan_id`` mutation, no resolver call. Returns a typed
+    ``DryRunResult`` with ``RESULT_DRY_RUN_SUCCESS`` |
+    ``RESULT_DRY_RUN_GENERATION_FAILED`` |
+    ``RESULT_REQUEST_NOT_FOUND``.
+    """
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed(self, **overrides) -> int:
+        row = make_request_row(
+            artist_name="Radiohead", album_title="Kid A",
+            year=2008, release_group_year=2000,
+            **overrides,
+        )
+        self.db.seed_request(row)
+        rid = int(row["id"])
+        self.db.set_tracks(rid, [
+            {"track_number": 1, "title": "Everything In Its Right Place"},
+            {"track_number": 2, "title": "Kid A"},
+            {"track_number": 3, "title": "The National Anthem"},
+        ])
+        return rid
+
+    def test_dry_run_returns_plan_without_persisting(self):
+        from lib.search_plan_service import RESULT_DRY_RUN_SUCCESS
+        rid = self._seed(id=1)
+        plans_before = dict(self.db.search_plans)
+        items_before = dict(self.db.search_plan_items)
+        result = self.svc.dry_run_for_request(rid)
+        self.assertEqual(result.outcome, RESULT_DRY_RUN_SUCCESS)
+        self.assertEqual(result.request_id, rid)
+        self.assertIsNotNone(result.plan)
+        assert result.plan is not None
+        self.assertGreater(len(result.plan.items), 0)
+        # Persistence invariants — nothing written.
+        self.assertEqual(self.db.search_plans, plans_before)
+        self.assertEqual(self.db.search_plan_items, items_before)
+        self.assertIsNone(self.db._requests[rid]["active_plan_id"])
+
+    def test_dry_run_request_not_found_returns_typed_outcome(self):
+        from lib.search_plan_service import RESULT_REQUEST_NOT_FOUND
+        result = self.svc.dry_run_for_request(9999)
+        self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
+        self.assertEqual(result.request_id, 9999)
+        self.assertIsNone(result.plan)
+        self.assertIsNotNone(result.error_message)
+
+    def test_dry_run_takes_no_advisory_lock(self):
+        rid = self._seed(id=2)
+        before = list(self.db.advisory_lock_calls)
+        self.svc.dry_run_for_request(rid)
+        # Lock list unchanged — dry-run is read-only and contention-free.
+        self.assertEqual(self.db.advisory_lock_calls, before)
+
+    def test_dry_run_does_not_invoke_resolver(self):
+        # Seed a request with NO tracks and a resolver that would raise
+        # if called — proves dry_run never reaches into the resolver.
+        from lib.search_plan_service import RESULT_DRY_RUN_SUCCESS
+        rid = self._seed(id=3)
+        self.db.set_tracks(rid, [])
+        resolver = MagicMock()
+        resolver.resolve_tracks.side_effect = AssertionError(
+            "resolver must not be called from dry_run")
+        svc = SearchPlanService(self.db, self.cfg, resolver=resolver)
+        result = svc.dry_run_for_request(rid)
+        # Even with empty tracks the generator emits a non-track plan.
+        self.assertEqual(result.outcome, RESULT_DRY_RUN_SUCCESS)
+        resolver.resolve_tracks.assert_not_called()
+
+    def test_dry_run_uses_release_group_year_from_row(self):
+        rid = self._seed(id=4)
+        result = self.svc.dry_run_for_request(rid)
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot.release_group_year, 2000)
+
+    def test_dry_run_metadata_snapshot_includes_release_group_year(self):
+        rid = self._seed(id=5)
+        result = self.svc.dry_run_for_request(rid)
+        assert result.metadata_snapshot is not None
+        self.assertEqual(
+            result.metadata_snapshot.get("release_group_year"), 2000)
+
+    def test_dry_run_uses_current_generator_id(self):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        rid = self._seed(id=6)
+        result = self.svc.dry_run_for_request(rid)
+        assert result.plan is not None
+        self.assertEqual(
+            result.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+
+
+class TestSearchPlanServiceSaturation(unittest.TestCase):
+    """U7 service contract: ``SearchPlanService.saturation_for_request``.
+
+    Read-only telemetry aggregator. The method wraps
+    ``PipelineDB.get_saturation_summary`` and adds the explicit "request
+    exists at all?" 404 check so empty windows do not collide with
+    deleted requests. Both ``pipeline-cli search-plan saturation`` and
+    ``GET /api/pipeline/<id>/search-plan/saturation`` go through this
+    method — keep the outcome / exit-code mapping symmetric.
+    """
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed(self, rid: int = 1) -> int:
+        row = make_request_row(id=rid, artist_name="Radiohead",
+                               album_title="Kid A")
+        self.db.seed_request(row)
+        return rid
+
+    def test_happy_path_returns_typed_summary(self):
+        # Plan AE: 30 searches in window, 10 saturated, 50 pre-filter
+        # skips → saturation_rate=10/30, total_pre_filter_skips=50.
+        # Distribute 50 skips across 30 rows as 20 rows of 2 + 10 rows
+        # of 1 = 50; deterministic and easy to read.
+        from lib.search_plan_service import RESULT_SATURATION_SUCCESS
+        rid = self._seed(rid=1)
+        for i in range(30):
+            final_state = (
+                "Completed, ResponseLimitReached" if i < 10
+                else "Completed")
+            skip = 2 if i < 20 else 1
+            self.db.log_search(
+                request_id=rid, query=f"q{i}",
+                result_count=5, outcome="found",
+                final_state=final_state,
+                pre_filter_skip_count=skip,
+            )
+        result = self.svc.saturation_for_request(rid, window_days=14)
+        self.assertEqual(result.outcome, RESULT_SATURATION_SUCCESS)
+        self.assertEqual(result.request_id, rid)
+        self.assertIsNotNone(result.summary)
+        assert result.summary is not None
+        self.assertEqual(result.summary.total_searches, 30)
+        self.assertEqual(result.summary.saturated_searches, 10)
+        self.assertAlmostEqual(result.summary.saturation_rate, 10 / 30)
+        self.assertEqual(result.summary.total_pre_filter_skips, 50)
+        self.assertEqual(result.summary.window_days, 14)
+
+    def test_empty_window_is_success_with_zeros_not_404(self):
+        # Request exists but has no logged searches in window. This is
+        # "found but quiet" — outcome MUST be SUCCESS with zero counts,
+        # NOT REQUEST_NOT_FOUND. Operators ask "how saturated is X?"
+        # and the truthful answer for a quiet request is "not at all".
+        from lib.search_plan_service import RESULT_SATURATION_SUCCESS
+        rid = self._seed(rid=2)
+        result = self.svc.saturation_for_request(rid, window_days=14)
+        self.assertEqual(result.outcome, RESULT_SATURATION_SUCCESS)
+        assert result.summary is not None
+        self.assertEqual(result.summary.total_searches, 0)
+        self.assertEqual(result.summary.saturated_searches, 0)
+        # Crucial: 0.0, not NaN. NaN would break JSON serialisation.
+        self.assertEqual(result.summary.saturation_rate, 0.0)
+        self.assertEqual(result.summary.total_pre_filter_skips, 0)
+
+    def test_request_not_found_returns_404_outcome(self):
+        from lib.search_plan_service import RESULT_REQUEST_NOT_FOUND
+        result = self.svc.saturation_for_request(9999, window_days=14)
+        self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
+        self.assertEqual(result.request_id, 9999)
+        self.assertIsNone(result.summary)
+        self.assertIsNotNone(result.error_message)
+
+    def test_window_days_parameter_filters_rows(self):
+        from lib.search_plan_service import RESULT_SATURATION_SUCCESS
+        rid = self._seed(rid=3)
+        # Two recent rows + one row older than 7 days.
+        self.db.log_search(request_id=rid, query="recent_a",
+                           outcome="found",
+                           final_state="Completed, FileLimitReached")
+        self.db.log_search(request_id=rid, query="recent_b",
+                           outcome="found",
+                           final_state="Completed")
+        # Backdate the third row to 10 days ago.
+        old = self.db.search_logs[-1]
+        self.db.log_search(request_id=rid, query="old",
+                           outcome="found",
+                           final_state="Completed, ResponseLimitReached")
+        self.db.search_logs[-1].created_at = (
+            old.created_at - timedelta(days=10))
+        # Window of 7 days: the old row falls outside.
+        result = self.svc.saturation_for_request(rid, window_days=7)
+        self.assertEqual(result.outcome, RESULT_SATURATION_SUCCESS)
+        assert result.summary is not None
+        self.assertEqual(result.summary.total_searches, 2)
+        self.assertEqual(result.summary.saturated_searches, 1)
+        self.assertEqual(result.summary.window_days, 7)
+        # Window of 14 days: all three rows are in scope.
+        result14 = self.svc.saturation_for_request(rid, window_days=14)
+        assert result14.summary is not None
+        self.assertEqual(result14.summary.total_searches, 3)
+        self.assertEqual(result14.summary.saturated_searches, 2)
+
+    def test_window_days_input_validation_below_min(self):
+        from lib.search_plan_service import RESULT_SATURATION_INPUT_INVALID
+        rid = self._seed(rid=4)
+        result = self.svc.saturation_for_request(rid, window_days=0)
+        self.assertEqual(result.outcome, RESULT_SATURATION_INPUT_INVALID)
+        self.assertIsNone(result.summary)
+        self.assertIsNotNone(result.error_message)
+
+    def test_window_days_input_validation_above_max(self):
+        from lib.search_plan_service import RESULT_SATURATION_INPUT_INVALID
+        rid = self._seed(rid=5)
+        result = self.svc.saturation_for_request(rid, window_days=10000)
+        self.assertEqual(result.outcome, RESULT_SATURATION_INPUT_INVALID)
+        self.assertIsNotNone(result.error_message)
+
+    def test_saturated_match_is_substring_not_exact(self):
+        # Production final_state values include the slskd-prefixed
+        # "Completed, ResponseLimitReached" / "Completed, FileLimitReached".
+        # The aggregator must match on substring, not equality.
+        from lib.search_plan_service import RESULT_SATURATION_SUCCESS
+        rid = self._seed(rid=6)
+        for state in (
+            "Completed, ResponseLimitReached",
+            "Completed, FileLimitReached",
+            "Completed",  # not saturated
+            "Cancelled",  # not saturated
+        ):
+            self.db.log_search(request_id=rid, query="q",
+                               outcome="found", final_state=state)
+        result = self.svc.saturation_for_request(rid, window_days=14)
+        self.assertEqual(result.outcome, RESULT_SATURATION_SUCCESS)
+        assert result.summary is not None
+        self.assertEqual(result.summary.total_searches, 4)
+        self.assertEqual(result.summary.saturated_searches, 2)
+
+    def test_takes_no_advisory_lock(self):
+        rid = self._seed(rid=7)
+        before = list(self.db.advisory_lock_calls)
+        self.svc.saturation_for_request(rid, window_days=14)
+        self.assertEqual(self.db.advisory_lock_calls, before)
+
+    def test_payload_helper_round_trips_summary_fields(self):
+        from lib.search_plan_service import (
+            RESULT_SATURATION_SUCCESS, saturation_payload,
+        )
+        rid = self._seed(rid=8)
+        self.db.log_search(request_id=rid, query="q1", outcome="found",
+                           final_state="Completed, ResponseLimitReached",
+                           pre_filter_skip_count=4)
+        self.db.log_search(request_id=rid, query="q2", outcome="found",
+                           final_state="Completed",
+                           pre_filter_skip_count=2)
+        result = self.svc.saturation_for_request(rid, window_days=14)
+        self.assertEqual(result.outcome, RESULT_SATURATION_SUCCESS)
+        payload = saturation_payload(result)
+        for key in ("request_id", "outcome", "total_searches",
+                    "saturated_searches", "saturation_rate",
+                    "total_pre_filter_skips", "window_days",
+                    "error_message"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["total_searches"], 2)
+        self.assertEqual(payload["saturated_searches"], 1)
+        self.assertAlmostEqual(payload["saturation_rate"], 0.5)
+        self.assertEqual(payload["total_pre_filter_skips"], 6)
+        self.assertEqual(payload["window_days"], 14)
+        self.assertIsNone(payload["error_message"])
+
+    def test_payload_helper_zeros_on_not_found(self):
+        from lib.search_plan_service import saturation_payload
+        result = self.svc.saturation_for_request(9999, window_days=14)
+        payload = saturation_payload(result)
+        # Even the not-found path emits the five summary fields so a
+        # client can read them without branching on outcome.
+        self.assertEqual(payload["total_searches"], 0)
+        self.assertEqual(payload["saturated_searches"], 0)
+        self.assertEqual(payload["saturation_rate"], 0.0)
+        self.assertEqual(payload["total_pre_filter_skips"], 0)
+        self.assertEqual(payload["window_days"], 14)
+        self.assertEqual(payload["outcome"], "request_not_found")
 
 
 class TestSearchPlanConfigFromCratedigger(unittest.TestCase):

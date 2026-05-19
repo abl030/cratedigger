@@ -441,6 +441,17 @@ class CandidateScore(msgspec.Struct):
     variant is the cheap zero-score record (``matched_tracks=0``,
     ``avg_ratio=0.0``, ``missing_titles=[]``) so the forensic blob still
     captures peers that had a sub-count audio file count.
+
+    ``pre_filter_skip`` (U2 of search-plan-entropy): True for the
+    sampled flagged rows ``check_for_match`` emits when the asymmetric
+    pre-filter (``search_count > 2 * track_num``) rejected the dir
+    before any browse. Sample rows carry ``matched_tracks=0``,
+    ``avg_ratio=0.0``, ``missing_titles=[]`` and the cached
+    ``file_count`` from the search response so operators can see
+    which peers are noisy. Defaults to ``False`` so historic blobs
+    decode unchanged (msgspec strict decode tolerates missing fields
+    only when a default is declared — symmetric encode keeps the field
+    on every row, including ``False`` on scored / sub-count rows).
     """
     username: str
     dir: str
@@ -450,6 +461,7 @@ class CandidateScore(msgspec.Struct):
     avg_ratio: float
     missing_titles: list[str]
     file_count: int
+    pre_filter_skip: bool = False
 
 
 def top_candidates(
@@ -470,12 +482,39 @@ def top_candidates(
     Sorting by matched_tracks first surfaces the closest peers; avg_ratio is
     the secondary tiebreak so a 24/26 dir with high ratio beats a 24/26 dir
     with low ratio.
+
+    U2 of search-plan-entropy: ``pre_filter_skip`` flagged rows
+    (``matched_tracks=0``, ``avg_ratio=0.0``) sink to the bottom of
+    this ordering naturally. Callers that want a guaranteed mix of
+    scored + skip-sample rows should split the input first
+    (see ``top_candidates_with_skip_split``).
     """
     return sorted(
         candidates,
         key=lambda c: (c.matched_tracks, c.avg_ratio),
         reverse=True,
     )[:limit]
+
+
+def top_candidates_with_skip_split(
+    candidates: Sequence[CandidateScore],
+    *,
+    scored_limit: int = 15,
+    skip_limit: int = 5,
+) -> list[CandidateScore]:
+    """Return scored top-N + sampled pre-filter-skip rows.
+
+    Splits ``candidates`` into scored vs pre-filter-skip; ranks scored
+    via ``top_candidates``, preserves visit order for the skip sample.
+    Default 15 + 5 keeps the JSONB blob the same size as the pre-split
+    cap of 20.
+    """
+    scored = [c for c in candidates if not c.pre_filter_skip]
+    skipped = [c for c in candidates if c.pre_filter_skip]
+    return (
+        top_candidates(scored, limit=scored_limit)
+        + list(skipped[:skip_limit])
+    )
 
 
 @dataclass

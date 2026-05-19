@@ -37,6 +37,7 @@ from lib.config import CratediggerConfig
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_PLAN,
     PLAN_STATUS_ACTIVE,
+    SaturationSummary,
     SearchPlanItemInput,
 )
 from lib.release_snapshot import (
@@ -83,6 +84,20 @@ RESULT_INVALID_TARGET = "invalid_target"
 # history_for_request outcomes (read-only paginated search_log slice).
 RESULT_HISTORY_PAGE_SUCCESS = "success"
 RESULT_HISTORY_PAGE_INPUT_INVALID = "input_invalid"
+# dry_run_for_request outcomes (U6 — read-only generator simulation).
+RESULT_DRY_RUN_SUCCESS = "success"
+RESULT_DRY_RUN_GENERATION_FAILED = "generation_failed"
+# saturation_for_request outcomes (U7 — read-only telemetry aggregate).
+RESULT_SATURATION_SUCCESS = "success"
+RESULT_SATURATION_INPUT_INVALID = "input_invalid"
+
+# Saturation telemetry window bounds (U7). Operators can ask for any
+# window in [1, 90] days; defaults to 14 days matching the brainstorm.
+# The CLI / route both clamp before calling the service so the DB layer
+# stays a thin adapter.
+SATURATION_WINDOW_MIN_DAYS = 1
+SATURATION_WINDOW_MAX_DAYS = 90
+SATURATION_WINDOW_DEFAULT_DAYS = 14
 
 # Bounds for the paginated history endpoint. The route handler and CLI
 # both consult these so the cap stays consistent across surfaces.
@@ -269,6 +284,68 @@ class SearchLogHistoryPageResult:
 
 
 @dataclass(frozen=True)
+class DryRunResult:
+    """Outcome of one ``dry_run_for_request`` call (U6).
+
+    Read-only simulator: the service constructs the same
+    ``ReleaseSnapshot`` startup/regeneration would build, runs
+    ``generate_search_plan`` against the current code, and returns the
+    in-memory ``SearchPlan`` plus a JSON-friendly view. No
+    ``search_plans`` / ``plan_items`` rows are written and the
+    request's ``active_plan_id`` is untouched.
+
+    ``outcome`` is one of:
+      * ``RESULT_DRY_RUN_SUCCESS`` — generator produced a non-empty plan.
+      * ``RESULT_DRY_RUN_GENERATION_FAILED`` — generator returned
+        ``PLAN_STATUS_GENERATION_FAILED`` (no runnable query / metadata
+        incomplete); ``plan`` is populated but ``items`` is empty.
+      * ``RESULT_REQUEST_NOT_FOUND`` — no row for ``request_id``.
+
+    ``plan`` is the live ``SearchPlan`` object. ``snapshot`` is the
+    ``ReleaseSnapshot`` fed to the generator (useful for operators
+    debugging snapshot inputs vs generator outputs).
+    """
+
+    outcome: str
+    request_id: int
+    plan: SearchPlan | None = None
+    snapshot: ReleaseSnapshot | None = None
+    metadata_snapshot: dict[str, Any] | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class SaturationResult:
+    """Outcome of one ``saturation_for_request`` call (U7).
+
+    Read-only aggregator: wraps
+    :class:`lib.pipeline_db.SaturationSummary` with a service-layer
+    outcome string so the CLI / API surfaces can map onto the standard
+    exit-code / status-code convention without coupling to the DB
+    dataclass directly.
+
+    ``outcome`` is one of:
+      * ``RESULT_SATURATION_SUCCESS`` — request exists; ``summary`` is
+        populated (it may contain all-zero fields if the window has no
+        searches, which is a valid "found but quiet" state).
+      * ``RESULT_REQUEST_NOT_FOUND`` — no row for ``request_id`` in
+        ``album_requests``; ``summary`` is ``None``. We check the
+        request row separately from the aggregate so zeros from a real
+        request never collide with "request id doesn't exist at all".
+      * ``RESULT_SATURATION_INPUT_INVALID`` — ``window_days`` is out of
+        the supported ``[SATURATION_WINDOW_MIN_DAYS,
+        SATURATION_WINDOW_MAX_DAYS]`` range; ``error_message`` carries
+        the offending value.
+    """
+
+    outcome: str
+    request_id: int
+    window_days: int
+    summary: "SaturationSummary | None" = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
 class AdvanceResult:
     """Outcome of a single ``advance_for_request`` call.
 
@@ -322,6 +399,7 @@ class SearchPlanService:
         tracks: list[dict[str, Any]],
         source: str = "request",
         prepend_artist: bool | None = None,
+        release_group_year: object = None,
     ) -> ServiceResult:
         """Generate a plan for a freshly-added request.
 
@@ -345,6 +423,7 @@ class SearchPlanService:
                 tracks=tracks,
                 source=source,
                 prepend_artist=prepend,
+                release_group_year=release_group_year,
             )
             return self._persist(request_id, snapshot, regenerate=False)
 
@@ -547,6 +626,135 @@ class SearchPlanService:
             request_id=request_id,
             rows=page.rows,
             next_before_id=page.next_before_id,
+        )
+
+    def dry_run_for_request(
+        self,
+        request_id: int,
+        *,
+        prepend_artist: bool | None = None,
+    ) -> "DryRunResult":
+        """U6 read-only simulator: run the generator without persisting.
+
+        Loads the request row + persisted tracks, constructs the same
+        ``ReleaseSnapshot`` that startup / explicit regeneration would
+        build, and invokes ``generate_search_plan`` against the current
+        code. Nothing is written: no ``search_plans`` / ``plan_items``
+        row is created, no ``active_plan_id`` mutation, no advisory
+        lock taken (no concurrent mutation to protect against).
+
+        Counterpart of ``pipeline-cli search-plan dry-run <id>`` and
+        ``GET /api/pipeline/<id>/search-plan/dry-run``.
+
+        Outcomes:
+          * ``RESULT_DRY_RUN_SUCCESS`` — generator emitted a plan with
+            non-empty items.
+          * ``RESULT_DRY_RUN_GENERATION_FAILED`` — generator returned
+            ``PLAN_STATUS_GENERATION_FAILED``; ``plan`` is populated so
+            callers can inspect ``failure_reason`` / ``provenance``.
+          * ``RESULT_REQUEST_NOT_FOUND`` — no row for ``request_id``.
+
+        The simulator deliberately does NOT call the ``TrackResolver``:
+        dry-run reads what's persisted today so operators can see what
+        the next cycle's generator would produce against the current
+        persisted state. If tracks are missing in the DB the snapshot
+        is built without them — same way the generator would see them
+        at startup before any resolver hydration.
+        """
+        prepend = self._resolve_prepend_artist(prepend_artist)
+        row = self.db.get_request(request_id)
+        if row is None:
+            return DryRunResult(
+                outcome=RESULT_REQUEST_NOT_FOUND,
+                request_id=request_id,
+                error_message=f"request {request_id} not found",
+            )
+        try:
+            tracks = self.db.get_tracks(request_id) or []
+        except Exception:  # noqa: BLE001
+            tracks = []
+        snapshot = snapshot_from_request_row(
+            row, tracks, prepend_artist=prepend,
+        )
+        plan = generate_search_plan(snapshot, self.plan_config)
+        metadata_snapshot = _metadata_snapshot_from_snapshot(snapshot)
+        if plan.status == PLAN_STATUS_GENERATION_FAILED:
+            return DryRunResult(
+                outcome=RESULT_DRY_RUN_GENERATION_FAILED,
+                request_id=request_id,
+                plan=plan,
+                snapshot=snapshot,
+                metadata_snapshot=metadata_snapshot,
+                error_message=plan.failure_reason,
+            )
+        return DryRunResult(
+            outcome=RESULT_DRY_RUN_SUCCESS,
+            request_id=request_id,
+            plan=plan,
+            snapshot=snapshot,
+            metadata_snapshot=metadata_snapshot,
+        )
+
+    def saturation_for_request(
+        self,
+        request_id: int,
+        *,
+        window_days: int = SATURATION_WINDOW_DEFAULT_DAYS,
+    ) -> "SaturationResult":
+        """U7 read-only telemetry aggregate over the request's search_log.
+
+        Wraps :meth:`PipelineDB.get_saturation_summary` with the
+        not-found semantics the operator surfaces expect:
+
+        * The request row is checked first. If it does not exist, the
+          outcome is ``RESULT_REQUEST_NOT_FOUND`` and the route /
+          CLI map that to 404 / exit 2.
+        * If the request exists but has no logged searches in window,
+          the outcome is ``RESULT_SATURATION_SUCCESS`` with all-zero
+          counts — a valid "found but quiet" state. We deliberately do
+          NOT collapse this onto 404; the operator asked "how saturated
+          is request X?" and the truthful answer is "not at all".
+        * ``window_days`` is validated against
+          ``[SATURATION_WINDOW_MIN_DAYS, SATURATION_WINDOW_MAX_DAYS]``;
+          out-of-range values return ``RESULT_SATURATION_INPUT_INVALID``
+          which CLI argparse normally prevents but the API surface
+          relies on for its 400 response.
+
+        Counterpart of ``pipeline-cli search-plan saturation <id>`` and
+        ``GET /api/pipeline/<id>/search-plan/saturation``. Both
+        surfaces wrap this method (see ``CLAUDE.md`` § "CLI ⇄ API
+        surface symmetry").
+        """
+        if (
+            window_days < SATURATION_WINDOW_MIN_DAYS
+            or window_days > SATURATION_WINDOW_MAX_DAYS
+        ):
+            return SaturationResult(
+                outcome=RESULT_SATURATION_INPUT_INVALID,
+                request_id=request_id,
+                window_days=int(window_days),
+                error_message=(
+                    f"window_days must be in "
+                    f"[{SATURATION_WINDOW_MIN_DAYS}, "
+                    f"{SATURATION_WINDOW_MAX_DAYS}]; got {window_days}"
+                ),
+            )
+        row = self.db.get_request(request_id)
+        if row is None:
+            return SaturationResult(
+                outcome=RESULT_REQUEST_NOT_FOUND,
+                request_id=request_id,
+                window_days=int(window_days),
+                error_message=f"request {request_id} not found",
+            )
+        summary = self.db.get_saturation_summary(
+            request_id, window_days=int(window_days),
+        )
+        return SaturationResult(
+            outcome=RESULT_SATURATION_SUCCESS,
+            request_id=request_id,
+            window_days=int(window_days),
+            summary=summary,
         )
 
     @staticmethod
@@ -945,6 +1153,111 @@ class SearchPlanService:
         )
 
 
+def _envelope(result: Any) -> dict[str, Any]:
+    """Common ``{request_id, outcome, error_message}`` envelope.
+
+    Shared by every payload helper (dry-run, saturation, ...) so the
+    CLI ⇄ API surface emits the same three keys regardless of outcome.
+    """
+    return {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "error_message": result.error_message,
+    }
+
+
+def dry_run_payload(
+    result: "DryRunResult",
+    *,
+    current_generator_id: str,
+    request_row: dict[str, Any] | None,
+    has_active_plan: bool,
+) -> dict[str, Any]:
+    """JSON-serialisable payload for U6 dry-run CLI + API responses.
+
+    Single helper so the CLI ``--json`` mode and the API endpoint emit
+    the same dict tree (CLI ⇄ API symmetry).
+    """
+    plan_payload: dict[str, Any] | None = None
+    if result.plan is not None:
+        items_payload: list[dict[str, Any]] = []
+        for it in result.plan.items:
+            items_payload.append({
+                "ordinal": it.ordinal,
+                "strategy": it.strategy,
+                "query": it.query,
+                "canonical_query_key": it.canonical_query_key,
+                "repeat_group": it.repeat_group,
+                "provenance": dict(it.provenance) if it.provenance else {},
+            })
+        plan_payload = {
+            "generator_id": result.plan.generator_id,
+            "status": result.plan.status,
+            "items": items_payload,
+            "provenance": (
+                dict(result.plan.provenance)
+                if result.plan.provenance else {}
+            ),
+            "failure_reason": result.plan.failure_reason,
+            "metadata_snapshot": result.metadata_snapshot,
+        }
+    request_payload: dict[str, Any] | None = None
+    if request_row is not None:
+        request_payload = {
+            "id": request_row.get("id"),
+            "status": request_row.get("status"),
+            "artist_name": request_row.get("artist_name"),
+            "album_title": request_row.get("album_title"),
+            "mb_release_id": request_row.get("mb_release_id"),
+            "discogs_release_id": request_row.get("discogs_release_id"),
+            "year": request_row.get("year"),
+            "release_group_year": request_row.get("release_group_year"),
+            "source": request_row.get("source"),
+        }
+    return {
+        **_envelope(result),
+        "current_generator_id": current_generator_id,
+        "request": request_payload,
+        "plan": plan_payload,
+        "would_supersede_active": bool(has_active_plan),
+    }
+
+
+def saturation_payload(result: "SaturationResult") -> dict[str, Any]:
+    """JSON-serialisable payload for U7 saturation CLI + API responses.
+
+    The wire shape is always the five summary fields at the top level
+    so a client can read ``data["saturation_rate"]`` directly without
+    branching on outcome. When the summary is missing (request not
+    found, invalid window) the counts are zero-filled and the
+    ``outcome`` field signals the failure mode. ``error_message`` is
+    populated on every non-success path. Single helper so the CLI
+    ``--json`` mode and the API endpoint emit the same dict tree (CLI
+    ⇄ API symmetry).
+    """
+    summary = result.summary
+    if summary is not None:
+        total = int(summary.total_searches)
+        saturated = int(summary.saturated_searches)
+        rate = float(summary.saturation_rate)
+        skips = int(summary.total_pre_filter_skips)
+        window = int(summary.window_days)
+    else:
+        total = 0
+        saturated = 0
+        rate = 0.0
+        skips = 0
+        window = int(result.window_days)
+    return {
+        **_envelope(result),
+        "total_searches": total,
+        "saturated_searches": saturated,
+        "saturation_rate": rate,
+        "total_pre_filter_skips": skips,
+        "window_days": window,
+    }
+
+
 def _within_retry_window(created_at: datetime | None) -> bool:
     """True when ``created_at`` is within the transient-retry window of now."""
     if created_at is None:
@@ -959,7 +1272,7 @@ def _metadata_snapshot_from_snapshot(
     snapshot: ReleaseSnapshot,
 ) -> dict[str, Any]:
     """JSON-friendly metadata snapshot for `search_plans.metadata_snapshot`."""
-    return {
+    out: dict[str, Any] = {
         "artist_name": snapshot.artist_name,
         "album_title": snapshot.title,
         "year": snapshot.year,
@@ -967,6 +1280,9 @@ def _metadata_snapshot_from_snapshot(
         "redownload": snapshot.redownload,
         "prepend_artist": snapshot.prepend_artist,
     }
+    if snapshot.release_group_year is not None:
+        out["release_group_year"] = int(snapshot.release_group_year)
+    return out
 
 
 def _metadata_snapshot_from_row(
@@ -978,10 +1294,14 @@ def _metadata_snapshot_from_row(
     Used on resolver-failure paths so the failed-plan row still carries
     enough context to debug what was attempted.
     """
-    return {
+    out: dict[str, Any] = {
         "artist_name": row.get("artist_name"),
         "album_title": row.get("album_title"),
         "year": row.get("year"),
         "track_count": len(tracks),
         "redownload": row.get("source") == "redownload",
     }
+    rg_year = row.get("release_group_year")
+    if rg_year is not None:
+        out["release_group_year"] = rg_year
+    return out

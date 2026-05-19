@@ -3255,7 +3255,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(row.candidates, "[]")
 
     def test_top_20_truncation_when_many_candidates(self):
-        """JSONB blob caps at top-20 by (matched_tracks, avg_ratio) DESC."""
+        """JSONB blob caps at top-15 scored + up to 5 pre-filter-skip samples.
+
+        Under U2 the cap split changed from top-20 scored to a 15-scored +
+        5-skip-sample blend so per-row forensic storage stays bounded as
+        the asymmetric pre-filter (U1) lets more peers through. Scored
+        candidates with no `pre_filter_skip=True` flag take the first 15
+        slots; this scenario feeds 30 scored candidates and asserts the
+        15 highest by (matched_tracks, avg_ratio) DESC land.
+        """
         import json
         from lib.quality import CandidateScore
         from lib.search import SearchResult
@@ -3305,10 +3313,13 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         row = db.search_logs[0]
         assert row.candidates is not None
         decoded = json.loads(row.candidates)
-        self.assertEqual(len(decoded), 20, "must truncate to top 20")
+        self.assertEqual(len(decoded), 15, "must truncate to top 15 scored")
         # The very top entry has matched_tracks=30 (i=0 in the source list).
         self.assertEqual(decoded[0]["matched_tracks"], 30)
-        self.assertEqual(decoded[-1]["matched_tracks"], 11)
+        # Last scored kept is matched_tracks=16 (i=14, 30-14=16).
+        self.assertEqual(decoded[-1]["matched_tracks"], 16)
+        # No pre-filter-skip rows in this scenario — all 30 inputs are scored.
+        self.assertTrue(all(not c.get("pre_filter_skip") for c in decoded))
 
     def test_discogs_source_request_produces_same_blob_shape(self):
         """A Discogs-source request flows through the same forensic capture."""
