@@ -555,6 +555,11 @@ class ConsumedAttemptInput:
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
+    # U2 of search-plan-entropy: count of dirs the asymmetric pre-filter
+    # rejected before browse during this search's find_download walk.
+    # Persisted on search_log.pre_filter_skip_count for per-search
+    # aggregation. Default 0 keeps every existing caller / test compatible.
+    pre_filter_skip_count: int = 0
     # Plan-item count required by wrap detection. The executor reads it
     # from the active plan it executed; passing it explicitly avoids a
     # second SELECT inside the transaction.
@@ -594,6 +599,11 @@ class NonConsumingAttemptInput:
     final_state: str | None = None
     error_message: str | None = None
     apply_scheduler_attempt: bool = True
+    # U2 of search-plan-entropy: pre-filter skip count for the failed
+    # attempt. Almost always 0 for pre-attempt failures because the
+    # matcher never ran, but plumbed through so the column is
+    # consistently populated across all log_search write paths.
+    pre_filter_skip_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -3218,7 +3228,8 @@ class PipelineDB:
                    match_time_s: float = 0.0,
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
-                   fanout_waves: int = 0) -> None:
+                   fanout_waves: int = 0,
+                   pre_filter_skip_count: int = 0) -> None:
         """Record one search attempt for an album request.
 
         ``candidates`` is the top-N forensic ``CandidateScore`` list (already
@@ -3227,6 +3238,11 @@ class PipelineDB:
         NULL — error / submission-failure rows have no scoring data to
         report. See ``.claude/rules/code-quality.md`` § Wire-boundary types
         for the symmetric encode/decode contract.
+
+        ``pre_filter_skip_count`` (U2 of search-plan-entropy) is the
+        aggregate count of dirs the matcher's asymmetric pre-filter
+        rejected before browse. NOT NULL on the column; default 0 keeps
+        pre-attempt / error rows uniformly populated.
         """
         candidates_json: str | None = None
         if candidates is not None:
@@ -3236,12 +3252,14 @@ class PipelineDB:
             INSERT INTO search_log (
                 request_id, query, result_count, elapsed_s, outcome,
                 candidates, variant, final_state, browse_time_s, match_time_s,
-                peers_browsed, peers_browsed_lazy, fanout_waves
+                peers_browsed, peers_browsed_lazy, fanout_waves,
+                pre_filter_skip_count
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (request_id, query, result_count, elapsed_s, outcome,
               candidates_json, variant, final_state, browse_time_s, match_time_s,
-              peers_browsed, peers_browsed_lazy, fanout_waves))
+              peers_browsed, peers_browsed_lazy, fanout_waves,
+              pre_filter_skip_count))
         self.conn.commit()
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:
@@ -5553,7 +5571,8 @@ class PipelineDB:
                         plan_repeat_group, plan_generator_id,
                         execution_stage, attempt_consumed,
                         cursor_update_status, stale_reason,
-                        plan_cycle_snapshot
+                        plan_cycle_snapshot,
+                        pre_filter_skip_count
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
@@ -5564,6 +5583,7 @@ class PipelineDB:
                         %s, %s,
                         %s, %s,
                         %s, %s,
+                        %s,
                         %s
                     )
                     RETURNING id
@@ -5594,6 +5614,7 @@ class PipelineDB:
                         cursor_update_status,
                         stale_reason,
                         attempt.cycle_count_snapshot,
+                        attempt.pre_filter_skip_count,
                     ),
                 )
                 log_row = cur.fetchone()
@@ -5712,7 +5733,8 @@ class PipelineDB:
                         plan_strategy, plan_canonical_query_key,
                         plan_repeat_group, plan_generator_id,
                         execution_stage, attempt_consumed,
-                        cursor_update_status, plan_cycle_snapshot
+                        cursor_update_status, plan_cycle_snapshot,
+                        pre_filter_skip_count
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s,
@@ -5720,7 +5742,8 @@ class PipelineDB:
                         %s, %s,
                         %s, %s,
                         %s, %s,
-                        %s, %s
+                        %s, %s,
+                        %s
                     )
                     RETURNING id
                     """,
@@ -5742,6 +5765,7 @@ class PipelineDB:
                         False,  # attempt_consumed
                         CURSOR_UPDATE_UNCHANGED,
                         cycle_snapshot,
+                        attempt.pre_filter_skip_count,
                     ),
                 )
                 log_row = cur.fetchone()

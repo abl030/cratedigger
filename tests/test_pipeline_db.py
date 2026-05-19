@@ -1433,6 +1433,26 @@ class TestSearchLog(unittest.TestCase):
         self.assertEqual(history[0]["variant"], "v1_year")
         self.assertEqual(history[0]["final_state"], "TimedOut")
 
+    def test_log_search_persists_pre_filter_skip_count(self):
+        """U2 of search-plan-entropy: ``pre_filter_skip_count`` writes to
+        the dedicated column. NOT NULL with default 0; this asserts the
+        explicit non-zero path actually round-trips, AND that omitting
+        the kwarg defaults to 0 in the persisted row."""
+        # Explicit non-zero round-trip.
+        self.db.log_search(
+            request_id=self.req_id, query="q", outcome="no_match",
+            candidates=None, pre_filter_skip_count=42,
+        )
+        # Default (kwarg omitted) writes 0.
+        self.db.log_search(
+            request_id=self.req_id, query="q2", outcome="found",
+            candidates=None,
+        )
+        history = self.db.get_search_history(self.req_id)
+        # history is newest-first; index 0 == second insert (default).
+        self.assertEqual(history[0]["pre_filter_skip_count"], 0)
+        self.assertEqual(history[1]["pre_filter_skip_count"], 42)
+
     def test_log_search_candidates_decode_rejects_wrong_type(self):
         """Wire-boundary regression: msgspec.convert raises on type drift.
 

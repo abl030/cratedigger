@@ -1,0 +1,33 @@
+-- 025_search_log_pre_filter_skip_count.sql
+--
+-- U2 of the search-plan-entropy plan: pre-filter skip telemetry.
+--
+-- ``lib/matching.py::check_for_match`` skips peer dirs whose cached
+-- audio-file count exceeds the asymmetric pre-filter threshold
+-- (``search_count > 2 * track_num``, U1). Those skips are the dominant
+-- explanation for "this album exists on Soulseek but never matches"
+-- starvation cases — but until now they were invisible:
+--
+--   * No row was written to ``search_log`` for the skipped dir.
+--   * The dir never appeared in the candidates JSONB blob.
+--
+-- This migration adds an aggregable scalar count column. The producer
+-- writes the total number of dirs the pre-filter skipped for that
+-- search (sum across all (user, dir) pairs touched by the matcher).
+-- Combined with the ≤5 flagged ``pre_filter_skip=True`` ``CandidateScore``
+-- sample rows that ride alongside scored candidates inside the existing
+-- ``search_log.candidates`` JSONB blob, operators can:
+--
+--   * ``SELECT MAX(pre_filter_skip_count) FROM search_log WHERE ...`` to
+--     find the worst-skip searches over a window.
+--   * Inspect a sample of skipped (user, dir, file_count) tuples per row
+--     via the candidates blob to understand which peers are noisy.
+--
+-- Pre-existing rows default to ``0`` — historical search_log rows did
+-- not carry skip counts and we don't backfill: the data was not
+-- captured at the time and the future writes carry it cleanly. The
+-- column is NOT NULL so all forward queries can assume a number rather
+-- than guarding against NULL.
+
+ALTER TABLE search_log
+    ADD COLUMN pre_filter_skip_count INTEGER NOT NULL DEFAULT 0;

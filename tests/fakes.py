@@ -162,6 +162,10 @@ class SearchLogRow:
     cursor_update_status: str | None = None
     stale_reason: str | None = None
     plan_cycle_snapshot: int | None = None
+    # U2 of search-plan-entropy: pre-filter skip count. NOT NULL on
+    # the real column with default 0; mirror that here so test asserts
+    # never see None on the field.
+    pre_filter_skip_count: int = 0
 
 
 @dataclass
@@ -2953,7 +2957,8 @@ class FakePipelineDB:
                    match_time_s: float = 0.0,
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
-                   fanout_waves: int = 0) -> None:
+                   fanout_waves: int = 0,
+                   pre_filter_skip_count: int = 0) -> None:
         """Mirror PipelineDB.log_search wire boundary.
 
         ``candidates`` is encoded via ``msgspec.json.encode`` (same as the
@@ -2981,6 +2986,7 @@ class FakePipelineDB:
             peers_browsed=peers_browsed,
             peers_browsed_lazy=peers_browsed_lazy,
             fanout_waves=fanout_waves,
+            pre_filter_skip_count=pre_filter_skip_count,
         ))
 
     def get_search_history(self,
@@ -3114,6 +3120,7 @@ class FakePipelineDB:
             "cursor_update_status": entry.cursor_update_status,
             "stale_reason": entry.stale_reason,
             "plan_cycle_snapshot": entry.plan_cycle_snapshot,
+            "pre_filter_skip_count": entry.pre_filter_skip_count,
         }
 
     # --- User cooldowns ---
@@ -3734,6 +3741,7 @@ class FakePipelineDB:
                 cursor_update_status=cursor_update_status,
                 stale_reason=stale_reason,
                 plan_cycle_snapshot=attempt.cycle_count_snapshot,
+                pre_filter_skip_count=attempt.pre_filter_skip_count,
             ))
 
             now = _utcnow()
@@ -3803,6 +3811,7 @@ class FakePipelineDB:
             attempt_consumed=False,
             cursor_update_status=CURSOR_UPDATE_UNCHANGED,
             plan_cycle_snapshot=cycle_snapshot,
+            pre_filter_skip_count=attempt.pre_filter_skip_count,
         ))
         if attempt.apply_scheduler_attempt:
             now = _utcnow()

@@ -58,6 +58,11 @@ class SearchResult:
     # Forensic capture persisted to search_log: candidates JSONB (top-20
     # match scores from find_download), variant tag, slskd terminal state.
     candidates: tuple[CandidateScore, ...] = ()
+    # U2 of search-plan-entropy: aggregate count of dirs the asymmetric
+    # pre-filter rejected before browse during this search's
+    # find_download walk. Persisted on search_log.pre_filter_skip_count
+    # for per-search aggregation.
+    pre_filter_skip_count: int = 0
     variant_tag: str | None = None
     final_state: str | None = None
     # Per-search browse/match cost copied from FindDownloadMetrics. These are

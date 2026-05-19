@@ -29,6 +29,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+# U2 of search-plan-entropy: per-search cap on the number of flagged
+# pre-filter-skip CandidateScore rows emitted into the forensic
+# candidates blob. The aggregable scalar count
+# (``MatchResult.pre_filter_skip_count``) is always accurate; the
+# sample rows are bounded so the JSONB blob does not blow out for
+# pathological junk-peer searches (hundreds of skipped dirs from one
+# noisy user). 5 chosen so a search can still keep ~15 scored
+# candidates inside the existing top-20 candidates cap when contested.
+PRE_FILTER_SKIP_SAMPLE_CAP = 5
+
+
 # ---------------------------------------------------------------------------
 # Structured return types (U2 of search-escalation-and-forensics)
 # ---------------------------------------------------------------------------
@@ -87,6 +98,14 @@ class MatchResult:
     directory: Any
     file_dir: str
     candidates: list[CandidateScore] = field(default_factory=list)
+    # U2 of search-plan-entropy: count of dirs the asymmetric pre-filter
+    # rejected before browse (``search_count > 2 * track_num`` for
+    # single-codec dirs). Sums one per pre-filter skip; the candidates
+    # list also carries up to ``PRE_FILTER_SKIP_SAMPLE_CAP`` flagged
+    # sample rows so operators can see which (user, dir) tuples are
+    # noisy. The count is the authoritative total -- sample rows are a
+    # subset.
+    pre_filter_skip_count: int = 0
 
 
 def get_album_by_id(album_id: int, ctx: CratediggerContext) -> Any:
@@ -323,6 +342,8 @@ def check_for_match(
     `search_log.candidates` for forensic introspection.
     """
     candidates: list[CandidateScore] = []
+    pre_filter_skip_count = 0
+    pre_filter_skip_samples_emitted = 0
     logger.debug(f"Current broken users {ctx.broken_user}")
     if username in ctx.broken_user:
         return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
@@ -353,12 +374,30 @@ def check_for_match(
                     f"audio files, need {track_num} tracks"
                 )
                 ctx.negative_matches.add(neg_key)
+                # U2: telemetry — always count, sample up to the cap.
+                pre_filter_skip_count += 1
+                if pre_filter_skip_samples_emitted < PRE_FILTER_SKIP_SAMPLE_CAP:
+                    candidates.append(CandidateScore(
+                        username=username,
+                        dir=file_dir,
+                        filetype=allowed_filetype,
+                        matched_tracks=0,
+                        total_tracks=track_num,
+                        avg_ratio=0.0,
+                        missing_titles=[],
+                        file_count=search_count,
+                        pre_filter_skip=True,
+                    ))
+                    pre_filter_skip_samples_emitted += 1
                 continue
 
         dirs_to_try.append(file_dir)
 
     if not dirs_to_try:
-        return MatchResult(matched=False, directory={}, file_dir="", candidates=candidates)
+        return MatchResult(
+            matched=False, directory={}, file_dir="", candidates=candidates,
+            pre_filter_skip_count=pre_filter_skip_count,
+        )
 
     peer_cache_negative_skips = getattr(ctx, "peer_cache_negative_skips", set())
     if peer_cache_negative_skips:
@@ -369,6 +408,7 @@ def check_for_match(
         if not dirs_to_try:
             return MatchResult(
                 matched=False, directory={}, file_dir="", candidates=candidates,
+                pre_filter_skip_count=pre_filter_skip_count,
             )
 
     ensure_cache_user(ctx, username)
@@ -429,6 +469,7 @@ def check_for_match(
             logger.debug(f"All browses failed for {username}, marked as broken")
             return MatchResult(
                 matched=False, directory={}, file_dir="", candidates=candidates,
+                pre_filter_skip_count=pre_filter_skip_count,
             )
 
     # U1 instrumentation: time the local matching/scoring loop separately
@@ -502,6 +543,7 @@ def check_for_match(
                         ),
                         file_dir=file_dir,
                         candidates=candidates,
+                        pre_filter_skip_count=pre_filter_skip_count,
                     )
                 logger.warning(
                     f"Track title cross-check FAILED for user {username}, "
@@ -511,6 +553,7 @@ def check_for_match(
 
         return MatchResult(
             matched=False, directory={}, file_dir="", candidates=candidates,
+            pre_filter_skip_count=pre_filter_skip_count,
         )
     finally:
         ctx.match_time_s += time.monotonic() - match_t0

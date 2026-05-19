@@ -39,12 +39,19 @@ class EnqueueAttempt:
     `check_for_match` for every dir touched during this attempt — including
     sub-count gate failures and cross-check rejections. U5 will surface this
     list in the persisted `search_log.candidates` JSONB blob.
+
+    ``pre_filter_skip_count`` (U2 of search-plan-entropy): aggregate count
+    of dirs the asymmetric pre-filter rejected before browse across every
+    ``check_for_match`` call that contributed to this attempt. Plumbed up
+    to ``FindDownloadResult`` and persisted on ``search_log`` so operators
+    can aggregate skip pressure per request.
     """
 
     matched: bool
     downloads: list[Any] | None = None
     enqueue_failed: bool = False
     candidates: tuple[CandidateScore, ...] = ()
+    pre_filter_skip_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,11 @@ class FindDownloadResult:
     grab_entry: GrabListEntry | None = None
     candidates: tuple[CandidateScore, ...] = ()
     metrics: FindDownloadMetrics | None = None
+    # U2 of search-plan-entropy: aggregate pre-filter skip count across
+    # every (filetype, disc, wave) ``check_for_match`` call this
+    # find_download walk contributed to. ``_apply_find_download_result``
+    # copies this onto ``SearchResult.pre_filter_skip_count``.
+    pre_filter_skip_count: int = 0
 
 
 class _WorkerPipelineDBSource:
@@ -191,6 +203,7 @@ def _with_metrics(
         grab_entry=result.grab_entry,
         candidates=result.candidates,
         metrics=FindDownloadMetrics.from_context(ctx),
+        pre_filter_skip_count=result.pre_filter_skip_count,
     )
 
 
@@ -771,6 +784,7 @@ def _iter_wave_matches(
     allowed_filetype: str,
     ctx: CratediggerContext,
     accumulated: list[CandidateScore],
+    pre_filter_skips: list[int] | None = None,
 ) -> Iterator[tuple[str, MatchResult, int]]:
     """Yield ``(username, match_result, wave_index)`` for every dir match.
 
@@ -846,6 +860,8 @@ def _iter_wave_matches(
                 tracks, allowed_filetype, file_dirs, username, ctx,
             )
             accumulated.extend(match_result.candidates)
+            if pre_filter_skips is not None:
+                pre_filter_skips[0] += match_result.pre_filter_skip_count
             if match_result.matched:
                 yield username, match_result, wave_idx
 
@@ -875,9 +891,11 @@ def try_enqueue(
 
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
+    pre_filter_skips: list[int] = [0]
     match_wave: int | None = None
     for username, match_result, wave_idx in _iter_wave_matches(
         all_tracks, eligible, user_dirs, allowed_filetype, ctx, accumulated,
+        pre_filter_skips,
     ):
         if match_wave is None:
             match_wave = wave_idx
@@ -938,6 +956,7 @@ def try_enqueue(
                     matched=True,
                     downloads=downloads,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
             if outcome.status == "rejected":
                 owned = _reset_claim_after_verified_no_acceptance(
@@ -957,6 +976,7 @@ def try_enqueue(
                         matched=True,
                         downloads=owned,
                         candidates=tuple(accumulated),
+                        pre_filter_skip_count=pre_filter_skips[0],
                     )
                 # Verified-no-acceptance: surface the rejection in
                 # download_log so the failure is visible immediately
@@ -990,6 +1010,7 @@ def try_enqueue(
                     matched=True,
                     downloads=owned,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
             had_enqueue_failure = True
             logger.info(
@@ -1014,6 +1035,7 @@ def try_enqueue(
                     matched=True,
                     downloads=owned,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
             had_enqueue_failure = True
             logger.warning(f"Exception enqueueing tracks: {e}")
@@ -1033,6 +1055,7 @@ def try_enqueue(
         matched=False,
         enqueue_failed=had_enqueue_failure,
         candidates=tuple(accumulated),
+        pre_filter_skip_count=pre_filter_skips[0],
     )
 
 
@@ -1069,6 +1092,7 @@ def try_multi_enqueue(
     artist_name = album.artist_name
     eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
     accumulated: list[CandidateScore] = []
+    pre_filter_skips: list[int] = [0]
     for disk in split_release:
         ctx.negative_matches.clear()
         peers_before = ctx.peers_browsed
@@ -1076,7 +1100,7 @@ def try_multi_enqueue(
         first_match = next(
             _iter_wave_matches(
                 disk["tracks"], eligible, user_dirs, allowed_filetype, ctx,
-                accumulated,
+                accumulated, pre_filter_skips,
             ),
             None,
         )
@@ -1089,7 +1113,11 @@ def try_multi_enqueue(
                 peers=ctx.peers_browsed - peers_before,
                 waves=ctx.fanout_waves - waves_before,
             )
-            return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
+            return EnqueueAttempt(
+                matched=False,
+                candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skips[0],
+            )
         username, match_result, match_wave = first_match
         directory = download_filter(
             allowed_filetype, match_result.directory, ctx.cfg,
@@ -1117,6 +1145,7 @@ def try_multi_enqueue(
             return EnqueueAttempt(
                 matched=False,
                 candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skips[0],
             )
         _log_album_browse(
             artist_name, album_name, allowed_filetype,
@@ -1147,6 +1176,7 @@ def try_multi_enqueue(
                 return EnqueueAttempt(
                     matched=False,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
             disk_planned = _planned_downloads(
                 username=username,
@@ -1168,6 +1198,7 @@ def try_multi_enqueue(
                 matched=False,
                 enqueue_failed=True,
                 candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skips[0],
             )
 
         all_downloads = []
@@ -1205,6 +1236,7 @@ def try_multi_enqueue(
                                     matched=True,
                                     downloads=recovered,
                                     candidates=tuple(accumulated),
+                                    pre_filter_skip_count=pre_filter_skips[0],
                                 )
                         elif claim.claimed:
                             owned = _leave_claim_for_poll_recovery(
@@ -1216,6 +1248,7 @@ def try_multi_enqueue(
                                 matched=True,
                                 downloads=owned,
                                 candidates=tuple(accumulated),
+                                pre_filter_skip_count=pre_filter_skips[0],
                             )
                         if not claim.claimed:
                             cancel_and_delete(all_downloads, ctx)
@@ -1231,6 +1264,7 @@ def try_multi_enqueue(
                                     matched=True,
                                     downloads=owned,
                                     candidates=tuple(accumulated),
+                                    pre_filter_skip_count=pre_filter_skips[0],
                                 )
                         elif claim.claimed:
                             owned = _leave_claim_for_poll_recovery(
@@ -1242,11 +1276,13 @@ def try_multi_enqueue(
                                 matched=True,
                                 downloads=owned,
                                 candidates=tuple(accumulated),
+                                pre_filter_skip_count=pre_filter_skips[0],
                             )
                     return EnqueueAttempt(
                         matched=False,
                         enqueue_failed=True,
                         candidates=tuple(accumulated),
+                        pre_filter_skip_count=pre_filter_skips[0],
                     )
             except Exception:
                 logger.exception("Exception enqueueing tracks")
@@ -1265,6 +1301,7 @@ def try_multi_enqueue(
                             matched=True,
                             downloads=owned,
                             candidates=tuple(accumulated),
+                            pre_filter_skip_count=pre_filter_skips[0],
                         )
                     if not claim.claimed:
                         cancel_and_delete(all_downloads, ctx)
@@ -1279,11 +1316,13 @@ def try_multi_enqueue(
                             matched=True,
                             downloads=owned,
                             candidates=tuple(accumulated),
+                            pre_filter_skip_count=pre_filter_skips[0],
                         )
                 return EnqueueAttempt(
                     matched=False,
                     enqueue_failed=True,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
         if enqueued == total:
             if not _persist_claimed_download_state(claim, all_downloads, ctx):
@@ -1292,11 +1331,13 @@ def try_multi_enqueue(
                     matched=False,
                     enqueue_failed=True,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
             return EnqueueAttempt(
                 matched=True,
                 downloads=all_downloads,
                 candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skips[0],
             )
         if len(all_downloads) > 0:
             recovered = _handle_claimed_partial_failure(claim, all_downloads, ctx)
@@ -1305,6 +1346,7 @@ def try_multi_enqueue(
                     matched=True,
                     downloads=recovered,
                     candidates=tuple(accumulated),
+                    pre_filter_skip_count=pre_filter_skips[0],
                 )
             if not claim.claimed:
                 cancel_and_delete(all_downloads, ctx)
@@ -1312,9 +1354,14 @@ def try_multi_enqueue(
             matched=False,
             enqueue_failed=True,
             candidates=tuple(accumulated),
+            pre_filter_skip_count=pre_filter_skips[0],
         )
 
-    return EnqueueAttempt(matched=False, candidates=tuple(accumulated))
+    return EnqueueAttempt(
+        matched=False,
+        candidates=tuple(accumulated),
+        pre_filter_skip_count=pre_filter_skips[0],
+    )
 
 
 def _try_filetype(
@@ -1330,6 +1377,7 @@ def _try_filetype(
     has_monitored = any(r.monitored for r in releases)
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
+    pre_filter_skip_count_total = 0
 
     for _ in range(len(releases)):
         if not releases:
@@ -1346,11 +1394,13 @@ def _try_filetype(
 
         attempt = try_enqueue(all_tracks, results, allowed_filetype, ctx)
         accumulated.extend(attempt.candidates)
+        pre_filter_skip_count_total += attempt.pre_filter_skip_count
         if not attempt.matched and len(release.media) > 1:
             attempt = try_multi_enqueue(
                 release, all_tracks, results, allowed_filetype, ctx
             )
             accumulated.extend(attempt.candidates)
+            pre_filter_skip_count_total += attempt.pre_filter_skip_count
 
         if attempt.matched:
             assert attempt.downloads is not None
@@ -1371,6 +1421,7 @@ def _try_filetype(
                 outcome="found",
                 grab_entry=grab_entry,
                 candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skip_count_total,
             )
 
         if attempt.enqueue_failed:
@@ -1389,6 +1440,7 @@ def _try_filetype(
     return FindDownloadResult(
         outcome="enqueue_failed" if had_enqueue_failure else "no_match",
         candidates=tuple(accumulated),
+        pre_filter_skip_count=pre_filter_skip_count_total,
     )
 
 
@@ -1418,15 +1470,18 @@ def find_download(
 
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
+    pre_filter_skip_count_total = 0
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
         result = _try_filetype(album, results, allowed_filetype, ctx)
         accumulated.extend(result.candidates)
+        pre_filter_skip_count_total += result.pre_filter_skip_count
         if result.outcome == "found":
             return _with_metrics(FindDownloadResult(
                 outcome="found",
                 grab_entry=result.grab_entry,
                 candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skip_count_total,
             ), ctx)
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
@@ -1441,11 +1496,13 @@ def find_download(
         )
         result = _try_filetype(album, results, "*", ctx)
         accumulated.extend(result.candidates)
+        pre_filter_skip_count_total += result.pre_filter_skip_count
         if result.outcome == "found":
             return _with_metrics(FindDownloadResult(
                 outcome="found",
                 grab_entry=result.grab_entry,
                 candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skip_count_total,
             ), ctx)
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
@@ -1453,4 +1510,5 @@ def find_download(
     return _with_metrics(FindDownloadResult(
         outcome="enqueue_failed" if had_enqueue_failure else "no_match",
         candidates=tuple(accumulated),
+        pre_filter_skip_count=pre_filter_skip_count_total,
     ), ctx)

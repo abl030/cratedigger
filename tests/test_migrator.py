@@ -1695,5 +1695,75 @@ class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
             self._cleanup_request(rid)
 
 
+class TestSearchLogPreFilterSkipCountSchema(unittest.TestCase):
+    """Migration 025 adds ``search_log.pre_filter_skip_count`` (NOT NULL,
+    default 0). U2 of search-plan-entropy. Pre-existing rows must default
+    to 0 because the data was never captured at the time, and we
+    intentionally do not backfill — forward-only by design.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_column_exists_with_default_zero(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, column_default, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'search_log'
+              AND column_name = 'pre_filter_skip_count'
+        """)
+        self.assertEqual(len(rows), 1)
+        col, is_nullable, default, dtype = rows[0]
+        self.assertEqual(col, "pre_filter_skip_count")
+        self.assertEqual(is_nullable, "NO")
+        # Default is the SQL literal ``0``.
+        assert default is not None
+        self.assertIn("0", str(default))
+        self.assertEqual(dtype, "integer")
+
+    def test_existing_row_defaults_to_zero_on_insert_without_value(self):
+        rid = self._query("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('pre-filter-skip-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec("""
+                INSERT INTO search_log (request_id, query, outcome)
+                VALUES (%s, 'q', 'no_match')
+            """, (rid,))
+            rows = self._query(
+                "SELECT pre_filter_skip_count FROM search_log "
+                "WHERE request_id = %s",
+                (rid,),
+            )
+            self.assertEqual(rows[0][0], 0)
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id = %s", (rid,),
+            )
+
+    def test_records_applied_version_025(self):
+        rows = self._query("""
+            SELECT version FROM schema_migrations
+            WHERE version = 25
+        """)
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
