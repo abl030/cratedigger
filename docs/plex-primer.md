@@ -170,6 +170,44 @@ ls "/mnt/user/appdata/binhex-plexpass/Library/Application Support/Plex Media Ser
 docker exec binhex-plexpass ls "/prom_music/Artist Name/" 2>&1 | head
 ```
 
+## Path-rename footgun — Plex splits the library on mass renames
+
+**Any beets config change that mutates rendered paths followed by a
+`beet move` will split affected albums into two Plex entries.** This
+happened May 2026 when `asciify_paths = true` was enabled — ~12% of the
+music library (1,178 albums) ended up split across a primary album row
+(holding tracks whose filenames Unicode didn't touch) and a ghost row
+(holding the renamed tracks). Plex's scanner does not reconcile
+many-file renames during a transition: the old paths' track rows become
+dead, the new paths get fresh track rows, and the fresh rows spawn a
+second album row instead of folding into the existing one.
+
+`Empty Trash + Clean Bundles` does NOT fix this — it deletes the dead
+track entries but leaves the ghost album rows intact, and on remote SMB
+mounts (where inotify is unreliable) it surfaces additional splits the
+prior partial scans missed.
+
+The fix is Plex's metadata merge endpoint:
+
+```
+PUT /library/metadata/{primary_rk}/merge?ids={ghost_rk1},...
+```
+
+Two scripts in `scripts/` automate the audit + cleanup:
+
+- `scripts/plex_dupes_audit.py` — finds duplicate `(artist, title, year)`
+  groups, classifies each as `same_folder` (asciify split) or
+  `diff_folder` (legit multi-edition pressing OR mid-reconciliation
+  ghost).
+- `scripts/plex_dupes_merge.py` — merges same-folder ghosts into their
+  primary, preserving play counts. Dry-run by default; `--commit` to
+  execute; `--limit N` for smoke testing.
+
+See `docs/solutions/runtime-errors/plex-asciify-paths-album-split.md`
+for the full incident write-up, the operator runbook, and why
+`beet write` / `mbsync` can't be used to align tags with paths after
+the fact.
+
 ## Plex's Own Scan Behavior
 
 Two background mechanisms can also pick up library changes — these are

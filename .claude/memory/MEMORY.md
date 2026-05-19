@@ -13,3 +13,4 @@
 - [Refactoring phases](project_refactoring_phases.md) — Status of the multi-phase refactoring of cratedigger.py through pyright cleanup
 - [Renamed to cratedigger](project_cratedigger_rename.md) — Project is cratedigger now across the board (repo, DB, systemd, working dir, memory dir)
 - [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
+- [Plex asciify_paths split](project_plex_asciify_split.md) — 2026-05-18: asciify_paths + beet move split 1,178 Plex albums; fix is Plex merge API, not Empty Trash
