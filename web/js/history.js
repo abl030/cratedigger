@@ -29,9 +29,8 @@ function formatV0Probe(avg, kind) {
 /**
  * Render a "Spectral" cell value with grade-aware coloring and floor bitrate.
  *
- * Shown on both candidate and existing sides — every "spectral_grade" /
- * "spectral_bitrate" pair routes through here so the rendering rules
- * (grade colors, ~ prefix for floor, etc.) live in one place.
+ * Every "spectral_grade" / "spectral_bitrate" pair routes through here so
+ * the rendering rules (grade colors, ~ prefix for floor) live in one place.
  * @param {string} grade
  * @param {number|string|undefined} bitrate
  */
@@ -46,17 +45,29 @@ function formatSpectral(grade, bitrate) {
 }
 
 /**
- * Render a single download history item.
+ * Append an inline "(was X)" suffix to a candidate value so the
+ * existing-side comparison reads on the same row instead of in a
+ * separate section. Returns the bare value when ``wasValue`` is null.
+ * @param {string} value - already-escaped candidate value (HTML)
+ * @param {string|null} wasValue - already-escaped existing value (HTML), or null
+ */
+function withWas(value, wasValue) {
+  if (wasValue === null || wasValue === undefined) return value;
+  return `${value} <span class="p-hist-was">(was ${wasValue})</span>`;
+}
+
+/**
+ * Render a single download history item as one consistent label/value grid.
  *
- * Two side-by-side sections compare apples to apples:
- *   - "Downloaded" — what the candidate looked like (format, spectral,
- *     V0 probe, final stored format)
- *   - "On disk (before)" — what the library album looked like before this
- *     candidate (bitrate, spectral, V0 probe)
- *
- * Common audit rows (distance, triage chain, etc.) render below in a
- * 4-cell grid. Either side is omitted when it has no rows — the
- * "On disk" section disappears entirely on a fresh new-album import.
+ * Every entry uses the same row vocabulary regardless of source codec:
+ *   Source / Spectral / V0 probe / Bitrate / Stored as
+ * Existing-side data appears inline as "(was Xkbps)" inside the value
+ * cell, so each metric is apples-to-apples on the same row. The grid is
+ * a 4-cell row (label/value/label/value), which collapses to 2-cell on
+ * narrow viewports. The V0 probe row only renders for true lossless-
+ * source probes (kind=lossless_source_v0); for non-lossless candidates
+ * the same data already shows in the Bitrate row, so a second "(measurement)"
+ * row would be redundant.
  * @param {Object} h - Download history entry from the API
  * @returns {string} HTML string
  */
@@ -73,101 +84,94 @@ export function renderDownloadHistoryItem(h) {
     <span style="color:#555;">${date}</span>
   </div>`;
 
-  // Candidate side — facts about the download being evaluated.
-  const downloadedRows = [];
+  const rows = [];
+
   if (h.downloaded_label) {
-    downloadedRows.push(['Source', h.downloaded_label]);
+    rows.push(['Source', h.downloaded_label]);
   }
+
   if (h.spectral_grade) {
-    downloadedRows.push(['Spectral', formatSpectral(h.spectral_grade, h.spectral_bitrate)]);
+    const candidate = formatSpectral(h.spectral_grade, h.spectral_bitrate);
+    const was = h.existing_spectral_bitrate
+      ? `<span style="color:#aa8;">~${esc(h.existing_spectral_bitrate)}kbps</span>`
+      : null;
+    rows.push(['Spectral', withWas(candidate, was)]);
   }
-  if (h.v0_probe_avg_bitrate) {
-    downloadedRows.push(['V0 probe', formatV0Probe(h.v0_probe_avg_bitrate, h.v0_probe_kind)]);
+
+  // V0 probe row: only for true lossless-source probes (kind ==
+  // 'lossless_source_v0'). Non-lossless candidates carry a v0_probe
+  // populated from their avg bitrate measurement — useful for
+  // backend policy decisions, but redundant with the Bitrate row in
+  // the UI, where the same number already appears.
+  if (
+    h.v0_probe_avg_bitrate
+    && h.v0_probe_kind === 'lossless_source_v0'
+  ) {
+    const candidate = formatV0Probe(h.v0_probe_avg_bitrate, h.v0_probe_kind);
+    const was = h.existing_v0_probe_avg_bitrate
+      ? `${esc(h.existing_v0_probe_avg_bitrate)}kbps avg`
+      : null;
+    rows.push(['V0 probe', withWas(candidate, was)]);
   }
+
+  // Bitrate row — apples-to-apples between candidate and existing on
+  // min bitrate (kbps). Always present when either side has data.
+  const candidateMin = h.actual_min_bitrate;
+  const existingMin = h.existing_min_bitrate;
+  if (candidateMin || existingMin) {
+    const candidate = candidateMin ? `${esc(candidateMin)}kbps` : '—';
+    const was = existingMin ? `${esc(existingMin)}kbps` : null;
+    rows.push(['Bitrate', withWas(candidate, was)]);
+  }
+
   if (h.final_format) {
-    downloadedRows.push(['Stored as', esc(h.final_format)]);
+    rows.push(['Stored as', esc(h.final_format)]);
   }
 
-  // Existing side — facts about the library album as it was before.
-  const onDiskRows = [];
-  if (h.existing_min_bitrate) {
-    onDiskRows.push(['Bitrate', `${esc(h.existing_min_bitrate)}kbps`]);
-  }
-  if (h.existing_spectral_bitrate) {
-    onDiskRows.push([
-      'Spectral',
-      `<span style="color:#aa8;">~${esc(h.existing_spectral_bitrate)}kbps</span>`,
-    ]);
-  }
-  if (h.existing_v0_probe_avg_bitrate) {
-    onDiskRows.push([
-      'V0 probe',
-      formatV0Probe(h.existing_v0_probe_avg_bitrate, h.existing_v0_probe_kind),
-    ]);
-  }
-
-  if (downloadedRows.length > 0 || onDiskRows.length > 0) {
-    html += '<div class="p-hist-sides">';
-    if (downloadedRows.length > 0) {
-      html += '<div class="p-hist-side"><div class="p-hist-side-header">Downloaded</div>';
-      for (const [label, value] of downloadedRows) {
-        html += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
-      }
-      html += '</div>';
-    }
-    if (onDiskRows.length > 0) {
-      html += '<div class="p-hist-side"><div class="p-hist-side-header">On disk (before)</div>';
-      for (const [label, value] of onDiskRows) {
-        html += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
-      }
-      html += '</div>';
-    }
-    html += '</div>';
-  }
-
-  // Common rows — not specific to either side. Rendered in a separate
-  // grid below the side-by-side comparison so the visual grouping
-  // ("here's the comparison, here's the audit metadata") stays clean.
-  const commonRows = [];
   if (h.beets_distance != null) {
-    commonRows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
+    rows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
   }
+
   const badExtensions = Array.isArray(h.bad_extensions) ? h.bad_extensions : [];
   if (badExtensions.length > 0) {
-    commonRows.push([
+    rows.push([
       'Bad extension',
       `<span style="color:#ec6;">${esc(badExtensions.join(', '))}</span>`,
     ]);
   }
+
   if (h.wrong_match_triage_summary) {
-    commonRows.push([
+    rows.push([
       'Triage',
       `<span style="color:#ec6;">${esc(h.wrong_match_triage_summary)}</span>`,
     ]);
   }
+
   const previewParts = [
     h.wrong_match_triage_preview_verdict,
     h.wrong_match_triage_preview_decision,
   ].filter(Boolean);
   if (previewParts.length > 0) {
-    commonRows.push(['Preview', esc(previewParts.join(' / '))]);
+    rows.push(['Preview', esc(previewParts.join(' / '))]);
   }
+
   if (
     h.wrong_match_triage_reason
     && !previewParts.includes(h.wrong_match_triage_reason)
   ) {
-    commonRows.push(['Reason', esc(h.wrong_match_triage_reason)]);
+    rows.push(['Reason', esc(h.wrong_match_triage_reason)]);
   }
+
   const triageStages = Array.isArray(h.wrong_match_triage_stage_chain)
     ? h.wrong_match_triage_stage_chain
     : [];
   if (triageStages.length > 0) {
-    commonRows.push(['Stages', esc(triageStages.join(' · '))]);
+    rows.push(['Stages', esc(triageStages.join(' · '))]);
   }
 
-  if (commonRows.length > 0) {
+  if (rows.length > 0) {
     html += '<div class="p-hist-grid">';
-    for (const [label, value] of commonRows) {
+    for (const [label, value] of rows) {
       html += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
     }
     html += '</div>';
@@ -184,4 +188,5 @@ export function renderDownloadHistoryItem(h) {
 export const __test__ = {
   formatV0Probe,
   formatSpectral,
+  withWas,
 };

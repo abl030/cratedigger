@@ -230,36 +230,11 @@
   .p-history { margin-top: 8px; }
   .p-hist-item { font-size: 0.75em; color: #777; padding: 6px 0; border-bottom: 1px solid #222; }
   .p-hist-header { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; }
-  /* Two side-by-side sections — "Downloaded" (candidate facts) and
-     "On disk (before)" (existing library facts). Wraps to stacked on
-     narrow viewports. Within each section, label/value pairs as a
-     2-column subgrid. */
-  .p-hist-sides {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-    padding: 2px 0 2px 8px;
-  }
-  .p-hist-side {
-    flex: 1 1 220px;
-    min-width: 0;
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    column-gap: 8px;
-    row-gap: 2px;
-    font-size: 0.95em;
-  }
-  .p-hist-side-header {
-    grid-column: 1 / -1;
-    color: #889;
-    text-transform: uppercase;
-    font-size: 0.78em;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    margin-bottom: 2px;
-  }
-  /* Common rows below the sides (distance, triage, etc.) — same 2-pair
-     grid as before so footer rows still spread horizontally. */
+  /* Single 2-column grid (label/value/label/value) so every entry has the
+     same row vocabulary regardless of source codec. Existing-side data
+     renders inline as "(was Xkbps)" suffixes inside the value cell, so
+     each metric (Bitrate, Spectral, V0 probe) is rendered apples-to-
+     apples on the same row instead of split across two sections. */
   .p-hist-grid {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
@@ -272,6 +247,7 @@
   .p-hist-grid > .p-hist-value { color: #888; overflow-wrap: anywhere; }
   .p-hist-label { color: #666; }
   .p-hist-value { color: #888; overflow-wrap: anywhere; }
+  .p-hist-was { color: #666; font-size: 0.9em; }
   .p-hist-verdict { color: #bbb; padding: 2px 0 0 8px; font-size: 0.95em; }
   @media (max-width: 600px) {
     .p-hist-grid { grid-template-columns: max-content minmax(0, 1fr); }
