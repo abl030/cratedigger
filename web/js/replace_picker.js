@@ -86,7 +86,27 @@ export function esc(s) {
 }
 
 /**
+ * Build the meta line for a release row — matches the format used by
+ * analysis.js pressing rows: `country · year · format · Nt`. Empty
+ * fields drop out.
+ *
+ * @param {{ date?: string, country?: string, format?: string, track_count?: number }} r
+ * @returns {string}
+ */
+export function pressingMeta(r) {
+  const year = r.date ? r.date.slice(0, 4) : '';
+  return [r.country, year, r.format, r.track_count ? `${r.track_count}t` : '']
+    .filter((x) => !!x)
+    .join(' · ');
+}
+
+/**
  * Render the "pressings in this release group" list (standard mode).
+ *
+ * Each row is click-to-expand. The MB tracklist is lazy-fetched on the
+ * first expand; the "Use this pressing" button lives inside the expanded
+ * detail panel so the row click never accidentally fires the destructive
+ * confirm flow.
  *
  * @param {ReleaseGroupSibling[]} releases
  * @param {string} sourceMbid       // current pressing — disabled in the list
@@ -98,24 +118,125 @@ export function renderPressingsList(releases, sourceMbid) {
   }
   const rows = releases.map((r) => {
     const isCurrent = r.id === sourceMbid;
-    const year = r.date ? r.date.slice(0, 4) : '';
-    const meta = [year, r.country, r.format, r.track_count ? `${r.track_count}tk` : '']
-      .filter((x) => !!x)
-      .join(' · ');
     const disabledAttr = isCurrent ? ' disabled' : '';
     const labelSuffix = isCurrent ? ' (current pressing)' : '';
-    return `<li>
-      <button class="btn"${disabledAttr} data-mbid="${esc(r.id)}">
+    const meta = pressingMeta(r);
+    const pickLabel = isCurrent
+      ? ''
+      : `<button class="replace-picker-confirm" data-mbid="${esc(r.id)}">Use this pressing</button>`;
+    return `<li class="replace-picker-row" data-mbid-row="${esc(r.id)}">
+      <button class="replace-picker-pick"${disabledAttr} data-expand-mbid="${esc(r.id)}" aria-expanded="false">
         <strong>${esc(r.title)}</strong>${labelSuffix}<br>
-        <small style="color:#888;">${esc(meta)} · ${esc(r.id)}</small>
+        <small>${esc(meta)}</small>
       </button>
+      <div class="replace-picker-detail" data-tracks-for="${esc(r.id)}"></div>
+      <div class="replace-picker-detail-actions-slot" data-actions-for="${esc(r.id)}" hidden>
+        <div class="replace-picker-detail-actions">${pickLabel}</div>
+      </div>
     </li>`;
   });
-  return `<ul style="list-style:none;padding:0;">${rows.join('')}</ul>`;
+  return `<ul class="replace-picker-list">${rows.join('')}</ul>`;
+}
+
+/**
+ * Format seconds → "m:ss". Returns empty string for null/undefined/NaN.
+ *
+ * @param {number|null|undefined} secs
+ * @returns {string}
+ */
+export function formatLength(secs) {
+  if (secs === null || secs === undefined || Number.isNaN(secs)) return '';
+  const total = Math.round(Number(secs));
+  if (!Number.isFinite(total) || total < 0) return '';
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * @typedef {Object} TracklistTrack
+ * @property {number} [disc_number]
+ * @property {number} [track_number]
+ * @property {string} [title]
+ * @property {number|null} [length_seconds]
+ */
+
+/**
+ * Render a compact tracklist. Disc headers only appear when there is
+ * more than one disc — keeps the visual quiet for the common single-disc
+ * case.
+ *
+ * @param {TracklistTrack[]} tracks
+ * @returns {string}
+ */
+export function renderTracklist(tracks) {
+  if (!tracks || !tracks.length) {
+    return '<p style="color:#888;margin:8px 0;">No tracks listed.</p>';
+  }
+  const discs = new Set(tracks.map((t) => t.disc_number || 1));
+  const multiDisc = discs.size > 1;
+  const byDisc = new Map();
+  for (const t of tracks) {
+    const d = t.disc_number || 1;
+    if (!byDisc.has(d)) byDisc.set(d, []);
+    byDisc.get(d).push(t);
+  }
+  const parts = [];
+  const sortedDiscs = [...byDisc.keys()].sort((a, b) => a - b);
+  for (const d of sortedDiscs) {
+    if (multiDisc) parts.push(`<div class="replace-picker-disc">Disc ${d}</div>`);
+    const items = byDisc.get(d).map((t) => {
+      const num = t.track_number || '';
+      const dur = formatLength(t.length_seconds);
+      const durHtml = dur ? `<span class="replace-picker-dur">${esc(dur)}</span>` : '';
+      return `<li><span class="replace-picker-tnum">${esc(String(num))}.</span> ${esc(t.title || '')} ${durHtml}</li>`;
+    });
+    parts.push(`<ol class="replace-picker-tracks">${items.join('')}</ol>`);
+  }
+  return parts.join('');
+}
+
+/**
+ * Render the pinned "current request" tracklist panel — the source
+ * request in standard mode, the target MBID in inverted mode. Shown
+ * once at the top of the picker so the operator always has the
+ * reference visible while expanding candidate pressings below. The
+ * summary line carries the same meta tags (country · year · format ·
+ * Nt) as the rows below so visual comparison is direct.
+ *
+ * @param {{
+ *   label: string,
+ *   meta?: string,
+ *   tracks: TracklistTrack[]|null,
+ *   loading?: boolean,
+ *   error?: string,
+ * }} args
+ * @returns {string}
+ */
+export function renderSourcePanel(args) {
+  let body;
+  if (args.error) {
+    body = `<p style="color:#f66;margin:4px 0;">${esc(args.error)}</p>`;
+  } else if (args.loading || args.tracks === null) {
+    body = '<p style="color:#888;margin:4px 0;">Loading tracklist…</p>';
+  } else {
+    body = renderTracklist(args.tracks);
+  }
+  const metaHtml = args.meta
+    ? `<br><small style="color:#888;">${esc(args.meta)}</small>`
+    : '';
+  return `<details class="replace-picker-source" open>
+    <summary><strong>Current request:</strong> ${esc(args.label)}${metaHtml}</summary>
+    <div class="replace-picker-source-body">${body}</div>
+  </details>`;
 }
 
 /**
  * Render the inverted-mode "which existing request to replace?" list.
+ *
+ * Same click-to-expand pattern as the standard-mode pressings list: the
+ * row is the disclosure, the "Use this request" button lives inside the
+ * expanded detail panel.
  *
  * @param {ExistingRequest[]} requests
  * @returns {string}
@@ -125,13 +246,19 @@ export function renderRequestsList(requests) {
     return '<p style="color:#888;">No active requests exist in this release group.</p>';
   }
   const rows = requests.map((r) => `
-    <li>
-      <button class="btn" data-rid="${r.id}">
+    <li class="replace-picker-row" data-mbid-row="${esc(r.mb_release_id)}">
+      <button class="replace-picker-pick" data-expand-mbid="${esc(r.mb_release_id)}" aria-expanded="false">
         <strong>#${r.id}</strong> · ${esc(r.artist_name)} — ${esc(r.album_title)}<br>
-        <small style="color:#888;">${esc(r.mb_release_id)} (status=${esc(r.status)})</small>
+        <small>status: ${esc(r.status)}</small>
       </button>
+      <div class="replace-picker-detail" data-tracks-for="${esc(r.mb_release_id)}"></div>
+      <div class="replace-picker-detail-actions-slot" data-actions-for="${esc(r.mb_release_id)}" hidden>
+        <div class="replace-picker-detail-actions">
+          <button class="replace-picker-confirm" data-rid="${r.id}">Use this request</button>
+        </div>
+      </div>
     </li>`);
-  return `<ul style="list-style:none;padding:0;">${rows.join('')}</ul>`;
+  return `<ul class="replace-picker-list">${rows.join('')}</ul>`;
 }
 
 /**
@@ -225,7 +352,7 @@ export async function openReplacePicker(options) {
     }
 
     function showOverlay(/** @type {string} */ inner) {
-      modal.innerHTML = `<div class="confirm-overlay"><div class="confirm-box" style="max-width:640px;text-align:left;">${inner}</div></div>`;
+      modal.innerHTML = `<div class="confirm-overlay"><div class="replace-picker-shell">${inner}</div></div>`;
       modal.style.display = '';
       const overlay = modal.querySelector('.confirm-overlay');
       if (overlay) {
@@ -298,7 +425,12 @@ async function runStandard(options, showOverlay, close) {
     const detail = await fetch(`/api/pipeline/${options.sourceRequestId}`);
     if (detail.ok) {
       const drow = await detail.json();
-      sourceMbid = drow.mb_release_id || '';
+      // The pipeline detail endpoint wraps the row under `request` —
+      // a flat read returned `undefined`, leaving sourceMbid blank
+      // (which the picker silently tolerated because it only drove the
+      // "disable current pressing" visual). Fixed when we started
+      // depending on it for the reference tracklist.
+      sourceMbid = (drow.request && drow.request.mb_release_id) || drow.mb_release_id || '';
     }
   } catch (err) {
     showOverlay(`${renderStandardHeader(options.sourceLabel || '')}
@@ -308,25 +440,165 @@ async function runStandard(options, showOverlay, close) {
     return;
   }
 
-  showOverlay(`${renderStandardHeader(options.sourceLabel || `request #${options.sourceRequestId}`)}
+  const sourceLabel = options.sourceLabel || `request #${options.sourceRequestId}`;
+  const sourcePressing = releases.find((r) => r.id === sourceMbid) || null;
+  const sourceMeta = sourcePressing ? pressingMeta(sourcePressing) : '';
+  const sourcePanel = renderSourcePanel({
+    label: sourceLabel,
+    meta: sourceMeta,
+    tracks: null,
+    loading: true,
+  });
+  showOverlay(`${renderStandardHeader(sourceLabel)}
+    ${sourcePanel}
     ${renderPressingsList(releases, sourceMbid)}
-    <div class="actions" style="margin-top:12px;">
+    <div class="replace-picker-cancel-bar">
       <button class="btn" id="replace-picker-cancel">Cancel</button>
     </div>`);
 
   bindCancel(close);
   const modal = document.getElementById('replace-picker-modal');
   if (!modal) return;
-  modal.querySelectorAll('button[data-mbid]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const targetMbid = btn.getAttribute('data-mbid') || '';
-      await runConfirm({
-        sourceRequestId: options.sourceRequestId,
-        targetMbid,
-        targetLabel: btn.textContent || targetMbid,
-      }, showOverlay, close);
+  wireRows(modal, async (targetMbid, rowLabel) => {
+    await runConfirm({
+      sourceRequestId: options.sourceRequestId,
+      targetMbid,
+      targetLabel: rowLabel,
+    }, showOverlay, close);
+  });
+  // Lazy-fill the "current request" tracklist. Failure here is non-fatal —
+  // the picker still works without the reference panel.
+  loadSourceTracklist(modal, sourceMbid, sourceLabel).catch(() => {});
+}
+
+/**
+ * Module-scoped cache for fetched MB releases — keyed by MBID. Drops on
+ * picker close because the modal HTML is wiped, not because the cache
+ * itself clears, so re-opening the picker against the same RG will
+ * re-fetch. That's fine: /api/release/<mbid> is Redis-cached server-side
+ * (24h TTL), so the second open is still effectively instant.
+ *
+ * @type {Map<string, Promise<{ tracks: TracklistTrack[] }>>}
+ */
+const tracklistCache = new Map();
+
+/**
+ * @param {string} mbid
+ * @returns {Promise<{ tracks: TracklistTrack[] }>}
+ */
+function fetchTracklist(mbid) {
+  const cached = tracklistCache.get(mbid);
+  if (cached) return cached;
+  const p = fetch(`/api/release/${encodeURIComponent(mbid)}`)
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      return { tracks: body.tracks || [] };
+    });
+  tracklistCache.set(mbid, p);
+  // If the fetch rejects, drop the cache entry so retries are possible.
+  p.catch(() => tracklistCache.delete(mbid));
+  return p;
+}
+
+/**
+ * Wire row-click expansion + confirm-button click for every picker row
+ * inside `root`.
+ *
+ * Row click toggles the tracklist + action panel. The first expansion
+ * lazy-fetches `/api/release/<mbid>` and renders the tracklist; later
+ * expansions just toggle visibility. The pick button (rendered inside
+ * the expanded panel) calls `onPick` with the row's MBID, its label,
+ * and the optional `data-rid` (inverted-mode existing-request id).
+ *
+ * @param {HTMLElement|Document} root
+ * @param {(mbid: string, label: string, rid: string | null) => void | Promise<void>} onPick
+ */
+function wireRows(root, onPick) {
+  root.querySelectorAll('.replace-picker-row').forEach((row) => {
+    const pickBtn = /** @type {HTMLButtonElement|null} */ (
+      row.querySelector('button.replace-picker-pick[data-expand-mbid]')
+    );
+    if (!pickBtn || pickBtn.disabled) return;
+    const mbid = pickBtn.getAttribute('data-expand-mbid') || '';
+    const panel = /** @type {HTMLElement|null} */ (
+      row.querySelector(`.replace-picker-detail[data-tracks-for="${cssEscape(mbid)}"]`)
+    );
+    const actionsSlot = /** @type {HTMLElement|null} */ (
+      row.querySelector(`.replace-picker-detail-actions-slot[data-actions-for="${cssEscape(mbid)}"]`)
+    );
+    if (!panel) return;
+
+    pickBtn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const expanded = pickBtn.getAttribute('aria-expanded') === 'true';
+      if (expanded) {
+        row.classList.remove('open');
+        pickBtn.setAttribute('aria-expanded', 'false');
+        if (actionsSlot) actionsSlot.hidden = true;
+        return;
+      }
+      row.classList.add('open');
+      pickBtn.setAttribute('aria-expanded', 'true');
+      if (actionsSlot) actionsSlot.hidden = false;
+      if (!panel.dataset.loaded) {
+        panel.innerHTML = '<p style="color:#888;margin:4px 0;">Loading tracklist…</p>';
+        try {
+          const { tracks } = await fetchTracklist(mbid);
+          panel.innerHTML = renderTracklist(tracks);
+          panel.dataset.loaded = '1';
+        } catch (err) {
+          panel.innerHTML = `<p style="color:#f66;margin:4px 0;">Failed to load: ${esc(String(err))}</p>`;
+        }
+      }
+    });
+
+    const confirmBtn = /** @type {HTMLButtonElement|null} */ (
+      row.querySelector('button.replace-picker-confirm')
+    );
+    if (!confirmBtn) return;
+    confirmBtn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const label = (pickBtn.textContent || '').trim().split('\n')[0] || mbid;
+      const rid = confirmBtn.getAttribute('data-rid');
+      await onPick(mbid, label, rid);
     });
   });
+}
+
+/**
+ * Minimal CSS.escape replacement — picker MBIDs are UUIDs so the only
+ * character classes we need to handle are `[0-9a-f-]`, but we guard
+ * defensively anyway.
+ *
+ * @param {string} s
+ * @returns {string}
+ */
+function cssEscape(s) {
+  if (typeof CSS !== 'undefined' && CSS && typeof CSS.escape === 'function') {
+    return CSS.escape(s);
+  }
+  return s.replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`);
+}
+
+/**
+ * @param {HTMLElement} modal
+ * @param {string} sourceMbid
+ * @param {string} sourceLabel
+ */
+async function loadSourceTracklist(modal, sourceMbid, sourceLabel) {
+  const body = modal.querySelector('.replace-picker-source-body');
+  if (!body) return;
+  if (!sourceMbid) {
+    body.innerHTML = '<p style="color:#888;margin:4px 0;">No reference MBID for this request.</p>';
+    return;
+  }
+  try {
+    const { tracks } = await fetchTracklist(sourceMbid);
+    body.innerHTML = renderTracklist(tracks);
+  } catch (err) {
+    body.innerHTML = `<p style="color:#f66;margin:4px 0;">Failed to load reference tracklist: ${esc(String(err))}</p>`;
+  }
 }
 
 /**
@@ -404,24 +676,32 @@ async function runInverted(options, showOverlay, close) {
     return;
   }
 
-  showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
+  const targetLabel = options.targetLabel || options.targetMbid;
+  const sourcePanel = renderSourcePanel({
+    label: targetLabel,
+    meta: '',
+    tracks: null,
+    loading: true,
+  });
+  showOverlay(`${renderInvertedHeader(targetLabel)}
+    ${sourcePanel}
     ${renderRequestsList(requests)}
-    <div class="actions" style="margin-top:12px;">
+    <div class="replace-picker-cancel-bar">
       <button class="btn" id="replace-picker-cancel">Cancel</button>
     </div>`);
   bindCancel(close);
   const modal = document.getElementById('replace-picker-modal');
   if (!modal) return;
-  modal.querySelectorAll('button[data-rid]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const rid = Number(btn.getAttribute('data-rid'));
-      await runConfirm({
-        sourceRequestId: rid,
-        targetMbid: options.targetMbid,
-        targetLabel: options.targetLabel || options.targetMbid,
-      }, showOverlay, close);
-    });
+  wireRows(modal, async (_rowMbid, _rowLabel, ridAttr) => {
+    const rid = Number(ridAttr);
+    if (!Number.isFinite(rid)) return;
+    await runConfirm({
+      sourceRequestId: rid,
+      targetMbid: options.targetMbid,
+      targetLabel: options.targetLabel || options.targetMbid,
+    }, showOverlay, close);
   });
+  loadSourceTracklist(modal, options.targetMbid, targetLabel).catch(() => {});
 }
 
 /**
