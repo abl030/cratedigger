@@ -994,6 +994,7 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/pipeline/(\d+)/replace$",
         r"^/api/pipeline/(\d+)/resolve-rg$",
         r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$",
+        r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$",
         "/api/pipeline/active-rgs",
         "/api/pipeline/add",
         "/api/pipeline/update",
@@ -8542,6 +8543,183 @@ class TestClientDisconnectHandling(unittest.TestCase):
         self.assertEqual(len(errors), 0,
             f"Normal POST must not produce ERROR logs, got: "
             f"{[r.getMessage() for r in errors]}")
+
+
+class TestBeetsDistanceRouteContract(_WebServerCase):
+    """Contract for ``GET /api/beets-distance/<download_log_id>/<mbid>``.
+
+    Service-layer correctness is covered by ``tests.test_beets_distance``.
+    Here we pin the HTTP wrapper: every ``BeetsDistanceResult.outcome``
+    maps to the documented status code, every required response field
+    is present, and the route is registered (the
+    ``TestRouteContractAudit`` guard catches missing classification).
+
+    The service function is patched at its import site
+    (``web.routes.pipeline.compute_beets_distance``-equivalent — actually
+    imported lazily inside the handler so we patch the module
+    attribute) and we drive each outcome through the wrapper. The real
+    beets distance pipeline is not exercised in this class; the
+    integration slice in ``tests.test_beets_distance`` is the
+    authority on that.
+    """
+
+    REQUIRED_FIELDS = {
+        "outcome",
+        "distance",
+        "matched_tracks",
+        "total_local_tracks",
+        "total_mb_tracks",
+        "extra_local_tracks",
+        "extra_mb_tracks",
+        "components",
+        "request_release_group_id",
+        "candidate_release_group_id",
+        "candidate_mbid",
+        "download_log_id",
+        "request_id",
+        "folder_path",
+        "error_message",
+        "duration_ms",
+    }
+
+    UUID_A = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    UUID_B = "12345678-1234-1234-1234-123456789abc"
+
+    def setUp(self) -> None:
+        self.mock_db.reset_mock()
+        from lib.beets_distance import BeetsDistanceResult
+        self._Result = BeetsDistanceResult
+
+    def _patch_service(self, **kwargs):
+        from unittest.mock import patch as _patch
+        return _patch(
+            "lib.beets_distance.compute_beets_distance",
+            return_value=self._Result(**kwargs),
+        )
+
+    def test_ok_returns_200_with_distance_and_required_fields(self):
+        with self._patch_service(
+            outcome="ok",
+            distance=0.07,
+            matched_tracks=12,
+            total_local_tracks=12,
+            total_mb_tracks=12,
+            extra_local_tracks=0,
+            extra_mb_tracks=0,
+            components={"album": 0.0, "artist": 0.0},
+            request_release_group_id="rg-1",
+            candidate_release_group_id="rg-1",
+            candidate_mbid=self.UUID_A,
+            download_log_id=100,
+            request_id=7,
+            folder_path="/tmp/x",
+            duration_ms=8,
+        ):
+            status, data = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS,
+                                "beets-distance ok response")
+        self.assertEqual(data["outcome"], "ok")
+        self.assertAlmostEqual(data["distance"], 0.07, places=4)
+        self.assertEqual(data["matched_tracks"], 12)
+
+    def test_download_log_not_found_returns_404(self):
+        with self._patch_service(
+            outcome="download_log_not_found",
+            download_log_id=999,
+            candidate_mbid=self.UUID_A,
+            error_message="download_log #999 not found",
+        ):
+            status, _ = self._get(f"/api/beets-distance/999/{self.UUID_A}")
+        self.assertEqual(status, 404)
+
+    def test_request_not_found_returns_404(self):
+        with self._patch_service(
+            outcome="request_not_found",
+            download_log_id=100,
+            candidate_mbid=self.UUID_A,
+            error_message="request #7 not found",
+        ):
+            status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 404)
+
+    def test_wrong_release_group_returns_422(self):
+        """The cross-RG guardrail surfaces as 422 (semantic violation)."""
+        with self._patch_service(
+            outcome="wrong_release_group",
+            download_log_id=100,
+            request_id=7,
+            request_release_group_id="rg-source",
+            candidate_release_group_id="rg-other",
+            candidate_mbid=self.UUID_A,
+            error_message="MBID is in a different release group",
+        ):
+            status, data = self._get(
+                f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 422)
+        self.assertEqual(data["outcome"], "wrong_release_group")
+
+    def test_mb_no_release_group_returns_422(self):
+        with self._patch_service(
+            outcome="mb_no_release_group",
+            download_log_id=100,
+            candidate_mbid=self.UUID_A,
+            error_message="MB release has no release_group_id",
+        ):
+            status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 422)
+
+    def test_folder_missing_returns_410(self):
+        with self._patch_service(
+            outcome="folder_missing",
+            download_log_id=100,
+            candidate_mbid=self.UUID_A,
+            error_message="failed_path is gone",
+        ):
+            status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 410)
+
+    def test_no_audio_returns_410(self):
+        with self._patch_service(
+            outcome="no_audio",
+            download_log_id=100,
+            candidate_mbid=self.UUID_A,
+            folder_path="/tmp/empty",
+            error_message="no readable audio files",
+        ):
+            status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 410)
+
+    def test_mb_lookup_failed_returns_503(self):
+        with self._patch_service(
+            outcome="mb_lookup_failed",
+            download_log_id=100,
+            candidate_mbid=self.UUID_A,
+            error_message="MB mirror unreachable",
+        ):
+            status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 503)
+
+    def test_distance_failed_returns_500(self):
+        with self._patch_service(
+            outcome="distance_failed",
+            download_log_id=100,
+            candidate_mbid=self.UUID_A,
+            error_message="beets blew up",
+        ):
+            status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 500)
+
+    def test_route_pattern_requires_uuid_shape(self):
+        """The route pattern only matches MBID UUIDs — a malformed
+        MBID (e.g. a Discogs numeric id) doesn't even hit the handler.
+
+        This is a route-table contract: keep the regex strict so we
+        never accidentally compute a distance against a non-MB id.
+        """
+        # Numeric id (Discogs-shaped) — pattern shouldn't match.
+        status, _ = self._get("/api/beets-distance/100/2048516")
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

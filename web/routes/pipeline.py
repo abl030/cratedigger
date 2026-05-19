@@ -1869,6 +1869,103 @@ def post_pipeline_delete(h, body: dict) -> None:
 
 # ── Route tables ─────────────────────────────────────────────────
 
+class _RedisFingerprintCache:
+    """Adapt ``web/cache.py``'s Redis client to the ``BeetsDistanceCache`` protocol.
+
+    Our fingerprints are msgspec-encoded bytes, while ``web/cache.py``
+    targets JSON-serialisable dicts/lists — so we bypass the JSON
+    wrapping and talk to the Redis client directly. Falls back to a
+    no-op cache when Redis is unavailable so single-call dev shells
+    still work (just without the cached fast-path).
+    """
+
+    def __init__(self) -> None:
+        from web import cache as _cache_mod
+        self._redis = getattr(_cache_mod, "_redis", None)
+
+    def get(self, key: str):
+        if self._redis is None:
+            return None
+        try:
+            raw = self._redis.get(key)  # type: ignore[union-attr]
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        # web/cache.py initialises Redis with ``decode_responses=True``,
+        # so ``get`` returns str. msgspec.json.decode handles bytes;
+        # encoding is cheap.
+        if isinstance(raw, str):
+            return raw.encode("utf-8")
+        return raw
+
+    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
+        if self._redis is None:
+            return
+        try:
+            self._redis.setex(key, ttl_seconds, value)  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
+_BEETS_DISTANCE_OUTCOME_STATUS: dict[str, int] = {
+    "ok": 200,
+    "download_log_not_found": 404,
+    "request_not_found": 404,
+    "folder_missing": 410,
+    "no_audio": 410,
+    "mb_lookup_failed": 503,
+    "mb_no_release_group": 422,
+    "wrong_release_group": 422,
+    "distance_failed": 500,
+}
+
+
+def get_beets_distance(
+    h, params: dict[str, list[str]],
+    download_log_id_str: str, mbid: str,
+) -> None:
+    """``GET /api/beets-distance/<download_log_id>/<mbid>``.
+
+    Real beets match distance for one ``(download_log_id, mbid)``
+    pair. The service does the heavy lifting (see
+    ``lib/beets_distance.compute_beets_distance``); this handler is a
+    thin adapter that maps the typed ``BeetsDistanceResult`` outcomes
+    to HTTP status codes per the CLI ⇄ API symmetry rule.
+
+    Status-code mapping:
+      * 200 — ``ok`` (distance is in ``response.distance``)
+      * 404 — ``download_log_not_found`` / ``request_not_found``
+      * 410 — ``folder_missing`` / ``no_audio`` (the data the caller
+              wanted to compare against is gone)
+      * 422 — ``mb_no_release_group`` / ``wrong_release_group``
+              (semantic input violations — including the
+              cross-release-group guardrail)
+      * 503 — ``mb_lookup_failed`` (MB mirror transient)
+      * 500 — ``distance_failed`` (unexpected beets error)
+    """
+    from lib.beets_distance import compute_beets_distance
+
+    try:
+        download_log_id = int(download_log_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid download_log_id")
+        return
+
+    s = _server()
+    result = compute_beets_distance(
+        download_log_id,
+        mbid,
+        pdb=s._db(),
+        mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
+        cache=_RedisFingerprintCache(),
+    )
+
+    status = _BEETS_DISTANCE_OUTCOME_STATUS.get(result.outcome, 500)
+    payload = msgspec.to_builtins(result)
+    h._json(payload, status=status)
+
+
 GET_ROUTES: dict[str, object] = {
     "/api/pipeline/log": get_pipeline_log,
     "/api/pipeline/status": get_pipeline_status,
@@ -1884,6 +1981,10 @@ GET_ROUTES: dict[str, object] = {
 }
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
+    # /api/beets-distance/<download_log_id>/<mbid> — real beets distance
+    # for one (download_log_id, mbid) pair. See get_beets_distance above.
+    (re.compile(r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$"),
+     get_beets_distance),
     (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
      get_pipeline_search_plan),
