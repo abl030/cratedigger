@@ -1,7 +1,7 @@
 ---
 title: feat: Search plan entropy and matcher pre-filter
 type: feat
-status: active
+status: completed
 date: 2026-05-19
 origin: docs/brainstorms/2026-05-19-search-plan-entropy-requirements.md
 ---
