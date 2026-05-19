@@ -44,13 +44,17 @@ MAX_PIPELINE_LOG_LIMIT = 500
 
 
 def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
-                              tracks, source):
+                              tracks, source, release_group_year=None):
     """Run shared plan generation after `set_tracks()` on the add path.
 
     Failures are recorded but never bubble up — the request is repairable
     via startup reconciliation or explicit regeneration. This keeps the
     add API contract stable: a 200 response means the request landed,
     even if plan generation needs another attempt.
+
+    ``release_group_year`` (U5 of search-plan-entropy) feeds the
+    generator's conditional ``unwild_rg_year`` slot for reissues. Pass
+    ``None`` when unknown — the generator handles it gracefully.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import SearchPlanService
@@ -64,6 +68,7 @@ def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
             year=year,
             tracks=tracks or [],
             source=source,
+            release_group_year=release_group_year,
         )
     except Exception as exc:  # noqa: BLE001
         # Never fail the HTTP request because plan generation hiccupped.
@@ -1256,6 +1261,7 @@ def post_pipeline_add(h, body: dict) -> None:
         year=release.get("year"),
         tracks=release.get("tracks") or [],
         source=source,
+        release_group_year=rg_year,
     )
 
     h._json({
@@ -1407,6 +1413,9 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
+        # rg_year_upgrade only exists on the MB branch above; Discogs
+        # upgrade leaves release_group_year NULL (no MB release-group).
+        _rg_year_for_plan = locals().get("rg_year_upgrade")
         _generate_plan_after_add(
             req_id,
             artist_name=release["artist_name"],
@@ -1414,6 +1423,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             year=release.get("year"),
             tracks=release.get("tracks") or [],
             source="request",
+            release_group_year=_rg_year_for_plan,
         )
         # Newly added request — status is already 'wanted', set quality override
         transitions.finalize_request(

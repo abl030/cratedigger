@@ -234,13 +234,17 @@ def _build_search_plan_service(db):
 
 
 def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
-                              tracks, source):
+                              tracks, source, release_group_year=None):
     """Run plan generation for a freshly-added request.
 
     Failures are non-fatal: a deterministic / transient failure is
     recorded as a `search_plans` row and the CLI prints a one-liner so
     the operator knows the request is wanted-but-not-searchable until
     repaired.
+
+    ``release_group_year`` (U5 of search-plan-entropy) feeds the
+    generator's conditional ``unwild_rg_year`` slot. ``None`` is fine
+    — the generator handles it gracefully.
     """
     from lib.search_plan_service import (
         RESULT_FAILED_DETERMINISTIC,
@@ -256,6 +260,7 @@ def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
         year=year,
         tracks=tracks,
         source=source,
+        release_group_year=release_group_year,
     )
     if result.outcome == RESULT_SUCCESS:
         print(f"  Plan: active id={result.plan_id}")
@@ -317,6 +322,7 @@ def _cmd_add_mb(db, mbid, source):
         year=year,
         tracks=tracks,
         source=source,
+        release_group_year=rg_year,
     )
 
 

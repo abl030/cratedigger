@@ -809,22 +809,27 @@ class TestSelectVariant(unittest.TestCase):
                 self.assertEqual(v.slice_index, idx)
 
 class TestGenerateSearchPlan(unittest.TestCase):
-    """Pure search-plan generator (U2 — persisted search plans).
+    """Pure search-plan generator (U5 of search-plan-entropy).
 
     Asserts full plan output, strategy ordering, canonical query keys,
     repeat groups, omitted candidates, dedupe provenance, low-entropy
-    drop recording, generation-failure path, and the generator id
-    constant.
+    drop recording, generation-failure path, self-titled mix, the
+    conditional release-group-year slot, and the generator id constant.
     """
 
-    WIGGLES_TITLES = (
-        "Get Ready to Wiggle",
-        "Rock-A-Bye Your Bear",
-        "Dorothy the Dinosaur",
-        "Mischief the Monkey",
+    KID_A_TITLES = (
+        "Everything in Its Right Place",
+        "Kid A",
+        "The National Anthem",
+        "How to Disappear Completely",
+        "Treefingers",
+        "Optimistic",
     )
 
     def _cfg(self, threshold: int = 5, max_track_slots: int = 3) -> SearchPlanConfig:
+        # ``escalation_threshold`` is preserved on SearchPlanConfig for
+        # backwards-compat but U5 collapsed default repetition to a single
+        # slot; the threshold value no longer affects slot count.
         return SearchPlanConfig(
             escalation_threshold=threshold,
             max_track_slots=max_track_slots,
@@ -833,12 +838,13 @@ class TestGenerateSearchPlan(unittest.TestCase):
     def _snapshot(
         self,
         *,
-        artist: str = "The Wiggles",
-        title: str = "The Wiggles",
-        year: str | None = "1991",
-        track_titles: tuple[str, ...] = WIGGLES_TITLES,
+        artist: str = "Radiohead",
+        title: str = "Kid A",
+        year: str | None = "2008",
+        track_titles: tuple[str, ...] = KID_A_TITLES,
         redownload: bool = False,
         prepend_artist: bool = True,
+        release_group_year: int | None = 2000,
     ) -> ReleaseSnapshot:
         return ReleaseSnapshot(
             artist_name=artist,
@@ -847,118 +853,354 @@ class TestGenerateSearchPlan(unittest.TestCase):
             track_titles=track_titles,
             redownload=redownload,
             prepend_artist=prepend_artist,
+            release_group_year=release_group_year,
         )
 
-    # --- happy path: typical multi-track release with year -----------------
+    # --- happy path: typical multi-track release with year + rg_year ---
 
     def test_typical_release_emits_full_ladder(self):
-        plan = generate_search_plan(self._snapshot(), self._cfg(threshold=5))
+        plan = generate_search_plan(self._snapshot(), self._cfg())
 
         self.assertIsInstance(plan, SearchPlan)
         self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
         self.assertIsNone(plan.failure_reason)
         self.assertEqual(plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
 
-        # 5 default + 1 unwild + 1 unwild_year + 3 track = 10 slots
-        self.assertEqual(len(plan.items), 10)
-
-        # Slot ordering and strategies
+        # 1 default + 1 literal + 1 literal_flac + 1 literal_lossless
+        # + 1 unwild_year + 1 unwild_rg_year + 3 track = 9 slots
         strategies = [it.strategy for it in plan.items]
         self.assertEqual(strategies, [
-            "default", "default", "default", "default", "default",
-            "unwild",
+            "default",
+            "literal",
+            "literal_flac",
+            "literal_lossless",
             "unwild_year",
-            "track_0", "track_1", "track_2",
+            "unwild_rg_year",
+            "track_0_artist",
+            "track_1_artist",
+            "track_2_artist",
         ])
 
-        # Ordinals are 0..9 contiguous
-        self.assertEqual([it.ordinal for it in plan.items], list(range(10)))
-
-        # Default repeats share repeat group; non-defaults have own group
+        # Ordinals contiguous from 0
         self.assertEqual(
-            [it.repeat_group for it in plan.items[:5]],
-            ["default"] * 5,
+            [it.ordinal for it in plan.items],
+            list(range(len(plan.items))),
         )
-        self.assertEqual(plan.items[5].repeat_group, "unwild")
-        self.assertEqual(plan.items[6].repeat_group, "unwild_year")
-        self.assertEqual(plan.items[7].repeat_group, "track_0")
 
-        # All items have non-empty queries and canonical keys
+        # Repeat group equals strategy for every non-default slot, and
+        # each slot's repeat group is its own (no more shared default
+        # repeat group).
+        for it in plan.items:
+            self.assertEqual(it.repeat_group, it.strategy)
+
+        # All items runnable + canonical keys consistent.
         for it in plan.items:
             self.assertTrue(it.query)
-            self.assertEqual(it.canonical_query_key, " ".join(it.query.lower().split()))
+            self.assertEqual(
+                it.canonical_query_key,
+                " ".join(it.query.lower().split()),
+            )
 
-        # Repeated-default queries are identical and share canonical key
-        default_keys = {it.canonical_query_key for it in plan.items[:5]}
-        self.assertEqual(len(default_keys), 1)
+        # Concrete query shapes for Radiohead / Kid A / 2008 / rg=2000.
+        by_strategy = {it.strategy: it.query for it in plan.items}
+        self.assertEqual(by_strategy["default"], "*adiohead Kid A")
+        self.assertEqual(by_strategy["literal"], "Radiohead Kid A")
+        self.assertEqual(by_strategy["literal_flac"], "Radiohead Kid A FLAC")
+        self.assertEqual(
+            by_strategy["literal_lossless"], "Radiohead Kid A lossless",
+        )
+        self.assertEqual(by_strategy["unwild_year"], "Radiohead Kid A 2008")
+        self.assertEqual(by_strategy["unwild_rg_year"], "Radiohead Kid A 2000")
+        # Artist-prepended track slots — wildcarded artist token.
+        self.assertTrue(
+            by_strategy["track_0_artist"].startswith("*adiohead "),
+            by_strategy["track_0_artist"],
+        )
 
-        # Default = wildcarded base; unwild = un-wildcarded.
-        self.assertEqual(plan.items[0].query, "*iggles")
-        self.assertEqual(plan.items[5].query, "Wiggles")
-        self.assertEqual(plan.items[6].query, "Wiggles 1991")
-
-    def test_repeated_default_repeat_index_in_provenance(self):
-        plan = generate_search_plan(self._snapshot(), self._cfg(threshold=3))
-        # First three slots are defaults with repeat_index 0/1/2
-        repeat_indexes = [
-            it.provenance.get("repeat_index") for it in plan.items[:3]
+    def test_no_more_five_slot_default_repetition(self):
+        """U5 R4: the five-slot default repetition is gone — one default only."""
+        plan = generate_search_plan(self._snapshot(), self._cfg(threshold=5))
+        default_slots = [
+            it for it in plan.items if it.strategy == "default"
         ]
-        self.assertEqual(repeat_indexes, [0, 1, 2])
+        self.assertEqual(len(default_slots), 1)
+        # ``repeat_index`` provenance no longer recorded (no repetition).
+        self.assertNotIn("repeat_index", default_slots[0].provenance)
 
     # --- year unknown ------------------------------------------------------
 
     def test_unknown_year_skips_unwild_year_and_records_omission(self):
         plan = generate_search_plan(
-            self._snapshot(year=None), self._cfg(threshold=2),
+            self._snapshot(year=None, release_group_year=None),
+            self._cfg(),
         )
         self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
         strategies = [it.strategy for it in plan.items]
-        # 2 default + 1 unwild + 3 track. unwild_year omitted.
-        self.assertEqual(strategies, [
-            "default", "default", "unwild",
-            "track_0", "track_1", "track_2",
-        ])
+        self.assertNotIn("unwild_year", strategies)
+        self.assertNotIn("unwild_rg_year", strategies)
         omitted = plan.provenance["omitted_candidates"]
-        unwild_year_omits = [o for o in omitted if o["strategy"] == "unwild_year"]
+        unwild_year_omits = [
+            o for o in omitted if o["strategy"] == "unwild_year"
+        ]
         self.assertEqual(len(unwild_year_omits), 1)
         self.assertEqual(unwild_year_omits[0]["reason"], "year_unknown")
 
     def test_year_0000_treated_as_unknown(self):
         plan = generate_search_plan(
-            self._snapshot(year="0000"), self._cfg(threshold=1),
+            self._snapshot(year="0000"), self._cfg(),
         )
         strategies = [it.strategy for it in plan.items]
         self.assertNotIn("unwild_year", strategies)
+
+    # --- release-group year ----------------------------------------------
+
+    def test_rg_year_slot_emitted_when_differs_from_year(self):
+        plan = generate_search_plan(
+            self._snapshot(year="2008", release_group_year=2000),
+            self._cfg(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertIn("unwild_rg_year", strategies)
+        by_strategy = {it.strategy: it.query for it in plan.items}
+        self.assertEqual(by_strategy["unwild_rg_year"], "Radiohead Kid A 2000")
+        # Provenance carries rg_year for debuggability.
+        rg_item = next(it for it in plan.items
+                       if it.strategy == "unwild_rg_year")
+        self.assertEqual(rg_item.provenance.get("release_group_year"), 2000)
+        # Plan-level provenance records rg_year too.
+        self.assertEqual(plan.provenance.get("release_group_year"), 2000)
+
+    def test_rg_year_slot_omitted_when_matches_year(self):
+        plan = generate_search_plan(
+            self._snapshot(year="2010", release_group_year=2010),
+            self._cfg(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertNotIn("unwild_rg_year", strategies)
+        omitted = plan.provenance["omitted_candidates"]
+        self.assertTrue(
+            any(o["strategy"] == "unwild_rg_year"
+                and o["reason"] == "release_group_year_matches_year"
+                for o in omitted),
+            f"missing rg_year matches omission: {omitted!r}",
+        )
+
+    def test_rg_year_slot_omitted_when_rg_year_missing(self):
+        plan = generate_search_plan(
+            self._snapshot(release_group_year=None),
+            self._cfg(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertNotIn("unwild_rg_year", strategies)
+        omitted = plan.provenance["omitted_candidates"]
+        self.assertTrue(
+            any(o["strategy"] == "unwild_rg_year"
+                and o["reason"] == "release_group_year_unknown"
+                for o in omitted),
+        )
+        self.assertNotIn("release_group_year", plan.provenance)
+
+    def test_rg_year_slot_omitted_when_year_unknown(self):
+        plan = generate_search_plan(
+            self._snapshot(year=None, release_group_year=2000),
+            self._cfg(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertNotIn("unwild_rg_year", strategies)
+
+    # --- format-hint slots unconditional ---------------------------------
+
+    def test_format_hint_slots_present_when_years_match(self):
+        plan = generate_search_plan(
+            self._snapshot(
+                artist="Darren Hanlon",
+                title="I Will Love You at All",
+                year="2010",
+                release_group_year=2010,
+            ),
+            self._cfg(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertIn("literal_flac", strategies)
+        self.assertIn("literal_lossless", strategies)
+        self.assertNotIn("unwild_rg_year", strategies)
+
+    # --- short-token drop removed ----------------------------------------
+
+    def test_short_tokens_preserved_in_title(self):
+        """Kid A's 'A' must survive; previously short-drop removed it."""
+        plan = generate_search_plan(self._snapshot(), self._cfg())
+        by_strategy = {it.strategy: it.query for it in plan.items}
+        # Literal slot preserves the bare 'A'.
+        self.assertIn(" A", by_strategy["literal"])
+        self.assertEqual(by_strategy["literal"], "Radiohead Kid A")
+
+    def test_short_tokens_preserved_for_bon_iver_numeric(self):
+        plan = generate_search_plan(
+            self._snapshot(
+                artist="Bon Iver",
+                title="22, a Million",
+                track_titles=(),
+                year="2016",
+                release_group_year=2016,
+            ),
+            self._cfg(),
+        )
+        by_strategy = {it.strategy: it.query for it in plan.items}
+        # 22 (2 chars) and a (1 char) must both survive the post-clean
+        # pipeline. The order is preserved (source order), cap=4.
+        self.assertEqual(by_strategy["default"], "*on *ver 22 Million")
+        # Literal slot keeps the same body shape (un-wildcarded).
+        self.assertEqual(by_strategy["literal"], "Bon Iver 22 Million")
+
+    # --- self-titled detection -------------------------------------------
+
+    def test_selftitled_release_uses_dedicated_mix(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Willow",
+                title="Willow",
+                year="2007",
+                track_titles=(
+                    "And Finally I Can Breathe",
+                    "When the Sea Called Our Names",
+                    "Stay Forever",
+                    "Going Going Gone",
+                ),
+                prepend_artist=True,
+                release_group_year=2007,
+            ),
+            self._cfg(),
+        )
+        self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
+        strategies = [it.strategy for it in plan.items]
+        # No default / literal / literal_flac / unwild_year slots — they
+        # would collapse to bare artist for self-titled releases.
+        for s in ("default", "literal", "literal_flac",
+                  "literal_lossless", "unwild_year", "unwild_rg_year"):
+            self.assertNotIn(s, strategies)
+        # Dedicated selftitled slots emitted.
+        self.assertIn("selftitled_artist_track_0", strategies)
+        self.assertIn("selftitled_artist_track_0_flac", strategies)
+        self.assertIn("selftitled_artist_year", strategies)
+        # Concrete queries.
+        by_strategy = {it.strategy: it.query for it in plan.items}
+        # First selftitled track query = literal artist + literal track,
+        # capped to MAX_SEARCH_TOKENS (longest first). "And"/"I" survive
+        # short-drop removal but cap may drop them.
+        self.assertTrue(
+            by_strategy["selftitled_artist_track_0"].startswith("Willow"),
+            by_strategy["selftitled_artist_track_0"],
+        )
+        self.assertIn("FLAC", by_strategy["selftitled_artist_track_0_flac"])
+        self.assertEqual(by_strategy["selftitled_artist_year"], "Willow 2007")
+        # Provenance flag set.
+        self.assertTrue(plan.provenance.get("selftitled"))
+
+    def test_selftitled_token_subset_mountains_case(self):
+        """Mountains / Mountains Mountains Mountains → both normalize to {mountains}."""
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Mountains",
+                title="Mountains Mountains Mountains",
+                year="2009",
+                track_titles=(
+                    "Bountiful Spreading",
+                    "Telescope",
+                    "Sheets Two",
+                ),
+                prepend_artist=True,
+                release_group_year=2009,
+            ),
+            self._cfg(),
+        )
+        self.assertTrue(plan.provenance.get("selftitled"))
+        strategies = [it.strategy for it in plan.items]
+        self.assertNotIn("default", strategies)
+        self.assertIn("selftitled_artist_track_0", strategies)
+
+    def test_selftitled_negative_willow_tree(self):
+        """Willow / Willow Tree → title has 'tree'; NOT self-titled."""
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Willow",
+                title="Willow Tree",
+                year="2007",
+                track_titles=("Branches", "Roots", "Leaves"),
+                prepend_artist=True,
+                release_group_year=2007,
+            ),
+            self._cfg(),
+        )
+        self.assertFalse(plan.provenance.get("selftitled"))
+        strategies = [it.strategy for it in plan.items]
+        self.assertIn("default", strategies)
+        self.assertIn("literal", strategies)
+
+    def test_selftitled_case_insensitive(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="WILLOW",
+                title="Willow",
+                year="2007",
+                track_titles=("Sample A", "Sample B"),
+                prepend_artist=True,
+            ),
+            self._cfg(),
+        )
+        self.assertTrue(plan.provenance.get("selftitled"))
 
     # --- single-track album skips track tier ------------------------------
 
     def test_single_track_album_has_no_track_slots(self):
         plan = generate_search_plan(
             self._snapshot(track_titles=("Lonely Track",)),
-            self._cfg(threshold=2),
+            self._cfg(),
         )
         self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
         strategies = [it.strategy for it in plan.items]
-        self.assertEqual(strategies, ["default", "default", "unwild", "unwild_year"])
-        # Skip recorded in provenance
+        # No track_* slots for single-track albums.
+        self.assertFalse(any(s.startswith("track_") for s in strategies))
+        # Album-level slots still present.
+        self.assertIn("default", strategies)
+        self.assertIn("literal", strategies)
+        # Skip recorded in provenance.
         omitted = plan.provenance["omitted_candidates"]
         self.assertTrue(
-            any(o["strategy"] == "track_*" and o["reason"] == "single_track_album"
+            any(o["strategy"] == "track_*"
+                and o["reason"] == "single_track_album"
                 for o in omitted),
             f"missing single_track_album omission: {omitted!r}",
         )
+
+    def test_fewer_than_three_tracks_emits_fewer_track_slots(self):
+        plan = generate_search_plan(
+            self._snapshot(
+                track_titles=("First Song Title", "Second Track Name"),
+            ),
+            self._cfg(),
+        )
+        track_slots = [
+            it for it in plan.items if it.strategy.startswith("track_")
+        ]
+        self.assertEqual(len(track_slots), 2)
 
     # --- empty tracklist still emits album-level slots --------------------
 
     def test_empty_tracklist_still_emits_album_slots(self):
         plan = generate_search_plan(
             self._snapshot(track_titles=()),
-            self._cfg(threshold=1),
+            self._cfg(),
         )
         self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
         strategies = [it.strategy for it in plan.items]
-        self.assertEqual(strategies, ["default", "unwild", "unwild_year"])
-        # No track-tier omission record (no tracks at all)
+        self.assertIn("default", strategies)
+        self.assertIn("literal", strategies)
+        self.assertIn("literal_flac", strategies)
+        self.assertIn("literal_lossless", strategies)
+        self.assertIn("unwild_year", strategies)
+        # No track slots and no track-tier omission record for empty.
+        self.assertFalse(any(s.startswith("track_") for s in strategies))
         omitted = plan.provenance["omitted_candidates"]
         self.assertFalse(
             any(o.get("strategy") == "track_*" for o in omitted),
@@ -1022,45 +1264,34 @@ class TestGenerateSearchPlan(unittest.TestCase):
     # --- cross-strategy dedupe: keep first, record loser -----------------
 
     def test_cross_strategy_duplicate_keeps_first_records_loser(self):
-        # When wildcarded and un-wildcarded queries coincide (e.g. an artist
-        # with no wildcardable tokens), unwild_year still differs because of
-        # the year suffix. To force a same-key collision across strategies,
-        # use a release where the unwild and the unwild_year base differ
-        # only by year, but force a track query that collides with the
-        # default base.
-        #
-        # Simpler construction: two strategies with identical canonical
-        # query. We exploit the fact that build_query returns the same string
-        # for an artist with no wildcardable content. Use a Various-Artists
-        # release whose title is a single distinct token; then a track named
-        # exactly that single title produces the same canonical query.
+        # Various Artists collapses to no wildcardable artist tokens, so
+        # the default slot is just "Compilation"; the literal slot is
+        # also "Compilation" — identical canonical key. The literal slot
+        # is deduped against the default slot.
         plan = generate_search_plan(
             ReleaseSnapshot(
                 artist_name="Various Artists",
                 title="Compilation",
                 year="2010",
                 track_titles=(
-                    "Compilation",  # collides with default canonical key
                     "Other Track Title Here",
                     "Yet Another Distinct Track",
                 ),
                 prepend_artist=True,
+                release_group_year=2010,
             ),
-            self._cfg(threshold=1),
+            self._cfg(),
         )
-        # default = "Compilation"; unwild = "Compilation"; identical canonical key
-        # so unwild is deduped against default.
+        # default = "Compilation"; literal = "Compilation"; identical
+        # canonical key so literal is deduped against default.
         self.assertEqual(plan.items[0].strategy, "default")
         self.assertEqual(plan.items[0].canonical_query_key, "compilation")
         strategies = [it.strategy for it in plan.items]
-        # unwild MUST be deduped (it'd be identical to "compilation")
-        self.assertNotIn("unwild", strategies)
-        # The dedupe loser is recorded in provenance with the ordinal it
-        # would have taken (1 — immediately after the single default).
+        self.assertNotIn("literal", strategies)
         losers = plan.provenance["dedupe_losers"]
         self.assertTrue(
             any(L["winner_strategy"] == "default"
-                and L["loser_strategy"] == "unwild"
+                and L["loser_strategy"] == "literal"
                 and L["canonical_query_key"] == "compilation"
                 and L["would_have_been_ordinal"] == 1
                 for L in losers),
@@ -1071,13 +1302,14 @@ class TestGenerateSearchPlan(unittest.TestCase):
 
     def test_track_ranking_ties_break_by_source_order(self):
         # All four tracks have identical useful-token count AND identical
-        # char count after cleaning, so the tiebreaker is source-track order.
-        # Two tokens of length 5 + space = 11 chars each.
+        # char count after cleaning. Artist prepending adds the same
+        # tokens to every track, so the relative rank stays source-order.
         plan = generate_search_plan(
             self._snapshot(
                 artist="Dallas Crane",
                 title="Album",
                 year=None,
+                release_group_year=None,
                 track_titles=(
                     "Alpha Sigma",   # 11 chars, 2 tokens
                     "Bravo Delta",   # 11 chars, 2 tokens
@@ -1085,56 +1317,61 @@ class TestGenerateSearchPlan(unittest.TestCase):
                     "Golfa Hotel",   # 11 chars, 2 tokens
                 ),
             ),
-            self._cfg(threshold=1, max_track_slots=3),
+            self._cfg(max_track_slots=3),
         )
-        track_items = [it for it in plan.items if it.strategy.startswith("track_")]
-        # Sanity: same token count, same char count → source-order
-        for it in track_items:
-            self.assertEqual(len(it.query.split()), 2)
-            self.assertEqual(len(it.query), 11)
+        track_items = [
+            it for it in plan.items if it.strategy.startswith("track_")
+        ]
         self.assertEqual(len(track_items), 3)
-        self.assertEqual(track_items[0].query, "Alpha Sigma")
-        self.assertEqual(track_items[1].query, "Bravo Delta")
-        self.assertEqual(track_items[2].query, "Echo1 Foxxx")
-        # source_track_index recorded in provenance
+        # Each query is "<*allas> <*rane> <Tok> <Tok>" capped to 4 tokens.
+        for it in track_items:
+            self.assertEqual(len(it.query.split()), 4)
+            self.assertTrue(it.query.startswith("*allas *rane "))
+        # First three tracks survive source-order ranking; fourth is
+        # bumped to omitted_candidates as excess.
         self.assertEqual(track_items[0].provenance["source_track_index"], 0)
         self.assertEqual(track_items[1].provenance["source_track_index"], 1)
         self.assertEqual(track_items[2].provenance["source_track_index"], 2)
-        # The fourth track must appear in plan-level omissions.
         omitted = plan.provenance["omitted_candidates"]
-        excess = [o for o in omitted if o.get("strategy") == "track_excess"]
+        excess = [
+            o for o in omitted if o.get("strategy") == "track_excess"
+        ]
         self.assertEqual(len(excess), 1)
         self.assertEqual(excess[0]["source_track_index"], 3)
-        self.assertEqual(excess[0]["query"], "Golfa Hotel")
 
     def test_track_ranking_orders_by_useful_tokens_then_chars(self):
-        # Make tracks with different post-clean shapes to exercise the rank
-        # order: useful-token count desc, then char count desc, then source
-        # index asc. No artist enrichment happens here — every cleaned track
-        # has >=2 tokens — so the ranking inputs are predictable.
+        # Ranking is computed on the post-prepend query (artist tokens
+        # consume slots equally for every track, so cap drops happen on
+        # the title side). Among queries tied on token count, the
+        # longest char count wins; ties break by source order.
         plan = generate_search_plan(
             self._snapshot(
                 artist="Some Artist",
                 title="Album",
                 year=None,
+                release_group_year=None,
                 track_titles=(
-                    "Aaa Bbbbbbb",                  # 2 tokens, 11 chars
-                    "One Two Three Four Tokens",    # 4 tokens (capped from 5)
-                    "Aaaaa Bbbbbbbbbbb",            # 2 tokens, 17 chars
-                    "One Two",                      # 2 tokens, 7 chars
+                    "Aaaaa Bbbbbbb",                # 2 title tokens → 4 after prepend
+                    "One Two Three Four Tokens",    # 5 cleaned title tokens
+                    "Aaaaa Bbbbbbbbbbb",            # 2 title tokens, longest body
+                    "Six Seven",                    # 2 title tokens, shortest body
                 ),
             ),
-            self._cfg(threshold=1, max_track_slots=3),
+            self._cfg(max_track_slots=3),
         )
-        track_items = [it for it in plan.items if it.strategy.startswith("track_")]
+        track_items = [
+            it for it in plan.items if it.strategy.startswith("track_")
+        ]
         self.assertEqual(len(track_items), 3)
-        # First slot is the 4-token query (most useful tokens).
-        self.assertEqual(track_items[0].provenance["source_track_index"], 1)
-        self.assertEqual(len(track_items[0].query.split()), 4)
-        # Among 2-token queries, the longer wins on char count, then ties
-        # break by source index. 17-char wins, then 11-char wins.
-        self.assertEqual(track_items[1].provenance["source_track_index"], 2)
-        self.assertEqual(track_items[2].provenance["source_track_index"], 0)
+        # All four post-prepend queries cap to 4 tokens (artist prepend
+        # consumes 2 slots). Char-count tiebreaker picks longest first.
+        # "*ome *rtist Aaaaa Bbbbbbbbbbb" is the longest (idx=2).
+        self.assertEqual(track_items[0].provenance["source_track_index"], 2)
+        # idx=0 "*ome *rtist Aaaaa Bbbbbbb" is next-longest.
+        self.assertEqual(track_items[1].provenance["source_track_index"], 0)
+        # Among remaining, idx=1 ("One Two Three Four Tokens") with
+        # artist prepend caps to 4 tokens with non-trivial body.
+        self.assertEqual(track_items[2].provenance["source_track_index"], 1)
 
     # --- generation failure: no runnable query ---------------------------
 
@@ -1163,9 +1400,11 @@ class TestGenerateSearchPlan(unittest.TestCase):
         self.assertFalse(sig["redownload"])
 
     def test_unrunnable_album_with_runnable_track_still_succeeds(self):
-        # Empty artist+title but two distinct track candidates with multi-token
-        # queries → multi-track album, track tier produces runnable items so
-        # the plan succeeds even without album-level slots.
+        # Empty artist+title but two distinct track candidates with
+        # multi-token queries → multi-track album, track tier produces
+        # runnable items so the plan succeeds even without album-level
+        # slots. Empty artist also collapses the artist-prepend prefix
+        # in per-track candidates, so the track queries are bare titles.
         plan = generate_search_plan(
             ReleaseSnapshot(
                 artist_name="",
@@ -1174,22 +1413,24 @@ class TestGenerateSearchPlan(unittest.TestCase):
                 track_titles=("Distinct Track Title", "Another Real Song"),
                 prepend_artist=True,
             ),
-            self._cfg(threshold=2),
+            self._cfg(),
         )
         self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
-        # Only track slots; default and unwild candidates omitted.
+        # Only track slots; album-level candidates all omitted.
         strategies = [it.strategy for it in plan.items]
-        self.assertEqual(strategies, ["track_0", "track_1"])
+        self.assertEqual(strategies, ["track_0_artist", "track_1_artist"])
         omitted = plan.provenance["omitted_candidates"]
         self.assertTrue(
-            any(o["strategy"] == "default" and o["reason"] == "empty_base_query"
+            any(o["strategy"] == "default"
+                and o["reason"] == "empty_default_query"
                 for o in omitted),
             f"missing default empty omission: {omitted!r}",
         )
         self.assertTrue(
-            any(o["strategy"] == "unwild" and o["reason"] == "empty_unwild_query"
+            any(o["strategy"] == "literal"
+                and o["reason"] == "empty_literal_query"
                 for o in omitted),
-            f"missing unwild empty omission: {omitted!r}",
+            f"missing literal empty omission: {omitted!r}",
         )
 
     # --- redownload flag preserved in snapshot signature -----------------
@@ -1206,28 +1447,33 @@ class TestGenerateSearchPlan(unittest.TestCase):
     def test_generator_id_constant_is_pinned(self):
         """Changing generator output requires bumping `SEARCH_PLAN_GENERATOR_ID`.
 
-        This explicit assertion is the contract: if the generator's behavior
-        changes (token rules, ladder, repeat groups, dedupe, provenance
-        shape), the test author MUST also bump the id constant. U3
-        (service) and U4 (reconciliation) read this constant — drift
-        breaks the persisted plan currentness check.
+        This explicit assertion is the contract: if the generator's
+        behavior changes (token rules, ladder, repeat groups, dedupe,
+        provenance shape), the test author MUST also bump the id
+        constant. The service layer and reconciliation read this
+        constant — drift breaks the persisted plan currentness check.
         """
         # Snapshot output of a known release. Bumping any of these
         # expectations should require the id below to change too.
-        plan = generate_search_plan(self._snapshot(), self._cfg(threshold=2))
-        self.assertEqual(plan.generator_id, "search-plan/2026-05-08-1")
+        plan = generate_search_plan(self._snapshot(), self._cfg())
+        self.assertEqual(plan.generator_id, "search-plan/2026-05-19-1")
         self.assertEqual(plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
-        # Pin the slot ladder shape and queries.
+        # Pin the slot ladder shape and queries for Radiohead / Kid A /
+        # year=2008 / rg_year=2000.
         self.assertEqual(
             [(it.strategy, it.query) for it in plan.items],
             [
-                ("default", "*iggles"),
-                ("default", "*iggles"),
-                ("unwild", "Wiggles"),
-                ("unwild_year", "Wiggles 1991"),
-                ("track_0", "Rock-A-Bye Your Bear"),
-                ("track_1", "Get Ready Wiggle"),
-                ("track_2", "Dorothy Dinosaur"),
+                ("default", "*adiohead Kid A"),
+                ("literal", "Radiohead Kid A"),
+                ("literal_flac", "Radiohead Kid A FLAC"),
+                ("literal_lossless", "Radiohead Kid A lossless"),
+                ("unwild_year", "Radiohead Kid A 2008"),
+                ("unwild_rg_year", "Radiohead Kid A 2000"),
+                ("track_0_artist",
+                 "*adiohead How Disappear Completely"),
+                ("track_1_artist",
+                 "*adiohead Everything Right Place"),
+                ("track_2_artist", "*adiohead National Anthem"),
             ],
         )
 

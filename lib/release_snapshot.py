@@ -134,6 +134,33 @@ def _track_titles_from_tracks(tracks: list[dict[str, Any]]) -> tuple[str, ...]:
     return tuple(s[2] for s in sortable)
 
 
+def _release_group_year_from_value(value: object) -> int | None:
+    """Normalise the ``release_group_year`` column / payload to ``int | None``.
+
+    The DB column is INTEGER NULL; CLI / web add paths pass a Python
+    int or None. Strings are accepted defensively (some test fixtures
+    use strings) and parsed as a 4-digit year. Non-positive ints / bad
+    strings collapse to None so the generator's ``unwild_rg_year``
+    skip path fires.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            n = int(s[:4])
+        except ValueError:
+            return None
+        return n if n > 0 else None
+    return None
+
+
 def snapshot_from_request_row(
     row: dict[str, Any],
     tracks: list[dict[str, Any]],
@@ -155,6 +182,7 @@ def snapshot_from_request_row(
         title = str(title)
     year = year_from_value(row.get("year"))
     redownload = bool(row.get("source") == "redownload")
+    rg_year = _release_group_year_from_value(row.get("release_group_year"))
     return ReleaseSnapshot(
         artist_name=artist,
         title=title,
@@ -162,6 +190,7 @@ def snapshot_from_request_row(
         track_titles=_track_titles_from_tracks(tracks),
         redownload=redownload,
         prepend_artist=prepend_artist,
+        release_group_year=rg_year,
     )
 
 
@@ -173,6 +202,7 @@ def snapshot_from_add_payload(
     tracks: list[dict[str, Any]],
     source: str,
     prepend_artist: bool = False,
+    release_group_year: object = None,
 ) -> ReleaseSnapshot:
     """Build a `ReleaseSnapshot` from add-time metadata.
 
@@ -180,6 +210,11 @@ def snapshot_from_add_payload(
     release dict + tracks list before calling `set_tracks`. Pass those
     same values through here so add-time generation sees identical
     inputs to a startup-time regeneration of the same release.
+
+    ``release_group_year`` is the first-release year of the MB release
+    group (U5 R9). When known AND different from ``year``, the
+    generator emits an extra ``unwild_rg_year`` slot so reissues find
+    their original-pressing peers on Soulseek.
     """
     return ReleaseSnapshot(
         artist_name=artist_name or "",
@@ -188,4 +223,5 @@ def snapshot_from_add_payload(
         track_titles=_track_titles_from_tracks(tracks),
         redownload=(source == "redownload"),
         prepend_artist=prepend_artist,
+        release_group_year=_release_group_year_from_value(release_group_year),
     )

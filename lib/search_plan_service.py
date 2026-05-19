@@ -322,6 +322,7 @@ class SearchPlanService:
         tracks: list[dict[str, Any]],
         source: str = "request",
         prepend_artist: bool | None = None,
+        release_group_year: object = None,
     ) -> ServiceResult:
         """Generate a plan for a freshly-added request.
 
@@ -345,6 +346,7 @@ class SearchPlanService:
                 tracks=tracks,
                 source=source,
                 prepend_artist=prepend,
+                release_group_year=release_group_year,
             )
             return self._persist(request_id, snapshot, regenerate=False)
 
@@ -959,7 +961,7 @@ def _metadata_snapshot_from_snapshot(
     snapshot: ReleaseSnapshot,
 ) -> dict[str, Any]:
     """JSON-friendly metadata snapshot for `search_plans.metadata_snapshot`."""
-    return {
+    out: dict[str, Any] = {
         "artist_name": snapshot.artist_name,
         "album_title": snapshot.title,
         "year": snapshot.year,
@@ -967,6 +969,9 @@ def _metadata_snapshot_from_snapshot(
         "redownload": snapshot.redownload,
         "prepend_artist": snapshot.prepend_artist,
     }
+    if snapshot.release_group_year is not None:
+        out["release_group_year"] = int(snapshot.release_group_year)
+    return out
 
 
 def _metadata_snapshot_from_row(
@@ -978,10 +983,14 @@ def _metadata_snapshot_from_row(
     Used on resolver-failure paths so the failed-plan row still carries
     enough context to debug what was attempted.
     """
-    return {
+    out: dict[str, Any] = {
         "artist_name": row.get("artist_name"),
         "album_title": row.get("album_title"),
         "year": row.get("year"),
         "track_count": len(tracks),
         "redownload": row.get("source") == "redownload",
     }
+    rg_year = row.get("release_group_year")
+    if rg_year is not None:
+        out["release_group_year"] = rg_year
+    return out
