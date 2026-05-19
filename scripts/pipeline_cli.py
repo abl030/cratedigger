@@ -2048,6 +2048,77 @@ def cmd_search_plan_dry_run(db, args):
     return 1
 
 
+def cmd_search_plan_saturation(db, args):
+    """U7: ``pipeline-cli search-plan saturation <request_id>``.
+
+    Read-only telemetry aggregator: reports the saturation rate (rows
+    whose ``final_state`` contains ``LimitReached``) and total
+    ``pre_filter_skip_count`` over the last ``--window-days`` (default
+    14) of ``search_log`` rows. Counterpart of
+    ``GET /api/pipeline/<id>/search-plan/saturation``; both surfaces
+    wrap ``SearchPlanService.saturation_for_request`` — keep them in
+    sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Exit codes:
+      * 0 — ``RESULT_SATURATION_SUCCESS`` (zeros are still success —
+        the request exists, the window is just quiet)
+      * 2 — ``RESULT_REQUEST_NOT_FOUND``
+      * 3 — ``RESULT_SATURATION_INPUT_INVALID`` (argparse normally
+        bounds this; the branch is defensive parity with the API's
+        400)
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SATURATION_INPUT_INVALID,
+        RESULT_SATURATION_SUCCESS,
+        SATURATION_WINDOW_DEFAULT_DAYS,
+        SearchPlanService,
+        saturation_payload,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    # ``None`` means "argparse default" (operator omitted the flag);
+    # treat 0 / negative as explicit and let the service flag them
+    # invalid so the operator sees the failure rather than silently
+    # widening to 14.
+    raw_window = getattr(args, "window_days", None)
+    window_days = int(
+        raw_window if raw_window is not None
+        else SATURATION_WINDOW_DEFAULT_DAYS)
+    result = svc.saturation_for_request(
+        int(args.id), window_days=window_days,
+    )
+    payload = saturation_payload(result)
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:             {payload['request_id']}")
+        print(f"  Outcome:                {payload['outcome']}")
+        print(f"  Window (days):          {payload['window_days']}")
+        print(f"  Total searches:         {payload['total_searches']}")
+        print(f"  Saturated searches:     {payload['saturated_searches']}")
+        # Render the rate as a percentage with one decimal so the
+        # number is human-readable at a glance.
+        rate_pct = 100.0 * float(payload['saturation_rate'])
+        print(f"  Saturation rate:        {rate_pct:.1f}%")
+        print(
+            f"  Pre-filter skips total: {payload['total_pre_filter_skips']}")
+        if payload.get("error_message"):
+            print(f"  Error message:          {payload['error_message']}")
+
+    if result.outcome == RESULT_SATURATION_SUCCESS:
+        return 0
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        return 2
+    if result.outcome == RESULT_SATURATION_INPUT_INVALID:
+        return 3
+    return 1
+
+
 def cmd_search_plan_advance(db, args):
     """Forward-only operator advance of the search-plan cursor.
 
@@ -2307,6 +2378,17 @@ def main():
                               "generated queries")
     p_sp_dry_run.add_argument("--json", action="store_true",
                               help="Print structured JSON instead of text")
+    p_sp_saturation = sp_sub.add_parser(
+        "saturation",
+        help="Show per-request saturation rate + pre-filter skip total "
+             "over the recent search_log window (U7 telemetry)")
+    p_sp_saturation.add_argument("id", type=int, help="Request ID")
+    p_sp_saturation.add_argument(
+        "--window-days", type=int, default=None, dest="window_days",
+        help="Window in days; defaults to 14; valid range [1, 90]")
+    p_sp_saturation.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON instead of text")
     p_sp_history = sp_sub.add_parser(
         "history",
         help="Cursor-paginated read of one request's search_log rows "
@@ -2489,6 +2571,7 @@ def main():
         "advance": cmd_search_plan_advance,
         "history": cmd_search_plan_history,
         "dry-run": cmd_search_plan_dry_run,
+        "saturation": cmd_search_plan_saturation,
     }
     try:
         if args.command == "search-plan":

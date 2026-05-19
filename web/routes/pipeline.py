@@ -598,6 +598,83 @@ def get_pipeline_search_plan_dry_run(
     h._error(f"Unknown dry-run outcome: {result.outcome}", 500)
 
 
+def get_pipeline_search_plan_saturation(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """U7: ``GET /api/pipeline/<id>/search-plan/saturation``.
+
+    Read-only telemetry aggregator. Returns the saturation rate (rows
+    whose ``final_state`` contains ``LimitReached``) and total
+    ``pre_filter_skip_count`` over the last ``window_days`` (default
+    14) of ``search_log`` rows for ``<id>``. Counterpart of
+    ``pipeline-cli search-plan saturation``; both surfaces wrap
+    ``SearchPlanService.saturation_for_request`` — keep them in sync
+    (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Query string:
+      * ``window_days`` — int in
+        ``[SATURATION_WINDOW_MIN_DAYS, SATURATION_WINDOW_MAX_DAYS]``;
+        defaults to ``SATURATION_WINDOW_DEFAULT_DAYS``.
+
+    Status-code mapping:
+      * 200 — ``RESULT_SATURATION_SUCCESS`` (counts may be zero — a
+        valid "found but quiet" state).
+      * 400 — ``window_days`` not parseable as int, or
+        ``RESULT_SATURATION_INPUT_INVALID``.
+      * 404 — ``RESULT_REQUEST_NOT_FOUND`` (request_id does not exist
+        in ``album_requests``; distinct from a real request whose
+        window happens to be empty).
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SATURATION_INPUT_INVALID,
+        RESULT_SATURATION_SUCCESS,
+        SATURATION_WINDOW_DEFAULT_DAYS,
+        SearchPlanService,
+        saturation_payload,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    window_raw = params.get("window_days", [None])[0]
+    if window_raw is None or window_raw == "":
+        window_days = SATURATION_WINDOW_DEFAULT_DAYS
+    else:
+        try:
+            window_days = int(window_raw)
+        except (TypeError, ValueError):
+            h._error(
+                f"window_days must be an integer; got {window_raw!r}",
+                status=400,
+            )
+            return
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.saturation_for_request(
+        request_id, window_days=window_days,
+    )
+    payload = saturation_payload(result)
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome == RESULT_SATURATION_INPUT_INVALID:
+        payload["error"] = (
+            result.error_message or "Invalid window_days")
+        h._json(payload, status=400)
+        return
+    if result.outcome == RESULT_SATURATION_SUCCESS:
+        h._json(payload)
+        return
+    # Defensive fallback for any future outcome string.
+    h._error(f"Unknown saturation outcome: {result.outcome}", 500)
+
+
 def get_pipeline_search_plan_history(
     h, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
@@ -2092,6 +2169,8 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
      get_pipeline_search_plan),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/dry-run$"),
      get_pipeline_search_plan_dry_run),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/saturation$"),
+     get_pipeline_search_plan_saturation),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
      get_pipeline_search_plan_history),
     (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),

@@ -639,6 +639,40 @@ class SearchLogHistoryPage:
 
 
 @dataclass(frozen=True)
+class SaturationSummary:
+    """U7: aggregate saturation/forensic counts for one request over a window.
+
+    Returned by ``PipelineDB.get_saturation_summary``. A search counts as
+    "saturated" when its ``final_state`` contains ``LimitReached`` (e.g.
+    ``Completed, ResponseLimitReached`` or ``Completed, FileLimitReached``)
+    — slskd hit its response/file ceiling before the search naturally
+    finished, so the result set is a truncated head sample rather than
+    the full picture. High saturation rates indicate the queries are too
+    generic for the album the operator is trying to find.
+
+    ``total_pre_filter_skips`` rolls up the U2 ``pre_filter_skip_count``
+    column — how many candidate peer dirs the asymmetric matcher
+    pre-filter rejected before browse over the same window.
+
+    ``saturation_rate`` is ``saturated_searches / total_searches`` with
+    an explicit ``0.0`` fallback when ``total_searches == 0`` (NOT NaN
+    — callers serialise this to JSON and NaN would break the
+    contract). Computed in Python after the aggregate fetch.
+
+    The summary is the data layer for the future search-plan dashboard
+    (see ``docs/brainstorms/2026-05-09-search-plan-per-request-dashboard-requirements.md``);
+    today it ships via ``pipeline-cli search-plan saturation`` and
+    ``GET /api/pipeline/<id>/search-plan/saturation``.
+    """
+
+    total_searches: int
+    saturated_searches: int
+    saturation_rate: float
+    total_pre_filter_skips: int
+    window_days: int
+
+
+@dataclass(frozen=True)
 class RequestV0ProbeStateUpdate:
     """Typed update for current comparable lossless-source V0 probe state."""
 
@@ -3346,6 +3380,72 @@ class PipelineDB:
             ORDER BY id DESC
         """, (request_id,))
         return [dict(r) for r in cur.fetchall()]
+
+    def get_saturation_summary(
+        self, request_id: int, *, window_days: int = 14,
+    ) -> "SaturationSummary":
+        """U7: saturation rate + pre-filter skip total for one request.
+
+        Aggregates ``search_log`` rows for ``request_id`` whose
+        ``created_at`` falls inside the last ``window_days`` days.
+        Returns a :class:`SaturationSummary` with:
+
+        * ``total_searches`` — count of rows in window
+        * ``saturated_searches`` — rows whose ``final_state`` matches
+          ``%LimitReached%`` (slskd hit its response/file ceiling)
+        * ``saturation_rate`` — ratio in ``[0.0, 1.0]``; ``0.0`` when
+          ``total_searches == 0`` (explicit, NOT NaN — the value is
+          serialised to JSON downstream)
+        * ``total_pre_filter_skips`` — sum of the U2
+          ``pre_filter_skip_count`` column over the same window
+        * ``window_days`` — echoed back so callers don't need to
+          remember which window they asked for
+
+        ``window_days`` is a non-negative int. The route handler and
+        CLI both bound it before calling (negative or huge values are
+        operator errors); the DB layer trusts the caller. ``0`` reduces
+        the SQL to an empty window and returns all zeros — that's a
+        defensible read (operator asked for the past zero days).
+
+        Returns an empty summary (all zeros, ``saturation_rate=0.0``)
+        when the request has no logged searches in window. This method
+        does NOT consult ``album_requests`` — the caller decides
+        whether to translate "no rows" into a 404 by looking up the
+        request row separately. See the service-layer
+        ``SearchPlanService.saturation_for_request`` for that mapping.
+        """
+        cur = self._execute("""
+            SELECT
+              COUNT(*) AS total_searches,
+              COUNT(*) FILTER (WHERE final_state LIKE %s)
+                AS saturated_searches,
+              COALESCE(SUM(pre_filter_skip_count), 0)
+                AS total_pre_filter_skips
+            FROM search_log
+            WHERE request_id = %s
+              AND created_at > NOW() - make_interval(days => %s)
+        """, ("%LimitReached%", request_id, int(window_days)))
+        row = cur.fetchone()
+        if row is None:
+            # Defensive — aggregate queries always return one row, but
+            # keep the type-checker happy and the helper total.
+            return SaturationSummary(
+                total_searches=0,
+                saturated_searches=0,
+                saturation_rate=0.0,
+                total_pre_filter_skips=0,
+                window_days=int(window_days),
+            )
+        total = int(row["total_searches"] or 0)
+        saturated = int(row["saturated_searches"] or 0)
+        rate = (saturated / total) if total > 0 else 0.0
+        return SaturationSummary(
+            total_searches=total,
+            saturated_searches=saturated,
+            saturation_rate=rate,
+            total_pre_filter_skips=int(row["total_pre_filter_skips"] or 0),
+            window_days=int(window_days),
+        )
 
     def get_legacy_search_log_summary(
         self, request_id: int, *, limit: int,

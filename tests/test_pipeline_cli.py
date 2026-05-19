@@ -2121,6 +2121,123 @@ class TestCmdSearchPlanDryRun(unittest.TestCase):
             payload["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
 
 
+class TestCmdSearchPlanSaturation(unittest.TestCase):
+    """U7: ``pipeline-cli search-plan saturation`` wraps
+    ``SearchPlanService.saturation_for_request``. Exit-code convention:
+    success = 0 (even when window is empty — found-but-quiet is still
+    success), request_not_found = 2, input_invalid = 3.
+    """
+
+    def _seed(self, *, rid: int = 1):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=rid, artist_name="Radiohead", album_title="Kid A",
+            source="request",
+        ))
+        return db, rid
+
+    def _run(self, db, rid, *, json_out: bool = False,
+             window_days: int | None = None):
+        args = SimpleNamespace(
+            id=rid, json=json_out, window_days=window_days)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_saturation(db, args)
+        return rc, stdout.getvalue()
+
+    def test_happy_path_prints_human_summary(self):
+        db, rid = self._seed()
+        for i in range(10):
+            final_state = (
+                "Completed, ResponseLimitReached" if i < 3
+                else "Completed")
+            db.log_search(request_id=rid, query=f"q{i}",
+                          outcome="found", final_state=final_state,
+                          pre_filter_skip_count=4)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Outcome:", out)
+        self.assertIn("success", out)
+        self.assertIn("Total searches:", out)
+        self.assertIn("10", out)
+        self.assertIn("Saturated searches:", out)
+        self.assertIn("Saturation rate:", out)
+        # Pre-filter skip total surfaces in human view.
+        self.assertIn("Pre-filter skips total:", out)
+        self.assertIn("40", out)
+
+    def test_json_returns_full_payload(self):
+        db, rid = self._seed()
+        db.log_search(request_id=rid, query="q",
+                      outcome="found",
+                      final_state="Completed, FileLimitReached",
+                      pre_filter_skip_count=3)
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        for key in ("request_id", "outcome", "total_searches",
+                    "saturated_searches", "saturation_rate",
+                    "total_pre_filter_skips", "window_days",
+                    "error_message"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["request_id"], rid)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertEqual(payload["total_searches"], 1)
+        self.assertEqual(payload["saturated_searches"], 1)
+        self.assertEqual(payload["saturation_rate"], 1.0)
+        self.assertEqual(payload["total_pre_filter_skips"], 3)
+        self.assertEqual(payload["window_days"], 14)
+
+    def test_empty_window_exits_0_with_zeros(self):
+        # Found-but-quiet — exit 0, all zeros, NOT 404.
+        db, rid = self._seed()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertEqual(payload["total_searches"], 0)
+        self.assertEqual(payload["saturation_rate"], 0.0)
+
+    def test_missing_request_returns_2(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_missing_request_json_is_structured(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999, json_out=True)
+        self.assertEqual(rc, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "request_not_found")
+        # All summary fields zero-filled so clients can read without
+        # branching on outcome.
+        self.assertEqual(payload["total_searches"], 0)
+        self.assertEqual(payload["saturation_rate"], 0.0)
+
+    def test_invalid_window_days_returns_3(self):
+        db, rid = self._seed()
+        rc, out = self._run(db, rid, window_days=0)
+        self.assertEqual(rc, 3)
+        self.assertIn("input_invalid", out)
+
+    def test_window_days_default_is_14(self):
+        db, rid = self._seed()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["window_days"], 14)
+
+
 class TestStaleCompletionRacingRegeneration(unittest.TestCase):
     """U8: a stale plan-A completion arriving after regeneration must
     log against plan A but never advance plan B's cursor. Integration

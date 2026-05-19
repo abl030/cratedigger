@@ -26,7 +26,7 @@ _PERTH_TZ = ZoneInfo("Australia/Perth")
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
-    from lib.pipeline_db import SearchLogHistoryPage
+    from lib.pipeline_db import SaturationSummary, SearchLogHistoryPage
 
 from lib.import_queue import (
     ImportJob,
@@ -3076,6 +3076,43 @@ class FakePipelineDB:
             assert isinstance(extra_id, int)
             next_before_id = extra_id
         return _Page(rows=rows, next_before_id=next_before_id)
+
+    def get_saturation_summary(
+        self, request_id: int, *, window_days: int = 14,
+    ) -> "SaturationSummary":
+        """U7 mirror of ``PipelineDB.get_saturation_summary``.
+
+        Replicates the SQL aggregate against ``self.search_logs``:
+        rows whose ``final_state`` contains ``LimitReached`` count as
+        saturated; ``pre_filter_skip_count`` is summed. The window cut
+        uses Python ``datetime`` arithmetic so tests can rewind
+        ``SearchLogRow.created_at`` deterministically.
+
+        ``saturation_rate`` is ``0.0`` (not NaN) when the window
+        contains no rows — same explicit fallback the real DB returns.
+        """
+        from lib.pipeline_db import SaturationSummary as _SatSummary
+        cutoff = _utcnow() - timedelta(days=int(window_days))
+        total = 0
+        saturated = 0
+        skips = 0
+        for entry in self.search_logs:
+            if entry.request_id != request_id:
+                continue
+            if entry.created_at <= cutoff:
+                continue
+            total += 1
+            if entry.final_state is not None and "LimitReached" in entry.final_state:
+                saturated += 1
+            skips += int(entry.pre_filter_skip_count or 0)
+        rate = (saturated / total) if total > 0 else 0.0
+        return _SatSummary(
+            total_searches=total,
+            saturated_searches=saturated,
+            saturation_rate=rate,
+            total_pre_filter_skips=skips,
+            window_days=int(window_days),
+        )
 
     def get_legacy_search_log_summary(
         self, request_id: int, *, limit: int,

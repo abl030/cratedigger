@@ -1476,6 +1476,137 @@ class TestSearchLog(unittest.TestCase):
 
 
 @requires_postgres
+class TestGetSaturationSummary(unittest.TestCase):
+    """U7: ``PipelineDB.get_saturation_summary`` aggregates one request's
+    search_log rows in the recent window. Saturation = rows whose
+    ``final_state`` matches ``%LimitReached%`` (slskd hit response /
+    file ceiling). ``total_pre_filter_skips`` rolls up the U2 column.
+
+    ``saturation_rate`` is computed in Python so the explicit ``0.0``
+    fallback survives the empty-window case (NaN would break JSON
+    serialisation downstream).
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="saturation-uuid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_empty_request_returns_zeros(self):
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 0)
+        self.assertEqual(summary.saturated_searches, 0)
+        # Critical invariant: 0.0, not NaN.
+        self.assertEqual(summary.saturation_rate, 0.0)
+        self.assertEqual(summary.total_pre_filter_skips, 0)
+        self.assertEqual(summary.window_days, 14)
+
+    def test_counts_only_saturated_final_states(self):
+        # Only rows whose final_state contains "LimitReached" count
+        # as saturated. The slskd state strings are comma-joined so
+        # the match must be a substring, not equality.
+        for state in (
+            "Completed, ResponseLimitReached",
+            "Completed, FileLimitReached",
+            "Completed",  # not saturated
+            "Cancelled",  # not saturated
+            None,         # not saturated
+        ):
+            self.db.log_search(
+                request_id=self.req_id, query="q", outcome="found",
+                final_state=state,
+            )
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 5)
+        self.assertEqual(summary.saturated_searches, 2)
+        self.assertAlmostEqual(summary.saturation_rate, 2 / 5)
+
+    def test_sums_pre_filter_skip_count(self):
+        for skip in (4, 1, 0, 8):
+            self.db.log_search(
+                request_id=self.req_id, query="q", outcome="found",
+                final_state="Completed", pre_filter_skip_count=skip,
+            )
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 4)
+        self.assertEqual(summary.saturated_searches, 0)
+        self.assertEqual(summary.total_pre_filter_skips, 13)
+
+    def test_window_days_filters_old_rows(self):
+        # Insert two recent rows, then backdate a third via direct SQL
+        # so we can test the window cut without sleeping.
+        self.db.log_search(
+            request_id=self.req_id, query="recent_a",
+            outcome="found",
+            final_state="Completed, ResponseLimitReached",
+            pre_filter_skip_count=2,
+        )
+        self.db.log_search(
+            request_id=self.req_id, query="recent_b",
+            outcome="found", final_state="Completed",
+            pre_filter_skip_count=1,
+        )
+        self.db.log_search(
+            request_id=self.req_id, query="old",
+            outcome="found",
+            final_state="Completed, FileLimitReached",
+            pre_filter_skip_count=10,
+        )
+        # Backdate the most recent row 10 days into the past.
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - INTERVAL '10 days' "
+            "WHERE query = %s",
+            ("old",),
+        )
+        # 7-day window: old row out, two recent rows in.
+        seven = self.db.get_saturation_summary(self.req_id, window_days=7)
+        self.assertEqual(seven.total_searches, 2)
+        self.assertEqual(seven.saturated_searches, 1)
+        self.assertEqual(seven.total_pre_filter_skips, 3)
+        self.assertEqual(seven.window_days, 7)
+        # 14-day window: all three rows are in scope.
+        fourteen = self.db.get_saturation_summary(
+            self.req_id, window_days=14)
+        self.assertEqual(fourteen.total_searches, 3)
+        self.assertEqual(fourteen.saturated_searches, 2)
+        self.assertEqual(fourteen.total_pre_filter_skips, 13)
+
+    def test_isolates_by_request_id(self):
+        # Rows for a different request must not bleed into this
+        # request's saturation roll-up.
+        other = self.db.add_request(
+            mb_release_id="other-uuid",
+            artist_name="X", album_title="Y", source="request",
+        )
+        self.db.log_search(
+            request_id=other, query="other",
+            outcome="found",
+            final_state="Completed, ResponseLimitReached",
+            pre_filter_skip_count=99,
+        )
+        self.db.log_search(
+            request_id=self.req_id, query="mine",
+            outcome="found", final_state="Completed",
+            pre_filter_skip_count=2,
+        )
+        summary = self.db.get_saturation_summary(self.req_id, window_days=14)
+        self.assertEqual(summary.total_searches, 1)
+        self.assertEqual(summary.saturated_searches, 0)
+        self.assertEqual(summary.total_pre_filter_skips, 2)
+
+    def test_window_days_echoes_back(self):
+        # The summary echoes window_days so callers don't have to
+        # remember what they asked for.
+        summary = self.db.get_saturation_summary(self.req_id, window_days=30)
+        self.assertEqual(summary.window_days, 30)
+
+
+@requires_postgres
 class TestGetSearchHistoryPage(unittest.TestCase):
     """U1: cursor-style pagination for ``GET /search-plan/history``.
 

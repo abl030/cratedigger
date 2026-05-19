@@ -37,6 +37,7 @@ from lib.config import CratediggerConfig
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_PLAN,
     PLAN_STATUS_ACTIVE,
+    SaturationSummary,
     SearchPlanItemInput,
 )
 from lib.release_snapshot import (
@@ -86,6 +87,17 @@ RESULT_HISTORY_PAGE_INPUT_INVALID = "input_invalid"
 # dry_run_for_request outcomes (U6 — read-only generator simulation).
 RESULT_DRY_RUN_SUCCESS = "success"
 RESULT_DRY_RUN_GENERATION_FAILED = "generation_failed"
+# saturation_for_request outcomes (U7 — read-only telemetry aggregate).
+RESULT_SATURATION_SUCCESS = "success"
+RESULT_SATURATION_INPUT_INVALID = "input_invalid"
+
+# Saturation telemetry window bounds (U7). Operators can ask for any
+# window in [1, 90] days; defaults to 14 days matching the brainstorm.
+# The CLI / route both clamp before calling the service so the DB layer
+# stays a thin adapter.
+SATURATION_WINDOW_MIN_DAYS = 1
+SATURATION_WINDOW_MAX_DAYS = 90
+SATURATION_WINDOW_DEFAULT_DAYS = 14
 
 # Bounds for the paginated history endpoint. The route handler and CLI
 # both consult these so the cap stays consistent across surfaces.
@@ -299,6 +311,37 @@ class DryRunResult:
     plan: SearchPlan | None = None
     snapshot: ReleaseSnapshot | None = None
     metadata_snapshot: dict[str, Any] | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class SaturationResult:
+    """Outcome of one ``saturation_for_request`` call (U7).
+
+    Read-only aggregator: wraps
+    :class:`lib.pipeline_db.SaturationSummary` with a service-layer
+    outcome string so the CLI / API surfaces can map onto the standard
+    exit-code / status-code convention without coupling to the DB
+    dataclass directly.
+
+    ``outcome`` is one of:
+      * ``RESULT_SATURATION_SUCCESS`` — request exists; ``summary`` is
+        populated (it may contain all-zero fields if the window has no
+        searches, which is a valid "found but quiet" state).
+      * ``RESULT_REQUEST_NOT_FOUND`` — no row for ``request_id`` in
+        ``album_requests``; ``summary`` is ``None``. We check the
+        request row separately from the aggregate so zeros from a real
+        request never collide with "request id doesn't exist at all".
+      * ``RESULT_SATURATION_INPUT_INVALID`` — ``window_days`` is out of
+        the supported ``[SATURATION_WINDOW_MIN_DAYS,
+        SATURATION_WINDOW_MAX_DAYS]`` range; ``error_message`` carries
+        the offending value.
+    """
+
+    outcome: str
+    request_id: int
+    window_days: int
+    summary: "SaturationSummary | None" = None
     error_message: str | None = None
 
 
@@ -650,6 +693,68 @@ class SearchPlanService:
             plan=plan,
             snapshot=snapshot,
             metadata_snapshot=metadata_snapshot,
+        )
+
+    def saturation_for_request(
+        self,
+        request_id: int,
+        *,
+        window_days: int = SATURATION_WINDOW_DEFAULT_DAYS,
+    ) -> "SaturationResult":
+        """U7 read-only telemetry aggregate over the request's search_log.
+
+        Wraps :meth:`PipelineDB.get_saturation_summary` with the
+        not-found semantics the operator surfaces expect:
+
+        * The request row is checked first. If it does not exist, the
+          outcome is ``RESULT_REQUEST_NOT_FOUND`` and the route /
+          CLI map that to 404 / exit 2.
+        * If the request exists but has no logged searches in window,
+          the outcome is ``RESULT_SATURATION_SUCCESS`` with all-zero
+          counts — a valid "found but quiet" state. We deliberately do
+          NOT collapse this onto 404; the operator asked "how saturated
+          is request X?" and the truthful answer is "not at all".
+        * ``window_days`` is validated against
+          ``[SATURATION_WINDOW_MIN_DAYS, SATURATION_WINDOW_MAX_DAYS]``;
+          out-of-range values return ``RESULT_SATURATION_INPUT_INVALID``
+          which CLI argparse normally prevents but the API surface
+          relies on for its 400 response.
+
+        Counterpart of ``pipeline-cli search-plan saturation <id>`` and
+        ``GET /api/pipeline/<id>/search-plan/saturation``. Both
+        surfaces wrap this method (see ``CLAUDE.md`` § "CLI ⇄ API
+        surface symmetry").
+        """
+        if (
+            window_days < SATURATION_WINDOW_MIN_DAYS
+            or window_days > SATURATION_WINDOW_MAX_DAYS
+        ):
+            return SaturationResult(
+                outcome=RESULT_SATURATION_INPUT_INVALID,
+                request_id=request_id,
+                window_days=int(window_days),
+                error_message=(
+                    f"window_days must be in "
+                    f"[{SATURATION_WINDOW_MIN_DAYS}, "
+                    f"{SATURATION_WINDOW_MAX_DAYS}]; got {window_days}"
+                ),
+            )
+        row = self.db.get_request(request_id)
+        if row is None:
+            return SaturationResult(
+                outcome=RESULT_REQUEST_NOT_FOUND,
+                request_id=request_id,
+                window_days=int(window_days),
+                error_message=f"request {request_id} not found",
+            )
+        summary = self.db.get_saturation_summary(
+            request_id, window_days=int(window_days),
+        )
+        return SaturationResult(
+            outcome=RESULT_SATURATION_SUCCESS,
+            request_id=request_id,
+            window_days=int(window_days),
+            summary=summary,
         )
 
     @staticmethod
@@ -1103,6 +1208,43 @@ def dry_run_payload(
         "request": request_payload,
         "plan": plan_payload,
         "would_supersede_active": bool(has_active_plan),
+        "error_message": result.error_message,
+    }
+
+
+def saturation_payload(result: "SaturationResult") -> dict[str, Any]:
+    """JSON-serialisable payload for U7 saturation CLI + API responses.
+
+    The wire shape is always the five summary fields at the top level
+    so a client can read ``data["saturation_rate"]`` directly without
+    branching on outcome. When the summary is missing (request not
+    found, invalid window) the counts are zero-filled and the
+    ``outcome`` field signals the failure mode. ``error_message`` is
+    populated on every non-success path. Single helper so the CLI
+    ``--json`` mode and the API endpoint emit the same dict tree (CLI
+    ⇄ API symmetry).
+    """
+    summary = result.summary
+    if summary is not None:
+        total = int(summary.total_searches)
+        saturated = int(summary.saturated_searches)
+        rate = float(summary.saturation_rate)
+        skips = int(summary.total_pre_filter_skips)
+        window = int(summary.window_days)
+    else:
+        total = 0
+        saturated = 0
+        rate = 0.0
+        skips = 0
+        window = int(result.window_days)
+    return {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "total_searches": total,
+        "saturated_searches": saturated,
+        "saturation_rate": rate,
+        "total_pre_filter_skips": skips,
+        "window_days": window,
         "error_message": result.error_message,
     }
 

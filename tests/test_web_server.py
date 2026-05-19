@@ -989,6 +989,7 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/pipeline/(\d+)$",
         r"^/api/pipeline/(\d+)/search-plan$",
         r"^/api/pipeline/(\d+)/search-plan/dry-run$",
+        r"^/api/pipeline/(\d+)/search-plan/saturation$",
         r"^/api/pipeline/(\d+)/search-plan/history$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
@@ -2317,6 +2318,150 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
         # The plan the simulator emits must be pinned to the same id.
         self.assertEqual(
             data["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
+
+
+class TestPipelineSearchPlanSaturationContract(_WebServerCase):
+    """U7 contract for ``GET /api/pipeline/<id>/search-plan/saturation``.
+
+    Read-only telemetry aggregator. The route wraps
+    ``SearchPlanService.saturation_for_request``; both this route and
+    ``pipeline-cli search-plan saturation`` go through the same
+    service method so input semantics + outcome mapping cannot drift.
+    The contract guarantees the payload shape consumed by the future
+    search-plan dashboard.
+    """
+
+    REQUIRED_FIELDS = {
+        "total_searches",
+        "saturated_searches",
+        "saturation_rate",
+        "total_pre_filter_skips",
+        "window_days",
+    }
+    FULL_REQUIRED_FIELDS = REQUIRED_FIELDS | {
+        "request_id", "outcome", "error_message",
+    }
+
+    def setUp(self) -> None:
+        from tests.helpers import make_request_row
+        # Production-shape mock: use real datetime + UUID values on the
+        # request row so the JSON encoder path is exercised end-to-end.
+        # The route does not consult timestamps directly, but the
+        # ``get_request`` call walks through the JSON encoder boundary
+        # if anything else does — keep the row shape honest.
+        import uuid
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="wanted",
+            artist_name="Radiohead", album_title="Kid A",
+            mb_release_id=str(uuid.uuid4()),
+        )
+        # Route reads runtime config — patch to a default config.
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+        # Default saturation summary — happy-path scenario.
+        from lib.pipeline_db import SaturationSummary
+        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
+            total_searches=30,
+            saturated_searches=10,
+            saturation_rate=10 / 30,
+            total_pre_filter_skips=50,
+            window_days=14,
+        )
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+        self.mock_db.get_saturation_summary.reset_mock(
+            return_value=True, side_effect=True)
+
+    def test_happy_path_returns_200_with_required_fields(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation")
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.FULL_REQUIRED_FIELDS, "saturation")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(data["outcome"], "success")
+        self.assertEqual(data["total_searches"], 30)
+        self.assertEqual(data["saturated_searches"], 10)
+        self.assertAlmostEqual(data["saturation_rate"], 10 / 30)
+        self.assertEqual(data["total_pre_filter_skips"], 50)
+        self.assertEqual(data["window_days"], 14)
+        self.assertIsNone(data["error_message"])
+
+    def test_empty_window_is_200_with_zeros_not_404(self):
+        # Found-but-quiet: request exists, window is just empty.
+        from lib.pipeline_db import SaturationSummary
+        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
+            total_searches=0, saturated_searches=0,
+            saturation_rate=0.0, total_pre_filter_skips=0,
+            window_days=14,
+        )
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "success")
+        # Crucial: rate is 0.0, NOT NaN — JSON parses cleanly.
+        self.assertEqual(data["saturation_rate"], 0.0)
+        self.assertEqual(data["total_searches"], 0)
+
+    def test_request_not_found_returns_404(self):
+        self.mock_db.get_request.return_value = None
+        status, data = self._get(
+            "/api/pipeline/9999/search-plan/saturation")
+        self.assertEqual(status, 404)
+        _assert_required_fields(
+            self, data, self.FULL_REQUIRED_FIELDS, "saturation 404")
+        self.assertEqual(data["outcome"], "request_not_found")
+        self.assertEqual(data["request_id"], 9999)
+        # All summary counts zero-filled — clients can read without
+        # branching on status code first.
+        self.assertEqual(data["total_searches"], 0)
+        self.assertEqual(data["saturation_rate"], 0.0)
+        self.assertIn("error", data)
+        # The DB aggregator must NOT be called when the request row
+        # itself is missing — wastes a query and risks misleading zeros.
+        self.mock_db.get_saturation_summary.assert_not_called()
+
+    def test_window_days_query_string_propagates_to_service(self):
+        from lib.pipeline_db import SaturationSummary
+        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
+            total_searches=5, saturated_searches=1,
+            saturation_rate=0.2, total_pre_filter_skips=3,
+            window_days=7,
+        )
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation?window_days=7")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["window_days"], 7)
+        # The aggregator was called with the requested window.
+        self.mock_db.get_saturation_summary.assert_called_with(
+            100, window_days=7)
+
+    def test_invalid_window_days_non_int_returns_400(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation?window_days=abc")
+        self.assertEqual(status, 400)
+
+    def test_invalid_window_days_out_of_range_returns_400(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation?window_days=0")
+        self.assertEqual(status, 400)
+        _assert_required_fields(
+            self, data, self.FULL_REQUIRED_FIELDS, "saturation 400")
+        self.assertEqual(data["outcome"], "input_invalid")
+
+    def test_default_window_is_14_when_omitted(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/saturation")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["window_days"], 14)
 
 
 class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
