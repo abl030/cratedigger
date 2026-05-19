@@ -695,6 +695,9 @@ import {
   renderTracklist,
   renderSourcePanel,
   formatLength,
+  pickBestDistance,
+  formatDistanceBadge,
+  runWithConcurrency,
   esc as replaceEsc,
 } from '../web/js/replace_picker.js';
 
@@ -818,6 +821,78 @@ assert(loadedPanel.includes('2:00'), 'renderSourcePanel renders track duration')
 
 const errorPanel = renderSourcePanel({ label: 'X', tracks: null, error: 'HTTP 500' });
 assert(errorPanel.includes('HTTP 500'), 'renderSourcePanel renders error message');
+
+// pickBestDistance — picks the lowest-distance ok result; null when none scored
+assertEqual(pickBestDistance([]), null, 'pickBestDistance [] → null');
+assertEqual(
+  pickBestDistance([
+    { outcome: 'fetch_failed' },
+    { outcome: 'wrong_release_group' },
+  ]),
+  null,
+  'pickBestDistance all-errors → null',
+);
+const best = pickBestDistance([
+  { outcome: 'ok', distance: 0.21, matched_tracks: 10, total_mb_tracks: 12 },
+  { outcome: 'ok', distance: 0.07, matched_tracks: 12, total_mb_tracks: 12 },
+  { outcome: 'no_audio' },
+]);
+assertEqual(best?.distance, 0.07, 'pickBestDistance picks lowest');
+assertEqual(best?.matched_tracks, 12, 'pickBestDistance carries metadata');
+
+// formatDistanceBadge — empty for null, formatted otherwise
+assertEqual(formatDistanceBadge(null), '', 'formatDistanceBadge null → empty');
+assertEqual(
+  formatDistanceBadge({ outcome: 'ok', distance: 0.0712,
+                         matched_tracks: 12, total_mb_tracks: 12 }),
+  'best 0.07 (12/12)',
+  'formatDistanceBadge ok result',
+);
+assertEqual(
+  formatDistanceBadge({ outcome: 'ok', distance: 0.42,
+                         matched_tracks: 8, total_mb_tracks: 12 }),
+  'best 0.42 (8/12)',
+  'formatDistanceBadge partial match',
+);
+assertEqual(
+  formatDistanceBadge({ outcome: 'ok', distance: 0.0 }),
+  'best 0.00',
+  'formatDistanceBadge no track-count metadata → distance only',
+);
+
+// runWithConcurrency — caps in-flight workers; preserves input order
+{
+  const order = [];
+  let inFlight = 0;
+  let peak = 0;
+  const items = [1, 2, 3, 4, 5, 6, 7, 8];
+  const results = await runWithConcurrency(items, 3, async (item) => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5 + Math.random() * 5));
+    inFlight--;
+    order.push(item);
+    return item * 10;
+  });
+  assertEqual(results.length, items.length,
+    'runWithConcurrency preserves count');
+  for (let i = 0; i < items.length; i++) {
+    assertEqual(results[i], items[i] * 10,
+      `runWithConcurrency preserves index ${i}`);
+  }
+  assert(peak <= 3,
+    `runWithConcurrency caps in-flight workers (peak=${peak})`);
+}
+{
+  // limit larger than item count — still completes correctly
+  const results = await runWithConcurrency([1, 2], 99, async (n) => n + 100);
+  assertEqual(results[0], 101, 'runWithConcurrency oversize limit ok [0]');
+  assertEqual(results[1], 102, 'runWithConcurrency oversize limit ok [1]');
+}
+{
+  // empty input — resolves immediately
+  const results = await runWithConcurrency([], 4, async () => 'never-called');
+  assertEqual(results.length, 0, 'runWithConcurrency [] → []');
+}
 
 assertEqual(replaceEsc('<script>'), '&lt;script&gt;', 'esc escapes <');
 assertEqual(replaceEsc('a&b'), 'a&amp;b', 'esc escapes &');
