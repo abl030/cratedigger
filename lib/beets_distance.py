@@ -46,6 +46,18 @@ from typing import Callable, Optional, Protocol, Sequence
 
 import msgspec
 
+# Eager beets imports. Lazy-loading was tempting (the module is heavy
+# and quality_evidence/measurement do the same), but a sibling
+# ``tests/test_web_server.py`` adds ``tests/../lib`` to sys.path early
+# in the test session, which then shadows the upstream ``beets``
+# package whenever we lazily ``from beets import library`` later. By
+# importing eagerly here we lock in the right module at this file's
+# load time, before any test fixture can prepend lib/ to sys.path.
+from beets import library as _beets_library  # noqa: E402
+from beets.autotag import distance as _beets_distance_mod  # noqa: E402
+from beets.autotag import hooks as _beets_hooks  # noqa: E402
+from beets.autotag import match as _beets_match_mod  # noqa: E402
+
 
 log = logging.getLogger(__name__)
 
@@ -188,10 +200,8 @@ def _fingerprint_file(path: str) -> Optional[_AudioFileFingerprint]:
     deliberately don't raise: a single corrupt sidecar file shouldn't
     fail the whole picker query.
     """
-    from beets import library
-
     try:
-        item = library.Item.from_path(path)
+        item = _beets_library.Item.from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
         log.warning("beets_distance: tag read failed for %s: %s", path, exc)
         return None
@@ -278,15 +288,13 @@ def _build_album_info(mb_release: dict, mbid: str):
     helpers skip the missing comparison (no penalty for unknowable
     fields — appropriate for picker-time triage).
     """
-    from beets.autotag import hooks
-
     tracks = []
     artist_name = mb_release.get("artist_name") or ""
     artist_id = mb_release.get("artist_id")
     for t in mb_release.get("tracks") or []:
         # MB pre-gap tracks ride as track_number=0; beets'
         # ``assign_items`` is fine with that.
-        tracks.append(hooks.TrackInfo(
+        tracks.append(_beets_hooks.TrackInfo(
             title=t.get("title") or "",
             track_id=None,
             artist=artist_name,
@@ -299,7 +307,7 @@ def _build_album_info(mb_release: dict, mbid: str):
 
     year = mb_release.get("year")
     rg_id = mb_release.get("release_group_id")
-    return hooks.AlbumInfo(
+    return _beets_hooks.AlbumInfo(
         tracks=tracks,
         album=mb_release.get("title") or "",
         album_id=mbid,
@@ -320,11 +328,9 @@ def _build_items(fingerprints: Sequence[_AudioFileFingerprint]):
     fingerprint cache — beets ``library.Item`` is a dict-like, so we
     just splat the fields in and skip the MediaFile roundtrip.
     """
-    from beets import library
-
     items = []
     for fp in fingerprints:
-        item = library.Item(
+        item = _beets_library.Item(
             path=fp.path.encode("utf-8"),
             title=fp.title,
             artist=fp.artist,
@@ -497,13 +503,11 @@ def compute_beets_distance(
 
     # 8. Hand to beets for the actual distance compute.
     try:
-        from beets.autotag import distance as distance_mod
-        from beets.autotag import match as match_mod
-
         album_info = _build_album_info(mb_release, mbid)
         items = _build_items(fingerprints)
-        mapping, extra_items, extra_tracks = match_mod.assign_items(items, album_info.tracks)
-        dist = distance_mod.distance(items, album_info, mapping)
+        mapping, extra_items, extra_tracks = _beets_match_mod.assign_items(
+            items, album_info.tracks)
+        dist = _beets_distance_mod.distance(items, album_info, mapping)
     except Exception as exc:  # noqa: BLE001 — beets bugs shouldn't 500 us
         return _result(
             "distance_failed",

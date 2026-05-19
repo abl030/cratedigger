@@ -2188,6 +2188,92 @@ class TestCmdReplace(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class TestCmdBeetsDistance(unittest.TestCase):
+    """``pipeline-cli beets-distance`` wraps
+    ``lib.beets_distance.compute_beets_distance``. Counterpart of
+    ``GET /api/beets-distance/<download_log_id>/<mbid>``. Service-layer
+    correctness lives in ``tests.test_beets_distance``; here we pin the
+    exit-code mapping per the CLI ⇄ API symmetry rule."""
+
+    UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def _run(self, *, outcome, json_out=False, **result_kwargs):
+        from lib.beets_distance import BeetsDistanceResult
+        result = BeetsDistanceResult(outcome=outcome, **result_kwargs)
+        args = SimpleNamespace(
+            download_log_id=100, mbid=self.UUID, json=json_out,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch(
+                "lib.beets_distance.compute_beets_distance",
+                return_value=result,
+            ):
+                rc = pipeline_cli.cmd_beets_distance(MagicMock(), args)
+        return rc, stdout.getvalue()
+
+    def test_exit_0_on_ok(self):
+        rc, out = self._run(
+            outcome="ok",
+            distance=0.07,
+            matched_tracks=12,
+            total_local_tracks=12,
+            total_mb_tracks=12,
+            duration_ms=8,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("0.0700", out)
+        self.assertIn("12 / 12", out)
+
+    def test_exit_2_on_not_found_branches(self):
+        for outcome in ("download_log_not_found", "request_not_found"):
+            with self.subTest(outcome=outcome):
+                rc, _ = self._run(outcome=outcome,
+                                  error_message="not found")
+                self.assertEqual(rc, 2)
+
+    def test_exit_3_on_semantic_violations(self):
+        """Cross-RG guardrail + missing-RG both surface as exit 3."""
+        for outcome in ("wrong_release_group", "mb_no_release_group"):
+            with self.subTest(outcome=outcome):
+                rc, _ = self._run(outcome=outcome,
+                                  error_message="bad MBID")
+                self.assertEqual(rc, 3)
+
+    def test_exit_4_on_missing_artifacts(self):
+        for outcome in ("folder_missing", "no_audio"):
+            with self.subTest(outcome=outcome):
+                rc, _ = self._run(outcome=outcome,
+                                  error_message="gone")
+                self.assertEqual(rc, 4)
+
+    def test_exit_5_on_transient(self):
+        rc, _ = self._run(outcome="mb_lookup_failed",
+                          error_message="MB mirror down")
+        self.assertEqual(rc, 5)
+
+    def test_exit_1_on_distance_failed(self):
+        rc, _ = self._run(outcome="distance_failed",
+                          error_message="beets blew up")
+        self.assertEqual(rc, 1)
+
+    def test_json_output_carries_full_payload(self):
+        rc, out = self._run(
+            outcome="ok",
+            distance=0.07,
+            matched_tracks=12,
+            total_local_tracks=12,
+            total_mb_tracks=12,
+            components={"album": 0.0, "artist": 0.05},
+            json_out=True,
+        )
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "ok")
+        self.assertAlmostEqual(payload["distance"], 0.07, places=4)
+        self.assertEqual(payload["components"]["album"], 0.0)
+
+
 class TestCmdSearchPlanHistory(unittest.TestCase):
     """``pipeline-cli search-plan history`` wraps
     ``SearchPlanService.history_for_request``. Counterpart of the API
