@@ -230,9 +230,22 @@
   .p-history { margin-top: 8px; }
   .p-hist-item { font-size: 0.75em; color: #777; padding: 6px 0; border-bottom: 1px solid #222; }
   .p-hist-header { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; }
-  .p-hist-row { color: #888; padding: 1px 0 1px 8px; font-size: 0.95em; }
-  .p-hist-label { color: #666; display: inline-block; min-width: 80px; }
+  .p-hist-grid {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+    column-gap: 12px;
+    row-gap: 2px;
+    padding: 2px 0 2px 8px;
+    font-size: 0.95em;
+  }
+  .p-hist-grid > .p-hist-label { color: #666; }
+  .p-hist-grid > .p-hist-value { color: #888; overflow-wrap: anywhere; }
+  .p-hist-label { color: #666; }
+  .p-hist-value { color: #888; }
   .p-hist-verdict { color: #bbb; padding: 2px 0 0 8px; font-size: 0.95em; }
+  @media (max-width: 600px) {
+    .p-hist-grid { grid-template-columns: max-content minmax(0, 1fr); }
+  }
   .p-actions { display: flex; gap: 6px; margin-top: 8px; }
   /* Manual-reason chip — small inline tag near the request title or status.
      Currently used for `search_exhausted` (red/amber) flips written by the

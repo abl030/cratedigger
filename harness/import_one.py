@@ -1304,10 +1304,10 @@ def _run_quality_evidence_authorized_import(
             snapshot_status=payload.provenance.snapshot_status,
             fallback_reason=payload.provenance.fallback_reason,
         )
-        from lib.quality_evidence import lossless_source_v0_probe_from_metric
-        r.v0_probe = lossless_source_v0_probe_from_metric(
+        from lib.quality_evidence import audit_v0_probe_from_metric
+        r.v0_probe = audit_v0_probe_from_metric(
             payload.candidate.v0_metric)
-        r.existing_v0_probe = lossless_source_v0_probe_from_metric(
+        r.existing_v0_probe = audit_v0_probe_from_metric(
             payload.current.v0_metric
             if payload.current is not None else None)
 

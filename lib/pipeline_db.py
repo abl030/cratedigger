@@ -3014,8 +3014,22 @@ class PipelineDB:
             ON e.id = dl.candidate_evidence_id
     """
 
-    @staticmethod
-    def _overlay_evidence_onto_download_log_row(row: dict[str, Any]) -> dict[str, Any]:
+    # Evidence stores lineage as ``lossless_source`` / ``native_lossy_research``;
+    # download_log.v0_probe_kind stores the wire-shaped kind
+    # ``lossless_source_v0`` / ``native_lossy_research_v0`` (constrained by
+    # migration 007). When we overlay evidence lineage into the kind slot, we
+    # have to translate, or the renderer (history.js::formatV0Probe) won't
+    # recognize the value and will fall through to the raw-kind branch.
+    _EVIDENCE_LINEAGE_TO_PROBE_KIND = {
+        "lossless_source":       "lossless_source_v0",
+        "native_lossy_research": "native_lossy_research_v0",
+        "on_disk_research":      "on_disk_research_v0",
+    }
+
+    @classmethod
+    def _overlay_evidence_onto_download_log_row(
+        cls, row: dict[str, Any]
+    ) -> dict[str, Any]:
         for legacy, overlay in (
             ("spectral_grade",       "_evidence_spectral_grade"),
             ("spectral_bitrate",     "_evidence_spectral_bitrate"),
@@ -3024,6 +3038,10 @@ class PipelineDB:
         ):
             evidence_value = row.pop(overlay, None)
             if row.get(legacy) is None and evidence_value is not None:
+                if legacy == "v0_probe_kind":
+                    evidence_value = cls._EVIDENCE_LINEAGE_TO_PROBE_KIND.get(
+                        evidence_value, evidence_value
+                    )
                 row[legacy] = evidence_value
         return row
 

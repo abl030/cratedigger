@@ -25,7 +25,7 @@ from lib.quality_evidence import (
     audio_snapshot_matches,
     legacy_current_lossless_v0_probe_from_request,
     load_or_backfill_current_evidence,
-    lossless_source_v0_probe_from_metric,
+    audit_v0_probe_from_metric,
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
     snapshot_audio_files,
@@ -615,7 +615,7 @@ def _preview_import_from_path_worker_mode(
             existing_grade = current_m.spectral_grade
             existing_bitrate = current_m.spectral_bitrate_kbps
             if current_evidence.v0_metric is not None:
-                existing_v0_probe = lossless_source_v0_probe_from_metric(
+                existing_v0_probe = audit_v0_probe_from_metric(
                     current_evidence.v0_metric
                 )
         override_min_bitrate = compute_effective_override_bitrate(
@@ -1134,7 +1134,7 @@ def preview_import_from_path(
 
         existing_v0_probe = legacy_current_lossless_v0_probe_from_request(req)
         if current_evidence is not None and current_evidence.v0_metric is not None:
-            existing_v0_probe = lossless_source_v0_probe_from_metric(
+            existing_v0_probe = audit_v0_probe_from_metric(
                 current_evidence.v0_metric
             )
 

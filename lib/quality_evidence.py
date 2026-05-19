@@ -291,17 +291,66 @@ def neutral_v0_metric_from_probe(
     )
 
 
-def lossless_source_v0_probe_from_metric(
+def neutral_v0_metric_from_measurement(
+    measurement: AudioQualityMeasurement | None,
+) -> AlbumQualityV0Metric | None:
+    """Fallback v0_metric for candidates without a lossless-source probe.
+
+    Lossy sources (MP3 V0, CBR 320, Opus 128, ...) never produce a
+    comparable lossless-source V0 probe, but every download_log row should
+    still carry the candidate's bitrate signature so audit and UI surfaces
+    can render a "what did we download" row without special-casing source
+    lineage. The fallback uses ``new_measurement.{min,avg,median}_bitrate_kbps``
+    and tags ``source_lineage=native_lossy_research`` to make the
+    provenance unambiguous — policy code that needs a *comparable* probe
+    still gates on ``is_comparable_lossless_source_probe`` (which filters
+    by ``kind == lossless_source_v0``), so this never widens decision input.
+    """
+
+    if measurement is None:
+        return None
+    min_kbps = measurement.min_bitrate_kbps
+    avg_kbps = measurement.avg_bitrate_kbps
+    median_kbps = measurement.median_bitrate_kbps
+    if min_kbps is None and avg_kbps is None and median_kbps is None:
+        return None
+    return AlbumQualityV0Metric(
+        min_bitrate_kbps=min_kbps,
+        avg_bitrate_kbps=avg_kbps,
+        median_bitrate_kbps=median_kbps,
+        source_lineage=V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
+        source_provenance="new_measurement_fallback",
+        proof_provenance=None,
+    )
+
+
+def audit_v0_probe_from_metric(
     metric: AlbumQualityV0Metric | None,
 ) -> V0ProbeEvidence | None:
-    if (
-        metric is None
-        or metric.source_lineage != V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
-        or metric.avg_bitrate_kbps is None
-    ):
+    """Build ``V0ProbeEvidence`` from a persisted v0_metric for audit/log use.
+
+    Returns a probe for *any* metric with ``kind`` reflecting source lineage
+    (``lossless_source_v0`` for true lossless-container probes;
+    ``neutral_v0_research`` otherwise). Policy code that needs a comparable
+    probe must keep filtering via :func:`is_comparable_lossless_source_probe`
+    — this helper exists so audit/UI surfaces can read a probe from *every*
+    download, including non-lossless candidates whose v0_metric was derived
+    from :func:`neutral_v0_metric_from_measurement`.
+    """
+
+    if metric is None:
         return None
+    # download_log.v0_probe_kind CHECK constraint (migration 007) only
+    # accepts the three persisted kinds. ``neutral_v0_research`` is an
+    # in-memory marker used inside ``full_pipeline_decision_from_evidence``
+    # to mean "non-comparable" and must never be written to the DB.
+    kind = (
+        V0_PROBE_LOSSLESS_SOURCE
+        if metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        else V0_PROBE_NATIVE_LOSSY_RESEARCH
+    )
     return V0ProbeEvidence(
-        kind=V0_PROBE_LOSSLESS_SOURCE,
+        kind=kind,
         min_bitrate_kbps=metric.min_bitrate_kbps,
         avg_bitrate_kbps=metric.avg_bitrate_kbps,
         median_bitrate_kbps=metric.median_bitrate_kbps,
@@ -524,7 +573,10 @@ def evidence_from_import_result(
         container=files[0].container,
         storage_format=audio_measurement.format,
         target_format=target_format,
-        v0_metric=neutral_v0_metric_from_probe(import_result.v0_probe),
+        v0_metric=(
+            neutral_v0_metric_from_probe(import_result.v0_probe)
+            or neutral_v0_metric_from_measurement(audio_measurement)
+        ),
         verified_lossless_proof=proof,
         audio_corrupt=audio_corrupt,
         folder_layout=folder_layout,

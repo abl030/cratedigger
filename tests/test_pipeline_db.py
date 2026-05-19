@@ -4286,11 +4286,15 @@ class TestGetWrongMatches(unittest.TestCase):
         self.db.set_download_log_candidate_evidence(log_id, persisted.id)
 
         # All three reader seams must overlay evidence onto the row.
+        # The overlay translates the evidence lineage label
+        # (``lossless_source``) into the download_log probe-kind wire shape
+        # (``lossless_source_v0``) so the frontend renderer's kind-aware
+        # branches match.
         entry = self.db.get_download_log_entry(log_id)
         assert entry is not None
         self.assertEqual(entry["spectral_grade"], "suspect")
         self.assertEqual(entry["spectral_bitrate"], 18)
-        self.assertEqual(entry["v0_probe_kind"], "lossless_source")
+        self.assertEqual(entry["v0_probe_kind"], "lossless_source_v0")
         self.assertEqual(entry["v0_probe_avg_bitrate"], 245)
 
         history = self.db.get_download_history(self.req1)
@@ -4300,7 +4304,7 @@ class TestGetWrongMatches(unittest.TestCase):
 
         batch = self.db.get_download_history_batch([self.req1])
         self.assertEqual(batch[self.req1][0]["spectral_grade"], "suspect")
-        self.assertEqual(batch[self.req1][0]["v0_probe_kind"], "lossless_source")
+        self.assertEqual(batch[self.req1][0]["v0_probe_kind"], "lossless_source_v0")
 
     def test_download_history_keeps_explicit_denorm_when_evidence_missing(self):
         """Legacy rows without an evidence FK fall back to denorm columns.

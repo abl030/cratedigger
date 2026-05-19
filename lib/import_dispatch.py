@@ -36,9 +36,9 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          override_bitrate_from_current_evidence,
                          rejection_backfill_override)
 from lib.quality_evidence import (
+    audit_v0_probe_from_metric,
     backfill_current_evidence_from_album_info,
     legacy_current_lossless_v0_probe_from_request,
-    lossless_source_v0_probe_from_metric,
     propagate_candidate_evidence_to_current,
     verified_lossless_proof_from_import_result,
 )
@@ -341,7 +341,7 @@ def _download_info_from_candidate_evidence(
             measurement.spectral_grade,
             measurement.spectral_bitrate_kbps,
         ),
-        v0_probe=lossless_source_v0_probe_from_metric(candidate.v0_metric),
+        v0_probe=audit_v0_probe_from_metric(candidate.v0_metric),
     )
 
 
@@ -1544,7 +1544,7 @@ def dispatch_import_core(
                 prevalidated_candidate_result=prevalidated_candidate_result,
                 beets_library_root=getattr(cfg, "beets_directory", "") if cfg is not None else "",
             )
-            existing_v0_probe = lossless_source_v0_probe_from_metric(
+            existing_v0_probe = audit_v0_probe_from_metric(
                 evidence_gate.current.v0_metric
                 if evidence_gate.current is not None
                 else None
@@ -1629,7 +1629,7 @@ def dispatch_import_core(
                             if evidence_gate.current is not None
                             else None
                         ),
-                        v0_probe=lossless_source_v0_probe_from_metric(
+                        v0_probe=audit_v0_probe_from_metric(
                             evidence_gate.candidate.v0_metric
                         ),
                         existing_v0_probe=existing_v0_probe,

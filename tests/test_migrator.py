@@ -1412,5 +1412,288 @@ class TestReplaceSupersedeSchema(unittest.TestCase):
         self.assertEqual(rows, [])
 
 
+class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
+    """Migration 024 backfills v0_metric on album_quality_evidence and
+    v0_probe_* columns on download_log from the row's own
+    ``import_result.new_measurement`` JSONB. Without it, every non-lossless
+    candidate (MP3 V0, Opus, CBR 320) had NULL V0 probe fields and the
+    audit/UI surface showed a blank "V0 probe" row.
+
+    Validates:
+    - schema_migrations records 024
+    - the backfill UPDATE fills NULL v0_* fields on evidence rows that have
+      a linked download_log with ``import_result.new_measurement``
+    - the backfill UPDATE fills NULL v0_probe_* columns on download_log
+      rows whose own JSONB carries ``new_measurement``
+    - rows that already have v0_metric / v0_probe_* set are left untouched
+    """
+
+    _BACKFILL_EVIDENCE_SQL = """
+        WITH evidence_measurements AS (
+            SELECT
+                dl.candidate_evidence_id                                                AS evidence_id,
+                ((dl.import_result -> 'new_measurement') ->> 'min_bitrate_kbps')::int   AS min_kbps,
+                ((dl.import_result -> 'new_measurement') ->> 'avg_bitrate_kbps')::int   AS avg_kbps,
+                ((dl.import_result -> 'new_measurement') ->> 'median_bitrate_kbps')::int AS median_kbps,
+                ROW_NUMBER() OVER (
+                    PARTITION BY dl.candidate_evidence_id
+                    ORDER BY dl.id DESC
+                ) AS rn
+            FROM download_log dl
+            WHERE dl.candidate_evidence_id IS NOT NULL
+              AND dl.import_result IS NOT NULL
+              AND dl.import_result -> 'new_measurement' IS NOT NULL
+        )
+        UPDATE album_quality_evidence e
+        SET v0_min_bitrate_kbps    = m.min_kbps,
+            v0_avg_bitrate_kbps    = m.avg_kbps,
+            v0_median_bitrate_kbps = m.median_kbps,
+            v0_source_lineage      = 'native_lossy_research',
+            v0_source_provenance   = 'new_measurement_fallback',
+            updated_at             = NOW()
+        FROM evidence_measurements m
+        WHERE e.id = m.evidence_id
+          AND m.rn = 1
+          AND e.v0_min_bitrate_kbps    IS NULL
+          AND e.v0_avg_bitrate_kbps    IS NULL
+          AND e.v0_median_bitrate_kbps IS NULL
+          AND e.v0_source_lineage      IS NULL
+          AND e.v0_source_provenance   IS NULL
+          AND e.v0_proof_provenance    IS NULL
+          AND (m.min_kbps IS NOT NULL OR m.avg_kbps IS NOT NULL OR m.median_kbps IS NOT NULL)
+    """
+
+    _BACKFILL_DOWNLOAD_LOG_SQL = """
+        UPDATE download_log dl
+        SET v0_probe_kind            = 'native_lossy_research_v0',
+            v0_probe_min_bitrate     = ((dl.import_result -> 'new_measurement') ->> 'min_bitrate_kbps')::int,
+            v0_probe_avg_bitrate     = ((dl.import_result -> 'new_measurement') ->> 'avg_bitrate_kbps')::int,
+            v0_probe_median_bitrate  = ((dl.import_result -> 'new_measurement') ->> 'median_bitrate_kbps')::int
+        WHERE dl.v0_probe_kind IS NULL
+          AND dl.import_result IS NOT NULL
+          AND dl.import_result -> 'new_measurement' IS NOT NULL
+          AND (
+                ((dl.import_result -> 'new_measurement') ->> 'min_bitrate_kbps')    IS NOT NULL
+             OR ((dl.import_result -> 'new_measurement') ->> 'avg_bitrate_kbps')    IS NOT NULL
+             OR ((dl.import_result -> 'new_measurement') ->> 'median_bitrate_kbps') IS NOT NULL
+          )
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def _make_evidence(self, mbid: str, fingerprint: str) -> int:
+        self._exec("""
+            INSERT INTO album_quality_evidence (
+                mb_release_id, snapshot_fingerprint, source_path,
+                measured_at, format, verified_lossless
+            ) VALUES (
+                %s, %s, '/tmp/test', NOW(), 'mp3 v0', FALSE
+            )
+            ON CONFLICT (mb_release_id, snapshot_fingerprint) DO NOTHING
+        """, (mbid, fingerprint))
+        return self._query(
+            """
+            SELECT id FROM album_quality_evidence
+            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
+            """,
+            (mbid, fingerprint),
+        )[0][0]
+
+    def _make_download_log(
+        self,
+        request_id: int,
+        evidence_id: int | None,
+        import_result_json: str | None,
+    ) -> int:
+        self._exec(
+            """
+            INSERT INTO download_log (
+                request_id, candidate_evidence_id, outcome,
+                soulseek_username, import_result
+            ) VALUES (%s, %s, 'rejected', 'tester', %s::jsonb)
+            """,
+            (request_id, evidence_id, import_result_json),
+        )
+        return self._query(
+            "SELECT MAX(id) FROM download_log WHERE request_id = %s",
+            (request_id,),
+        )[0][0]
+
+    def _cleanup_request(self, rid: int) -> None:
+        self._exec(
+            "DELETE FROM download_log WHERE request_id = %s",
+            (rid,),
+        )
+        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def _cleanup_evidence(self, eid: int) -> None:
+        self._exec(
+            "DELETE FROM album_quality_evidence WHERE id = %s", (eid,)
+        )
+
+    def test_schema_migrations_records_024(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 24"
+        )
+        self.assertEqual(rows, [(24,)])
+
+    def test_backfill_fills_null_evidence_v0_metric_from_jsonb_measurement(self):
+        rid = self._make_request("mig024-evidence-mbid")
+        eid = self._make_evidence("mig024-evidence-mbid", "fp-evidence")
+        ir = (
+            '{"decision":"transcode_downgrade",'
+            '"new_measurement":{"min_bitrate_kbps":237,'
+            '"avg_bitrate_kbps":247,"median_bitrate_kbps":246,"format":"mp3 v0"}}'
+        )
+        dlid = self._make_download_log(rid, eid, ir)
+        try:
+            self._exec(self._BACKFILL_EVIDENCE_SQL)
+            rows = self._query(
+                """
+                SELECT v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
+                       v0_median_bitrate_kbps, v0_source_lineage,
+                       v0_source_provenance
+                FROM album_quality_evidence WHERE id = %s
+                """,
+                (eid,),
+            )
+            self.assertEqual(
+                rows[0],
+                (237, 247, 246, "native_lossy_research", "new_measurement_fallback"),
+            )
+        finally:
+            self._exec("DELETE FROM download_log WHERE id = %s", (dlid,))
+            self._cleanup_evidence(eid)
+            self._cleanup_request(rid)
+
+    def test_backfill_leaves_already_populated_evidence_untouched(self):
+        rid = self._make_request("mig024-already-mbid")
+        eid = self._make_evidence("mig024-already-mbid", "fp-already")
+        # Seed an existing v0_metric on the evidence row (lossless source).
+        self._exec(
+            """
+            UPDATE album_quality_evidence
+            SET v0_min_bitrate_kbps = 250,
+                v0_avg_bitrate_kbps = 260,
+                v0_median_bitrate_kbps = 258,
+                v0_source_lineage = 'lossless_source',
+                v0_source_provenance = 'lossless_source_v0'
+            WHERE id = %s
+            """,
+            (eid,),
+        )
+        ir = (
+            '{"decision":"import",'
+            '"new_measurement":{"min_bitrate_kbps":900,'
+            '"avg_bitrate_kbps":900,"median_bitrate_kbps":900,"format":"mp3 v0"}}'
+        )
+        dlid = self._make_download_log(rid, eid, ir)
+        try:
+            self._exec(self._BACKFILL_EVIDENCE_SQL)
+            rows = self._query(
+                """
+                SELECT v0_avg_bitrate_kbps, v0_source_lineage
+                FROM album_quality_evidence WHERE id = %s
+                """,
+                (eid,),
+            )
+            # Backfill must NOT overwrite the lossless probe with the
+            # synthetic 900-kbps measurement value.
+            self.assertEqual(rows[0], (260, "lossless_source"))
+        finally:
+            self._exec("DELETE FROM download_log WHERE id = %s", (dlid,))
+            self._cleanup_evidence(eid)
+            self._cleanup_request(rid)
+
+    def test_backfill_fills_null_download_log_v0_probe_from_own_jsonb(self):
+        rid = self._make_request("mig024-dl-mbid")
+        ir = (
+            '{"decision":"transcode_downgrade",'
+            '"new_measurement":{"min_bitrate_kbps":192,'
+            '"avg_bitrate_kbps":215,"median_bitrate_kbps":213,"format":"mp3 v0"}}'
+        )
+        # No candidate_evidence_id — covers the pre-rekey audit-history case.
+        dlid = self._make_download_log(rid, None, ir)
+        try:
+            self._exec(self._BACKFILL_DOWNLOAD_LOG_SQL)
+            rows = self._query(
+                """
+                SELECT v0_probe_kind, v0_probe_min_bitrate,
+                       v0_probe_avg_bitrate, v0_probe_median_bitrate
+                FROM download_log WHERE id = %s
+                """,
+                (dlid,),
+            )
+            self.assertEqual(
+                rows[0],
+                ("native_lossy_research_v0", 192, 215, 213),
+            )
+        finally:
+            self._exec("DELETE FROM download_log WHERE id = %s", (dlid,))
+            self._cleanup_request(rid)
+
+    def test_backfill_leaves_already_populated_download_log_untouched(self):
+        rid = self._make_request("mig024-dl-already-mbid")
+        ir = (
+            '{"decision":"import",'
+            '"new_measurement":{"min_bitrate_kbps":900,'
+            '"avg_bitrate_kbps":900,"median_bitrate_kbps":900,"format":"mp3 v0"}}'
+        )
+        dlid = self._make_download_log(rid, None, ir)
+        # Seed a real lossless probe on the row.
+        self._exec(
+            """
+            UPDATE download_log
+            SET v0_probe_kind = 'lossless_source_v0',
+                v0_probe_min_bitrate = 250,
+                v0_probe_avg_bitrate = 260,
+                v0_probe_median_bitrate = 258
+            WHERE id = %s
+            """,
+            (dlid,),
+        )
+        try:
+            self._exec(self._BACKFILL_DOWNLOAD_LOG_SQL)
+            rows = self._query(
+                """
+                SELECT v0_probe_kind, v0_probe_avg_bitrate
+                FROM download_log WHERE id = %s
+                """,
+                (dlid,),
+            )
+            self.assertEqual(rows[0], ("lossless_source_v0", 260))
+        finally:
+            self._exec("DELETE FROM download_log WHERE id = %s", (dlid,))
+            self._cleanup_request(rid)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,42 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         assert result.evidence.v0_metric is not None
         self.assertEqual(result.evidence.v0_metric.source_lineage, "lossless_source")
 
+    def test_non_lossless_candidate_evidence_carries_v0_metric_from_measurement(self):
+        """Non-lossless candidate evidence still records a v0_metric so the
+        audit/UI surface can show every download's bitrate. Backed by
+        ``import_result.new_measurement`` min/avg/median when no
+        lossless-source V0 probe exists.
+        """
+        result = evidence_from_import_result(
+            mb_release_id="mb-mp3-1",
+            source_path=self.root,
+            import_result=ImportResult(
+                decision="import",
+                new_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=237,
+                    avg_bitrate_kbps=247,
+                    median_bitrate_kbps=246,
+                    format="mp3 v0",
+                ),
+                # No v0_probe — the candidate isn't a lossless container,
+                # so there is no comparable lossless-source probe to record.
+            ),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        assert result.evidence.v0_metric is not None, (
+            "Non-lossless candidate must carry a v0_metric derived from "
+            "new_measurement so the audit/UI surface always has a row."
+        )
+        self.assertEqual(
+            result.evidence.v0_metric.source_lineage,
+            "native_lossy_research",
+        )
+        self.assertEqual(result.evidence.v0_metric.min_bitrate_kbps, 237)
+        self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 247)
+        self.assertEqual(result.evidence.v0_metric.median_bitrate_kbps, 246)
+
     def test_empty_fileset_is_explicit_outcome(self):
         empty = tempfile.mkdtemp()
         try:

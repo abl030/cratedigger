@@ -2,7 +2,38 @@
 import { awstDateTime, esc } from './util.js';
 
 /**
- * Render a single download history item.
+ * Render a single V0 probe value with its provenance suffix.
+ *
+ * - ``lossless_source_v0`` is the gold standard — render bare ("260kbps avg"),
+ *   the source proof itself is the message.
+ * - ``native_lossy_research_v0`` means "we measured the candidate's avg
+ *   bitrate, but it's not a comparable lossless-source probe" — render
+ *   "(measurement)" so the reader doesn't misread it as an upgrade signal.
+ * - Anything else falls back to showing the raw kind so debug rows are
+ *   still legible.
+ * @param {number|string} avg
+ * @param {string|undefined} kind
+ * @returns {string}
+ */
+function formatV0Probe(avg, kind) {
+  const base = `${esc(avg)}kbps avg`;
+  if (!kind || kind === 'lossless_source_v0') {
+    return base;
+  }
+  if (kind === 'native_lossy_research_v0') {
+    return `${base} (measurement)`;
+  }
+  return `${base} (${esc(kind)})`;
+}
+
+/**
+ * Render a single download history item as a 2-column label/value grid.
+ *
+ * Every download (lossless source, MP3 V0, CBR 320, ...) produces the same
+ * shape of row. Fields that have no value for a particular entry are simply
+ * omitted from the grid; the renderer never invents placeholders, but the
+ * V0 probe row is expected to be present on every row after migration 024
+ * backfills legacy NULLs.
  * @param {Object} h - Download history entry from the API
  * @returns {string} HTML string
  */
@@ -42,8 +73,7 @@ export function renderDownloadHistoryItem(h) {
   }
 
   if (h.v0_probe_avg_bitrate) {
-    const kind = h.v0_probe_kind ? ` (${esc(h.v0_probe_kind)})` : '';
-    rows.push(['Source V0 probe', `${esc(h.v0_probe_avg_bitrate)}kbps avg${kind}`]);
+    rows.push(['V0 probe', formatV0Probe(h.v0_probe_avg_bitrate, h.v0_probe_kind)]);
   }
 
   const existingBitrates = [];
@@ -105,8 +135,12 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Stages', esc(triageStages.join(' · '))]);
   }
 
-  for (const [label, value] of rows) {
-    html += `<div class="p-hist-row"><span class="p-hist-label">${label}</span> ${value}</div>`;
+  if (rows.length > 0) {
+    html += '<div class="p-hist-grid">';
+    for (const [label, value] of rows) {
+      html += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
+    }
+    html += '</div>';
   }
 
   const verdict = h.verdict || h.beets_scenario || '';
@@ -116,3 +150,7 @@ export function renderDownloadHistoryItem(h) {
 
   return `<div class="p-hist-item">${html}</div>`;
 }
+
+export const __test__ = {
+  formatV0Probe,
+};

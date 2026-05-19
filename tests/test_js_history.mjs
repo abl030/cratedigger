@@ -3,7 +3,8 @@
  * Run with: node tests/test_js_history.mjs
  */
 
-import { renderDownloadHistoryItem } from '../web/js/history.js';
+import { renderDownloadHistoryItem, __test__ } from '../web/js/history.js';
+const { formatV0Probe } = __test__;
 
 let passed = 0;
 let failed = 0;
@@ -142,11 +143,81 @@ console.log('renderDownloadHistoryItem() shows provisional V0 probe evidence');
     verdict: 'Provisional lossless source',
   });
 
-  assertContains(html, 'Source V0 probe', 'candidate probe label rendered');
+  assertContains(html, 'V0 probe', 'candidate probe label rendered');
   assertContains(html, '228kbps avg', 'candidate probe avg rendered');
   assertContains(html, '171kbps source V0 avg', 'existing probe avg rendered');
   assertContains(html, 'Stored as', 'final format label rendered');
   assertContains(html, 'opus 128', 'final format rendered');
+  assertExcludes(html, '(lossless_source_v0)',
+    'lossless probe omits the noisy kind suffix');
+}
+
+console.log('renderDownloadHistoryItem() renders non-lossless V0 probe with "(measurement)" suffix');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    v0_probe_kind: 'native_lossy_research_v0',
+    v0_probe_avg_bitrate: 247,
+    final_format: 'MP3',
+    downloaded_label: 'MP3 V0',
+  });
+
+  assertContains(html, 'V0 probe', 'V0 probe label rendered for non-lossless source');
+  assertContains(html, '247kbps avg (measurement)',
+    'non-lossless probe shows "(measurement)" to flag non-comparable provenance');
+  assertExcludes(html, '(native_lossy_research_v0)',
+    'raw kind string not surfaced in non-lossless probe value');
+}
+
+console.log('renderDownloadHistoryItem() emits the 2-column grid wrapper, not stacked rows');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    downloaded_label: 'MP3 V0',
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 96,
+    v0_probe_kind: 'native_lossy_research_v0',
+    v0_probe_avg_bitrate: 247,
+    existing_min_bitrate: 237,
+    existing_spectral_bitrate: 96,
+    final_format: 'MP3',
+    beets_distance: 0.066,
+  });
+
+  assertContains(html, 'class="p-hist-grid"',
+    '2-column grid wrapper rendered');
+  assertExcludes(html, 'class="p-hist-row"',
+    'old stacked .p-hist-row markup is gone');
+  // Each label/value pair is its own grid cell, so labels and values must
+  // both appear as siblings under the grid.
+  assertContains(html, 'class="p-hist-label">V0 probe</span>',
+    'V0 probe label appears as a grid cell');
+  assertContains(html, 'class="p-hist-value">247kbps avg (measurement)',
+    'V0 probe value appears as a grid cell');
+}
+
+console.log('formatV0Probe() helper picks the right kind suffix per source lineage');
+{
+  if (formatV0Probe(260, 'lossless_source_v0') !== '260kbps avg') {
+    failed++;
+    console.error('  FAIL: lossless probe should render bare ("260kbps avg")');
+  } else { passed++; }
+  if (formatV0Probe(247, 'native_lossy_research_v0') !== '247kbps avg (measurement)') {
+    failed++;
+    console.error('  FAIL: native_lossy_research_v0 should add "(measurement)" suffix');
+  } else { passed++; }
+  if (formatV0Probe(200, undefined) !== '200kbps avg') {
+    failed++;
+    console.error('  FAIL: missing kind should render bare');
+  } else { passed++; }
+  if (formatV0Probe(180, 'on_disk_research_v0') !== '180kbps avg (on_disk_research_v0)') {
+    failed++;
+    console.error('  FAIL: unknown kind should fall back to raw label');
+  } else { passed++; }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
