@@ -347,7 +347,7 @@ def check_for_match(
             cached_codecs = _search_cache_concrete_codecs_for_dir(
                 ctx, album_id, username, file_dir,
             )
-            if len(cached_codecs) <= 1 and abs(search_count - track_num) > 2:
+            if len(cached_codecs) <= 1 and search_count > 2 * track_num:
                 logger.debug(
                     f"Pre-filter skip: {username} {file_dir} has {search_count} "
                     f"audio files, need {track_num} tracks"

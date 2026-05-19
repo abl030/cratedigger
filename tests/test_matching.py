@@ -608,5 +608,204 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         self.assertEqual(candidates[0].file_count, 3)
 
 
+# ---------------------------------------------------------------------------
+# Asymmetric pre-filter (U1 of search-plan-entropy plan)
+#
+# The pre-filter rule is `search_count > 2 * track_num` — junk-dir guard only,
+# not a tight-fit filter. This lets track-fallback queries (search_count=1
+# vs track_num=4) reach `album_track_num` so the dir can be browsed and
+# scored. The codec guard (`cached_codecs <= 1`) still bypasses the
+# pre-filter so multi-codec dirs are never skipped on count alone.
+# ---------------------------------------------------------------------------
+
+class TestCheckForMatchAsymmetricPreFilter(unittest.TestCase):
+    """The pre-filter only skips dirs whose audio count exceeds 2 * track_num.
+
+    Track-fallback queries (one track in the search response) MUST reach the
+    browse + score path; the bidirectional `abs() > 2` rule used to silently
+    skip them.
+    """
+
+    def setUp(self) -> None:
+        self.cfg = _make_cfg()
+        self.ctx = _make_ctx(self.cfg, album_id=1, album_title="Cool Album")
+        self.username = "user1"
+        # 4-track album — the canonical scenario from the plan.
+        self.tracks = [
+            _track(1, "Alpha"),
+            _track(1, "Bravo"),
+            _track(1, "Charlie"),
+            _track(1, "Delta"),
+        ]
+        self.full_files = [
+            _file("Alpha.flac"),
+            _file("Bravo.flac"),
+            _file("Charlie.flac"),
+            _file("Delta.flac"),
+        ]
+
+    def _set_browse(self, file_dir: str, files: list[SlskdFile]) -> None:
+        self.ctx.folder_cache.setdefault(self.username, {})[file_dir] = {
+            "directory": file_dir,
+            "files": files,
+        }
+
+    def _set_search_count(self, file_dir: str, count: int) -> None:
+        """Populate search_dir_audio_count and search_cache so the pre-filter
+        actually consults the cached count for this dir."""
+        self.ctx.search_dir_audio_count = {
+            self.username: {file_dir: count},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "flac": [file_dir],
+                },
+            },
+        }
+
+    @staticmethod
+    def _matched(result: Any) -> bool:
+        return result.matched if hasattr(result, "matched") else result[0]
+
+    @staticmethod
+    def _candidates(result: Any) -> list[CandidateScore]:
+        if hasattr(result, "candidates"):
+            return result.candidates
+        return result[3]
+
+    def test_search_count_equals_track_num_passes_prefilter(self) -> None:
+        """Happy path: search_count=4, track_num=4 — passes pre-filter,
+        browse + score proceeds, dir matches."""
+        self._set_search_count("dirA", 4)
+        self._set_browse("dirA", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertTrue(self._matched(result))
+        self.assertNotIn(
+            (self.username, "dirA", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+
+    def test_track_fallback_search_count_one_passes_prefilter(self) -> None:
+        """The bug fix: track-fallback queries return one file but the album
+        has many tracks. Under the old `abs() > 2` rule this was skipped;
+        under the new `2n` rule it must reach the browse + score path."""
+        self._set_search_count("dirA", 1)
+        # Files match the full album — the dir on the peer IS the album,
+        # the search response just only had one file in it.
+        self._set_browse("dirA", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertTrue(self._matched(result))
+        self.assertNotIn(
+            (self.username, "dirA", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+
+    def test_search_count_at_2n_boundary_passes_prefilter(self) -> None:
+        """Boundary: search_count=8, track_num=4 — `8 > 8` is false, so the
+        pre-filter does NOT skip. The dir is browsed; the post-browse strict
+        -count gate at line 451 then writes its own negative_matches entry
+        because 8 != 4. We verify the pre-filter passed by checking that
+        a CandidateScore was recorded (pre-filter skips produce zero
+        candidates; the strict-count gate produces a cheap one)."""
+        self._set_search_count("dirA", 8)
+        # Dir actually contains the 4 tracks plus 4 extras — the post-browse
+        # strict-count gate will fail (8 != 4), but the pre-filter must pass.
+        self._set_browse("dirA", self.full_files + [
+            _file("Bonus1.flac"),
+            _file("Bonus2.flac"),
+            _file("Bonus3.flac"),
+            _file("Bonus4.flac"),
+        ])
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        # Pre-filter did NOT skip — at least one candidate was recorded.
+        # (A pre-filter skip produces zero candidates per
+        # test_search_count_just_over_2n_is_skipped.)
+        candidates = self._candidates(result)
+        self.assertEqual(len(candidates), 1)
+        # The candidate is the cheap one from the strict-count gate
+        # (file_count=8 != track_num=4 → matched_tracks=0).
+        self.assertEqual(candidates[0].file_count, 8)
+        self.assertEqual(candidates[0].matched_tracks, 0)
+
+    def test_search_count_just_over_2n_is_skipped(self) -> None:
+        """Edge case: search_count=9, track_num=4 — `9 > 8`, dir is skipped,
+        negative-cache entry written, no candidates recorded."""
+        self._set_search_count("dirA", 9)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        self.assertEqual(self._candidates(result), [])
+        self.assertIn(
+            (self.username, "dirA", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+        # Pre-filter rejected without ever browsing this user.
+        self.assertNotIn(self.username, self.ctx.folder_cache)
+
+    def test_junk_dir_well_over_2n_is_skipped(self) -> None:
+        """Junk-dir case: search_count=50, track_num=4 — large dump folder.
+        Pre-filter must continue to catch this case."""
+        self._set_search_count("dirJunk", 50)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirJunk"], self.username, self.ctx,
+        )
+
+        self.assertFalse(self._matched(result))
+        self.assertEqual(self._candidates(result), [])
+        self.assertIn(
+            (self.username, "dirJunk", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+        self.assertNotIn(self.username, self.ctx.folder_cache)
+
+    def test_codec_guard_bypasses_prefilter_on_large_dir(self) -> None:
+        """Codec-guard case: search_count=50, track_num=4 BUT the dir is
+        present in the search_cache under multiple concrete codecs — the
+        `len(cached_codecs) <= 1` guard bypasses the pre-filter so the
+        multi-codec dir is browsed and scored."""
+        # Multi-codec presence: both "flac" and "mp3" tiers contain dirMulti.
+        self.ctx.search_dir_audio_count = {
+            self.username: {"dirMulti": 50},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "flac": ["dirMulti"],
+                    "mp3": ["dirMulti"],
+                },
+            },
+        }
+        self._set_browse("dirMulti", self.full_files)
+
+        result = check_for_match(
+            self.tracks, "flac", ["dirMulti"], self.username, self.ctx,
+        )
+
+        # Pre-filter did NOT add a negative_matches entry — codec guard fired.
+        self.assertNotIn(
+            (self.username, "dirMulti", 4, "flac"),
+            self.ctx.negative_matches,
+        )
+        # And the dir was actually browsed + scored.
+        self.assertTrue(self._matched(result))
+
+
 if __name__ == "__main__":
     unittest.main()
