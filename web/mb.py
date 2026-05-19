@@ -204,13 +204,8 @@ def get_release_group_year(rg_mbid):
             if exc.code == 404:
                 return None
             raise
-        date = data.get("first-release-date", "")
-        if not isinstance(date, str) or len(date) < 4:
-            return None
-        try:
-            return int(date[:4])
-        except ValueError:
-            return None
+        from lib.util import parse_mb_first_release_year
+        return parse_mb_first_release_year(data)
 
     return _cache.memoize_meta(
         f"mb:release-group:{rg_mbid}:year", _fetch)

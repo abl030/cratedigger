@@ -504,16 +504,10 @@ def top_candidates_with_skip_split(
 ) -> list[CandidateScore]:
     """Return scored top-N + sampled pre-filter-skip rows.
 
-    Splits the candidate list into scored (matched_tracks > 0 OR not a
-    pre-filter skip) and pre-filter-skip subsets, returns up to
-    ``scored_limit`` of the former (ranked the same way ``top_candidates``
-    ranks them) and up to ``skip_limit`` of the latter (preserving input
-    order, which mirrors matcher visit order — first N peers the matcher
-    rejected, not a random sample).
-
-    Total returned ≤ ``scored_limit + skip_limit``. Scored rows always
-    come first, then skip rows. Default split (15 + 5 = 20) matches the
-    pre-U2 forensic candidates cap so blob size does not balloon.
+    Splits ``candidates`` into scored vs pre-filter-skip; ranks scored
+    via ``top_candidates``, preserves visit order for the skip sample.
+    Default 15 + 5 keeps the JSONB blob the same size as the pre-split
+    cap of 20.
     """
     scored = [c for c in candidates if not c.pre_filter_skip]
     skipped = [c for c in candidates if c.pre_filter_skip]

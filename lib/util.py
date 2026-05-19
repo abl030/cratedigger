@@ -36,6 +36,23 @@ class AudioValidationResult:
     failed_files: list[tuple[str, str]] = field(default_factory=list)
 
 
+def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
+    """Parse the 4-digit year from an MB release-group ``first-release-date``.
+
+    Shared by ``web/mb.py::get_release_group_year`` and
+    ``scripts/pipeline_cli.py::fetch_mb_release_group_year`` — each owns
+    its own transport + 404 handling; only the parse is common.
+    Returns ``None`` for missing/short/non-numeric prefixes.
+    """
+    date = data.get("first-release-date", "")
+    if not isinstance(date, str) or len(date) < 4:
+        return None
+    try:
+        return int(date[:4])
+    except ValueError:
+        return None
+
+
 # === Subprocess env for beets ===
 
 

@@ -60,7 +60,10 @@ from lib.import_queue import (
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.import_preview import ImportPreviewValues
 from lib.release_identity import detect_release_source, normalize_release_id
-from lib.util import resolve_failed_path as _shared_resolve_failed_path
+from lib.util import (
+    parse_mb_first_release_year,
+    resolve_failed_path as _shared_resolve_failed_path,
+)
 
 MB_API = "http://192.168.1.35:5200/ws/2"
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
@@ -155,13 +158,7 @@ def fetch_mb_release_group_year(rg_mbid):
     except urllib.error.URLError as e:
         print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
         return None
-    date = data.get("first-release-date", "")
-    if not isinstance(date, str) or len(date) < 4:
-        return None
-    try:
-        return int(date[:4])
-    except ValueError:
-        return None
+    return parse_mb_first_release_year(data)
 
 
 def tracks_from_mb_release(release_data):
@@ -233,6 +230,46 @@ def _build_search_plan_service(db):
     return SearchPlanService(db, read_runtime_config())
 
 
+def _search_plan_exit_code(outcome: str) -> int:
+    """CLI ⇄ API exit-code mapping for search-plan read/advance subcommands.
+
+    Per CLAUDE.md § "CLI ⇄ API surface symmetry":
+    0=success, 2=not_found, 3=input_validation, 4=wrong_state, 5=transient.
+
+    Covers the outcome strings emitted by ``dry_run_for_request``,
+    ``saturation_for_request``, ``advance_for_request`` and
+    ``history_for_request``. Regenerate has its own ladder
+    (``failed_transient`` → 4 there, predating this convention).
+    """
+    from lib.search_plan_service import (
+        RESULT_ADVANCED,
+        RESULT_DRY_RUN_GENERATION_FAILED,
+        RESULT_DRY_RUN_SUCCESS,
+        RESULT_FAILED_TRANSIENT,
+        RESULT_HISTORY_PAGE_INPUT_INVALID,
+        RESULT_HISTORY_PAGE_SUCCESS,
+        RESULT_INVALID_TARGET,
+        RESULT_NO_ACTIVE_PLAN,
+        RESULT_REQUEST_NOT_FOUND,
+        RESULT_SATURATION_INPUT_INVALID,
+        RESULT_SATURATION_SUCCESS,
+    )
+    mapping: dict[str, int] = {
+        RESULT_DRY_RUN_SUCCESS: 0,
+        RESULT_DRY_RUN_GENERATION_FAILED: 0,
+        RESULT_SATURATION_SUCCESS: 0,
+        RESULT_ADVANCED: 0,
+        RESULT_HISTORY_PAGE_SUCCESS: 0,
+        RESULT_REQUEST_NOT_FOUND: 2,
+        RESULT_SATURATION_INPUT_INVALID: 3,
+        RESULT_INVALID_TARGET: 3,
+        RESULT_HISTORY_PAGE_INPUT_INVALID: 3,
+        RESULT_NO_ACTIVE_PLAN: 4,
+        RESULT_FAILED_TRANSIENT: 5,
+    }
+    return mapping.get(outcome, 1)
+
+
 def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
                               tracks, source, release_group_year=None):
     """Run plan generation for a freshly-added request.
@@ -292,7 +329,7 @@ def _cmd_add_mb(db, mbid, source):
     if release.get("date"):
         year = int(release["date"][:4]) if len(release["date"]) >= 4 else None
 
-    # U4: persist release-group year so the generator (U5) can emit a
+    # Persist release-group year so the generator can emit a
     # year-anchored slot matching how users on Soulseek file reissues.
     # ``fetch_mb_release_group_year`` is 404/error tolerant; column
     # accepts NULL.
@@ -1954,9 +1991,6 @@ def cmd_search_plan_dry_run(db, args):
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_DRY_RUN_GENERATION_FAILED,
-        RESULT_DRY_RUN_SUCCESS,
-        RESULT_REQUEST_NOT_FOUND,
         SearchPlanService,
         dry_run_payload,
     )
@@ -2039,13 +2073,7 @@ def cmd_search_plan_dry_run(db, args):
                     else:
                         print(f"    {key}: {value}")
 
-    if result.outcome == RESULT_DRY_RUN_SUCCESS:
-        return 0
-    if result.outcome == RESULT_DRY_RUN_GENERATION_FAILED:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    return 1
+    return _search_plan_exit_code(result.outcome)
 
 
 def cmd_search_plan_saturation(db, args):
@@ -2069,9 +2097,6 @@ def cmd_search_plan_saturation(db, args):
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_REQUEST_NOT_FOUND,
-        RESULT_SATURATION_INPUT_INVALID,
-        RESULT_SATURATION_SUCCESS,
         SATURATION_WINDOW_DEFAULT_DAYS,
         SearchPlanService,
         saturation_payload,
@@ -2110,13 +2135,7 @@ def cmd_search_plan_saturation(db, args):
         if payload.get("error_message"):
             print(f"  Error message:          {payload['error_message']}")
 
-    if result.outcome == RESULT_SATURATION_SUCCESS:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    if result.outcome == RESULT_SATURATION_INPUT_INVALID:
-        return 3
-    return 1
+    return _search_plan_exit_code(result.outcome)
 
 
 def cmd_search_plan_advance(db, args):
@@ -2136,11 +2155,6 @@ def cmd_search_plan_advance(db, args):
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_ADVANCED,
-        RESULT_FAILED_TRANSIENT,
-        RESULT_INVALID_TARGET,
-        RESULT_NO_ACTIVE_PLAN,
-        RESULT_REQUEST_NOT_FOUND,
         SearchPlanService,
     )
 
@@ -2181,17 +2195,7 @@ def cmd_search_plan_advance(db, args):
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
 
-    if result.outcome == RESULT_ADVANCED:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    if result.outcome == RESULT_INVALID_TARGET:
-        return 3
-    if result.outcome == RESULT_NO_ACTIVE_PLAN:
-        return 4
-    if result.outcome == RESULT_FAILED_TRANSIENT:
-        return 5
-    return 1
+    return _search_plan_exit_code(result.outcome)
 
 
 def cmd_search_plan_history(db, args):
@@ -2214,9 +2218,7 @@ def cmd_search_plan_history(db, args):
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
         HISTORY_PAGE_DEFAULT_LIMIT,
-        RESULT_HISTORY_PAGE_INPUT_INVALID,
         RESULT_HISTORY_PAGE_SUCCESS,
-        RESULT_REQUEST_NOT_FOUND,
         SearchPlanService,
     )
 
@@ -2277,13 +2279,7 @@ def cmd_search_plan_history(db, args):
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
 
-    if result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    if result.outcome == RESULT_HISTORY_PAGE_INPUT_INVALID:
-        return 3
-    return 1
+    return _search_plan_exit_code(result.outcome)
 
 
 def main():

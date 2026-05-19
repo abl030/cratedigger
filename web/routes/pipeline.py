@@ -1384,10 +1384,10 @@ def post_pipeline_add(h, body: dict) -> None:
     # an extra MB mirror round trip on add.
     release = mb_api.get_release(mbid, fresh=True)
 
-    # U4: persist release-group year alongside release year so the
-    # generator (U5) can emit a year-anchored slot that matches how
-    # users on Soulseek actually file reissues. ``get_release_group_year``
-    # returns None on 404 / unparseable date; column accepts NULL.
+    # Persist release-group year alongside release year so the generator
+    # can emit a year-anchored slot matching how users on Soulseek file
+    # reissues. ``get_release_group_year`` returns None on 404 /
+    # unparseable date; column accepts NULL.
     rg_id = release.get("release_group_id")
     rg_year = mb_api.get_release_group_year(rg_id) if rg_id else None
 
@@ -1527,6 +1527,8 @@ def post_pipeline_upgrade(h, body: dict) -> None:
     else:
         # Brand-new request — no prior override to preserve.
         quality = QUALITY_UPGRADE_TIERS
+        # Discogs upgrade leaves release_group_year NULL (no MB release-group).
+        rg_year_upgrade: int | None = None
         # Bypass the 24h meta cache — both branches persist metadata
         # into the pipeline DB (artist / title / tracks). Stale cache
         # reads would silently bake pre-correction data from an earlier
@@ -1545,8 +1547,6 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
-            # U4: persist release-group year alongside release year. See
-            # ``post_pipeline_add`` for rationale.
             rg_id_upgrade = release.get("release_group_id")
             rg_year_upgrade = (
                 mb_api.get_release_group_year(rg_id_upgrade)
@@ -1565,9 +1565,6 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             )
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
-        # rg_year_upgrade only exists on the MB branch above; Discogs
-        # upgrade leaves release_group_year NULL (no MB release-group).
-        _rg_year_for_plan = locals().get("rg_year_upgrade")
         _generate_plan_after_add(
             req_id,
             artist_name=release["artist_name"],
@@ -1575,7 +1572,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             year=release.get("year"),
             tracks=release.get("tracks") or [],
             source="request",
-            release_group_year=_rg_year_for_plan,
+            release_group_year=rg_year_upgrade,
         )
         # Newly added request — status is already 'wanted', set quality override
         transitions.finalize_request(

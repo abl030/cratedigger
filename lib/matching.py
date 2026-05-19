@@ -29,14 +29,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-# U2 of search-plan-entropy: per-search cap on the number of flagged
-# pre-filter-skip CandidateScore rows emitted into the forensic
-# candidates blob. The aggregable scalar count
-# (``MatchResult.pre_filter_skip_count``) is always accurate; the
-# sample rows are bounded so the JSONB blob does not blow out for
-# pathological junk-peer searches (hundreds of skipped dirs from one
-# noisy user). 5 chosen so a search can still keep ~15 scored
-# candidates inside the existing top-20 candidates cap when contested.
+# Cap on flagged pre-filter-skip sample rows per search — bounds the
+# JSONB blob for noisy peers. The aggregate count is always accurate
+# (``MatchResult.pre_filter_skip_count``); only the sample is capped.
 PRE_FILTER_SKIP_SAMPLE_CAP = 5
 
 
@@ -98,13 +93,9 @@ class MatchResult:
     directory: Any
     file_dir: str
     candidates: list[CandidateScore] = field(default_factory=list)
-    # U2 of search-plan-entropy: count of dirs the asymmetric pre-filter
-    # rejected before browse (``search_count > 2 * track_num`` for
-    # single-codec dirs). Sums one per pre-filter skip; the candidates
-    # list also carries up to ``PRE_FILTER_SKIP_SAMPLE_CAP`` flagged
-    # sample rows so operators can see which (user, dir) tuples are
-    # noisy. The count is the authoritative total -- sample rows are a
-    # subset.
+    # Authoritative count of dirs rejected by the asymmetric pre-filter
+    # before browse; sample rows in ``candidates`` are bounded by
+    # ``PRE_FILTER_SKIP_SAMPLE_CAP``.
     pre_filter_skip_count: int = 0
 
 

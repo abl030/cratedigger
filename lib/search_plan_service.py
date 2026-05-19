@@ -1153,6 +1153,19 @@ class SearchPlanService:
         )
 
 
+def _envelope(result: Any) -> dict[str, Any]:
+    """Common ``{request_id, outcome, error_message}`` envelope.
+
+    Shared by every payload helper (dry-run, saturation, ...) so the
+    CLI ⇄ API surface emits the same three keys regardless of outcome.
+    """
+    return {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "error_message": result.error_message,
+    }
+
+
 def dry_run_payload(
     result: "DryRunResult",
     *,
@@ -1202,13 +1215,11 @@ def dry_run_payload(
             "source": request_row.get("source"),
         }
     return {
-        "request_id": result.request_id,
-        "outcome": result.outcome,
+        **_envelope(result),
         "current_generator_id": current_generator_id,
         "request": request_payload,
         "plan": plan_payload,
         "would_supersede_active": bool(has_active_plan),
-        "error_message": result.error_message,
     }
 
 
@@ -1238,14 +1249,12 @@ def saturation_payload(result: "SaturationResult") -> dict[str, Any]:
         skips = 0
         window = int(result.window_days)
     return {
-        "request_id": result.request_id,
-        "outcome": result.outcome,
+        **_envelope(result),
         "total_searches": total,
         "saturated_searches": saturated,
         "saturation_rate": rate,
         "total_pre_filter_skips": skips,
         "window_days": window,
-        "error_message": result.error_message,
     }
 
 

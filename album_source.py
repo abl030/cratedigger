@@ -58,11 +58,11 @@ class AlbumRecord:
     db_mb_release_id: str
     db_search_filetype_override: str | None
     db_target_format: str | None
-    # U3 / R9 — release-group's first-release year, populated from the
-    # local MB mirror at enqueue time (U4) or deploy-time backfill (U3).
-    # NULL for pre-backfill rows, Discogs-only rows, and rows missing
-    # ``mb_release_group_id``. The generator (U5) emits a year-suffixed
-    # slot when this differs from ``release_date``'s year.
+    # Release-group's first-release year, populated from the local MB
+    # mirror at enqueue time or via the deploy-time backfill. NULL for
+    # pre-backfill rows, Discogs-only rows, and rows missing
+    # ``mb_release_group_id``. The generator emits a year-suffixed slot
+    # when this differs from ``release_date``'s year.
     db_release_group_year: int | None = None
 
     @staticmethod

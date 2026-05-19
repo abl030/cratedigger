@@ -40,11 +40,10 @@ class EnqueueAttempt:
     sub-count gate failures and cross-check rejections. U5 will surface this
     list in the persisted `search_log.candidates` JSONB blob.
 
-    ``pre_filter_skip_count`` (U2 of search-plan-entropy): aggregate count
-    of dirs the asymmetric pre-filter rejected before browse across every
-    ``check_for_match`` call that contributed to this attempt. Plumbed up
-    to ``FindDownloadResult`` and persisted on ``search_log`` so operators
-    can aggregate skip pressure per request.
+    ``pre_filter_skip_count`` aggregates dirs the asymmetric pre-filter
+    rejected before browse across every ``check_for_match`` call this
+    attempt contributed to; persisted on ``search_log`` for skip-pressure
+    telemetry.
     """
 
     matched: bool
@@ -94,10 +93,8 @@ class FindDownloadResult:
     grab_entry: GrabListEntry | None = None
     candidates: tuple[CandidateScore, ...] = ()
     metrics: FindDownloadMetrics | None = None
-    # U2 of search-plan-entropy: aggregate pre-filter skip count across
-    # every (filetype, disc, wave) ``check_for_match`` call this
-    # find_download walk contributed to. ``_apply_find_download_result``
-    # copies this onto ``SearchResult.pre_filter_skip_count``.
+    # Aggregate pre-filter skip count across every (filetype, disc,
+    # wave) ``check_for_match`` call this walk contributed to.
     pre_filter_skip_count: int = 0
 
 

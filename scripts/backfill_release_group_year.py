@@ -47,7 +47,7 @@ if REPO_ROOT not in sys.path:
 logger = logging.getLogger("backfill_release_group_year")
 
 BATCH_SIZE = 500
-RATE_LIMIT_SECONDS = 0.05  # 50ms between MB mirror calls — cheap local I/O
+RATE_LIMIT_SECONDS = 0.0  # local mirror — no throttle by default
 
 
 # Result counters — surfaced in the final summary and (post-deploy) in

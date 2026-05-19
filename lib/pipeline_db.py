@@ -555,10 +555,10 @@ class ConsumedAttemptInput:
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
-    # U2 of search-plan-entropy: count of dirs the asymmetric pre-filter
-    # rejected before browse during this search's find_download walk.
-    # Persisted on search_log.pre_filter_skip_count for per-search
-    # aggregation. Default 0 keeps every existing caller / test compatible.
+    # Count of dirs the asymmetric pre-filter rejected before browse
+    # during this search's find_download walk; persisted on
+    # ``search_log.pre_filter_skip_count``. Default 0 keeps existing
+    # callers compatible.
     pre_filter_skip_count: int = 0
     # Plan-item count required by wrap detection. The executor reads it
     # from the active plan it executed; passing it explicitly avoids a
@@ -599,10 +599,9 @@ class NonConsumingAttemptInput:
     final_state: str | None = None
     error_message: str | None = None
     apply_scheduler_attempt: bool = True
-    # U2 of search-plan-entropy: pre-filter skip count for the failed
-    # attempt. Almost always 0 for pre-attempt failures because the
-    # matcher never ran, but plumbed through so the column is
-    # consistently populated across all log_search write paths.
+    # Pre-filter skip count for the failed attempt. Almost always 0
+    # because the matcher rarely runs on pre-attempt failures, but
+    # plumbed through so the column is consistently populated.
     pre_filter_skip_count: int = 0
 
 

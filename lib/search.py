@@ -58,10 +58,9 @@ class SearchResult:
     # Forensic capture persisted to search_log: candidates JSONB (top-20
     # match scores from find_download), variant tag, slskd terminal state.
     candidates: tuple[CandidateScore, ...] = ()
-    # U2 of search-plan-entropy: aggregate count of dirs the asymmetric
-    # pre-filter rejected before browse during this search's
-    # find_download walk. Persisted on search_log.pre_filter_skip_count
-    # for per-search aggregation.
+    # Aggregate count of dirs the asymmetric pre-filter rejected before
+    # browse during this search; persisted on
+    # ``search_log.pre_filter_skip_count`` for per-search aggregation.
     pre_filter_skip_count: int = 0
     variant_tag: str | None = None
     final_state: str | None = None
@@ -582,6 +581,12 @@ _STRATEGY_UNWILD = "unwild"
 _STRATEGY_UNWILD_YEAR = "unwild_year"
 _STRATEGY_UNWILD_RG_YEAR = "unwild_rg_year"
 _STRATEGY_SELFTITLED_ARTIST_TRACK_PREFIX = "selftitled_artist_track_"
+_STRATEGY_SELFTITLED_ARTIST_TRACK_0 = (
+    f"{_STRATEGY_SELFTITLED_ARTIST_TRACK_PREFIX}0"
+)
+_STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC = (
+    f"{_STRATEGY_SELFTITLED_ARTIST_TRACK_0}_flac"
+)
 _STRATEGY_SELFTITLED_ARTIST_YEAR = "selftitled_artist_year"
 
 
@@ -625,10 +630,10 @@ class ReleaseSnapshot:
     track_titles: tuple[str, ...]
     redownload: bool = False
     prepend_artist: bool = False
-    # U5 of search-plan-entropy: release-group year (first release year of
-    # the MB release group). When known AND different from `year`, the
-    # generator emits an extra `unwild_rg_year` slot so reissues find their
-    # original-pressing peers on Soulseek. NULL means no extra slot.
+    # First-release year of the MB release group. When known and
+    # different from ``year``, the generator emits an extra
+    # ``unwild_rg_year`` slot so reissues find original-pressing peers
+    # on Soulseek. NULL means no extra slot.
     release_group_year: int | None = None
 
 
@@ -852,73 +857,30 @@ def _is_self_titled(artist_name: str, title: str) -> bool:
     return bool(a) and a == t
 
 
-def _build_default_query(
+def _build_query(
     artist: str,
     title: str,
     *,
     prepend_artist: bool,
-) -> str | None:
-    """Build the default slot query: wildcarded artist + title, no short drop.
-
-    U5 of search-plan-entropy:
-      * No `strip_short_tokens` call — short tokens survive into the
-        query (capped only by token count, longest-first).
-      * Low-entropy normalization still applies ("the/you/from/and"
-        dropped).
-      * Artist tokens wildcarded for ban bypass.
-      * Title tokens that duplicate the wildcarded artist tokens
-        (case-insensitive on the un-wildcarded form) are dropped.
-    """
-    clean_artist = strip_special_chars(artist)
-    clean_title = strip_special_chars(title)
-
-    artist_tokens = clean_artist.split()
-    title_tokens = clean_title.split()
-
-    artist_tokens = _normalize_query_tokens(
-        artist_tokens, preserve_all_low_entropy=True,
-    )
-    title_tokens = _normalize_query_tokens(title_tokens)
-
-    artist_lower = {t.lower() for t in artist_tokens}
-    title_tokens = [t for t in title_tokens if t.lower() not in artist_lower]
-
-    if clean_artist.lower() in ("various artists", "various"):
-        artist_tokens = []
-
-    artist_tokens = wildcard_artist_tokens(artist_tokens)
-
-    if prepend_artist and artist_tokens:
-        all_tokens = artist_tokens + title_tokens
-    else:
-        all_tokens = title_tokens
-
-    if not all_tokens:
-        return None
-
-    all_tokens = cap_tokens(all_tokens, MAX_SEARCH_TOKENS)
-    return " ".join(all_tokens)
-
-
-def _build_literal_query(
-    artist: str,
-    title: str,
-    *,
-    prepend_artist: bool,
+    wildcard: bool,
     max_tokens: int = MAX_SEARCH_TOKENS,
 ) -> str | None:
-    """Build the literal slot query: artist + title, no wildcard, no short drop.
+    """Build a slot query from artist + title.
 
-    Used directly for the ``literal`` slot and as the body for the
-    format-hint and year-anchored slots (``literal_flac``,
-    ``literal_lossless``, ``unwild_year``, ``unwild_rg_year``).
+    Shared pipeline for the ``default`` slot (wildcard=True), the
+    ``literal`` slot, and the bodies of format-hint and year-anchored
+    slots (``literal_flac``, ``literal_lossless``, ``unwild_year``,
+    ``unwild_rg_year``) (wildcard=False):
 
-    Pipeline:
       * Strip special chars.
-      * Low-entropy normalization on both sides (``the/you/from/and``).
-      * Drop title tokens that duplicate artist tokens (case-insensitive).
-      * Drop artist for Various Artists.
-      * Cap to `max_tokens` longest-first.
+      * Low-entropy normalization ("the/you/from/and" dropped) on both
+        sides.
+      * Drop title tokens that duplicate artist tokens
+        (case-insensitive on the un-wildcarded form).
+      * ``Various Artists`` → no artist tokens.
+      * When ``wildcard=True``, artist tokens are wildcarded for ban
+        bypass.
+      * Cap longest-first to ``max_tokens``.
     """
     clean_artist = strip_special_chars(artist)
     clean_title = strip_special_chars(title)
@@ -936,6 +898,9 @@ def _build_literal_query(
 
     if clean_artist.lower() in ("various artists", "various"):
         artist_tokens = []
+
+    if wildcard:
+        artist_tokens = wildcard_artist_tokens(artist_tokens)
 
     if prepend_artist and artist_tokens:
         all_tokens = artist_tokens + title_tokens
@@ -1040,8 +1005,8 @@ def _generate_normal_plan(
     candidates: list[_Candidate] = []
 
     # 1. Default slot — wildcarded artist + title, no short-token drop.
-    default_query = _build_default_query(
-        artist, title, prepend_artist=prepend_artist,
+    default_query = _build_query(
+        artist, title, prepend_artist=prepend_artist, wildcard=True,
     )
     if default_query:
         candidates.append(_Candidate(
@@ -1059,14 +1024,15 @@ def _generate_normal_plan(
         ))
 
     # 2. Literal slot — un-wildcarded, no short-token drop, no year.
-    literal_query = _build_literal_query(
-        artist, title, prepend_artist=prepend_artist,
+    literal_query = _build_query(
+        artist, title, prepend_artist=prepend_artist, wildcard=False,
     )
     # Body capped at MAX_SEARCH_TOKENS - 1 so format-hint slots can
     # append their hint token without losing it to the slskd 4-token cap.
-    literal_body_for_hint = _build_literal_query(
+    literal_body_for_hint = _build_query(
         artist, title,
         prepend_artist=prepend_artist,
+        wildcard=False,
         max_tokens=MAX_SEARCH_TOKENS - 1,
     )
 
@@ -1128,55 +1094,34 @@ def _generate_normal_plan(
             omit_reason=reason,
         ))
 
-    # 6. unwild_rg_year slot — only when rg_year is known AND differs
-    #    from release `year`. When they match we omit (avoid duplicate
-    #    of the unwild_year slot).
-    if (
-        year_known
-        and rg_year is not None
-        and int(rg_year) > 0
-        and str(rg_year) != (year[:4] if year else "")
-        and literal_query
-    ):
-        rg_year_str = f"{int(rg_year):04d}"
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_RG_YEAR,
-            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-            query=f"{literal_query} {rg_year_str}",
-            omit_reason=None,
-            extra_provenance={"release_group_year": int(rg_year)},
-        ))
-    elif rg_year is None:
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_RG_YEAR,
-            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-            query=None,
-            omit_reason="release_group_year_unknown",
-        ))
+    # 6. unwild_rg_year slot — emit a query only when rg_year is known,
+    #    year is known, the two differ, and the literal body exists.
+    #    Otherwise emit one omission with a precise reason.
+    rg_query: str | None = None
+    rg_omit_reason: str | None = None
+    rg_provenance: dict[str, Any] = (
+        {"release_group_year": int(rg_year)}
+        if rg_year is not None else {}
+    )
+    if rg_year is None:
+        rg_omit_reason = "release_group_year_unknown"
     elif not year_known:
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_RG_YEAR,
-            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-            query=None,
-            omit_reason="year_unknown",
-            extra_provenance={"release_group_year": int(rg_year)},
-        ))
+        rg_omit_reason = "year_unknown"
     elif str(rg_year) == (year[:4] if year else ""):
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_RG_YEAR,
-            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-            query=None,
-            omit_reason="release_group_year_matches_year",
-            extra_provenance={"release_group_year": int(rg_year)},
-        ))
+        rg_omit_reason = "release_group_year_matches_year"
+    elif not literal_query:
+        rg_omit_reason = "empty_literal_query"
+    elif int(rg_year) <= 0:
+        rg_omit_reason = "release_group_year_unknown"
     else:
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_RG_YEAR,
-            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-            query=None,
-            omit_reason="empty_literal_query",
-            extra_provenance={"release_group_year": int(rg_year)},
-        ))
+        rg_query = f"{literal_query} {int(rg_year):04d}"
+    candidates.append(_Candidate(
+        strategy=_STRATEGY_UNWILD_RG_YEAR,
+        repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+        query=rg_query,
+        omit_reason=rg_omit_reason,
+        extra_provenance=rg_provenance,
+    ))
 
     # 7. Per-track slots — artist-prepended (R8). Multi-track only.
     per_track_pairs = _per_track_candidates(
@@ -1229,19 +1174,18 @@ def _generate_selftitled_plan(
             break
 
     # 1. selftitled_artist_track_0
-    strat1 = f"{_STRATEGY_SELFTITLED_ARTIST_TRACK_PREFIX}0"
     if first_track_query is not None and first_track_idx is not None:
         candidates.append(_Candidate(
-            strategy=strat1,
-            repeat_group=strat1,
+            strategy=_STRATEGY_SELFTITLED_ARTIST_TRACK_0,
+            repeat_group=_STRATEGY_SELFTITLED_ARTIST_TRACK_0,
             query=first_track_query,
             omit_reason=None,
             extra_provenance={"source_track_index": first_track_idx},
         ))
     else:
         candidates.append(_Candidate(
-            strategy=strat1,
-            repeat_group=strat1,
+            strategy=_STRATEGY_SELFTITLED_ARTIST_TRACK_0,
+            repeat_group=_STRATEGY_SELFTITLED_ARTIST_TRACK_0,
             query=None,
             omit_reason=(
                 "no_runnable_track_queries" if track_titles
@@ -1250,11 +1194,10 @@ def _generate_selftitled_plan(
         ))
 
     # 2. selftitled_artist_track_0_flac
-    strat1_flac = f"{strat1}_flac"
     if first_track_query_body is not None and first_track_idx is not None:
         candidates.append(_Candidate(
-            strategy=strat1_flac,
-            repeat_group=strat1_flac,
+            strategy=_STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC,
+            repeat_group=_STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC,
             query=f"{first_track_query_body} {_FORMAT_HINT_FLAC}",
             omit_reason=None,
             extra_provenance={
@@ -1264,8 +1207,8 @@ def _generate_selftitled_plan(
         ))
     else:
         candidates.append(_Candidate(
-            strategy=strat1_flac,
-            repeat_group=strat1_flac,
+            strategy=_STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC,
+            repeat_group=_STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC,
             query=None,
             omit_reason=(
                 "no_runnable_track_queries" if track_titles
