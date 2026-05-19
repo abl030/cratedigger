@@ -3,11 +3,13 @@
 let
   cratedigger = import ./package.nix { inherit pkgs; };
 
-  # Dev-only python env: production deps + beets so
-  # harness/beets_harness.py is importable for tests. Production
-  # pythonEnv deliberately excludes beets — see nix/package.nix.
+  # Dev env: production deps. ``ps.beets`` was previously listed
+  # again here because the production env excluded it; now that
+  # ``lib.beets_distance`` makes beets a first-class library
+  # dependency it's already in ``pythonPackages``, so the dev shell
+  # inherits it without duplication.
   testPythonEnv = pkgs.python3.withPackages (ps:
-    cratedigger.pythonPackages ps ++ [ps.beets]
+    cratedigger.pythonPackages ps
   );
 in
 pkgs.mkShell {
