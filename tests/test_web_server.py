@@ -988,6 +988,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/simulate",
         r"^/api/pipeline/(\d+)$",
         r"^/api/pipeline/(\d+)/search-plan$",
+        r"^/api/pipeline/(\d+)/search-plan/dry-run$",
         r"^/api/pipeline/(\d+)/search-plan/history$",
         r"^/api/pipeline/(\d+)/search-plan/regenerate$",
         r"^/api/pipeline/(\d+)/search-plan/advance$",
@@ -2154,6 +2155,168 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         self.assertEqual(
             data["currentness"]["active_plan_generator_id"],
             "search-plan/2026-01-01-old")
+
+
+class TestPipelineSearchPlanDryRunContract(_WebServerCase):
+    """U6 contract for ``GET /api/pipeline/<id>/search-plan/dry-run``.
+
+    Read-only generator simulator. The route wraps
+    ``SearchPlanService.dry_run_for_request``; both this route and
+    ``pipeline-cli search-plan dry-run`` go through the same service
+    method so input semantics + outcome mapping cannot drift. The
+    contract guarantees the payload shape used by the future search-
+    plan dashboard.
+    """
+
+    REQUIRED_FIELDS = {
+        "request_id",
+        "outcome",
+        "current_generator_id",
+        "request",
+        "plan",
+        "would_supersede_active",
+        "error_message",
+    }
+    REQUEST_REQUIRED_FIELDS = {
+        "id", "status", "artist_name", "album_title",
+        "mb_release_id", "discogs_release_id", "year",
+        "release_group_year", "source",
+    }
+    PLAN_REQUIRED_FIELDS = {
+        "generator_id", "status", "items", "provenance",
+        "failure_reason", "metadata_snapshot",
+    }
+    ITEM_REQUIRED_FIELDS = {
+        "ordinal", "strategy", "query",
+        "canonical_query_key", "repeat_group", "provenance",
+    }
+
+    def setUp(self) -> None:
+        from tests.helpers import make_request_row
+        self.mock_db.get_request.return_value = make_request_row(
+            id=100, status="wanted",
+            artist_name="Radiohead", album_title="Kid A",
+            year=2008, release_group_year=2000,
+        )
+        self.mock_db.get_tracks.return_value = [
+            {"disc_number": 1, "track_number": 1,
+             "title": "Everything In Its Right Place"},
+            {"disc_number": 1, "track_number": 2, "title": "Kid A"},
+            {"disc_number": 1, "track_number": 3,
+             "title": "The National Anthem"},
+        ]
+        self.mock_db.get_active_search_plan.return_value = None
+        # Route reads runtime config — patch to a default CratediggerConfig.
+        from lib.config import CratediggerConfig
+        import configparser
+        cp = configparser.RawConfigParser()
+        cp.read_string("[General]\n")
+        self._cfg_patcher = patch(
+            "lib.config.read_runtime_config",
+            return_value=CratediggerConfig.from_ini(cp),
+        )
+        self._cfg_patcher.start()
+
+    def tearDown(self) -> None:
+        self._cfg_patcher.stop()
+        self.mock_db.get_active_search_plan.reset_mock(
+            return_value=True, side_effect=True)
+        self.mock_db.get_tracks.return_value = []
+
+    def test_dry_run_happy_path_returns_200_with_required_fields(self):
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.REQUIRED_FIELDS, "dry-run")
+        self.assertEqual(data["request_id"], 100)
+        self.assertEqual(data["outcome"], "success")
+        self.assertIsNotNone(data["request"])
+        _assert_required_fields(
+            self, data["request"], self.REQUEST_REQUIRED_FIELDS,
+            "dry-run request")
+        self.assertEqual(data["request"]["release_group_year"], 2000)
+        self.assertIsNotNone(data["plan"])
+        _assert_required_fields(
+            self, data["plan"], self.PLAN_REQUIRED_FIELDS,
+            "dry-run plan")
+        self.assertGreater(len(data["plan"]["items"]), 0)
+        for item in data["plan"]["items"]:
+            _assert_required_fields(
+                self, item, self.ITEM_REQUIRED_FIELDS,
+                "dry-run plan.items[]")
+        # Ordinals must be sorted.
+        ordinals = [it["ordinal"] for it in data["plan"]["items"]]
+        self.assertEqual(ordinals, sorted(ordinals))
+        # No active plan was wired — would_supersede_active is False.
+        self.assertFalse(data["would_supersede_active"])
+
+    def test_dry_run_reports_active_plan_would_be_superseded(self):
+        # When an active plan exists, the response flags
+        # would_supersede_active=True so operators understand the
+        # current plan would be replaced by a real regeneration call.
+        self.mock_db.get_active_search_plan.return_value = MagicMock()
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["would_supersede_active"])
+
+    def test_dry_run_request_not_found_returns_404(self):
+        self.mock_db.get_request.return_value = None
+        status, data = self._get(
+            "/api/pipeline/9999/search-plan/dry-run")
+        self.assertEqual(status, 404)
+        # 404 body must carry the same structured shape so clients can
+        # introspect outcome / plan without status-code branching.
+        _assert_required_fields(
+            self, data, self.REQUIRED_FIELDS, "dry-run 404")
+        self.assertEqual(data["outcome"], "request_not_found")
+        self.assertEqual(data["request_id"], 9999)
+        self.assertIsNone(data["plan"])
+        self.assertIsNone(data["request"])
+        self.assertIn("error", data)
+
+    def test_dry_run_request_with_no_tracks_succeeds(self):
+        # Generator handles empty tracks — emits a plan without
+        # track-fallback slots; the dry-run reflects exactly that.
+        self.mock_db.get_tracks.return_value = []
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "success")
+        self.assertIsNotNone(data["plan"])
+        # No track_* slots should appear.
+        strategies = [
+            it["strategy"] for it in data["plan"]["items"]
+        ]
+        self.assertFalse(
+            any(s.startswith("track_") for s in strategies),
+            f"unexpected track-fallback slots in zero-tracks plan: "
+            f"{strategies}")
+
+    def test_dry_run_does_not_persist_or_write_plan_rows(self):
+        # The simulator must never call into create_successful_search_plan
+        # / supersede_search_plan_with_replacement / create_failed_search_plan.
+        self.mock_db.create_successful_search_plan.reset_mock()
+        self.mock_db.supersede_search_plan_with_replacement.reset_mock()
+        self.mock_db.create_failed_search_plan.reset_mock()
+        status, _ = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.mock_db.create_successful_search_plan.assert_not_called()
+        self.mock_db.supersede_search_plan_with_replacement.assert_not_called()
+        self.mock_db.create_failed_search_plan.assert_not_called()
+
+    def test_dry_run_carries_current_generator_id(self):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            data["current_generator_id"], SEARCH_PLAN_GENERATOR_ID)
+        # The plan the simulator emits must be pinned to the same id.
+        self.assertEqual(
+            data["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
 
 
 class TestPipelineSearchPlanRegenerateContract(_WebServerCase):

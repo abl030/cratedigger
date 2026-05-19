@@ -523,6 +523,81 @@ def get_pipeline_search_plan(
     h._json(payload)
 
 
+def get_pipeline_search_plan_dry_run(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """U6: ``GET /api/pipeline/<id>/search-plan/dry-run``.
+
+    Read-only generator simulator. Runs ``generate_search_plan``
+    against the current persisted snapshot for ``<id>`` and returns
+    the resulting plan items without writing anything. Counterpart of
+    ``pipeline-cli search-plan dry-run``; both surfaces wrap
+    ``SearchPlanService.dry_run_for_request`` — keep them in sync
+    (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Query string:
+      * ``prepend_artist`` — ``1`` to enable (defaults to runtime
+        config's ``album_prepend_artist``).
+
+    Status-code mapping:
+      * 200 — ``RESULT_DRY_RUN_SUCCESS`` or
+        ``RESULT_DRY_RUN_GENERATION_FAILED`` (the latter is a
+        deterministic generator outcome the operator wants to see in
+        the body — the route is informational, not a hard error).
+      * 404 — ``RESULT_REQUEST_NOT_FOUND``.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_DRY_RUN_GENERATION_FAILED,
+        RESULT_DRY_RUN_SUCCESS,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+        dry_run_payload,
+    )
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+    prepend_artist_raw = params.get("prepend_artist", [None])[0]
+    prepend_artist: bool | None
+    if prepend_artist_raw is None or prepend_artist_raw == "":
+        prepend_artist = None
+    else:
+        prepend_artist = prepend_artist_raw == "1"
+
+    db = _server()._db()
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.dry_run_for_request(
+        request_id, prepend_artist=prepend_artist,
+    )
+    row = db.get_request(request_id)
+    has_active = False
+    if row is not None:
+        try:
+            active = db.get_active_search_plan(request_id)
+            has_active = active is not None
+        except Exception:  # noqa: BLE001
+            has_active = False
+    payload = dry_run_payload(
+        result,
+        current_generator_id=svc.generator_id,
+        request_row=row,
+        has_active_plan=has_active,
+    )
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        payload["error"] = result.error_message or "Not found"
+        h._json(payload, status=404)
+        return
+    if result.outcome in (
+            RESULT_DRY_RUN_SUCCESS, RESULT_DRY_RUN_GENERATION_FAILED):
+        h._json(payload)
+        return
+    # Defensive fallback for any future outcome string.
+    h._error(f"Unknown dry-run outcome: {result.outcome}", 500)
+
+
 def get_pipeline_search_plan_history(
     h, params: dict[str, list[str]], req_id_str: str,
 ) -> None:
@@ -2015,6 +2090,8 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
      get_pipeline_search_plan),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/dry-run$"),
+     get_pipeline_search_plan_dry_run),
     (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
      get_pipeline_search_plan_history),
     (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),

@@ -83,6 +83,9 @@ RESULT_INVALID_TARGET = "invalid_target"
 # history_for_request outcomes (read-only paginated search_log slice).
 RESULT_HISTORY_PAGE_SUCCESS = "success"
 RESULT_HISTORY_PAGE_INPUT_INVALID = "input_invalid"
+# dry_run_for_request outcomes (U6 — read-only generator simulation).
+RESULT_DRY_RUN_SUCCESS = "success"
+RESULT_DRY_RUN_GENERATION_FAILED = "generation_failed"
 
 # Bounds for the paginated history endpoint. The route handler and CLI
 # both consult these so the cap stays consistent across surfaces.
@@ -265,6 +268,37 @@ class SearchLogHistoryPageResult:
     request_id: int
     rows: list[dict[str, Any]]
     next_before_id: int | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class DryRunResult:
+    """Outcome of one ``dry_run_for_request`` call (U6).
+
+    Read-only simulator: the service constructs the same
+    ``ReleaseSnapshot`` startup/regeneration would build, runs
+    ``generate_search_plan`` against the current code, and returns the
+    in-memory ``SearchPlan`` plus a JSON-friendly view. No
+    ``search_plans`` / ``plan_items`` rows are written and the
+    request's ``active_plan_id`` is untouched.
+
+    ``outcome`` is one of:
+      * ``RESULT_DRY_RUN_SUCCESS`` — generator produced a non-empty plan.
+      * ``RESULT_DRY_RUN_GENERATION_FAILED`` — generator returned
+        ``PLAN_STATUS_GENERATION_FAILED`` (no runnable query / metadata
+        incomplete); ``plan`` is populated but ``items`` is empty.
+      * ``RESULT_REQUEST_NOT_FOUND`` — no row for ``request_id``.
+
+    ``plan`` is the live ``SearchPlan`` object. ``snapshot`` is the
+    ``ReleaseSnapshot`` fed to the generator (useful for operators
+    debugging snapshot inputs vs generator outputs).
+    """
+
+    outcome: str
+    request_id: int
+    plan: SearchPlan | None = None
+    snapshot: ReleaseSnapshot | None = None
+    metadata_snapshot: dict[str, Any] | None = None
     error_message: str | None = None
 
 
@@ -549,6 +583,73 @@ class SearchPlanService:
             request_id=request_id,
             rows=page.rows,
             next_before_id=page.next_before_id,
+        )
+
+    def dry_run_for_request(
+        self,
+        request_id: int,
+        *,
+        prepend_artist: bool | None = None,
+    ) -> "DryRunResult":
+        """U6 read-only simulator: run the generator without persisting.
+
+        Loads the request row + persisted tracks, constructs the same
+        ``ReleaseSnapshot`` that startup / explicit regeneration would
+        build, and invokes ``generate_search_plan`` against the current
+        code. Nothing is written: no ``search_plans`` / ``plan_items``
+        row is created, no ``active_plan_id`` mutation, no advisory
+        lock taken (no concurrent mutation to protect against).
+
+        Counterpart of ``pipeline-cli search-plan dry-run <id>`` and
+        ``GET /api/pipeline/<id>/search-plan/dry-run``.
+
+        Outcomes:
+          * ``RESULT_DRY_RUN_SUCCESS`` — generator emitted a plan with
+            non-empty items.
+          * ``RESULT_DRY_RUN_GENERATION_FAILED`` — generator returned
+            ``PLAN_STATUS_GENERATION_FAILED``; ``plan`` is populated so
+            callers can inspect ``failure_reason`` / ``provenance``.
+          * ``RESULT_REQUEST_NOT_FOUND`` — no row for ``request_id``.
+
+        The simulator deliberately does NOT call the ``TrackResolver``:
+        dry-run reads what's persisted today so operators can see what
+        the next cycle's generator would produce against the current
+        persisted state. If tracks are missing in the DB the snapshot
+        is built without them — same way the generator would see them
+        at startup before any resolver hydration.
+        """
+        prepend = self._resolve_prepend_artist(prepend_artist)
+        row = self.db.get_request(request_id)
+        if row is None:
+            return DryRunResult(
+                outcome=RESULT_REQUEST_NOT_FOUND,
+                request_id=request_id,
+                error_message=f"request {request_id} not found",
+            )
+        try:
+            tracks = self.db.get_tracks(request_id) or []
+        except Exception:  # noqa: BLE001
+            tracks = []
+        snapshot = snapshot_from_request_row(
+            row, tracks, prepend_artist=prepend,
+        )
+        plan = generate_search_plan(snapshot, self.plan_config)
+        metadata_snapshot = _metadata_snapshot_from_snapshot(snapshot)
+        if plan.status == PLAN_STATUS_GENERATION_FAILED:
+            return DryRunResult(
+                outcome=RESULT_DRY_RUN_GENERATION_FAILED,
+                request_id=request_id,
+                plan=plan,
+                snapshot=snapshot,
+                metadata_snapshot=metadata_snapshot,
+                error_message=plan.failure_reason,
+            )
+        return DryRunResult(
+            outcome=RESULT_DRY_RUN_SUCCESS,
+            request_id=request_id,
+            plan=plan,
+            snapshot=snapshot,
+            metadata_snapshot=metadata_snapshot,
         )
 
     @staticmethod
@@ -945,6 +1046,65 @@ class SearchPlanService:
             failure_class=failure_class,
             error_message=sanitized_msg,
         )
+
+
+def dry_run_payload(
+    result: "DryRunResult",
+    *,
+    current_generator_id: str,
+    request_row: dict[str, Any] | None,
+    has_active_plan: bool,
+) -> dict[str, Any]:
+    """JSON-serialisable payload for U6 dry-run CLI + API responses.
+
+    Single helper so the CLI ``--json`` mode and the API endpoint emit
+    the same dict tree (CLI ⇄ API symmetry).
+    """
+    plan_payload: dict[str, Any] | None = None
+    if result.plan is not None:
+        items_payload: list[dict[str, Any]] = []
+        for it in result.plan.items:
+            items_payload.append({
+                "ordinal": it.ordinal,
+                "strategy": it.strategy,
+                "query": it.query,
+                "canonical_query_key": it.canonical_query_key,
+                "repeat_group": it.repeat_group,
+                "provenance": dict(it.provenance) if it.provenance else {},
+            })
+        plan_payload = {
+            "generator_id": result.plan.generator_id,
+            "status": result.plan.status,
+            "items": items_payload,
+            "provenance": (
+                dict(result.plan.provenance)
+                if result.plan.provenance else {}
+            ),
+            "failure_reason": result.plan.failure_reason,
+            "metadata_snapshot": result.metadata_snapshot,
+        }
+    request_payload: dict[str, Any] | None = None
+    if request_row is not None:
+        request_payload = {
+            "id": request_row.get("id"),
+            "status": request_row.get("status"),
+            "artist_name": request_row.get("artist_name"),
+            "album_title": request_row.get("album_title"),
+            "mb_release_id": request_row.get("mb_release_id"),
+            "discogs_release_id": request_row.get("discogs_release_id"),
+            "year": request_row.get("year"),
+            "release_group_year": request_row.get("release_group_year"),
+            "source": request_row.get("source"),
+        }
+    return {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "current_generator_id": current_generator_id,
+        "request": request_payload,
+        "plan": plan_payload,
+        "would_supersede_active": bool(has_active_plan),
+        "error_message": result.error_message,
+    }
 
 
 def _within_retry_window(created_at: datetime | None) -> bool:

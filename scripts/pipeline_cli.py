@@ -1929,6 +1929,125 @@ def cmd_beets_distance(db, args):
     return 1
 
 
+def cmd_search_plan_dry_run(db, args):
+    """U6: ``pipeline-cli search-plan dry-run <request_id>``.
+
+    Read-only simulator: runs the current generator against the
+    request's persisted snapshot and prints the slot list without
+    writing anything. Counterpart of ``GET /api/pipeline/<id>/search-plan/dry-run``.
+    Both surfaces wrap ``SearchPlanService.dry_run_for_request`` — keep
+    them in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+
+    Use this during generator development (see
+    ``.claude/rules/code-quality.md`` § "Pipeline Decision Debugging
+    — Simulator-First TDD") to validate that the next cycle's
+    generator output matches expectations before bumping
+    ``SEARCH_PLAN_GENERATOR_ID``.
+
+    Exit codes:
+      * 0 — ``RESULT_DRY_RUN_SUCCESS`` or
+        ``RESULT_DRY_RUN_GENERATION_FAILED`` (generator returned a
+        deterministic generation failure — informational, not a CLI
+        error; the operator still wants to see ``failure_reason`` and
+        provenance).
+      * 2 — ``RESULT_REQUEST_NOT_FOUND``.
+    """
+    from lib.config import read_runtime_config
+    from lib.search_plan_service import (
+        RESULT_DRY_RUN_GENERATION_FAILED,
+        RESULT_DRY_RUN_SUCCESS,
+        RESULT_REQUEST_NOT_FOUND,
+        SearchPlanService,
+        dry_run_payload,
+    )
+
+    cfg = read_runtime_config()
+    svc = SearchPlanService(db, cfg)
+    result = svc.dry_run_for_request(
+        int(args.id),
+        prepend_artist=bool(getattr(args, "prepend_artist", False)),
+    )
+    row = db.get_request(int(args.id))
+    has_active = False
+    if row is not None:
+        try:
+            active = db.get_active_search_plan(int(args.id))
+            has_active = active is not None
+        except Exception:  # noqa: BLE001
+            has_active = False
+    payload = dry_run_payload(
+        result,
+        current_generator_id=svc.generator_id,
+        request_row=row,
+        has_active_plan=has_active,
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+    else:
+        print(f"  Request ID:             {payload['request_id']}")
+        print(f"  Outcome:                {payload['outcome']}")
+        print(
+            f"  Current generator id:   {payload['current_generator_id']}")
+        if payload["request"] is not None:
+            req = payload["request"]
+            print(f"  Artist:                 {req.get('artist_name')}")
+            print(f"  Album:                  {req.get('album_title')}")
+            print(f"  Status:                 {req.get('status')}")
+            print(f"  Year:                   {req.get('year') or '-'}")
+            rg = req.get("release_group_year")
+            print(f"  Release-group year:     {rg if rg is not None else '-'}")
+            print(
+                f"  Would supersede active: "
+                f"{'yes' if payload['would_supersede_active'] else 'no'}")
+        plan = payload["plan"]
+        if plan is None:
+            print(f"  Plan:                   (none)")
+            if result.error_message:
+                print(f"  Error message:          {result.error_message}")
+        else:
+            print(f"  Plan generator_id:      {plan['generator_id']}")
+            print(f"  Plan status:            {plan['status']}")
+            if plan["failure_reason"]:
+                print(
+                    f"  Plan failure_reason:    {plan['failure_reason']}")
+            items = plan["items"]
+            print(f"  Plan items ({len(items)}):")
+            for it in items:
+                head = (
+                    f"    [{it['ordinal']:>2}] strategy={it['strategy']}"
+                    f"  query={it['query']!r}")
+                if it.get("canonical_query_key"):
+                    head += f"  key={it['canonical_query_key']}"
+                if it.get("repeat_group"):
+                    head += f"  repeat={it['repeat_group']}"
+                print(head)
+                prov = it.get("provenance") or {}
+                for key, value in prov.items():
+                    print(f"          provenance.{key}: {value}")
+            prov_plan = plan.get("provenance") or {}
+            if prov_plan:
+                print(f"  Plan provenance:")
+                for key, value in prov_plan.items():
+                    if isinstance(value, list):
+                        print(f"    {key}: {len(value)} item(s)")
+                        for entry in value[:5]:
+                            print(f"      - {entry}")
+                        if len(value) > 5:
+                            print(f"      ... +{len(value) - 5} more")
+                    else:
+                        print(f"    {key}: {value}")
+
+    if result.outcome == RESULT_DRY_RUN_SUCCESS:
+        return 0
+    if result.outcome == RESULT_DRY_RUN_GENERATION_FAILED:
+        return 0
+    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+        return 2
+    return 1
+
+
 def cmd_search_plan_advance(db, args):
     """Forward-only operator advance of the search-plan cursor.
 
@@ -2177,6 +2296,17 @@ def main():
              "(e.g. `track`, `unwild_year`)")
     p_sp_advance.add_argument("--json", action="store_true",
                               help="Print structured JSON instead of text")
+    p_sp_dry_run = sp_sub.add_parser(
+        "dry-run",
+        help="Run the generator against the request's snapshot without "
+             "persisting (U6 simulator)")
+    p_sp_dry_run.add_argument("id", type=int, help="Request ID")
+    p_sp_dry_run.add_argument("--prepend-artist", action="store_true",
+                              dest="prepend_artist",
+                              help="Prepend artist name to album title in "
+                              "generated queries")
+    p_sp_dry_run.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
     p_sp_history = sp_sub.add_parser(
         "history",
         help="Cursor-paginated read of one request's search_log rows "
@@ -2358,6 +2488,7 @@ def main():
         "regenerate": cmd_search_plan_regenerate,
         "advance": cmd_search_plan_advance,
         "history": cmd_search_plan_history,
+        "dry-run": cmd_search_plan_dry_run,
     }
     try:
         if args.command == "search-plan":

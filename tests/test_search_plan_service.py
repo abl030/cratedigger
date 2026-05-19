@@ -926,6 +926,104 @@ class TestSearchPlanServiceHistoryPage(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_HISTORY_PAGE_SUCCESS)
 
 
+class TestSearchPlanServiceDryRun(unittest.TestCase):
+    """U6 service contract: ``SearchPlanService.dry_run_for_request``.
+
+    Pure read-only simulator — no DB writes, no advisory lock, no
+    ``active_plan_id`` mutation, no resolver call. Returns a typed
+    ``DryRunResult`` with ``RESULT_DRY_RUN_SUCCESS`` |
+    ``RESULT_DRY_RUN_GENERATION_FAILED`` |
+    ``RESULT_REQUEST_NOT_FOUND``.
+    """
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+
+    def _seed(self, **overrides) -> int:
+        row = make_request_row(
+            artist_name="Radiohead", album_title="Kid A",
+            year=2008, release_group_year=2000,
+            **overrides,
+        )
+        self.db.seed_request(row)
+        rid = int(row["id"])
+        self.db.set_tracks(rid, [
+            {"track_number": 1, "title": "Everything In Its Right Place"},
+            {"track_number": 2, "title": "Kid A"},
+            {"track_number": 3, "title": "The National Anthem"},
+        ])
+        return rid
+
+    def test_dry_run_returns_plan_without_persisting(self):
+        from lib.search_plan_service import RESULT_DRY_RUN_SUCCESS
+        rid = self._seed(id=1)
+        plans_before = dict(self.db.search_plans)
+        items_before = dict(self.db.search_plan_items)
+        result = self.svc.dry_run_for_request(rid)
+        self.assertEqual(result.outcome, RESULT_DRY_RUN_SUCCESS)
+        self.assertEqual(result.request_id, rid)
+        self.assertIsNotNone(result.plan)
+        assert result.plan is not None
+        self.assertGreater(len(result.plan.items), 0)
+        # Persistence invariants — nothing written.
+        self.assertEqual(self.db.search_plans, plans_before)
+        self.assertEqual(self.db.search_plan_items, items_before)
+        self.assertIsNone(self.db._requests[rid]["active_plan_id"])
+
+    def test_dry_run_request_not_found_returns_typed_outcome(self):
+        from lib.search_plan_service import RESULT_REQUEST_NOT_FOUND
+        result = self.svc.dry_run_for_request(9999)
+        self.assertEqual(result.outcome, RESULT_REQUEST_NOT_FOUND)
+        self.assertEqual(result.request_id, 9999)
+        self.assertIsNone(result.plan)
+        self.assertIsNotNone(result.error_message)
+
+    def test_dry_run_takes_no_advisory_lock(self):
+        rid = self._seed(id=2)
+        before = list(self.db.advisory_lock_calls)
+        self.svc.dry_run_for_request(rid)
+        # Lock list unchanged — dry-run is read-only and contention-free.
+        self.assertEqual(self.db.advisory_lock_calls, before)
+
+    def test_dry_run_does_not_invoke_resolver(self):
+        # Seed a request with NO tracks and a resolver that would raise
+        # if called — proves dry_run never reaches into the resolver.
+        from lib.search_plan_service import RESULT_DRY_RUN_SUCCESS
+        rid = self._seed(id=3)
+        self.db.set_tracks(rid, [])
+        resolver = MagicMock()
+        resolver.resolve_tracks.side_effect = AssertionError(
+            "resolver must not be called from dry_run")
+        svc = SearchPlanService(self.db, self.cfg, resolver=resolver)
+        result = svc.dry_run_for_request(rid)
+        # Even with empty tracks the generator emits a non-track plan.
+        self.assertEqual(result.outcome, RESULT_DRY_RUN_SUCCESS)
+        resolver.resolve_tracks.assert_not_called()
+
+    def test_dry_run_uses_release_group_year_from_row(self):
+        rid = self._seed(id=4)
+        result = self.svc.dry_run_for_request(rid)
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot.release_group_year, 2000)
+
+    def test_dry_run_metadata_snapshot_includes_release_group_year(self):
+        rid = self._seed(id=5)
+        result = self.svc.dry_run_for_request(rid)
+        assert result.metadata_snapshot is not None
+        self.assertEqual(
+            result.metadata_snapshot.get("release_group_year"), 2000)
+
+    def test_dry_run_uses_current_generator_id(self):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        rid = self._seed(id=6)
+        result = self.svc.dry_run_for_request(rid)
+        assert result.plan is not None
+        self.assertEqual(
+            result.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
+
+
 class TestSearchPlanConfigFromCratedigger(unittest.TestCase):
     def test_threshold_propagates(self):
         cfg = CratediggerConfig(search_escalation_threshold=7)

@@ -1979,6 +1979,148 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         self.assertEqual(active.plan.id, old_plan_id)
 
 
+class TestCmdSearchPlanDryRun(unittest.TestCase):
+    """U6: ``pipeline-cli search-plan dry-run`` wraps
+    ``SearchPlanService.dry_run_for_request`` — read-only generator
+    simulator. Mirrors the same exit-code convention as ``search-plan
+    show``: success = 0, request_not_found = 2.
+    """
+
+    def _seed_request(
+        self, *, status: str = "wanted",
+        artist: str = "Radiohead", title: str = "Kid A",
+        year: int = 2008, release_group_year: int | None = 2000,
+        tracks: list[dict] | None = None,
+    ):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name=artist, album_title=title,
+            source="request", year=year, status=status,
+        )
+        if release_group_year is not None:
+            db._requests[rid]["release_group_year"] = release_group_year
+        if tracks is None:
+            tracks = [
+                {"track_number": 1, "title": "Everything In Its Right Place"},
+                {"track_number": 2, "title": "Kid A"},
+                {"track_number": 3, "title": "The National Anthem"},
+            ]
+        if tracks:
+            db.set_tracks(rid, tracks)
+        return db, rid
+
+    def _run(self, db, rid, *, json_out: bool = False, prepend: bool = False):
+        args = SimpleNamespace(
+            id=rid, json=json_out, prepend_artist=prepend)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch("lib.config.read_runtime_config") as mock_cfg:
+                from lib.config import CratediggerConfig
+                import configparser
+                cp = configparser.RawConfigParser()
+                cp.read_string("[General]\n")
+                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+                rc = pipeline_cli.cmd_search_plan_dry_run(db, args)
+        return rc, stdout.getvalue()
+
+    def test_dry_run_happy_path_prints_plan_items_without_persisting(self):
+        db, rid = self._seed_request()
+        plans_before = len(db.search_plans)
+        items_before = len(db.search_plan_items)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Outcome:", out)
+        self.assertIn("success", out)
+        self.assertIn("Plan items", out)
+        # Persistence invariant: dry-run never writes plan rows.
+        self.assertEqual(len(db.search_plans), plans_before)
+        self.assertEqual(len(db.search_plan_items), items_before)
+        # Request row's active_plan_id is untouched.
+        self.assertIsNone(db._requests[rid]["active_plan_id"])
+
+    def test_dry_run_json_returns_full_payload(self):
+        db, rid = self._seed_request()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        for key in ("request_id", "outcome", "current_generator_id",
+                    "request", "plan", "would_supersede_active",
+                    "error_message"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["request_id"], rid)
+        self.assertEqual(payload["outcome"], "success")
+        self.assertIsNotNone(payload["plan"])
+        # release_group_year reflected in request payload (U5 input).
+        self.assertEqual(
+            payload["request"]["release_group_year"], 2000)
+        # Plan items shape is the documented contract.
+        self.assertGreater(len(payload["plan"]["items"]), 0)
+        item = payload["plan"]["items"][0]
+        for key in ("ordinal", "strategy", "query",
+                    "canonical_query_key", "repeat_group", "provenance"):
+            self.assertIn(key, item)
+
+    def test_dry_run_missing_request_returns_2(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999)
+        self.assertEqual(rc, 2)
+        self.assertIn("request_not_found", out)
+
+    def test_dry_run_missing_request_json_is_structured(self):
+        from tests.fakes import FakePipelineDB
+        db = FakePipelineDB()
+        rc, out = self._run(db, 9999, json_out=True)
+        self.assertEqual(rc, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "request_not_found")
+        self.assertEqual(payload["request_id"], 9999)
+        self.assertIsNone(payload["plan"])
+        self.assertIsNone(payload["request"])
+
+    def test_dry_run_request_with_no_tracks_succeeds_no_track_slots(self):
+        db, rid = self._seed_request(tracks=[])
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "success")
+        # No track-fallback slots when the request has zero tracks.
+        strategies = [
+            it["strategy"] for it in payload["plan"]["items"]
+        ]
+        self.assertFalse(
+            any(s.startswith("track_") for s in strategies),
+            f"unexpected track slots: {strategies}")
+
+    def test_dry_run_flags_active_plan_would_be_superseded(self):
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db, rid = self._seed_request()
+        db.create_successful_search_plan(
+            request_id=rid, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="prior",
+                canonical_query_key="k0")],
+            set_active=True,
+        )
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["would_supersede_active"])
+
+    def test_dry_run_uses_current_generator_id(self):
+        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        db, rid = self._seed_request()
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(
+            payload["current_generator_id"], SEARCH_PLAN_GENERATOR_ID)
+        self.assertEqual(
+            payload["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
+
+
 class TestStaleCompletionRacingRegeneration(unittest.TestCase):
     """U8: a stale plan-A completion arriving after regeneration must
     log against plan A but never advance plan B's cursor. Integration
