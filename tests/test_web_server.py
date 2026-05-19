@@ -485,7 +485,7 @@ def _make_server():
             ],
         },
         "plan_readiness": {
-            "generator_id": "search-plan/2026-05-08-1",
+            "generator_id": "search-plan/2026-05-19-1",
             "wanted_total": 10,
             "wanted_searchable": 7,
             "wanted_legacy": 1,
@@ -1919,7 +1919,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
 
     def _make_active(
         self, *,
-        generator_id: str = "search-plan/2026-05-08-1",
+        generator_id: str = "search-plan/2026-05-19-1",
         items_count: int = 2,
         next_ordinal: int = 0,
         cycle_count: int = 0,
@@ -1961,7 +1961,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         status: str,
         failure_class: str,
         error_message: str = "boom",
-        generator_id: str = "search-plan/2026-05-08-1",
+        generator_id: str = "search-plan/2026-05-19-1",
     ):
         from datetime import datetime, timezone
         from lib.pipeline_db import SearchPlanRow, SearchPlanProvenance

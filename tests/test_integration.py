@@ -1319,11 +1319,20 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         cratedigger.slskd = self._orig_slskd
         cratedigger.pipeline_db_source = self._orig_pdb
 
-    def test_dir_with_wrong_count_skipped_before_browse(self):
-        """Directory with 3 audio files should be skipped when we need 12 tracks."""
-        # Search metadata says this dir has 3 audio files
+    def test_dir_with_junk_count_skipped_before_browse(self):
+        """Junk-dir guard: ``search_count > 2 * track_num`` skips pre-browse.
+
+        Asymmetric pre-filter (U1, 2026-05-19): the old bidirectional
+        ``abs(search_count - track_num) > 2`` was over-strict and silently
+        discarded track-fallback results (search_count=1 vs track_num=4).
+        The new rule only skips when the dir has way too many audio files
+        to plausibly be the album — a 12-track album request seeing 50
+        audio files matching its query is almost certainly a junk dump,
+        and we save the network roundtrip.
+        """
+        # 50 audio files for a 12-track album → 50 > 2*12 = 24 → skip.
         self.ctx.search_dir_audio_count = {
-            "user1": {"Music\\Album": 3}
+            "user1": {"Music\\Album": 50}
         }
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
 
@@ -1333,8 +1342,46 @@ class TestSearchResultPreFiltering(unittest.TestCase):
         # Should NOT have called slskd.users.directory — skipped before browse
         self.assertEqual(self.slskd.users.directory_calls, [])
 
+    def test_track_fallback_dir_not_skipped(self):
+        """Track-fallback search (search_count=1) must reach the browse step.
+
+        Bug fix dividend (U1, 2026-05-19): under the old bidirectional rule
+        the 1-file response from a track-name query was always skipped
+        and negative-cached. The asymmetric rule lets it through.
+        """
+        # 1 audio file for a 12-track album → 1 > 24 is false → browse.
+        self.ctx.search_dir_audio_count = {
+            "user1": {"Music\\Album": 1}
+        }
+        self.slskd.users.set_directory("user1", "Music\\Album", [
+            make_directory("Music\\Album", [
+                {"filename": f"0{i} - Track {i}.flac", "size": 100}
+                for i in range(12)
+            ])
+        ])
+        self.ctx.current_album_cache[1] = MagicMock(
+            title="Album", artist_name="Artist")
+
+        tracks: list[cratedigger.TrackRecord] = [
+            {"albumId": 1, "title": f"Track {i}", "mediumNumber": 1}
+            for i in range(12)
+        ]  # type: ignore[misc]
+        cratedigger.check_for_match(
+            tracks, "flac", ["Music\\Album"], "user1", self.ctx)
+
+        # SHOULD have browsed — search_count=1 is below the 2*track_num guard.
+        self.assertEqual(
+            self.slskd.users.directory_calls,
+            [("user1", "Music\\Album")],
+        )
+
     def test_dir_with_close_count_not_skipped(self):
-        """Directory with 13 audio files should NOT be skipped for 12 tracks (tolerance +-2)."""
+        """Directory with 13 audio files should NOT be skipped for 12 tracks.
+
+        Under the asymmetric pre-filter (U1, 2026-05-19) the cutoff is
+        ``search_count > 2 * track_num`` (i.e. >24 for a 12-track album).
+        13 sails through.
+        """
         self.ctx.search_dir_audio_count = {
             "user1": {"Music\\Album": 13}
         }
