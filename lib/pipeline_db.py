@@ -1570,19 +1570,24 @@ class PipelineDB:
                     mb_artist_id=None, discogs_release_id=None,
                     year=None, country=None, format=None,
                     source_path=None, reasoning=None,
-                    status="wanted"):
+                    status="wanted",
+                    release_group_year=None):
         now = datetime.now(timezone.utc)
         cur = self._execute("""
             INSERT INTO album_requests (
                 mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
-                artist_name, album_title, year, country, format,
+                artist_name, album_title, year, release_group_year,
+                country, format,
                 source, source_path, reasoning, status,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
             RETURNING id
         """, (
             mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
-            artist_name, album_title, year, country, format,
+            artist_name, album_title, year, release_group_year,
+            country, format,
             source, source_path, reasoning, status,
             now, now,
         ))
@@ -1926,6 +1931,54 @@ class PipelineDB:
     ) -> None:
         """Write spectral state pairs together, including explicit NULLs."""
         self.update_request_fields(request_id, **update.as_update_fields())
+
+    def get_requests_missing_release_group_year(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List requests that need ``release_group_year`` populated.
+
+        Returns the rows where ``mb_release_group_id IS NOT NULL`` and
+        ``release_group_year IS NULL``. Used by the U3 deploy backfill
+        script (``scripts/backfill_release_group_year.py``); the WHERE
+        clause is what makes the backfill idempotent — re-running skips
+        rows that already have a value.
+
+        ``limit`` is honoured so the backfill can process in deterministic
+        chunks and test setups can constrain the result set.
+        """
+        sql = (
+            "SELECT id, mb_release_group_id, artist_name, album_title "
+            "FROM album_requests "
+            "WHERE mb_release_group_id IS NOT NULL "
+            "  AND release_group_year IS NULL "
+            "ORDER BY id"
+        )
+        params: tuple[object, ...] = ()
+        if limit is not None:
+            sql += " LIMIT %s"
+            params = (limit,)
+        cur = self._execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+    def set_release_group_year(
+        self,
+        request_id: int,
+        year: int | None,
+    ) -> None:
+        """Set ``album_requests.release_group_year`` (U3 / R9).
+
+        ``year`` may be ``None`` (column reset to NULL) or an int (the
+        release-group's first-release year as returned by the MB mirror).
+        Used by the U3 deploy backfill and by U4's enqueue path. Thin
+        wrapper around ``update_request_fields`` — exists so call sites
+        carry the column name as part of the method, which makes the
+        backfill / enqueue intent grep-able.
+        """
+        self.update_request_fields(
+            request_id, release_group_year=year,
+        )
 
     def update_v0_probe_state(
         self,

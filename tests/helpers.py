@@ -51,6 +51,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "artist_name": "Test Artist",
         "album_title": "Test Album",
         "year": 2024,
+        # Migration 026 — release-group's first-release year (U3 / R9).
+        "release_group_year": None,
         "country": "US",
         "format": None,
         "source": "request",

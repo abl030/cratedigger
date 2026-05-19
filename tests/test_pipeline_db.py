@@ -2509,6 +2509,86 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
 
 
 @requires_postgres
+class TestReleaseGroupYearColumn(unittest.TestCase):
+    """U3 / R9 — ``album_requests.release_group_year`` column wiring.
+
+    The migration is verified in ``tests/test_migrator.py``. These tests
+    cover ``PipelineDB.set_release_group_year`` and
+    ``get_requests_missing_release_group_year`` against real PostgreSQL.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_get_request_round_trips_release_group_year(self):
+        rid = self.db.add_request(
+            mb_release_id="rg-year-roundtrip",
+            mb_release_group_id="rg-uuid-1",
+            artist_name="A", album_title="B", source="request",
+        )
+        req = self.db.get_request(rid)
+        assert req is not None
+        # Default is NULL — the column has no default in the migration.
+        self.assertIsNone(req["release_group_year"])
+
+        self.db.set_release_group_year(rid, 2000)
+        req2 = self.db.get_request(rid)
+        assert req2 is not None
+        self.assertEqual(req2["release_group_year"], 2000)
+
+    def test_set_to_none_clears_the_column(self):
+        rid = self.db.add_request(
+            mb_release_id="rg-year-clear",
+            mb_release_group_id="rg-uuid-clear",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.db.set_release_group_year(rid, 1980)
+        self.db.set_release_group_year(rid, None)
+        req = self.db.get_request(rid)
+        assert req is not None
+        self.assertIsNone(req["release_group_year"])
+
+    def test_get_requests_missing_release_group_year_filters_correctly(self):
+        # Has RG, no year → returned.
+        needs = self.db.add_request(
+            mb_release_id="needs-year",
+            mb_release_group_id="rg-needs",
+            artist_name="A", album_title="B", source="request",
+        )
+        # Has RG and year → excluded.
+        has = self.db.add_request(
+            mb_release_id="has-year",
+            mb_release_group_id="rg-has",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.db.set_release_group_year(has, 1999)
+        # No RG → excluded (the generator's RG slot wouldn't fire either).
+        no_rg = self.db.add_request(
+            discogs_release_id="555",
+            artist_name="A", album_title="B", source="request",
+        )
+
+        rows = self.db.get_requests_missing_release_group_year()
+        ids = {r["id"] for r in rows}
+        self.assertIn(needs, ids)
+        self.assertNotIn(has, ids)
+        self.assertNotIn(no_rg, ids)
+
+    def test_missing_year_query_respects_limit(self):
+        for i in range(5):
+            self.db.add_request(
+                mb_release_id=f"rg-limit-{i}",
+                mb_release_group_id=f"rg-limit-uuid-{i}",
+                artist_name="A", album_title="B", source="request",
+            )
+        rows = self.db.get_requests_missing_release_group_year(limit=2)
+        self.assertEqual(len(rows), 2)
+
+
+@requires_postgres
 class TestApplyTransitionDB(unittest.TestCase):
     """DB-backed contract tests for apply_transition preserve semantics."""
 

@@ -183,6 +183,39 @@ def get_release_group(rg_mbid):
     return _cache.memoize_meta(f"mb:release-group:{rg_mbid}:meta", _fetch)
 
 
+def get_release_group_year(rg_mbid):
+    """Return the release-group's first-release year as an int, or None.
+
+    Used by the U3/U4 release-group-year backfill + enqueue path. The
+    MB ``/release-group/<mbid>`` endpoint returns ``first-release-date``
+    directly (verified against the local mirror at 2026-05-19), so a
+    single fetch is enough — no need to paginate child releases and
+    derive ``min(release.date)``.
+
+    Returns ``None`` when the mirror returns 404, when the response
+    lacks a parseable date, or when the year prefix is not 4 digits.
+    Callers treat ``None`` as "leave the column NULL"; they never
+    fail-hard on a missing release-group.
+    """
+    def _fetch() -> int | None:
+        try:
+            data = _get(f"{MB_API_BASE}/release-group/{rg_mbid}?fmt=json")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            raise
+        date = data.get("first-release-date", "")
+        if not isinstance(date, str) or len(date) < 4:
+            return None
+        try:
+            return int(date[:4])
+        except ValueError:
+            return None
+
+    return _cache.memoize_meta(
+        f"mb:release-group:{rg_mbid}:year", _fetch)
+
+
 def get_release_group_releases(rg_mbid):
     """Get all releases for a release group. Returns list of release summaries."""
     def _fetch() -> dict:

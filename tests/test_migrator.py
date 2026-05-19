@@ -1765,5 +1765,92 @@ class TestSearchLogPreFilterSkipCountSchema(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+@requires_postgres
+class TestAlbumRequestsReleaseGroupYearSchema(unittest.TestCase):
+    """Migration 026 adds ``album_requests.release_group_year``
+    (INTEGER, NULL). U3 of search-plan-entropy / R9 (data layer). The
+    column is nullable because many requests have no
+    ``mb_release_group_id`` (legacy / Discogs / manual rows) — the
+    backfill skips those, the generator handles NULL gracefully.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_column_exists_nullable_with_no_default(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, column_default, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'album_requests'
+              AND column_name = 'release_group_year'
+        """)
+        self.assertEqual(len(rows), 1)
+        col, is_nullable, default, dtype = rows[0]
+        self.assertEqual(col, "release_group_year")
+        self.assertEqual(is_nullable, "YES")
+        self.assertIsNone(default)
+        self.assertEqual(dtype, "integer")
+
+    def test_existing_row_defaults_to_null_on_insert_without_value(self):
+        rid = self._query("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES ('rg-year-default-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            rows = self._query(
+                "SELECT release_group_year FROM album_requests "
+                "WHERE id = %s",
+                (rid,),
+            )
+            self.assertIsNone(rows[0][0])
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id = %s", (rid,),
+            )
+
+    def test_writable_when_explicitly_set(self):
+        rid = self._query("""
+            INSERT INTO album_requests (
+                mb_release_id, mb_release_group_id, artist_name,
+                album_title, source, release_group_year
+            )
+            VALUES ('rg-year-set-test', 'rg-test-uuid', 'A', 'B', 'request', 2000)
+            RETURNING id
+        """)[0][0]
+        try:
+            rows = self._query(
+                "SELECT release_group_year FROM album_requests "
+                "WHERE id = %s",
+                (rid,),
+            )
+            self.assertEqual(rows[0][0], 2000)
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id = %s", (rid,),
+            )
+
+    def test_records_applied_version_026(self):
+        rows = self._query("""
+            SELECT version FROM schema_migrations
+            WHERE version = 26
+        """)
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
