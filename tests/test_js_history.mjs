@@ -4,7 +4,7 @@
  */
 
 import { renderDownloadHistoryItem, __test__ } from '../web/js/history.js';
-const { formatV0Probe } = __test__;
+const { formatV0Probe, formatSpectral } = __test__;
 
 let passed = 0;
 let failed = 0;
@@ -87,7 +87,7 @@ console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values
   assertExcludes(html, 'confident<script>', 'raw preview not rendered');
 }
 
-console.log('renderDownloadHistoryItem() shows actual and spectral existing bitrate');
+console.log('renderDownloadHistoryItem() shows actual and spectral existing bitrate in side-by-side comparison');
 {
   const html = renderDownloadHistoryItem({
     outcome: 'rejected',
@@ -97,10 +97,16 @@ console.log('renderDownloadHistoryItem() shows actual and spectral existing bitr
     existing_spectral_bitrate: 128,
   });
 
-  assertContains(html, 'On disk (before)', 'existing bitrate label rendered');
+  // After the side-by-side restructure, each existing fact gets its own
+  // label/value pair under the "On disk (before)" header rather than
+  // being concatenated into one composite line.
+  assertContains(html, 'On disk (before)', 'on-disk section header rendered');
+  assertContains(html, 'class="p-hist-label">Bitrate</span>',
+    'existing bitrate has its own row');
   assertContains(html, '246kbps', 'actual existing bitrate rendered');
+  assertContains(html, 'class="p-hist-label">Spectral</span>',
+    'existing spectral has its own row');
   assertContains(html, '~128kbps', 'spectral existing bitrate rendered');
-  assertContains(html, '~128kbps (spectral)', 'spectral style retained');
 }
 
 console.log('renderDownloadHistoryItem() keeps single existing bitrate styles');
@@ -118,16 +124,18 @@ console.log('renderDownloadHistoryItem() keeps single existing bitrate styles');
     existing_min_bitrate: 246,
   });
 
-  assertContains(spectralOnlyHtml, '~128kbps (spectral)',
-    'spectral-only existing bitrate keeps spectral style');
+  assertContains(spectralOnlyHtml, '~128kbps',
+    'spectral-only existing bitrate shows the ~ prefix');
   assertExcludes(spectralOnlyHtml, '246kbps',
     'spectral-only existing bitrate does not invent actual bitrate');
+  assertExcludes(spectralOnlyHtml, 'class="p-hist-label">Bitrate</span>',
+    'spectral-only existing has no Bitrate row');
   assertContains(actualOnlyHtml, '246kbps',
     'actual-only existing bitrate keeps plain style');
   assertExcludes(actualOnlyHtml, '~246kbps',
     'actual-only existing bitrate is not shown as spectral');
-  assertExcludes(actualOnlyHtml, '(spectral)',
-    'actual-only existing bitrate has no spectral suffix');
+  assertExcludes(actualOnlyHtml, 'class="p-hist-label">Spectral</span>',
+    'actual-only existing has no Spectral row');
 }
 
 console.log('renderDownloadHistoryItem() shows provisional V0 probe evidence');
@@ -145,7 +153,11 @@ console.log('renderDownloadHistoryItem() shows provisional V0 probe evidence');
 
   assertContains(html, 'V0 probe', 'candidate probe label rendered');
   assertContains(html, '228kbps avg', 'candidate probe avg rendered');
-  assertContains(html, '171kbps source V0 avg', 'existing probe avg rendered');
+  // The existing probe now sits in the side-by-side "On disk (before)"
+  // section using the shared formatV0Probe helper — same rendering
+  // rules as the candidate side. Bare "171kbps avg" with no source-V0
+  // qualifier, because the section header ("On disk") already labels it.
+  assertContains(html, '171kbps avg', 'existing probe avg rendered');
   assertContains(html, 'Stored as', 'final format label rendered');
   assertContains(html, 'opus 128', 'final format rendered');
   assertExcludes(html, '(lossless_source_v0)',
@@ -171,7 +183,7 @@ console.log('renderDownloadHistoryItem() renders non-lossless V0 probe with "(me
     'raw kind string not surfaced in non-lossless probe value');
 }
 
-console.log('renderDownloadHistoryItem() emits the 2-column grid wrapper, not stacked rows');
+console.log('renderDownloadHistoryItem() separates Downloaded from On disk into side-by-side sections');
 {
   const html = renderDownloadHistoryItem({
     outcome: 'rejected',
@@ -183,21 +195,71 @@ console.log('renderDownloadHistoryItem() emits the 2-column grid wrapper, not st
     v0_probe_kind: 'native_lossy_research_v0',
     v0_probe_avg_bitrate: 247,
     existing_min_bitrate: 237,
-    existing_spectral_bitrate: 96,
+    existing_spectral_bitrate: 92,
     final_format: 'MP3',
     beets_distance: 0.066,
   });
 
-  assertContains(html, 'class="p-hist-grid"',
-    '2-column grid wrapper rendered');
-  assertExcludes(html, 'class="p-hist-row"',
-    'old stacked .p-hist-row markup is gone');
-  // Each label/value pair is its own grid cell, so labels and values must
-  // both appear as siblings under the grid.
+  // The wrapper that holds the two sections.
+  assertContains(html, 'class="p-hist-sides"', 'two-side wrapper rendered');
+  assertExcludes(html, 'class="p-hist-row"', 'old stacked rows are gone');
+
+  // Section headers identify each side.
+  assertContains(html, '>Downloaded<', 'Downloaded section header rendered');
+  assertContains(html, '>On disk (before)<', 'On disk section header rendered');
+
+  // Apples-to-apples: same metric labels appear on both sides where data
+  // is present.
   assertContains(html, 'class="p-hist-label">V0 probe</span>',
-    'V0 probe label appears as a grid cell');
+    'V0 probe label appears on candidate side');
   assertContains(html, 'class="p-hist-value">247kbps avg (measurement)',
-    'V0 probe value appears as a grid cell');
+    'candidate V0 probe value renders with measurement suffix');
+  assertContains(html, '237kbps', 'existing bitrate renders');
+  assertContains(html, '~92kbps', 'existing spectral renders with floor');
+
+  // Distance + verdict + triage stays in the common footer grid below
+  // the side-by-side comparison.
+  assertContains(html, 'class="p-hist-grid"', 'common footer grid rendered');
+  assertContains(html, '0.066', 'distance rendered in footer');
+}
+
+console.log('renderDownloadHistoryItem() omits the On disk section when no existing data');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    downloaded_label: 'MP3 V2',
+    spectral_grade: 'genuine',
+    v0_probe_kind: 'native_lossy_research_v0',
+    v0_probe_avg_bitrate: 192,
+    final_format: 'MP3',
+    beets_distance: 0.137,
+  });
+
+  assertContains(html, '>Downloaded<', 'Downloaded section present');
+  assertExcludes(html, '>On disk (before)<',
+    'On disk section absent when no existing data');
+}
+
+console.log('formatSpectral() helper colors grades and prefixes the floor');
+{
+  if (!formatSpectral('genuine').includes('#6d6')) {
+    failed++;
+    console.error('  FAIL: genuine should be green (#6d6)');
+  } else { passed++; }
+  if (!formatSpectral('suspect').includes('#d66')) {
+    failed++;
+    console.error('  FAIL: suspect should be red (#d66)');
+  } else { passed++; }
+  if (!formatSpectral('genuine', 96).includes('~96kbps')) {
+    failed++;
+    console.error('  FAIL: spectral with floor should show ~96kbps');
+  } else { passed++; }
+  if (formatSpectral('genuine').includes('~')) {
+    failed++;
+    console.error('  FAIL: spectral without floor should not show ~');
+  } else { passed++; }
 }
 
 console.log('formatV0Probe() helper picks the right kind suffix per source lineage');
