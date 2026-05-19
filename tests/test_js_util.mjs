@@ -692,6 +692,9 @@ import {
   renderConfirmDialog,
   renderStandardHeader,
   renderInvertedHeader,
+  renderTracklist,
+  renderSourcePanel,
+  formatLength,
   esc as replaceEsc,
 } from '../web/js/replace_picker.js';
 
@@ -706,12 +709,23 @@ const sample = [
   { id: 'bbb', title: 'Pressing B', date: '2021-05-01', country: 'JP', track_count: 13, format: 'LP' },
 ];
 const pressingsHtml = renderPressingsList(sample, 'aaa');
-assert(pressingsHtml.includes('data-mbid="aaa"'), 'renderPressingsList includes current as data-mbid');
-assert(pressingsHtml.includes('disabled'), 'renderPressingsList marks current pressing disabled');
+assert(pressingsHtml.includes('data-expand-mbid="aaa"'),
+  'renderPressingsList wires current pressing as expandable row');
+assert(/data-expand-mbid="aaa"[^>]*disabled|disabled[^>]*data-expand-mbid="aaa"/.test(pressingsHtml),
+  'renderPressingsList marks current pressing disabled');
 assert(pressingsHtml.includes('current pressing'), 'renderPressingsList labels current pressing');
-assert(pressingsHtml.includes('data-mbid="bbb"'), 'renderPressingsList includes sibling');
-assert(!/<button[^>]*data-mbid="bbb"[^>]*disabled/.test(pressingsHtml),
+assert(pressingsHtml.includes('data-expand-mbid="bbb"'), 'renderPressingsList includes sibling');
+assert(!/<button[^>]*data-expand-mbid="bbb"[^>]*disabled/.test(pressingsHtml),
   'renderPressingsList does not disable non-current siblings');
+assert(pressingsHtml.includes('data-mbid="bbb"') &&
+  /replace-picker-confirm[^>]*data-mbid="bbb"/.test(pressingsHtml),
+  'renderPressingsList renders pick-button for non-current pressing');
+assert(!/replace-picker-confirm[^>]*data-mbid="aaa"/.test(pressingsHtml),
+  'renderPressingsList omits pick-button for current pressing');
+assert(!pressingsHtml.includes('aaa</small>') && !pressingsHtml.includes('bbb</small>'),
+  'renderPressingsList does not expose MBID to operator (visual-noise cleanup)');
+assert(/2020.*US.*CD.*12t/.test(pressingsHtml) || pressingsHtml.includes('US · 2020 · CD · 12t'),
+  'renderPressingsList renders meta in country·year·format·Nt order');
 
 assertEqual(
   renderRequestsList([]).includes('No active requests'),
@@ -721,8 +735,14 @@ assertEqual(
 const reqHtml = renderRequestsList([
   { id: 42, mb_release_id: 'old-uuid', status: 'wanted', artist_name: 'Pet Grief', album_title: 'X' },
 ]);
-assert(reqHtml.includes('data-rid="42"'), 'renderRequestsList carries id');
+assert(reqHtml.includes('data-rid="42"'), 'renderRequestsList carries id (pick button)');
 assert(reqHtml.includes('Pet Grief'), 'renderRequestsList includes artist');
+assert(reqHtml.includes('data-expand-mbid="old-uuid"'),
+  'renderRequestsList row expands by MBID');
+assert(reqHtml.includes('data-tracks-for="old-uuid"'),
+  'renderRequestsList renders lazy tracklist container per row');
+assert(!/<small[^>]*>[^<]*old-uuid/.test(reqHtml),
+  'renderRequestsList hides the MBID from the operator');
 
 const dlg = renderConfirmDialog({
   sourceRequestId: 4194,
@@ -740,6 +760,64 @@ assert(renderStandardHeader('Pet Grief — Old').includes('Switch'),
   'renderStandardHeader carries "Switch" verb');
 assert(renderInvertedHeader('Pet Grief — New').includes('replace an existing request'),
   'renderInvertedHeader carries inverted-mode verb');
+
+// Tracklist container is rendered hidden until row.open
+assert(pressingsHtml.includes('data-tracks-for="aaa"'),
+  'renderPressingsList renders tracklist container per row');
+
+// formatLength
+assertEqual(formatLength(0), '0:00', 'formatLength 0 → 0:00');
+assertEqual(formatLength(7), '0:07', 'formatLength <60s pads seconds');
+assertEqual(formatLength(63), '1:03', 'formatLength 63s → 1:03');
+assertEqual(formatLength(263.4), '4:23', 'formatLength rounds');
+assertEqual(formatLength(null), '', 'formatLength null → empty');
+assertEqual(formatLength(undefined), '', 'formatLength undefined → empty');
+assertEqual(formatLength(NaN), '', 'formatLength NaN → empty');
+
+// renderTracklist
+assert(renderTracklist([]).includes('No tracks'),
+  'renderTracklist empty → friendly message');
+const tlHtml = renderTracklist([
+  { disc_number: 1, track_number: 1, title: 'Aaa', length_seconds: 200 },
+  { disc_number: 1, track_number: 2, title: 'Bbb <em>', length_seconds: 263.4 },
+]);
+assert(tlHtml.includes('Aaa'), 'renderTracklist includes title');
+assert(tlHtml.includes('4:23'), 'renderTracklist formats track length');
+assert(tlHtml.includes('&lt;em&gt;'), 'renderTracklist escapes titles');
+assert(!/Disc 1/.test(tlHtml), 'renderTracklist hides disc header for single-disc');
+
+const multiDiscHtml = renderTracklist([
+  { disc_number: 1, track_number: 1, title: 'A', length_seconds: 60 },
+  { disc_number: 2, track_number: 1, title: 'B', length_seconds: 60 },
+]);
+assert(multiDiscHtml.includes('Disc 1') && multiDiscHtml.includes('Disc 2'),
+  'renderTracklist shows disc headers for multi-disc');
+
+// renderSourcePanel
+const loadingPanel = renderSourcePanel({
+  label: 'Pet Grief — Old',
+  meta: 'US · 2020 · CD · 12t',
+  tracks: null,
+  loading: true,
+});
+assert(loadingPanel.includes('Current request:'),
+  'renderSourcePanel labels the panel "Current request:"');
+assert(loadingPanel.includes('Pet Grief — Old'), 'renderSourcePanel includes the label');
+assert(loadingPanel.includes('US · 2020 · CD · 12t'),
+  'renderSourcePanel renders meta line on summary');
+assert(loadingPanel.includes('Loading'), 'renderSourcePanel loading state shows placeholder');
+assert(loadingPanel.includes('replace-picker-source-body'),
+  'renderSourcePanel exposes the body container for lazy fill');
+
+const loadedPanel = renderSourcePanel({
+  label: 'X',
+  tracks: [{ disc_number: 1, track_number: 1, title: 'Z', length_seconds: 120 }],
+});
+assert(loadedPanel.includes('Z'), 'renderSourcePanel renders tracks when loaded');
+assert(loadedPanel.includes('2:00'), 'renderSourcePanel renders track duration');
+
+const errorPanel = renderSourcePanel({ label: 'X', tracks: null, error: 'HTTP 500' });
+assert(errorPanel.includes('HTTP 500'), 'renderSourcePanel renders error message');
 
 assertEqual(replaceEsc('<script>'), '&lt;script&gt;', 'esc escapes <');
 assertEqual(replaceEsc('a&b'), 'a&amp;b', 'esc escapes &');
