@@ -469,6 +469,13 @@ async function runStandard(options, showOverlay, close) {
   // Lazy-fill the "current request" tracklist. Failure here is non-fatal —
   // the picker still works without the reference panel.
   loadSourceTracklist(modal, sourceMbid, sourceLabel).catch(() => {});
+  // Fan out beets-distance lookups against the source request's
+  // wrong-matches folders. Decorates each pressing row's meta line as
+  // results arrive. Silent no-op when the request has no wrong-matches
+  // entries — the picker looks identical to the non-distance UI.
+  loadDistances(modal, options.sourceRequestId, releases).catch((err) => {
+    console.warn('replace-picker distance overlay failed:', err);
+  });
 }
 
 /**
@@ -481,6 +488,95 @@ async function runStandard(options, showOverlay, close) {
  * @type {Map<string, Promise<{ tracks: TracklistTrack[] }>>}
  */
 const tracklistCache = new Map();
+
+/* --------------------------------------------------------------------------
+ * Beets-distance overlay — pure helpers
+ *
+ * The picker decorates each pressing row with the best beets-distance against
+ * the source request's wrong-matches folders. Pure helpers below are tested
+ * via tests/test_js_util.mjs; DOM glue further down lives in `loadDistances`.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * @typedef {Object} BeetsDistanceResult
+ * @property {string} outcome
+ * @property {number|null} [distance]
+ * @property {number|null} [matched_tracks]
+ * @property {number|null} [total_local_tracks]
+ * @property {number|null} [total_mb_tracks]
+ * @property {string|null} [folder_path]
+ * @property {number|null} [download_log_id]
+ */
+
+/**
+ * Pick the lowest-distance "ok" result from a list. Returns null if none
+ * of the inputs scored — keeps the caller branch-free (no distance UI
+ * if every download errored, was wrong-RG-guarded, etc.).
+ *
+ * @param {BeetsDistanceResult[]} results
+ * @returns {BeetsDistanceResult|null}
+ */
+export function pickBestDistance(results) {
+  let best = null;
+  for (const r of results) {
+    if (!r || r.outcome !== 'ok' || typeof r.distance !== 'number') continue;
+    if (best === null || r.distance < /** @type {number} */ (best.distance)) {
+      best = r;
+    }
+  }
+  return best;
+}
+
+/**
+ * Format a distance badge for the pressing-row meta line: `best 0.07 (12/12)`.
+ *
+ * Distance only — no folder path, that's a different surface (the
+ * expanded-row breakdown will carry the per-download details). Returns
+ * an empty string for null so callers can concatenate unconditionally.
+ *
+ * @param {BeetsDistanceResult|null} best
+ * @returns {string}
+ */
+export function formatDistanceBadge(best) {
+  if (best === null) return '';
+  if (typeof best.distance !== 'number') return '';
+  const matched = best.matched_tracks;
+  const total = best.total_mb_tracks;
+  const ratio = (typeof matched === 'number' && typeof total === 'number')
+    ? ` (${matched}/${total})`
+    : '';
+  return `best ${best.distance.toFixed(2)}${ratio}`;
+}
+
+/**
+ * Run an async worker over a list of inputs with a concurrency cap.
+ *
+ * Used to fan out N×M `/api/beets-distance` calls without blowing past
+ * the browser's per-origin connection limit. Resolves to the worker
+ * results in input order (failed workers resolve to whatever the
+ * worker returns on error — typically a struct with `outcome: 'error'`).
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} worker
+ * @returns {Promise<R[]>}
+ */
+export async function runWithConcurrency(items, limit, worker) {
+  /** @type {R[]} */
+  const results = new Array(items.length);
+  let cursor = 0;
+  const lanes = Math.max(1, Math.min(limit, items.length));
+  async function lane() {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: lanes }, () => lane()));
+  return results;
+}
 
 /**
  * @param {string} mbid
@@ -579,6 +675,127 @@ function cssEscape(s) {
     return CSS.escape(s);
   }
   return s.replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Maximum concurrent ``/api/beets-distance`` requests. Cap at six,
+ * which matches the browser's typical per-origin keep-alive limit —
+ * past that, requests just queue behind the limit anyway and we'd
+ * waste server-side parallelism waiting for the next free socket.
+ */
+const DISTANCE_CONCURRENCY = 6;
+
+/**
+ * Fetch the source request's wrong-matches folders, compute beets-distance
+ * against every candidate pressing, and decorate the picker rows with the
+ * best result per pressing as each pressing's column resolves.
+ *
+ * Silent no-op when:
+ *   - the request has zero wrong-matches entries on disk, or
+ *   - every distance call fails (no signal to show).
+ *
+ * Failure mode for the operator: the distance badge just doesn't appear.
+ * The picker remains fully usable; the badge is additive, not load-bearing.
+ *
+ * @param {HTMLElement} modal
+ * @param {number} sourceRequestId
+ * @param {ReleaseGroupSibling[]} releases
+ */
+async function loadDistances(modal, sourceRequestId, releases) {
+  // 1. Find this request's wrong-matches entries → their download_log_ids.
+  let downloadLogIds;
+  try {
+    const res = await fetch('/api/wrong-matches');
+    if (!res.ok) return;
+    const body = await res.json();
+    const groups = body.groups || [];
+    const ourGroup = groups.find((g) => g.request_id === sourceRequestId);
+    if (!ourGroup) return;
+    const entries = ourGroup.entries || [];
+    downloadLogIds = entries
+      .map((e) => e.download_log_id)
+      .filter((id) => typeof id === 'number');
+  } catch (err) {
+    console.warn('replace-picker: wrong-matches fetch failed:', err);
+    return;
+  }
+  if (downloadLogIds.length === 0) return;
+
+  // 2. Build the (pressing, download_log_id) work list. Disabled rows
+  //    (the current pressing) are skipped — there is no point telling
+  //    the operator how well their existing downloads match the
+  //    pressing they're trying to switch *away* from.
+  /** @type {{mbid: string, logId: number}[]} */
+  const work = [];
+  for (const r of releases) {
+    const row = modal.querySelector(`.replace-picker-row[data-mbid-row="${cssEscape(r.id)}"]`);
+    const pickBtn = row && row.querySelector('button.replace-picker-pick');
+    if (pickBtn && /** @type {HTMLButtonElement} */ (pickBtn).disabled) continue;
+    for (const logId of downloadLogIds) {
+      work.push({ mbid: r.id, logId });
+    }
+  }
+  if (work.length === 0) return;
+
+  // 3. Per-pressing accumulator: as results stream in we recompute the
+  //    best score for that MBID and rewrite its row's badge. This keeps
+  //    the UI feeling fast even when the last download is still
+  //    crunching — early best-distances appear immediately.
+  /** @type {Map<string, BeetsDistanceResult[]>} */
+  const perPressing = new Map();
+  for (const r of releases) perPressing.set(r.id, []);
+
+  await runWithConcurrency(work, DISTANCE_CONCURRENCY, async ({ mbid, logId }) => {
+    /** @type {BeetsDistanceResult} */
+    let result;
+    try {
+      const res = await fetch(`/api/beets-distance/${logId}/${encodeURIComponent(mbid)}`);
+      result = /** @type {BeetsDistanceResult} */ (await res.json());
+    } catch (err) {
+      result = { outcome: 'fetch_failed' };
+    }
+    const bucket = perPressing.get(mbid);
+    if (bucket) {
+      bucket.push(result);
+      paintDistanceBadge(modal, mbid, pickBestDistance(bucket));
+    }
+    return result;
+  });
+}
+
+/**
+ * Rewrite the distance-badge span for one pressing row.
+ *
+ * The badge sits inside the row's `<small>` meta line as
+ * ``<span class="replace-picker-distance">…</span>``. We create the
+ * span on first paint and update its text on subsequent paints —
+ * cheaper than rebuilding the row's innerHTML each time a result
+ * lands.
+ *
+ * @param {HTMLElement} modal
+ * @param {string} mbid
+ * @param {BeetsDistanceResult|null} best
+ */
+function paintDistanceBadge(modal, mbid, best) {
+  const row = modal.querySelector(
+    `.replace-picker-row[data-mbid-row="${cssEscape(mbid)}"]`);
+  if (!row) return;
+  const meta = row.querySelector('button.replace-picker-pick small');
+  if (!meta) return;
+  let badge = /** @type {HTMLSpanElement|null} */ (
+    meta.querySelector('.replace-picker-distance'));
+  const text = formatDistanceBadge(best);
+  if (!text) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'replace-picker-distance';
+    meta.appendChild(document.createTextNode(' · '));
+    meta.appendChild(badge);
+  }
+  badge.textContent = text;
 }
 
 /**
