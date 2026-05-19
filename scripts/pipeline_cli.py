@@ -1738,7 +1738,7 @@ def cmd_search_plan_regenerate(db, args):
     result = svc.generate_for_request(
         int(args.id),
         regenerate=True,
-        prepend_artist=bool(getattr(args, "prepend_artist", False)),
+        prepend_artist=getattr(args, "prepend_artist", None),
     )
 
     payload = {
@@ -1999,7 +1999,7 @@ def cmd_search_plan_dry_run(db, args):
     svc = SearchPlanService(db, cfg)
     result = svc.dry_run_for_request(
         int(args.id),
-        prepend_artist=bool(getattr(args, "prepend_artist", False)),
+        prepend_artist=getattr(args, "prepend_artist", None),
     )
     row = db.get_request(int(args.id))
     has_active = False
@@ -2342,9 +2342,10 @@ def main():
         help="Regenerate the search plan for a request (U8)")
     p_sp_regen.add_argument("id", type=int, help="Request ID")
     p_sp_regen.add_argument("--prepend-artist", action="store_true",
-                             dest="prepend_artist",
+                             dest="prepend_artist", default=None,
                              help="Prepend artist name to album title in "
-                             "generated queries")
+                             "generated queries (overrides config; absent "
+                             "means use config's album_prepend_artist)")
     p_sp_regen.add_argument("--json", action="store_true",
                              help="Print structured JSON instead of text")
     p_sp_advance = sp_sub.add_parser(
@@ -2369,9 +2370,10 @@ def main():
              "persisting (U6 simulator)")
     p_sp_dry_run.add_argument("id", type=int, help="Request ID")
     p_sp_dry_run.add_argument("--prepend-artist", action="store_true",
-                              dest="prepend_artist",
+                              dest="prepend_artist", default=None,
                               help="Prepend artist name to album title in "
-                              "generated queries")
+                              "generated queries (overrides config; absent "
+                              "means use config's album_prepend_artist)")
     p_sp_dry_run.add_argument("--json", action="store_true",
                               help="Print structured JSON instead of text")
     p_sp_saturation = sp_sub.add_parser(
