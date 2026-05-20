@@ -172,6 +172,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 | A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes.py` |
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
 | A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes.py`, `tests/test_fakes.py` |
+| A new `BeetsDB` method | Either (a) an equivalent stub on `FakeBeetsDB` with a self-test in `tests/test_fakes.py::TestFakeBeetsDB`, OR (b) drive the test against a real test SQLite DB if it's a read-only query | `tests/fakes.py`, `tests/test_fakes.py` |
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
 
@@ -231,10 +232,14 @@ Always use these instead of inventing parallel scaffolding:
 - `make_spectral_context(...)` — `SpectralContext`
 - `make_ctx_with_fake_db(fake_db)` — `CratediggerContext` wired to a fake
 - `patch_dispatch_externals()` — context manager for the 6 dispatch external patches
+- `noop_quality_gate(**kwargs) -> None` — drop-in `quality_gate_fn` stub for dispatch tests that don't care about the post-import gate. Pair with `dispatch_import_core(..., quality_gate_fn=noop_quality_gate)`.
+- `RecordingQualityGate()` — recorder `quality_gate_fn` with `assert_called_once()` / `assert_not_called()` / `call_count` / `calls` (list of kwargs). For tests that assert the gate ran with specific args.
 
 **`tests/fakes.py`** — stateful fakes:
-- `FakePipelineDB` — full PipelineDB stand-in: requests, download_logs, denylist, cooldowns, status history, spectral state, attempt counters. Includes `assert_log()` helper.
+- `FakePipelineDB` — full PipelineDB stand-in: requests, download_logs, denylist, cooldowns, status history, spectral state, attempt counters. Includes `assert_log()` helper. Has `queue_execute_results(*cursors)` + `execute_calls` recording for tests driving raw-SQL CLI paths.
+- `FakeBeetsDB` — minimal BeetsDB stand-in: `album_exists`, `get_album_info(mb_release_id, cfg)`, `get_all_album_ids_for_release`, `get_item_paths`, `get_album_path_by_id`, `close` + context-manager + per-method call recorders + seed helpers (`set_album_exists`, `set_album_info`, `set_album_ids_for_release`, `set_item_paths`, `set_album_path_by_id`). Each method also has a `_default` field for "any key returns the same value" tests. Extend the surface only when a test exercises a new BeetsDB method.
 - `FakeSlskdAPI` — stateful slskd client: `transfers` (enqueue, get_all_downloads, get_download, cancel_download, queued snapshots), `users` (directory with per-directory results and errors), call recording.
+- `FakePipelineDBSource` — typed PipelineDBSource fake wrapping a `FakePipelineDB`. Use via `make_ctx_with_fake_db(fake_db)` rather than constructing directly.
 
 **`tests/test_web_server.py`** — `_WebServerCase` harness with `_get`/`_post` helpers + `TestRouteContractAudit` guard.
 
@@ -269,13 +274,36 @@ These are functions whose body is mostly "construct args and dispatch to a netwo
 
 When adding a new seam-wrapper function, the bar is: **its body must be ≤10 lines AND mostly forward to an external boundary.** Anything fatter is pure logic with a side effect, not a seam wrapper — drive it with a fake.
 
+**ALLOWED — module-local DI seams (route/CLI dispatch only):**
+
+When production code is dispatched by URL (web routes) or argparse subcommands (CLI), there's no kwarg path to inject a dependency through. The established pattern: bind the dependency at module-attribute scope and let tests patch the attribute.
+
+```python
+# lib/<module>.py at module top
+from lib import transitions
+finalize_request = transitions.finalize_request   # the DI seam
+
+# tests patch the module attribute
+@patch("lib.<module>.finalize_request")
+def test_x(self, mock_finalize):
+    ...
+```
+
+Examples currently allowlisted: `web.routes.pipeline.finalize_request`, `harness.import_one.finalize_request`, `scripts.pipeline_cli.finalize_request`, `scripts.repair.finalize_request`, `lib.import_dispatch.finalize_request`.
+
+**This is only legitimate when the entry point cannot accept a kwarg.** A mid-tier private helper called from another production function CAN accept a kwarg — see `try_enqueue(..., match_fn=check_for_match)` and `dispatch_import_core(..., quality_gate_fn=_check_quality_gate_core)` as the canonical kwarg-DI examples. Module-local seams are the second-best option; kwarg DI is the first-best.
+
+When you find yourself reaching for an in-module patch on a mid-tier function (e.g. `patch("lib.download._handle_valid_result")` from within a `process_completed_album` test), ask: could this function take the dependency as a kwarg? If yes, refactor. If no (URL or argparse dispatcher), allowlist with rationale.
+
 **FORBIDDEN — stateful collaborators and pure-logic functions:**
-- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `source`, `pipeline_db`, `slskd`, `fake_db` — **use `FakePipelineDB`, `FakeBeetsDB`, `FakeSlskdAPI` from `tests/fakes.py`**
-- `patch("lib.enqueue.check_for_match")` — pure matching logic. Drive the real function with seeded folder cache / track data.
-- `patch("lib.transitions.finalize_request")`, `patch("lib.transitions.apply_transition")` — DB transition logic. Drive through `FakePipelineDB`.
-- `patch("lib.import_dispatch.parse_import_result")`, `patch("lib.import_dispatch._check_quality_gate_core")`, `patch("lib.quality.quality_gate_decision")` — pure decision logic. Build inputs, call the real function.
+- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `beets_db`, `source`, `pipeline_db`, `slskd`, `fake_db` — **use `FakePipelineDB`, `FakeBeetsDB`, `FakeSlskdAPI` from `tests/fakes.py`**.
+- `patch("lib.enqueue.check_for_match")` — pure matching logic. Use the `try_enqueue(..., match_fn=)` kwarg DI seam, or drive the real function with seeded folder cache / track data.
+- `patch("lib.transitions.finalize_request")` / `patch("lib.transitions.apply_transition")` on the ORIGIN module. The route / CLI / harness modules each expose a `finalize_request = transitions.finalize_request` module-local seam — patch THAT instead (e.g. `patch("web.routes.pipeline.finalize_request")`).
+- `patch("lib.import_dispatch.parse_import_result")` is forbidden on lib.import_dispatch.parse_import_result — `lib.quality.parse_import_result` is a thin harness-stdout parser and is allowlisted; the `lib.import_dispatch` re-export is also allowlisted. Use one of those.
 - `patch("lib.beets_db.BeetsDB.<method>")` — use `FakeBeetsDB`; the class itself is allowlisted but per-method stubbing is not.
 - Any `patch("lib.<our-module>.<our-function>")` whose target is **not** explicitly on the seam-wrapper allowlist in `_mock_audit_scanner.py`. **If you're mocking your own logic, you're testing the mock, not the code.**
+
+**Pure-decision allowlist debt (known cleanup):** Three pure-decision functions are currently allowlisted as orchestration test seams: `lib.import_dispatch.quality_gate_decision`, `lib.quality.full_pipeline_decision`, and `lib.import_preview.preview_import_from_values` (+ its `web.routes.pipeline` re-export). The rationale (orchestration tests stub the branch; the decision's own tests live elsewhere) is defensible scoping but the proper migration is to drive the tests with real measurement / value inputs that produce each branch. Tracked in the active follow-up issue — do not allowlist new pure-decision functions; migrate them.
 
 **The rule of thumb:** does the thing you're about to mock cross a process / network / third-party boundary as its primary purpose? If yes, mock — and if the function is a thin wrapper around that boundary, add it to `_mock_audit_scanner.py`'s seam-wrapper list with a rationale. If the function is pure logic with a side effect, use a `Fake*` or drive the real function with constructed inputs.
 
