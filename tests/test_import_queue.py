@@ -1842,6 +1842,46 @@ class TestImportPreviewWorker(unittest.TestCase):
         # We saw at least the transient raise + one post-recover poll.
         self.assertGreaterEqual(calls, 2)
 
+    def test_main_requeues_running_preview_jobs_on_startup(self):
+        """A preview job left in ``preview_status='running'`` by a dead
+        worker process must be flipped back to ``waiting`` the moment
+        ``main()`` runs — not after the 15-minute stale-recovery
+        window. Mirrors the importer's startup self-heal.
+        """
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/failed",
+                source_username="alice",
+            ),
+        )
+        claimed = db.claim_next_import_preview_job(worker_id="dead-worker")
+        assert claimed is not None
+        self.assertEqual(claimed.preview_status, "running")
+
+        argv = ["import_preview_worker.py", "--dsn", "postgresql://fake", "--once"]
+        with (
+            patch("sys.argv", argv),
+            patch("scripts.import_preview_worker.PipelineDB",
+                  side_effect=lambda dsn: db),
+            patch("scripts.import_preview_worker.run_once", return_value=None),
+            patch("scripts.import_preview_worker.logger.warning"),
+        ):
+            exit_code = import_preview_worker.main()
+
+        self.assertEqual(exit_code, 0)
+        recovered = db.get_import_job(claimed.id)
+        assert recovered is not None
+        self.assertEqual(recovered.preview_status, "waiting")
+        self.assertIsNone(recovered.preview_worker_id)
+        self.assertIsNone(recovered.preview_heartbeat_at)
+
 
 class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     """U1: worker short-circuits measurement when stored candidate evidence

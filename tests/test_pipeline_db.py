@@ -1078,6 +1078,100 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
 
 
 @requires_postgres
+class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
+    """Startup self-heal for the async preview worker.
+
+    Mirrors the importer's ``requeue_running_import_jobs`` — when the
+    preview worker process restarts, it must immediately requeue every
+    job in ``preview_status='running'`` regardless of heartbeat age,
+    because by definition no preview worker is currently processing
+    them (systemd runs a single instance). Before this method existed,
+    crash recovery waited on the 15-minute stale-age window in
+    ``requeue_stale_import_preview_jobs`` and operators saw preview
+    jobs sit stuck for the full window.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="requeue-running-preview-mbid",
+            artist_name="Requeue",
+            album_title="Preview Running",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _enqueue_running_preview_job(self) -> int:
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:requeue-running-preview",
+            payload=manual_import_payload(failed_path="/tmp/manual"),
+        )
+        claimed = self.db.claim_next_import_preview_job(worker_id="preview-old")
+        assert claimed is not None
+        self.assertEqual(claimed.preview_status, "running")
+        self.assertIsNotNone(claimed.preview_heartbeat_at)
+        return job.id
+
+    def test_requeues_fresh_running_job_immediately(self):
+        """The bug: a job claimed seconds ago should be requeued on
+        startup, not wait 15 minutes for the stale-recovery sweep.
+        """
+        job_id = self._enqueue_running_preview_job()
+
+        requeued = self.db.requeue_running_import_preview_jobs(
+            message="Preview worker restarted while job was running; retry queued",
+        )
+
+        self.assertEqual(len(requeued), 1)
+        self.assertEqual(requeued[0].id, job_id)
+        self.assertEqual(requeued[0].preview_status, "waiting")
+        self.assertIsNone(requeued[0].preview_worker_id)
+        self.assertIsNone(requeued[0].preview_started_at)
+        self.assertIsNone(requeued[0].preview_heartbeat_at)
+        self.assertIsNone(requeued[0].preview_error)
+        self.assertIn("restarted", (requeued[0].preview_message or ""))
+
+    def test_requeued_job_is_immediately_claimable_by_preview(self):
+        job_id = self._enqueue_running_preview_job()
+        self.db.requeue_running_import_preview_jobs(
+            message="restart",
+        )
+        reclaim = self.db.claim_next_import_preview_job(worker_id="preview-new")
+        assert reclaim is not None
+        self.assertEqual(reclaim.id, job_id)
+        self.assertEqual(reclaim.preview_status, "running")
+        self.assertEqual(reclaim.preview_worker_id, "preview-new")
+
+    def test_does_not_touch_waiting_or_already_imported_jobs(self):
+        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+
+        # Claim-and-leave-running first so the second enqueue stays waiting.
+        running_id = self._enqueue_running_preview_job()
+        waiting = self.db.enqueue_import_job(
+            IMPORT_JOB_MANUAL,
+            request_id=self.req_id,
+            dedupe_key="manual:waiting",
+            payload=manual_import_payload(failed_path="/tmp/waiting"),
+        )
+
+        result = self.db.requeue_running_import_preview_jobs(message="restart")
+
+        self.assertEqual({j.id for j in result}, {running_id})
+        waiting_row = self.db._execute(
+            "SELECT preview_status FROM import_jobs WHERE id = %s",
+            (waiting.id,),
+        ).fetchone()
+        assert waiting_row is not None
+        self.assertEqual(waiting_row["preview_status"], "waiting")
+
+
+@requires_postgres
 class TestUpdateStatus(unittest.TestCase):
     def setUp(self):
         self.db = make_db()

@@ -1279,6 +1279,31 @@ class FakePipelineDB:
                 break
         return updated_jobs
 
+    def requeue_running_import_preview_jobs(
+        self,
+        *,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        running = [
+            row for row in self._import_jobs
+            if row.get("status") == "queued"
+            and row.get("preview_status") == "running"
+        ]
+        running.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
+        updated_jobs = []
+        for row in running[:limit]:
+            now = _utcnow()
+            row["preview_status"] = "waiting"
+            row["preview_message"] = message
+            row["preview_error"] = None
+            row["preview_worker_id"] = None
+            row["preview_started_at"] = None
+            row["preview_heartbeat_at"] = None
+            row["updated_at"] = now
+            updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
+        return updated_jobs
+
     # --- PipelineDB interface methods ---
 
     def get_request(self, request_id: int) -> dict[str, Any] | None:

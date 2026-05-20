@@ -1614,6 +1614,46 @@ class PipelineDB:
         """, (cutoff, limit, message))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
+    def requeue_running_import_preview_jobs(
+        self,
+        *,
+        message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]:
+        """Reset every running preview job to ``waiting`` for immediate retry.
+
+        Mirrors ``requeue_running_import_jobs`` for the preview lane.
+        Called at preview-worker startup: the previous worker process is
+        dead by definition (systemd has just spawned this one), so any
+        ``preview_status='running'`` row is owned by a ghost worker and
+        must be released immediately — no heartbeat-age threshold. The
+        periodic ``requeue_stale_import_preview_jobs`` sweep retains the
+        15-minute window for jobs that get orphaned while a worker is
+        otherwise alive.
+        """
+        cur = self._execute("""
+            WITH running AS (
+                SELECT id
+                FROM import_jobs
+                WHERE status = 'queued'
+                  AND preview_status = 'running'
+                ORDER BY updated_at ASC, id ASC
+                LIMIT %s
+            )
+            UPDATE import_jobs
+            SET preview_status = 'waiting',
+                preview_message = %s,
+                preview_error = NULL,
+                preview_worker_id = NULL,
+                preview_started_at = NULL,
+                preview_heartbeat_at = NULL,
+                updated_at = NOW()
+            FROM running
+            WHERE import_jobs.id = running.id
+            RETURNING import_jobs.*
+        """, (limit, message))
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
     # --- album_requests CRUD ---
 
     def add_request(self, artist_name, album_title, source,

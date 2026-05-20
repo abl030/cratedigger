@@ -50,6 +50,7 @@ from lib.quality_evidence import (
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
+RESTART_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(minutes=15)
@@ -621,6 +622,23 @@ def recover_abandoned_preview_jobs(
     )
 
 
+def recover_running_preview_jobs(db: PipelineDB) -> list[ImportJob]:
+    """Requeue every preview job left running by a previous worker process.
+
+    Called once at startup. Systemd guarantees a single preview-worker
+    process; if any ``preview_status='running'`` rows exist when this
+    process starts, the previous owner is dead and the rows are
+    orphaned regardless of how recently their heartbeats fired. This
+    is the importer's ``recover_abandoned_running_jobs`` pattern,
+    mirrored for the preview lane. The periodic
+    ``preview_recovery_loop`` keeps using the 15-minute heartbeat
+    threshold for the running-system safety net.
+    """
+    return db.requeue_running_import_preview_jobs(
+        message=RESTART_PREVIEW_MESSAGE,
+    )
+
+
 def preview_recovery_loop(
     *,
     dsn: str,
@@ -754,7 +772,7 @@ def main() -> int:
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:
-        recovered = recover_abandoned_preview_jobs(db)
+        recovered = recover_running_preview_jobs(db)
         if recovered:
             logger.warning(
                 "Requeued %s abandoned import preview job(s)",
