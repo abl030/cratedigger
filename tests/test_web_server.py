@@ -779,6 +779,16 @@ class TestServerEndpoints(unittest.TestCase):
         status, data = self._post("/api/pipeline/add", {})
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+        # Pydantic adapter populates ``errors`` with structured field-path
+        # entries — the frontend uses ``loc`` + ``msg`` + ``type`` to
+        # render real validation messages instead of a single string.
+        self.assertIn("errors", data)
+        self.assertIsInstance(data["errors"], list)
+        self.assertTrue(data["errors"])
+        first = data["errors"][0]
+        self.assertIn("loc", first)
+        self.assertIn("msg", first)
+        self.assertIn("type", first)
 
     def test_post_pipeline_delete_missing_id(self):
         status, data = self._post("/api/pipeline/delete", {})

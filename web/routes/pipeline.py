@@ -4,7 +4,11 @@ import json
 import logging
 import re
 from pathlib import Path
+
 import msgspec
+from pydantic import BaseModel, Field, model_validator
+
+from web.routes._pydantic import parse_body
 
 logger = logging.getLogger(__name__)
 
@@ -1298,15 +1302,35 @@ def get_import_job(h, params: dict[str, list[str]], job_id_str: str) -> None:
 # ── POST handlers ────────────────────────────────────────────────
 
 
-def post_pipeline_add(h, body: dict) -> None:
-    s = _server()
-    mbid = normalize_release_id(body.get("mb_release_id"))
-    discogs_id = normalize_release_id(body.get("discogs_release_id"))
-    source = body.get("source", "request")
+class PipelineAddRequest(BaseModel):
+    """HTTP body for ``POST /api/pipeline/add``.
 
-    if not mbid and not discogs_id:
-        h._error("Missing mb_release_id or discogs_release_id")
+    At least one of ``mb_release_id`` / ``discogs_release_id`` is required;
+    the @model_validator below enforces that. Both IDs are normalised
+    after parsing (downcase, strip) by ``normalize_release_id`` inside
+    the handler — keeping normalisation in route logic, not in the model,
+    matches how other handlers consume these fields.
+    """
+
+    mb_release_id: str | None = None
+    discogs_release_id: str | None = None
+    source: str = "request"
+
+    @model_validator(mode="after")
+    def _at_least_one_release_id(self) -> "PipelineAddRequest":
+        if not self.mb_release_id and not self.discogs_release_id:
+            raise ValueError("Missing mb_release_id or discogs_release_id")
+        return self
+
+
+def post_pipeline_add(h, body: dict) -> None:
+    req = parse_body(h, body, PipelineAddRequest)
+    if req is None:
         return
+    s = _server()
+    mbid = normalize_release_id(req.mb_release_id)
+    discogs_id = normalize_release_id(req.discogs_release_id)
+    source = req.source
 
     if discogs_id:
         # Discogs flow: store discogs ID in both columns for pipeline compat
@@ -1488,10 +1512,21 @@ def post_pipeline_update(h, body: dict) -> None:
     h._json({"status": "ok", "id": req_id, "new_status": new_status})
 
 
+class PipelineUpgradeRequest(BaseModel):
+    """HTTP body for ``POST /api/pipeline/upgrade``."""
+
+    mb_release_id: str = Field(min_length=1)
+
+
 def post_pipeline_upgrade(h, body: dict) -> None:
+    req = parse_body(h, body, PipelineUpgradeRequest)
+    if req is None:
+        return
     s = _server()
-    mbid = normalize_release_id(body.get("mb_release_id"))
+    mbid = normalize_release_id(req.mb_release_id)
     if not mbid:
+        # ``normalize_release_id`` strips/lowercases and can return None
+        # for whitespace-only inputs that passed the min_length=1 check.
         h._error("Missing mb_release_id")
         return
 
