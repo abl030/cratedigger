@@ -101,8 +101,7 @@
     "stateful_mock_assign:db": 5
   },
   "test_transitions.py": {
-    "patch:lib.transitions.apply_transition": 4,
-    "stateful_mock_assign:db": 6
+    "patch:lib.transitions.apply_transition": 1
   },
   "test_web_server.py": {
     "patch:lib.transitions.finalize_request": 26,

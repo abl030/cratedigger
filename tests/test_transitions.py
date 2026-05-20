@@ -2,7 +2,6 @@
 
 import unittest
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
 
 from lib.transitions import (
     VALID_TRANSITIONS,
@@ -13,6 +12,8 @@ from lib.transitions import (
     transition_side_effects,
     validate_transition,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 
 class TestValidateTransition(unittest.TestCase):
@@ -144,101 +145,156 @@ class TestTransitionTable(unittest.TestCase):
 
 
 class TestApplyTransition(unittest.TestCase):
-    """Tests for the imperative apply_transition function."""
+    """Tests for the imperative apply_transition function.
 
-    def _make_db(self, current_status="wanted"):
-        db = MagicMock()
-        db.get_request.return_value = {"status": current_status}
+    All tests drive real ``apply_transition`` against a ``FakePipelineDB``
+    seeded with the relevant starting state, then assert on the resulting
+    row. The migration replaces ``MagicMock`` + ``mock.assert_called_with``
+    introspection with observable DB-state assertions.
+    """
+
+    def _make_db(self, current_status: str = "wanted") -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status=current_status))
         return db
 
-    def test_downloading_to_imported_calls_update_status(self):
+    def test_downloading_to_imported_sets_status(self):
         db = self._make_db("downloading")
-        apply_transition(db, 1, "imported", from_status="downloading")
-        db.update_status.assert_called_once_with(1, "imported")
+        apply_transition(
+            cast(Any, db), 1, "imported", from_status="downloading",
+        )
+        self.assertEqual(db.request(1)["status"], "imported")
 
-    def test_downloading_to_wanted_calls_reset(self):
+    def test_downloading_to_wanted_clears_state_and_records_attempt(self):
         db = self._make_db("downloading")
-        db.reset_downloading_to_wanted.return_value = True
-        apply_transition(db, 1, "wanted", from_status="downloading",
-                         search_filetype_override="flac", attempt_type="download")
-        db.reset_downloading_to_wanted.assert_called_once_with(
-            1, search_filetype_override="flac")
-        db.reset_to_wanted.assert_not_called()
-        db.record_attempt.assert_called_once_with(1, "download")
+        apply_transition(
+            cast(Any, db), 1, "wanted", from_status="downloading",
+            search_filetype_override="flac",
+            attempt_type="download",
+        )
+        row = db.request(1)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "flac")
+        self.assertEqual(row["download_attempts"], 1)
+        # Active download state cleared
+        self.assertIsNone(row["active_download_state"])
 
     def test_downloading_to_wanted_guard_failure_skips_attempt_record(self):
-        db = self._make_db("downloading")
-        db.reset_downloading_to_wanted.return_value = False
-        result = apply_transition(
-            db, 1, "wanted", from_status="downloading",
-            attempt_type="download")
-        self.assertFalse(result)
-        db.record_attempt.assert_not_called()
-
-    def test_imported_to_wanted_calls_reset(self):
-        db = self._make_db("imported")
-        apply_transition(db, 1, "wanted", from_status="imported",
-                         search_filetype_override="flac,mp3 v0,mp3 320",
-                         min_bitrate=245)
-        db.reset_to_wanted.assert_called_once_with(
-            1, search_filetype_override="flac,mp3 v0,mp3 320", min_bitrate=245)
-
-    def test_wanted_to_downloading_calls_set_downloading(self):
+        """Guard refuses non-downloading rows. ``apply_transition`` returns
+        False and ``record_attempt`` must not advance the counter."""
+        # Seed the row as 'wanted' so reset_downloading_to_wanted's guard
+        # refuses the change (status != 'downloading').
         db = self._make_db("wanted")
-        apply_transition(db, 1, "downloading", from_status="wanted",
-                         state_json='{"filetype":"flac"}')
-        db.set_downloading.assert_called_once_with(1, '{"filetype":"flac"}')
+        result = apply_transition(
+            cast(Any, db), 1, "wanted", from_status="downloading",
+            attempt_type="download",
+        )
+        self.assertFalse(result)
+        self.assertEqual(db.request(1)["download_attempts"], 0)
+
+    def test_imported_to_wanted_resets_and_clears_retry_counters(self):
+        db = self._make_db("imported")
+        apply_transition(
+            cast(Any, db), 1, "wanted", from_status="imported",
+            search_filetype_override="flac,mp3 v0,mp3 320",
+            min_bitrate=245,
+        )
+        row = db.request(1)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(
+            row["search_filetype_override"], "flac,mp3 v0,mp3 320",
+        )
+        self.assertEqual(row["min_bitrate"], 245)
+
+    def test_wanted_to_downloading_sets_state(self):
+        db = self._make_db("wanted")
+        apply_transition(
+            cast(Any, db), 1, "downloading", from_status="wanted",
+            state_json='{"filetype":"flac"}',
+        )
+        row = db.request(1)
+        self.assertEqual(row["status"], "downloading")
+        self.assertEqual(row["active_download_state"], '{"filetype":"flac"}')
 
     def test_auto_detects_from_status(self):
+        """No ``from_status`` arg → the seam looks up the current status
+        from the row. Implicit verification: the transition succeeds (the
+        guard would refuse if from_status were wrong)."""
         db = self._make_db("downloading")
-        apply_transition(db, 1, "imported")
-        db.get_request.assert_called_once_with(1)
-        db.update_status.assert_called_once_with(1, "imported")
+        apply_transition(cast(Any, db), 1, "imported")
+        self.assertEqual(db.request(1)["status"], "imported")
 
-    def test_extra_fields_passed_to_update_status(self):
+    def test_extra_fields_persist_through_update_status(self):
         db = self._make_db("downloading")
-        apply_transition(db, 1, "imported", from_status="downloading",
-                         min_bitrate=245, last_download_spectral_grade="genuine")
-        db.update_status.assert_called_once_with(
-            1, "imported", min_bitrate=245,
-            last_download_spectral_grade="genuine")
+        apply_transition(
+            cast(Any, db), 1, "imported", from_status="downloading",
+            min_bitrate=245, last_download_spectral_grade="genuine",
+        )
+        row = db.request(1)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["last_download_spectral_grade"], "genuine")
 
-    def test_invalid_transition_logs_warning(self):
-        """Invalid transitions still proceed (with warning) for backward compat."""
+    def test_invalid_transition_logs_warning_but_proceeds_to_seam(self):
+        """Invalid transitions still proceed to the seam (with warning)
+        for backward compatibility — see lib.transitions.apply_transition
+        line 451. Whether the seam itself accepts the change is a
+        separate concern: set_downloading has a SQL guard
+        ``WHERE status='wanted'``, so a manual → downloading attempt
+        logs the validity warning AND then logs the guard rejection.
+        The row stays at ``manual``."""
         db = self._make_db("manual")
-        apply_transition(db, 1, "downloading", from_status="manual",
-                         state_json='{}')
-        # Should still call set_downloading despite invalid transition
-        db.set_downloading.assert_called_once()
-
-    def test_downloading_guard_logs_when_rejected(self):
-        """When set_downloading returns False, transition logs a warning."""
-        db = self._make_db("wanted")
-        db.set_downloading.return_value = False
         with self.assertLogs("cratedigger", level="WARNING") as cm:
-            apply_transition(db, 1, "downloading", from_status="wanted",
-                             state_json='{"filetype":"flac"}')
+            apply_transition(
+                cast(Any, db), 1, "downloading", from_status="manual",
+                state_json='{}',
+            )
+        self.assertTrue(any("invalid" in m.lower() for m in cm.output))
+        # Row stays at manual — the seam's own guard refused the
+        # change. This matches production behavior; the previous
+        # MagicMock test only verified the seam was called and
+        # missed that production wouldn't actually have moved the
+        # row either.
+        self.assertEqual(db.request(1)["status"], "manual")
+
+    def test_downloading_guard_logs_when_set_downloading_refuses(self):
+        """When ``set_downloading`` returns False (row no longer wanted),
+        the transition logs a warning and the row's status stays."""
+        # Seed as 'imported' so set_downloading's guard refuses the change.
+        db = self._make_db("imported")
+        with self.assertLogs("cratedigger", level="WARNING") as cm:
+            apply_transition(
+                cast(Any, db), 1, "downloading", from_status="wanted",
+                state_json='{"filetype":"flac"}',
+            )
         self.assertTrue(any("status guard" in msg for msg in cm.output))
+        # Status unchanged.
+        self.assertEqual(db.request(1)["status"], "imported")
 
     def test_downloading_requires_state_json(self):
         db = self._make_db("wanted")
-
         with self.assertRaisesRegex(ValueError, "state_json"):
-            apply_transition(db, 1, "downloading", from_status="wanted")
+            apply_transition(
+                cast(Any, db), 1, "downloading", from_status="wanted",
+            )
+        # ValueError fires before any DB mutation — row unchanged.
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
 
-        db.set_downloading.assert_not_called()
-        db.update_status.assert_not_called()
+    def test_request_not_found_returns_without_writing(self):
+        """No row for the request → apply_transition returns without
+        any update. The empty DB stays empty."""
+        db = FakePipelineDB()  # no rows seeded
+        # auto-detect from_status path queries the row first, finds None,
+        # logs, returns False.
+        result = apply_transition(cast(Any, db), 999, "imported")
+        self.assertFalse(result)
+        self.assertIsNone(db._requests.get(999))
 
-    def test_request_not_found(self):
-        db = MagicMock()
-        db.get_request.return_value = None
-        apply_transition(db, 999, "imported")
-        db.update_status.assert_not_called()
-
-    def test_wanted_to_manual(self):
+    def test_wanted_to_manual_sets_status(self):
         db = self._make_db("wanted")
-        apply_transition(db, 1, "manual", from_status="wanted")
-        db.update_status.assert_called_once_with(1, "manual")
+        apply_transition(cast(Any, db), 1, "manual", from_status="wanted")
+        self.assertEqual(db.request(1)["status"], "manual")
 
 
 class TestRequestTransition(unittest.TestCase):
@@ -305,69 +361,80 @@ class TestRequestTransition(unittest.TestCase):
 
 
 class TestFinalizeRequest(unittest.TestCase):
-    """Final request-state command execution lives in lib.transitions."""
+    """Final request-state command execution lives in lib.transitions.
+
+    Migrated from ``patch('lib.transitions.apply_transition')`` +
+    ``mock.assert_called_with`` to driving real ``finalize_request``
+    against a ``FakePipelineDB`` and asserting on the resulting row.
+    Validation-error tests verify the DB row stays unchanged when the
+    transition raises before any mutation.
+    """
 
     def test_forwards_transition_fields_and_attempt_type(self):
-        db = MagicMock()
+        db = FakePipelineDB()
+        db.seed_request(
+            make_request_row(
+                id=42, status="downloading",
+                search_filetype_override=None,
+                min_bitrate=320,
+                prev_min_bitrate=None,
+            ),
+        )
         transition = RequestTransition.to_wanted(
             from_status="downloading",
             attempt_type="download",
             search_filetype_override="flac,mp3 v0",
             min_bitrate=245,
-            prev_min_bitrate=320,
         )
+        finalize_request(cast(Any, db), 42, transition)
 
-        with patch("lib.transitions.apply_transition") as mock_apply:
-            finalize_request(db, 42, transition)
-
-        mock_apply.assert_called_once_with(
-            db,
-            42,
-            "wanted",
-            from_status="downloading",
-            attempt_type="download",
-            search_filetype_override="flac,mp3 v0",
-            min_bitrate=245,
-            prev_min_bitrate=320,
-        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "flac,mp3 v0")
+        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["prev_min_bitrate"], 320)
+        self.assertEqual(row["download_attempts"], 1)
 
     def test_rejects_direct_constructor_wrong_fields_at_finalization(self):
-        db = MagicMock()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         transition = RequestTransition(
             "manual",
             from_status="wanted",
             fields={"imported_path": "/Beets/Artist/Album"},
         )
 
-        with patch("lib.transitions.apply_transition") as mock_apply:
-            with self.assertRaisesRegex(ValueError, "manual transitions"):
-                finalize_request(db, 42, transition)
+        with self.assertRaisesRegex(ValueError, "manual transitions"):
+            finalize_request(cast(Any, db), 42, transition)
 
-        mock_apply.assert_not_called()
+        # ValueError fires upstream of any DB mutation — row unchanged.
+        self.assertEqual(db.request(42)["status"], "wanted")
 
     def test_rejects_downloading_without_state_at_finalization(self):
-        db = MagicMock()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         transition = RequestTransition("downloading", from_status="wanted")
 
-        with patch("lib.transitions.apply_transition") as mock_apply:
-            with self.assertRaisesRegex(ValueError, "state_json"):
-                finalize_request(db, 42, transition)
+        with self.assertRaisesRegex(ValueError, "state_json"):
+            finalize_request(cast(Any, db), 42, transition)
 
-        mock_apply.assert_not_called()
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["active_download_state"])
 
     def test_rejects_downloading_with_explicit_none_state_at_finalization(self):
-        db = MagicMock()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         transition = RequestTransition(
             "downloading",
             from_status="wanted",
             fields={"state_json": None},
         )
 
-        with patch("lib.transitions.apply_transition") as mock_apply:
-            with self.assertRaisesRegex(ValueError, "state_json"):
-                finalize_request(db, 42, transition)
+        with self.assertRaisesRegex(ValueError, "state_json"):
+            finalize_request(cast(Any, db), 42, transition)
 
-        mock_apply.assert_not_called()
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["active_download_state"])
 
 
 if __name__ == "__main__":
