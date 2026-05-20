@@ -17,6 +17,7 @@ let
     ps.psycopg2
     ps.music-tag
     ps.msgspec
+    ps.pydantic  # HTTP request-body validation in web/routes/* (issue #343); msgspec stays for internal wire boundaries
     ps.redis     # web UI cache (graceful no-op if redis server is down, but the module must be importable)
     ps.zstandard # peer cache compresses msgpack directory payloads before writing Redis bytes
     ps.beets     # beets.autotag.distance for /api/beets-distance — library import only
