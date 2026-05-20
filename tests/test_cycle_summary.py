@@ -204,14 +204,26 @@ class TestMatchTimeAccumulator(unittest.TestCase):
     def test_match_time_credited_when_album_match_raises(self):
         """An exception inside the matching loop must still credit
         match_time_s (try/finally contract). Regression guard for the
-        pre-fix bug where two += sites silently dropped time on raise."""
+        pre-fix bug where two += sites silently dropped time on raise.
+
+        Uses the ``album_match_fn`` kwarg DI on ``check_for_match`` to
+        inject an exception-raising stub. The production code path
+        runs through the same try/finally accumulator as a real
+        ``album_match`` call would.
+        """
         ctx = _make_real_ctx()
         self._seed_cache(ctx, "dirA", [
             _file("Alpha.flac"), _file("Bravo.flac"), _file("Charlie.flac"),
         ])
-        with patch("lib.matching.album_match", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
-                check_for_match(self.TRACKS, "flac", ["dirA"], self.USERNAME, ctx)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            check_for_match(
+                self.TRACKS, "flac", ["dirA"], self.USERNAME, ctx,
+                album_match_fn=_boom,
+            )
         self.assertGreater(
             ctx.match_time_s, 0.0,
             "exception inside matching loop must still credit match_time_s",

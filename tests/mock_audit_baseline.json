@@ -1,8 +1,1 @@
-{
-  "test_cycle_summary.py": {
-    "patch:lib.matching.album_match": 1
-  },
-  "test_matching.py": {
-    "patch:lib.matching._track_titles_cross_check": 1
-  }
-}
+{}

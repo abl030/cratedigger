@@ -478,24 +478,19 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         self.assertEqual(candidates[0].matched_tracks, 0)
 
     def test_cross_check_failure_continues_loop_and_records_score(self) -> None:
-        """When _track_titles_cross_check fails, dir is added to negative_matches
+        """When the title cross-check fails, dir is added to negative_matches
         and the score is still appended to candidates so the forensic record
-        captures the cross-check rejection."""
-        # Files match the count gate but titles are wildly different — cross-check
-        # tolerates 1/5 mismatch but here every title is wrong, so cross-check fails.
-        # However, album_match's filename-ratio path happily accepts these because
-        # of separator/album-name retries... we need filenames that pass album_match
-        # filename ratio but fail _track_titles_cross_check. The cross-check uses
-        # _normalize_title + extracted-title fuzzy matching with 0.5 threshold.
-        # Easiest construction: tracks all named distinctly, files use those titles
-        # *embedded* but with very different content elsewhere.
-        # In practice, the strict-accept path is: all tracks above ratio AND
-        # cross-check passes. If the filenames are exact title matches, cross-check
-        # also passes — they're correlated. To force cross-check failure we need
-        # the album_match per-track ratios to clear minimum_match_ratio while the
-        # extracted-title fuzzy check fails.
-        # We achieve this with a low minimum_match_ratio so the strict accept path
-        # triggers, but slskd filenames are very long so extracted_title differs.
+        captures the cross-check rejection.
+
+        The strict-accept path is correlated: filenames that clear the
+        per-track ratio almost always also pass the extracted-title
+        fuzzy check, which makes constructing a real failing input
+        fragile. Use the ``cross_check_fn`` kwarg DI on
+        ``check_for_match`` to pass a stub that always returns False —
+        this exercises the failure branch directly without coupling
+        the test to whichever input shape happens to fail
+        ``_track_titles_cross_check`` today.
+        """
         cfg = _make_cfg(minimum_match_ratio=0.1)
         ctx = _make_ctx(cfg, album_id=1, album_title="Cool Album")
         ctx.folder_cache.setdefault(self.username, {})["dirX"] = {
@@ -506,24 +501,15 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
                 _file("Charlie.flac"),
             ],
         }
-        # Make tracks barely passing the filename ratio (>=0.1) but with names
-        # that differ enough for cross-check.
         tracks = [
             _track(1, "Alpha"),
             _track(1, "Bravo"),
             _track(1, "Charlie"),
         ]
-        # With identical filenames and titles, both will accept. To force cross-
-        # check failure we need filenames that pass album_match's per-track filename
-        # ratio but produce extracted titles that fail _track_titles_cross_check.
-        # In practice this means matching is tight — skip this case if cross-check
-        # ends up succeeding. The contract we care about: IF cross-check fails,
-        # THEN candidate is still appended. We test that contract by mocking.
-        from unittest.mock import patch
-        with patch("lib.matching._track_titles_cross_check", return_value=False):
-            result = check_for_match(
-                tracks, "flac", ["dirX"], self.username, ctx,
-            )
+        result = check_for_match(
+            tracks, "flac", ["dirX"], self.username, ctx,
+            cross_check_fn=lambda *_args, **_kwargs: False,
+        )
         self.assertFalse(self._matched(result))
         candidates = self._candidates(result)
         self.assertEqual(len(candidates), 1)
