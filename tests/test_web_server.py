@@ -1752,33 +1752,43 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("error", data)
 
-    @patch("web.routes.pipeline.preview_import_from_values")
-    def test_pipeline_simulate_threads_target_format(self, mock_preview):
-        from lib.import_preview import ImportPreviewResult
+    def test_pipeline_simulate_threads_target_format(self):
+        """Real ``preview_import_from_values`` honours the ``target_format``
+        query param.
 
-        mock_preview.return_value = ImportPreviewResult(
-            mode="values",
-            verdict="would_import",
-            simulation={
-            "stage0_spectral_gate": "skipped_flac",
-            "stage1_spectral": None,
-            "stage2_import": "import",
-            "stage3_quality_gate": "accept",
-            "final_status": "imported",
-            "imported": True,
-            "denylisted": False,
-            "keep_searching": False,
-            "target_final_format": "flac",
-            },
-        )
+        Drives the real preview engine; the simulator's own coverage lives in
+        ``tests/test_import_preview.py``. This test asserts only the wire-
+        boundary contract: query params → response JSON.
 
-        status, _data = self._get(
-            "/api/pipeline/simulate?is_flac=true&min_bitrate=900&target_format=flac"
+        Threading proof: with ``verified_lossless_target=opus+128`` set,
+        the simulator's ``target_final_format`` defaults to ``opus 128``.
+        Adding ``target_format=flac`` overrides that — FLAC is a no-convert
+        target and the simulator emits ``target_final_format=None``. If the
+        route dropped ``target_format``, the simulator would fall back to
+        the lossless target and the assertion would fail.
+        """
+        status, data = self._get(
+            "/api/pipeline/simulate?is_flac=true&min_bitrate=900"
+            "&spectral_grade=genuine&converted_count=12"
+            "&post_conversion_min_bitrate=128"
+            "&verified_lossless_target=opus+128"
+            "&target_format=flac"
         )
 
         self.assertEqual(status, 200)
-        self.assertEqual(
-            mock_preview.call_args.args[0].target_format, "flac")
+        # target_format=flac overrides verified_lossless_target=opus 128 →
+        # target_final_format is None (no conversion happens for FLAC).
+        self.assertIsNone(data.get("target_final_format"))
+        # Sanity: without the target_format=flac override the simulator
+        # would expose verified_lossless_target as target_final_format.
+        status2, data2 = self._get(
+            "/api/pipeline/simulate?is_flac=true&min_bitrate=900"
+            "&spectral_grade=genuine&converted_count=12"
+            "&post_conversion_min_bitrate=128"
+            "&verified_lossless_target=opus+128"
+        )
+        self.assertEqual(status2, 200)
+        self.assertEqual(data2.get("target_final_format"), "opus 128")
 
     def test_pipeline_simulate_threads_avg_bitrate_to_stage0(self):
         """Issue #93: the web simulator must accept avg_bitrate and return

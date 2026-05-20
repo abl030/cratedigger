@@ -340,18 +340,6 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.repair\.find_orphaned_downloads$"),
     re.compile(r"^scripts\.repair\.find_blocked_recovery_issues$"),
 
-    # Module-local DI seam for ``quality_gate_decision``. The orchestration
-    # wrapper ``lib.import_dispatch._check_quality_gate_core`` binds the
-    # pure decision at import time so orchestration tests can stub the
-    # branch via ``patch("lib.import_dispatch.quality_gate_decision")``
-    # without setting up full ``AudioQualityMeasurement`` fixtures for
-    # every requeue/accept/transcode/downgrade scenario. The decision's
-    # own contract is exercised in ``tests/test_quality_classification.py``
-    # (TestQualityGateDecision); this seam keeps wrapper tests focused
-    # on the orchestration around the gate (status transitions,
-    # search-override updates, requeue-vs-accept routing).
-    re.compile(r"^lib\.import_dispatch\.quality_gate_decision$"),
-
     # Auto-import staging-destination seam. ``stage_to_ai_path`` is a
     # path-construction helper that the auto-import flow consults to
     # decide where to move staged audio. Tests patch its
@@ -359,25 +347,6 @@ _LEAF_SEAM_PATTERNS = [
     # downstream subprocess calls land inside the test's working dir
     # rather than the production ``beets_staging_dir``.
     re.compile(r"^lib\.download\.stage_to_ai_path$"),
-
-    # ``preview_import_from_values`` is the preview-engine entrypoint —
-    # synthesises an ``ImportPreviewResult`` (verdict + decision tree)
-    # from caller-supplied measurement values. Same shape as
-    # ``quality_gate_decision``: pure decision being stubbed by
-    # orchestration tests that exercise the CLI / web route wrappers.
-    # Behaviour of the engine itself is covered by
-    # ``tests/test_import_preview.py``; CLI / route tests stub it to
-    # return a deterministic verdict and check the wire-shape mapping.
-    re.compile(r"^lib\.import_preview\.preview_import_from_values$"),
-    re.compile(r"^web\.routes\.pipeline\.preview_import_from_values$"),
-
-    # ``full_pipeline_decision`` is the flat-kwargs simulator twin of
-    # ``full_pipeline_decision_from_evidence`` — same pure-decision
-    # rationale as ``quality_gate_decision``. The simulator's own
-    # behaviour is covered in test_quality_classification.py; CLI
-    # orchestration tests stub it to control which decision branch
-    # ``pipeline-cli quality`` displays.
-    re.compile(r"^lib\.quality\.full_pipeline_decision$"),
 
     # Service-class constructor replacement. ``MbidReplaceService`` is
     # the operator's MBID-replace surface (CLI + web route both wrap
