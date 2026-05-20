@@ -677,6 +677,15 @@ class FakePipelineDB:
         # purged from beets; tests on lib.release_cleanup assert the
         # exact request_id flushed (and whether it fired at all).
         self.clear_on_disk_quality_fields_calls: list[int] = []
+        # ``close()`` call count — pipeline_cli main() must close the
+        # DB exactly once per invocation, regardless of subcommand exit
+        # code. Tracked here so tests can assert the contract.
+        self.close_calls: int = 0
+        # ``update_request_fields`` is the catch-all for set-intent CLI
+        # commands. Track the (request_id, fields_dict) tuples so tests
+        # can assert what was written without relying on MagicMock
+        # introspection.
+        self.update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
         # Keyed by (mb_release_id, snapshot_fingerprint) — content-addressed
         # after migration 021. Each row also has a surrogate ``id``; the
         # parallel ``_evidence_by_id`` dict mirrors load-by-id lookups.
@@ -1991,6 +2000,7 @@ class FakePipelineDB:
                 if r.get("status") == "downloading"]
 
     def update_request_fields(self, request_id: int, **fields: Any) -> None:
+        self.update_request_fields_calls.append((request_id, dict(fields)))
         row = self._requests.get(request_id)
         if row:
             row.update(fields)
@@ -2034,6 +2044,7 @@ class FakePipelineDB:
     def close(self) -> None:
         """Record that the fake connection was closed. No-op otherwise."""
         self.closed = True
+        self.close_calls += 1
 
     # --- album_requests write + query ---
 

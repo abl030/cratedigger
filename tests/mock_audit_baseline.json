@@ -77,7 +77,7 @@
     "patch:lib.mbid_replace_service.MbidReplaceService": 1,
     "patch:lib.quality.full_pipeline_decision": 2,
     "patch:lib.transitions.finalize_request": 3,
-    "stateful_mock_assign:db": 42
+    "stateful_mock_assign:db": 6
   },
   "test_repair_cli.py": {
     "patch:lib.transitions.finalize_request": 1,
