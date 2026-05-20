@@ -162,14 +162,18 @@ def _nomatch() -> MatchResult:
 
 
 def _always_nomatch(*_args, **_kwargs) -> MatchResult:
-    """Stub ``match_fn`` that never matches — replaces
-    ``patch("lib.enqueue.check_for_match", return_value=_nomatch())``."""
+    """Stub match_fn that never matches.
+
+    Replaces the legacy ``return_value=_nomatch()`` patch on the
+    check_for_match module attribute."""
     return _nomatch()
 
 
 def _const_match(result: MatchResult):
-    """Stub ``match_fn`` that always returns ``result`` — replaces
-    ``patch("lib.enqueue.check_for_match", return_value=result)``."""
+    """Stub match_fn that always returns ``result``.
+
+    Replaces the legacy ``return_value=result`` patch on the
+    check_for_match module attribute."""
 
     def _fn(*_args, **_kwargs) -> MatchResult:
         return result
@@ -178,9 +182,9 @@ def _const_match(result: MatchResult):
 
 
 class _RecordingMatchFn:
-    """Recorder ``match_fn`` for tests that previously did
-    ``patch("lib.enqueue.check_for_match") as m_match`` and then asserted
-    on call shape (``assert_not_called``, ``call_count``, ``call_args``).
+    """Recorder match_fn for tests that previously bound the
+    check_for_match module attribute via patch and then asserted on
+    call shape (``assert_not_called``, ``call_count``, ``call_args``).
 
     Wraps an inner stub and records each invocation's positional args so
     tests can assert call counts and arguments without mocking module

@@ -33,7 +33,7 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_audio_files
 from lib.staged_album import StagedAlbum
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -253,10 +253,8 @@ class TestImporterWorker(unittest.TestCase):
     def _patch_beets_album(self, album_path: str, *, min_bitrate: int):
         from lib.beets_db import AlbumInfo
 
-        beets = MagicMock()
-        beets.__enter__.return_value = beets
-        beets.__exit__.return_value = None
-        beets.get_album_info.return_value = AlbumInfo(
+        beets = FakeBeetsDB()
+        info = AlbumInfo(
             album_id=1,
             track_count=1,
             min_bitrate_kbps=min_bitrate,
@@ -266,6 +264,10 @@ class TestImporterWorker(unittest.TestCase):
             album_path=album_path,
             format="MP3",
         )
+        # Seed the same row for any release_id the test queries — the
+        # importer worker uses the request's mb_release_id, which the
+        # tests don't pin to a specific value.
+        beets._album_info_default = info
         return patch("lib.beets_db.BeetsDB", return_value=beets)
 
     def _mark_importable(
