@@ -32,19 +32,10 @@
     "stateful_mock_assign:ctx": 1
   },
   "test_import_one_stages.py": {
-    "patch:harness.import_one.BeetsDB": 3,
-    "patch:harness.import_one._get_folder_bitrates": 1,
-    "patch:harness.import_one._get_folder_min_bitrate": 1,
-    "patch:harness.import_one._probe_lossless_source_as_v0": 1,
-    "patch:harness.import_one._probe_native_lossy_as_v0": 1,
-    "patch:harness.import_one.convert_lossless": 3,
     "patch:harness.import_one.determine_verified_lossless": 1,
-    "patch:harness.import_one.fix_library_modes": 1,
     "patch:harness.import_one.provisional_lossless_decision": 1,
     "patch:harness.import_one.quality_decision_stage": 1,
-    "patch:harness.import_one.run_import": 3,
     "patch:lib.pipeline_db.PipelineDB": 4,
-    "patch:lib.spectral_check.analyze_album": 1,
     "patch:lib.transitions.finalize_request": 4,
     "stateful_mock_assign:beets": 4,
     "stateful_mock_assign:db": 4

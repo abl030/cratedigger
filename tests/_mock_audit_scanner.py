@@ -193,6 +193,38 @@ _LEAF_SEAM_PATTERNS = [
 
     # Filesystem permission helper — wraps chmod calls.
     re.compile(r"^lib\.permissions\.fix_library_modes$"),
+    re.compile(r"^harness\.import_one\.fix_library_modes$"),
+
+    # harness.import_one subprocess wrappers. ``run_import`` invokes
+    # ``beet import``; ``convert_lossless`` runs ffmpeg; the probe
+    # helpers run ffprobe/sox; ``_get_folder_*`` read tag metadata.
+    re.compile(r"^harness\.import_one\.run_import$"),
+    re.compile(r"^harness\.import_one\.convert_lossless$"),
+    re.compile(r"^harness\.import_one\._probe_lossless_source_as_v0$"),
+    re.compile(r"^harness\.import_one\._probe_native_lossy_as_v0$"),
+    re.compile(r"^harness\.import_one\._get_folder_bitrates$"),
+    re.compile(r"^harness\.import_one\._get_folder_min_bitrate$"),
+    re.compile(r"^harness\.import_one\.BeetsDB$"),  # class replacement, see lib.beets_db.BeetsDB
+
+    # Album-level spectral analysis — same sox/ffmpeg seam as
+    # analyze_track, just aggregating across an album's tracks.
+    re.compile(r"^lib\.spectral_check\.analyze_album$"),
+    re.compile(r"^harness\.import_one\.fix_library_modes$"),
+
+    # harness.import_one subprocess wrappers. ``run_import`` invokes
+    # ``beet import``; ``convert_lossless`` runs ffmpeg; the probe
+    # helpers run ffprobe/sox; ``_get_folder_*`` read tag metadata.
+    re.compile(r"^harness\.import_one\.run_import$"),
+    re.compile(r"^harness\.import_one\.convert_lossless$"),
+    re.compile(r"^harness\.import_one\._probe_lossless_source_as_v0$"),
+    re.compile(r"^harness\.import_one\._probe_native_lossy_as_v0$"),
+    re.compile(r"^harness\.import_one\._get_folder_bitrates$"),
+    re.compile(r"^harness\.import_one\._get_folder_min_bitrate$"),
+    re.compile(r"^harness\.import_one\.BeetsDB$"),  # class replacement, see lib.beets_db.BeetsDB
+
+    # Album-level spectral analysis — same sox/ffmpeg seam as
+    # analyze_track, just aggregating across an album's tracks.
+    re.compile(r"^lib\.spectral_check\.analyze_album$"),
 
     # Logger objects — patching the module-level logger lets tests
     # assert against log records without subclassing the logger. Also
