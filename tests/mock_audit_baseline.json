@@ -17,7 +17,6 @@
     "patch:lib.download.dispatch_import_core": 4,
     "patch:lib.download.log_validation_result": 1,
     "patch:lib.download.process_completed_album": 3,
-    "patch:lib.download.slskd_download_status": 2,
     "patch:lib.wrong_match_cleanup_service.cleanup_wrong_match": 4,
     "stateful_mock_assign:slskd": 1
   },
@@ -53,9 +52,6 @@
   "test_import_queue.py": {
     "patch:lib.download._handle_valid_result": 1,
     "patch:scripts.import_preview_worker.PipelineDB": 4,
-    "patch:scripts.import_preview_worker.logger.error": 2,
-    "patch:scripts.import_preview_worker.logger.exception": 2,
-    "patch:scripts.import_preview_worker.logger.warning": 2,
     "patch:scripts.import_preview_worker.run_once": 3,
     "stateful_mock_assign:beets": 1
   },
@@ -81,7 +77,7 @@
     "patch:scripts.repair._collect_issues": 1,
     "patch:scripts.repair.find_blocked_recovery_issues": 1,
     "patch:scripts.repair.find_orphaned_downloads": 2,
-    "stateful_mock_assign:db": 5
+    "stateful_mock_assign:db": 4
   },
   "test_web_server.py": {
     "patch:lib.transitions.finalize_request": 26,
