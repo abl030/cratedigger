@@ -39,15 +39,14 @@ inputs. Allowlist entries removed from `tests/_mock_audit_scanner.py`;
 `.claude/rules/code-quality.md` "Pure-decision allowlist policy" callout
 flipped from "known cleanup" to "never reintroduce".
 
-### Step 2 — `stage_to_ai_path` allowlist removal (~30 min, smallest)
+### Step 2 — `stage_to_ai_path` allowlist removal ✅ DONE
 
-`lib.download.stage_to_ai_path` is pure path-construction with no I/O. Currently allowlisted as a "staging-destination seam" — that rationale is a stretch.
-
-**The migration:** `test_import_dispatch.py::_dispatch_valid_result_cmd` patches it to return `dest_dir = os.path.join(tmpdir, "dest")`. Compute the real path: configure the test's `ctx.cfg.beets_staging_dir = tmpdir` and call the real `stage_to_ai_path` to compute the destination, then create that directory.
-
-- Remove the allowlist entry.
-- Update the helper to drive the real function with a tempdir staging root.
-- Verify file moves still land where the test expects.
+Landed: `_dispatch_valid_result_cmd` now configures
+`ctx.cfg.beets_staging_dir = tmpdir` and lets the real
+`stage_to_ai_path` compute the destination.
+`StagedAlbum.move_to` already mkdir-p's the target, so no extra
+setup is needed. Allowlist entry removed from
+`tests/_mock_audit_scanner.py`.
 
 ### Step 3 — In-module DI seam audit (~half day)
 
