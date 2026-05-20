@@ -1,0 +1,228 @@
+{
+  "helpers.py": {
+    "patch:lib.import_dispatch._cleanup_staged_dir": 1,
+    "patch:lib.import_dispatch.cleanup_disambiguation_orphans": 1
+  },
+  "test_album_source.py": {
+    "patch:lib.import_dispatch._do_mark_done": 1,
+    "patch:lib.transitions.finalize_request": 1
+  },
+  "test_beets_album_op.py": {
+    "patch:lib.permissions.fix_library_modes": 5,
+    "stateful_mock_assign:beets": 1
+  },
+  "test_browse.py": {
+    "patch:lib.browse.logger": 6
+  },
+  "test_config.py": {
+    "patch:cratedigger.os.getcwd": 1,
+    "patch:lib.config.CratediggerConfig.from_ini": 1
+  },
+  "test_cooldown.py": {
+    "patch:lib.download.cancel_and_delete": 3,
+    "patch:lib.enqueue.check_for_match": 1,
+    "stateful_mock_assign:db": 1,
+    "stateful_mock_assign:slskd": 1,
+    "stateful_mock_assign:source": 1
+  },
+  "test_cycle_summary.py": {
+    "patch:lib.matching.album_match": 1,
+    "stateful_mock_assign:slskd": 2
+  },
+  "test_disambiguation.py": {
+    "patch:harness.import_one.os.getpgid": 1,
+    "patch:harness.import_one.os.killpg": 1
+  },
+  "test_dispatch_core.py": {
+    "patch:lib.beets_db.BeetsDB": 1,
+    "patch:lib.import_dispatch._check_quality_gate_core": 4,
+    "patch:lib.import_dispatch.parse_import_result": 4,
+    "stateful_mock_assign:beets": 1
+  },
+  "test_dispatch_from_db.py": {
+    "patch:lib.beets_db.BeetsDB": 1,
+    "patch:lib.config.read_runtime_config": 10,
+    "patch:lib.import_dispatch._check_quality_gate_core": 5,
+    "patch:lib.import_dispatch.parse_import_result": 5
+  },
+  "test_download.py": {
+    "patch:lib.beets.beets_validate": 7,
+    "patch:lib.beets_db.BeetsDB": 1,
+    "patch:lib.download._process_beets_validation": 1,
+    "patch:lib.download.cancel_and_delete": 8,
+    "patch:lib.download.dispatch_import_core": 4,
+    "patch:lib.download.log_validation_result": 1,
+    "patch:lib.download.measure_preimport_state": 6,
+    "patch:lib.download.process_completed_album": 3,
+    "patch:lib.download.slskd_download_status": 2,
+    "patch:lib.wrong_match_cleanup_service.cleanup_wrong_match": 4,
+    "stateful_mock_assign:slskd": 1
+  },
+  "test_enqueue_fanout.py": {
+    "patch:lib.enqueue._fanout_browse_users": 35,
+    "patch:lib.enqueue.cancel_and_delete": 2,
+    "patch:lib.enqueue.check_for_match": 33,
+    "patch:lib.enqueue.slskd_do_enqueue": 10,
+    "patch:lib.enqueue.slskd_enqueue_with_outcome": 9,
+    "stateful_mock_assign:db": 2,
+    "stateful_mock_assign:slskd": 3,
+    "stateful_mock_assign:source": 2
+  },
+  "test_force_import.py": {
+    "patch:harness.import_one._log": 2
+  },
+  "test_force_import_gates.py": {
+    "patch:lib.beets_db.BeetsDB": 3,
+    "patch:lib.measurement.inspect_local_files": 5,
+    "patch:lib.measurement.repair_mp3_headers": 1,
+    "patch:lib.measurement.spectral_analyze": 9,
+    "patch:lib.spectral_check.analyze_track": 1
+  },
+  "test_import_dispatch.py": {
+    "patch:lib.beets_db.BeetsDB": 8,
+    "patch:lib.download.log_validation_result": 1,
+    "patch:lib.download.stage_to_ai_path": 1,
+    "patch:lib.import_dispatch._check_quality_gate_core": 4,
+    "patch:lib.import_dispatch.parse_import_result": 5,
+    "patch:lib.quality.quality_gate_decision": 5,
+    "patch:lib.transitions.finalize_request": 1,
+    "stateful_mock_assign:ctx": 1
+  },
+  "test_import_evidence.py": {
+    "patch:lib.beets_db.BeetsDB": 5
+  },
+  "test_import_one_stages.py": {
+    "patch:harness.import_one.BeetsDB": 3,
+    "patch:harness.import_one._get_folder_bitrates": 1,
+    "patch:harness.import_one._get_folder_min_bitrate": 1,
+    "patch:harness.import_one._probe_lossless_source_as_v0": 1,
+    "patch:harness.import_one._probe_native_lossy_as_v0": 1,
+    "patch:harness.import_one.convert_lossless": 3,
+    "patch:harness.import_one.determine_verified_lossless": 1,
+    "patch:harness.import_one.fix_library_modes": 1,
+    "patch:harness.import_one.provisional_lossless_decision": 1,
+    "patch:harness.import_one.quality_decision_stage": 1,
+    "patch:harness.import_one.run_import": 3,
+    "patch:lib.pipeline_db.PipelineDB": 4,
+    "patch:lib.spectral_check.analyze_album": 1,
+    "patch:lib.transitions.finalize_request": 4,
+    "stateful_mock_assign:beets": 4,
+    "stateful_mock_assign:db": 4
+  },
+  "test_import_preview.py": {
+    "patch:lib.config.read_runtime_config": 7,
+    "patch:lib.import_preview.inspect_local_files": 7,
+    "patch:lib.import_preview.measure_preimport_state": 7,
+    "patch:lib.import_preview.run_import_one": 7
+  },
+  "test_import_queue.py": {
+    "patch:lib.beets.beets_validate": 2,
+    "patch:lib.beets_db.BeetsDB": 1,
+    "patch:lib.download._handle_valid_result": 1,
+    "patch:lib.download.measure_preimport_state": 1,
+    "patch:scripts.import_preview_worker.PipelineDB": 4,
+    "patch:scripts.import_preview_worker.logger.error": 2,
+    "patch:scripts.import_preview_worker.logger.exception": 2,
+    "patch:scripts.import_preview_worker.logger.warning": 2,
+    "patch:scripts.import_preview_worker.run_once": 3,
+    "patch:scripts.import_preview_worker.threading.Event": 1,
+    "stateful_mock_assign:beets": 1
+  },
+  "test_integration.py": {
+    "stateful_mock_assign:db": 3,
+    "stateful_mock_assign:source": 3
+  },
+  "test_integration_slices.py": {
+    "patch:lib.beets.beets_validate": 1,
+    "patch:lib.beets_db.BeetsDB": 31,
+    "patch:lib.config.read_runtime_config": 7,
+    "patch:lib.enqueue._fanout_browse_users": 4,
+    "patch:lib.enqueue.check_for_match": 4,
+    "patch:lib.enqueue.slskd_do_enqueue": 2,
+    "patch:lib.measurement._needs_spectral_check": 1,
+    "patch:lib.measurement.hash_audio_content": 1,
+    "patch:lib.measurement.measure_preimport_state": 1,
+    "patch:lib.transitions.finalize_request": 1,
+    "stateful_mock_assign:source": 4
+  },
+  "test_library_delete_service.py": {
+    "patch:lib.beets_db.BeetsDB.delete_album": 5
+  },
+  "test_matching.py": {
+    "patch:lib.matching._track_titles_cross_check": 1,
+    "stateful_mock_assign:slskd": 1
+  },
+  "test_mbid_replace_service.py": {
+    "stateful_mock_assign:slskd": 1
+  },
+  "test_measurement.py": {
+    "patch:lib.measurement._iter_audio_files": 2,
+    "patch:lib.measurement._needs_spectral_check": 4,
+    "patch:lib.measurement.hash_audio_content": 2,
+    "patch:lib.measurement.repair_mp3_headers": 4,
+    "patch:lib.measurement.validate_audio": 1,
+    "stateful_mock_assign:db": 2
+  },
+  "test_overlay.py": {
+    "patch:web.server.compute_library_rank": 1
+  },
+  "test_pipeline_cli.py": {
+    "patch:lib.beets_db.BeetsDB": 1,
+    "patch:lib.config.read_runtime_config": 6,
+    "patch:lib.import_preview.preview_import_from_values": 2,
+    "patch:lib.mbid_replace_service.MbidReplaceService": 1,
+    "patch:lib.quality.full_pipeline_decision": 2,
+    "patch:lib.transitions.finalize_request": 3,
+    "patch:scripts.pipeline_cli._load_beets_album_info": 2,
+    "patch:scripts.pipeline_cli._load_runtime_rank_config": 2,
+    "patch:scripts.pipeline_cli._load_runtime_verified_lossless_target": 2,
+    "patch:scripts.pipeline_cli._resolve_failed_path": 5,
+    "patch:scripts.pipeline_cli.fetch_mb_release": 8,
+    "patch:scripts.pipeline_cli.fetch_mb_release_group_year": 3,
+    "stateful_mock_assign:db": 42
+  },
+  "test_release_cleanup.py": {
+    "stateful_mock_assign:pdb": 13
+  },
+  "test_repair_cli.py": {
+    "patch:lib.transitions.finalize_request": 1,
+    "patch:scripts.repair._collect_issues": 1,
+    "patch:scripts.repair._get_all_rows": 3,
+    "patch:scripts.repair._get_slskd_active_transfers": 3,
+    "patch:scripts.repair.find_blocked_recovery_issues": 1,
+    "patch:scripts.repair.find_orphaned_downloads": 2,
+    "patch:scripts.repair.read_runtime_config": 3,
+    "stateful_mock_assign:db": 5
+  },
+  "test_request_finalization.py": {
+    "patch:lib.transitions.apply_transition": 2,
+    "stateful_mock_assign:db": 1
+  },
+  "test_search_max_inflight.py": {
+    "stateful_mock_assign:ctx": 1,
+    "stateful_mock_assign:source": 3
+  },
+  "test_transitions.py": {
+    "patch:lib.transitions.apply_transition": 4,
+    "stateful_mock_assign:db": 6
+  },
+  "test_web_server.py": {
+    "patch:lib.beets_db.BeetsDB": 9,
+    "patch:lib.transitions.finalize_request": 26,
+    "patch:web.routes.imports.cleanup_all_wrong_matches": 3,
+    "patch:web.routes.imports.match_folders_to_requests": 1,
+    "patch:web.routes.imports.resolve_failed_path": 9,
+    "patch:web.routes.imports.scan_complete_folder": 1,
+    "patch:web.routes.pipeline.hash_audio_content": 4,
+    "patch:web.routes.pipeline.preview_import_from_values": 1,
+    "patch:web.routes.pipeline.resolve_failed_path": 2,
+    "patch:web.server._try_reconnect_db": 6,
+    "patch:web.server.check_beets_by_artist_album": 3,
+    "patch:web.server.compute_library_rank": 1,
+    "stateful_mock_assign:failing_db": 1,
+    "stateful_mock_assign:mock_db": 1
+  },
+  "test_wrong_matches_cleanup.py": {
+    "patch:lib.wrong_matches.resolve_failed_path": 1
+  }
+}
