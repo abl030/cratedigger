@@ -218,6 +218,24 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.beets_db\.BeetsDB\.delete_album$"),  # SQLite write + file delete seam
     re.compile(r"^web\.server\._real_beets_db$"),
 
+    # web.server.db — module-level pipeline DB connection cache.
+    # Tests patch.object(server, "db", fake) to inject a per-test DB.
+    # Equivalent to the constructor-replacement pattern.
+    re.compile(r"^web\.server\.db$"),
+
+    # web.routes re-exports of allowlisted helpers. Same physical
+    # function lives in lib.* and is allowlisted there; tests just
+    # patch the import binding inside the route module.
+    re.compile(r"^web\.routes\.\w+\.resolve_failed_path$"),
+    re.compile(r"^web\.routes\.pipeline\.hash_audio_content$"),
+    re.compile(r"^web\.routes\.imports\.scan_complete_folder$"),
+
+    # Deleted-shim regression guard. ``check_beets_by_artist_album``
+    # was removed in issue #123; tests patch it with create=True to
+    # ensure it stays gone (the patch acts as a RED guard against
+    # accidental reintroduction).
+    re.compile(r"^web\.server\.check_beets_by_artist_album$"),
+
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release$"),
     re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release_group_year$"),
