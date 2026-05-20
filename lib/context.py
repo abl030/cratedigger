@@ -9,11 +9,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import threading
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 if TYPE_CHECKING:
-    from album_source import DatabaseSource
     from lib.config import CratediggerConfig
+
+
+@runtime_checkable
+class PipelineDBSource(Protocol):
+    """Structural surface of the pipeline DB source used throughout the engine.
+
+    Production implementation is ``album_source.DatabaseSource``; tests use
+    ``tests.fakes.FakePipelineDBSource``. The protocol lets either satisfy
+    the ``CratediggerContext.pipeline_db_source`` slot without the test fake
+    having to inherit from the production class (which would require a DSN
+    constructor it doesn't need).
+    """
+
+    def _get_db(self) -> Any: ...
+    def get_tracks(self, album_record: Any) -> list[dict[str, Any]]: ...
+    def get_wanted_searchable(
+        self, generator_id: str, limit: int | None = None,
+    ) -> list[Any]: ...
+    def mark_done(
+        self,
+        album_record: Any,
+        bv_result: Any,
+        dest_path: Any = None,
+        download_info: Any = None,
+    ) -> None: ...
+    def reject_and_requeue(
+        self,
+        album_record: Any,
+        bv_result: Any,
+        usernames: Any = None,
+        download_info: Any = None,
+        search_filetype_override: Any = None,
+        cooled_down_users: set[str] | None = None,
+    ) -> int | None: ...
+    def close(self) -> None: ...
 
 
 @dataclass
@@ -23,7 +57,7 @@ class CratediggerContext:
     # --- Core dependencies (set once in main()) ---
     cfg: CratediggerConfig
     slskd: Any  # slskd_api.SlskdClient — Any to avoid import
-    pipeline_db_source: DatabaseSource
+    pipeline_db_source: PipelineDBSource
     download_ownership: Any = None
 
     # --- Runtime caches (reset each cycle) ---

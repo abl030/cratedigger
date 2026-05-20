@@ -3941,3 +3941,102 @@ class FakePipelineDB:
             test.assertEqual(actual, value,
                              f"download_log[{index}].{field}: "
                              f"expected {value!r}, got {actual!r}")
+
+
+class FakePipelineDBSource:
+    """Typed stand-in for ``album_source.DatabaseSource`` / similar.
+
+    Production calls ``ctx.pipeline_db_source._get_db()`` (and a handful of
+    higher-level methods) to reach the pipeline DB. Tests historically
+    constructed this with ``MagicMock`` and ``source._get_db.return_value
+    = ...``; replace with this typed fake so the surface is explicit and
+    the test fails loudly if production calls an unexpected method.
+
+    Surface mirrors the production source's six public callables:
+    ``_get_db``, ``get_tracks``, ``get_wanted_searchable``, ``mark_done``,
+    ``reject_and_requeue``, ``close``. The fake's behavior is intentionally
+    minimal — tests that exercise real DB activity should rely on the
+    underlying ``FakePipelineDB`` directly (via ``source.db``).
+    """
+
+    def __init__(self, db: FakePipelineDB | None = None) -> None:
+        self.db: FakePipelineDB = db if db is not None else FakePipelineDB()
+        # Call records — empty unless production reached a method.
+        self.get_tracks_calls: list[Any] = []
+        self.mark_done_calls: list[dict[str, Any]] = []
+        self.reject_and_requeue_calls: list[dict[str, Any]] = []
+        self.close_calls: int = 0
+        # Test-configurable returns for the wanted iterator. Default empty
+        # so the worker pipeline observes "nothing to do."
+        self._wanted_searchable: list[Any] = []
+
+    def _get_db(self) -> FakePipelineDB:
+        return self.db
+
+    def get_tracks(self, album_record: Any) -> list[dict[str, Any]]:
+        self.get_tracks_calls.append(album_record)
+        request_id = getattr(album_record, "db_request_id", None)
+        if not request_id:
+            return []
+        rows = self.db._tracks.get(request_id, [])
+        album_id = request_id * -1
+        out: list[dict[str, Any]] = []
+        for t in rows:
+            out.append({
+                "title": t.get("title"),
+                "trackNumber": str(t.get("track_number") or ""),
+                "mediumNumber": t.get("disc_number"),
+                "duration": int((t.get("length_seconds") or 0) * 10_000_000),
+                "id": 0,
+                "albumId": album_id,
+            })
+        return out
+
+    def set_wanted_searchable(self, records: list[Any]) -> None:
+        """Configure what ``get_wanted_searchable`` returns."""
+        self._wanted_searchable = list(records)
+
+    def get_wanted_searchable(
+        self,
+        generator_id: str,
+        limit: int | None = None,
+    ) -> list[Any]:
+        if limit is None:
+            return list(self._wanted_searchable)
+        return list(self._wanted_searchable[:limit])
+
+    def mark_done(
+        self,
+        album_record: Any,
+        bv_result: Any,
+        dest_path: Any = None,
+        download_info: Any = None,
+    ) -> None:
+        self.mark_done_calls.append({
+            "album_record": album_record,
+            "bv_result": bv_result,
+            "dest_path": dest_path,
+            "download_info": download_info,
+        })
+
+    def reject_and_requeue(
+        self,
+        album_record: Any,
+        bv_result: Any,
+        usernames: Any = None,
+        download_info: Any = None,
+        search_filetype_override: Any = None,
+        cooled_down_users: set[str] | None = None,
+    ) -> int | None:
+        self.reject_and_requeue_calls.append({
+            "album_record": album_record,
+            "bv_result": bv_result,
+            "usernames": usernames,
+            "download_info": download_info,
+            "search_filetype_override": search_filetype_override,
+            "cooled_down_users": cooled_down_users,
+        })
+        return None
+
+    def close(self) -> None:
+        self.close_calls += 1
