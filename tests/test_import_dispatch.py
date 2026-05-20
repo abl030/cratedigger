@@ -23,6 +23,7 @@ from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    make_ctx_with_fake_db,
     make_import_result,
     make_request_row,
     noop_quality_gate,
@@ -55,20 +56,24 @@ def _make_album_data(artist="Test Artist", title="Test Album",
 
 
 def _make_ctx():
-    """Build a mock CratediggerContext."""
-    ctx = MagicMock()
-    ctx.cfg.beets_harness_path = "/nix/store/fake/harness/run_beets_harness.sh"
-    ctx.cfg.beets_distance_threshold = 0.15
-    ctx.cfg.beets_staging_dir = "/tmp/staging"
-    ctx.cfg.verified_lossless_target = ""
-    ctx.cfg.quality_ranks.to_json.return_value = "{}"
+    """Build a CratediggerContext wired to a seeded FakePipelineDB.
+
+    The DB is seeded with request id 42 in ``downloading`` status — the
+    auto-import dispatch path expects to find an owning request. The
+    config remains a ``MagicMock`` because the tests only read a handful
+    of attributes from it; ``cfg`` is not a stateful-collaborator name
+    in the audit's heuristic.
+    """
+    cfg = MagicMock()
+    cfg.beets_harness_path = "/nix/store/fake/harness/run_beets_harness.sh"
+    cfg.beets_distance_threshold = 0.15
+    cfg.beets_staging_dir = "/tmp/staging"
+    cfg.verified_lossless_target = ""
+    cfg.quality_ranks.to_json.return_value = "{}"
+    fake_db = FakePipelineDB()
+    fake_db.seed_request(make_request_row(id=42, status="downloading"))
+    ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
     ctx.cooled_down_users = set()
-    ctx.pipeline_db_source = MagicMock()
-    db_mock = MagicMock()
-    db_mock.get_request.return_value = make_request_row(status="downloading")
-    db_mock.advisory_lock.return_value.__enter__.return_value = True
-    db_mock.advisory_lock.return_value.__exit__.return_value = False
-    ctx.pipeline_db_source._get_db.return_value = db_mock
     return ctx
 
 
@@ -99,9 +104,16 @@ def _dispatch_valid_result_cmd(
 
     album_data = album_data or _make_album_data()
     ctx = ctx or _make_ctx()
-    db_mock = ctx.pipeline_db_source._get_db.return_value
     if db_fields is not None:
-        db_mock.get_request.return_value = db_fields
+        # Reseed request 42 with the test-supplied row shape. The default
+        # _make_ctx() ships a downloading row keyed by id=42; tests that
+        # need a different shape pass ``db_fields`` and we overwrite.
+        # Force id=42 so ``_handle_valid_result`` finds the override when
+        # looking up by ``album_data.db_request_id``.
+        override = dict(db_fields)
+        override["id"] = album_data.db_request_id
+        fake_db = ctx.pipeline_db_source._get_db()
+        fake_db.seed_request(override)
     bv_result = _make_bv_result()
     ir = ir or make_import_result(decision="import")
 
@@ -1121,7 +1133,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db.seed_request(make_request_row(id=42, **merged))
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
-             patch("lib.quality.quality_gate_decision",
+             patch("lib.import_dispatch.quality_gate_decision",
                    return_value=gate_decision):
             mock_beets = MagicMock()
             mock_beets.__enter__ = MagicMock(return_value=mock_beets)
@@ -1288,7 +1300,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             return "accept"
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
-             patch("lib.quality.quality_gate_decision",
+             patch("lib.import_dispatch.quality_gate_decision",
                    side_effect=capture_decision):
             mock_beets = MagicMock()
             mock_beets.__enter__ = MagicMock(return_value=mock_beets)
@@ -1328,7 +1340,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             return quality_gate_decision(measurement)
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
-             patch("lib.quality.quality_gate_decision",
+             patch("lib.import_dispatch.quality_gate_decision",
                    side_effect=capture_and_decide):
             mock_beets = MagicMock()
             mock_beets.__enter__ = MagicMock(return_value=mock_beets)
@@ -1369,7 +1381,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             return "accept"
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
-             patch("lib.quality.quality_gate_decision", side_effect=capture):
+             patch("lib.import_dispatch.quality_gate_decision", side_effect=capture):
             mock_beets = MagicMock()
             mock_beets.__enter__ = MagicMock(return_value=mock_beets)
             mock_beets.__exit__ = MagicMock(return_value=False)
@@ -1450,7 +1462,7 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
         ))
 
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls, \
-             patch("lib.quality.quality_gate_decision",
+             patch("lib.import_dispatch.quality_gate_decision",
                    return_value="accept"):
             mock_beets = MagicMock()
             mock_beets.__enter__ = MagicMock(return_value=mock_beets)
