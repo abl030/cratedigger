@@ -247,75 +247,39 @@ Always use these instead of inventing parallel scaffolding:
 
 # MOCKS: LEAF-SEAM ONLY
 
-`MagicMock` and `patch(...)` are for the **outermost edge** of the test — the place where our code calls something external we don't own. They are forbidden as a substitute for our own stateful types or our own functions. Enforced by `tests/test_mock_audit.py` (issue #290).
+`MagicMock` and `patch(...)` are for the **outermost edge** of the test — where our code calls something external we don't own. They are forbidden as a substitute for our own stateful types or our own pure-logic functions. Zero-tolerance: enforced by `tests/test_mock_audit.py` against the allowlist in `tests/_mock_audit_scanner.py`.
 
-**ALLOWED — leaf seams (mock freely):**
-- Subprocess: `subprocess.run`, `subprocess.Popen`, `*.sp.run`, `*.sp.Popen`
-- HTTP / URL: `urllib.request.urlopen`, `requests.get`, `requests.Session`
-- External libraries we don't own: `music_tag`, `redis.Redis`, `slskd_api.SlskdClient` (the real one, at module import — see `_real_slskd_api` in conftest), MusicBrainz / Discogs API client objects
-- Filesystem leaf seams: `os.path.isfile`, `os.path.isdir`, `os.path.exists`, `shutil.*`
-- Time: `time.sleep`, `time.monotonic`
-- Stdlib primitives: `threading.Event/Lock`, `signal.*`, `select.select`
-- Notifier seams: `lib.util._meelo_*`, `lib.util.trigger_(meelo|plex|jellyfin)_scan` (one-way fire-and-forget)
-- argparse `args` stubs: `args = MagicMock()` for CLI subcommand tests where args is a parsed-options struct
-- subprocess return-value envelopes: `proc = MagicMock()` where you only set `returncode` / `stdout` / `stderr`
-- `sys.modules["external_pkg"] = MagicMock()` at module top-level for import-time stubbing of optional deps
-- Module-level `logger` objects (`lib.<module>.logger`, `harness.<module>.logger`) when tests assert on log records
+**Forbidden:**
+- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `beets_db`, `source`, `pipeline_db`, `slskd`, `fake_db`. Use `FakePipelineDB` / `FakeBeetsDB` / `FakeSlskdAPI` from `tests/fakes.py`.
+- `patch("lib.X.our_function")` for any target not on the allowlist. If you're mocking your own logic, you're testing the mock.
+- `patch("lib.beets_db.BeetsDB.<method>")`. The class constructor is allowlisted; per-method stubbing isn't — use `FakeBeetsDB`.
+- Allowlisting a pure decision function. Drive the test with real inputs that produce the branch you care about — fixtures usually already exist in the decision's own coverage.
 
-**ALLOWED — thin seam-wrapper functions in `lib/` (the function IS the boundary):**
-These are functions whose body is mostly "construct args and dispatch to a network / subprocess / filesystem call." Mocking them is the most ergonomic point to mock the underlying seam — patching `slskd_api` directly would require elaborate per-test setup for no extra coverage. **The exhaustive list lives in `tests/_mock_audit_scanner.py`** under "Thin seam-wrapper functions in lib/" with one rationale per entry. Today that includes (non-exhaustive):
-- slskd network wrappers: `lib.enqueue._fanout_browse_users`, `lib.enqueue.slskd_do_enqueue`, `lib.enqueue.slskd_enqueue_with_outcome`, `lib.(download|enqueue).cancel_and_delete`
-- Beets harness subprocess wrapper: `lib.beets.beets_validate`
-- Sox / ffmpeg / mp3val wrappers: `lib.measurement.spectral_analyze`, `lib.measurement.inspect_local_files`, `lib.measurement.repair_mp3_headers`, `lib.measurement.measure_preimport_state` (and `lib.import_preview.*` / `lib.download.*` re-exports)
-- Config loader: `lib.config.read_runtime_config`, `lib.config.CratediggerConfig.from_ini`
-- `BeetsDB` class itself (the constructor — `BeetsDB.<method>` patches remain flagged because `FakeBeetsDB` is the right replacement)
-- MB API fetch: `scripts.pipeline_cli.fetch_mb_release`, `lib.*.fetch_mb_release`
-- DB reconnect: `web.server._try_reconnect_db`
+**Allowed leaf seams (mock freely, never tripped by the audit):**
+Subprocess, urllib/requests, third-party libs (`music_tag`, `redis`, `slskd_api`), `os.path.*`, `shutil.*`, `time.sleep`, threading/signal primitives, fire-and-forget notifier helpers (`lib.util.trigger_*_scan`), module-level `logger` objects, and ergonomic envelopes (`args = MagicMock()` for parsed argparse args, `proc = MagicMock()` for subprocess return-value structs).
 
-When adding a new seam-wrapper function, the bar is: **its body must be ≤10 lines AND mostly forward to an external boundary.** Anything fatter is pure logic with a side effect, not a seam wrapper — drive it with a fake.
+**Allowed thin seam-wrappers (allowlisted in `_mock_audit_scanner.py`):**
+A function in `lib/` is a legitimate seam-wrapper iff its body is **≤10 lines AND mostly forwards to a process / network / filesystem boundary**. Fatter than that means pure logic with a side effect — drive it with a fake, not a patch.
 
-**ALLOWED — module-local DI seams (route/CLI dispatch only):**
+When adding a wrapper to the allowlist, include a one-line rationale next to the regex. The list is the contract.
 
-When production code is dispatched by URL (web routes) or argparse subcommands (CLI), there's no kwarg path to inject a dependency through. The established pattern: bind the dependency at module-attribute scope and let tests patch the attribute.
+**Picking a strategy when you'd otherwise want to patch our own code:**
 
-```python
-# lib/<module>.py at module top
-from lib import transitions
-finalize_request = transitions.finalize_request   # the DI seam
+1. **Real inputs (best).** Construct values that produce the branch you need. Borrow fixtures from the decision's dedicated unit tests.
+2. **Kwarg-DI seam.** Mid-tier helpers can accept the dependency as a kwarg with the production function as the default. Canonical examples in this repo: `try_enqueue(match_fn=)`, `dispatch_import_core(quality_gate_fn=)`, `_handle_valid_result(dispatch_fn=)`, `check_for_match(album_match_fn=, cross_check_fn=)`, `_collect_issues(find_orphaned_fn=, find_blocked_recovery_fn=)`.
+3. **Module-local DI seam (only for URL or argparse dispatchers).** When the entry point can't take a kwarg, bind the dependency at the calling module's top: `finalize_request = transitions.finalize_request`. Tests patch the module attribute. Allowlist the binding. Canonical examples: `web.routes.pipeline.finalize_request`, `scripts.pipeline_cli.finalize_request`, `scripts.repair._collect_issues`.
+4. **Allowlist (last resort).** Only if the target is a thin wrapper around an external boundary.
 
-# tests patch the module attribute
-@patch("lib.<module>.finalize_request")
-def test_x(self, mock_finalize):
-    ...
-```
-
-Examples currently allowlisted: `web.routes.pipeline.finalize_request`, `harness.import_one.finalize_request`, `scripts.pipeline_cli.finalize_request`, `scripts.repair.finalize_request`, `lib.import_dispatch.finalize_request`.
-
-**This is only legitimate when the entry point cannot accept a kwarg.** A mid-tier private helper called from another production function CAN accept a kwarg — see `try_enqueue(..., match_fn=check_for_match)` and `dispatch_import_core(..., quality_gate_fn=_check_quality_gate_core)` as the canonical kwarg-DI examples. Module-local seams are the second-best option; kwarg DI is the first-best.
-
-When you find yourself reaching for an in-module patch on a mid-tier function (e.g. `patch("lib.download._handle_valid_result")` from within a `process_completed_album` test), ask: could this function take the dependency as a kwarg? If yes, refactor. If no (URL or argparse dispatcher), allowlist with rationale.
-
-**FORBIDDEN — stateful collaborators and pure-logic functions:**
-- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `beets_db`, `source`, `pipeline_db`, `slskd`, `fake_db` — **use `FakePipelineDB`, `FakeBeetsDB`, `FakeSlskdAPI` from `tests/fakes.py`**.
-- `patch("lib.enqueue.check_for_match")` — pure matching logic. Use the `try_enqueue(..., match_fn=)` kwarg DI seam, or drive the real function with seeded folder cache / track data.
-- `patch("lib.transitions.finalize_request")` / `patch("lib.transitions.apply_transition")` on the ORIGIN module. The route / CLI / harness modules each expose a `finalize_request = transitions.finalize_request` module-local seam — patch THAT instead (e.g. `patch("web.routes.pipeline.finalize_request")`).
-- `patch("lib.import_dispatch.parse_import_result")` is forbidden on lib.import_dispatch.parse_import_result — `lib.quality.parse_import_result` is a thin harness-stdout parser and is allowlisted; the `lib.import_dispatch` re-export is also allowlisted. Use one of those.
-- `patch("lib.beets_db.BeetsDB.<method>")` — use `FakeBeetsDB`; the class itself is allowlisted but per-method stubbing is not.
-- Any `patch("lib.<our-module>.<our-function>")` whose target is **not** explicitly on the seam-wrapper allowlist in `_mock_audit_scanner.py`. **If you're mocking your own logic, you're testing the mock, not the code.**
-
-**Pure-decision allowlist policy:** Never allowlist a pure decision function as an orchestration test seam. Drive these tests with real measurement / value inputs that produce each branch — borrow fixtures from the decision's own coverage (e.g. `tests/test_quality_decisions.py::TestQualityGateDecision.CASES`, `tests/test_quality_classification.py::TestLiveBugReproductions`, `tests/test_import_preview.py`). Previously-allowlisted `lib.import_dispatch.quality_gate_decision`, `lib.quality.full_pipeline_decision`, and `lib.import_preview.preview_import_from_values` were migrated in issue #333 — do not reintroduce. If a wrapper test wants to stub the decision because "real inputs are too much setup", that's a signal the seam is misplaced — use kwarg DI instead.
-
-**The rule of thumb:** does the thing you're about to mock cross a process / network / third-party boundary as its primary purpose? If yes, mock — and if the function is a thin wrapper around that boundary, add it to `_mock_audit_scanner.py`'s seam-wrapper list with a rationale. If the function is pure logic with a side effect, use a `Fake*` or drive the real function with constructed inputs.
-
-**Adding a new `PipelineDB` method:**
-1. Add the method to `tests/fakes.py::FakePipelineDB` (state-respecting implementation) — not `MagicMock`.
+**Adding a new `PipelineDB` / `BeetsDB` / `SlskdAPI` method:**
+1. Add a state-respecting implementation to the corresponding `Fake*` in `tests/fakes.py`.
 2. Add a self-test in `tests/test_fakes.py`.
-3. Tests that use it consume the fake; they do NOT do `mock_db.new_method.return_value = ...`.
+3. Tests consume the fake; they do NOT do `mock_db.new_method.return_value = ...`.
 
-- **Equivalence proof for deleted tests.** When removing a test, document in the commit message: what behavior was covered, where it's covered now, what branch is still protected.
-- **Short docstrings.** One-line docstrings are fine. Long `NOTE:` paragraphs justifying a test's existence are a smell — extract a helper, move the explanation to the PR, or restructure the test.
+**Other test rules:**
+- **Equivalence proof when removing a test.** Note in the commit message what behaviour was covered, where it's covered now, what branch is still protected.
+- **Short docstrings.** One line is fine. Long `NOTE:` paragraphs justifying a test's existence are a smell — restructure the test or move the explanation to the PR.
 - **Builders for structured data.** Hand-rolled dicts with many fields drift silently when the schema evolves.
-- **No new bespoke harnesses.** If the existing fakes/builders/helpers don't fit your test, extend them (and update this rule). Don't write a one-off.
+- **No new bespoke harnesses.** If existing fakes/builders/helpers don't fit, extend them and update this rule. Don't write a one-off.
 
 ## Pre-Commit Review Gate
 - For non-trivial changes (new dataclasses, refactored function signatures, new pipeline paths), spawn an Opus agent to review the diff before committing.
