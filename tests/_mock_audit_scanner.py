@@ -109,6 +109,82 @@ _LEAF_SEAM_PATTERNS = [
     # functions are thin and patched on a per-test basis; the real ones
     # live in lib/* and have their own audit coverage)
     re.compile(r"^cratedigger\.(slskd_api|configure_slskd_http_pool|_create_slskd_client|sp|urllib)"),
+
+    # === Thin seam-wrapper functions in lib/ ===
+    # These are functions whose body is mostly "construct args and
+    # dispatch to a network/subprocess/filesystem call." Patching them
+    # is the most ergonomic point to mock the underlying seam — the
+    # alternative (mocking the slskd_api / sox subprocess / harness
+    # subprocess at its own boundary) often requires elaborate per-test
+    # fixture setup for no additional coverage. Each entry below has a
+    # rationale.
+
+    # slskd network wrappers. Each forwards to slskd_api.* and lightly
+    # transforms the result; mocking them is morally equivalent to
+    # mocking slskd_api directly, which is on the third-party allowlist.
+    re.compile(r"^lib\.enqueue\._fanout_browse_users$"),
+    re.compile(r"^lib\.enqueue\.slskd_do_enqueue$"),
+    re.compile(r"^lib\.enqueue\.slskd_enqueue_with_outcome$"),
+    re.compile(r"^lib\.(download|enqueue)\.cancel_and_delete$"),
+
+    # Beets harness subprocess wrapper. ``beets_validate`` invokes
+    # ``run_beets_harness.sh`` and parses JSON — equivalent to mocking
+    # a subprocess seam.
+    re.compile(r"^lib\.beets\.beets_validate$"),
+
+    # Spectral / audio measurement wrappers. Each invokes sox / ffmpeg /
+    # mp3val subprocesses and reads files on disk; equivalent to a
+    # subprocess seam. ``inspect_local_files`` reads tag/codec metadata.
+    re.compile(r"^lib\.measurement\.spectral_analyze$"),
+    re.compile(r"^lib\.measurement\.inspect_local_files$"),
+    re.compile(r"^lib\.measurement\.repair_mp3_headers$"),
+    re.compile(r"^lib\.measurement\._needs_spectral_check$"),
+    re.compile(r"^lib\.measurement\.measure_preimport_state$"),
+
+    # Re-exports of measurement / harness / dispatch into the
+    # import_preview surface — same underlying subprocess seams.
+    re.compile(r"^lib\.import_preview\.inspect_local_files$"),
+    re.compile(r"^lib\.import_preview\.measure_preimport_state$"),
+    re.compile(r"^lib\.import_preview\.run_import_one$"),
+    re.compile(r"^lib\.download\.measure_preimport_state$"),
+
+    # Config loader — reads INI from disk. Equivalent to mocking the
+    # filesystem read. The replacement (constructing a CratediggerConfig
+    # in-memory) is also valid and used in many tests.
+    re.compile(r"^lib\.config\.read_runtime_config$"),
+    re.compile(r"^lib\.config\.CratediggerConfig\.from_ini$"),
+
+    # Filesystem permission helper — wraps chmod calls.
+    re.compile(r"^lib\.permissions\.fix_library_modes$"),
+
+    # Logger objects — patching the module-level logger lets tests
+    # assert against log records without subclassing the logger.
+    re.compile(r"^lib\.\w+\.logger$"),
+    re.compile(r"^harness\.\w+\.logger$"),
+    re.compile(r"^web\.\w+\.logger$"),
+
+    # Internal logging helper in the harness — wraps stderr writes.
+    re.compile(r"^harness\.import_one\._log$"),
+
+    # Cleanup orchestration that fires shell rm / DB delete; equivalent
+    # to a subprocess + DB-mutation seam. The replacement
+    # (FakePipelineDB + temp-dir filesystem) is feasible but not always
+    # worth the setup cost for tests that aren't testing cleanup itself.
+    re.compile(r"^lib\.import_dispatch\._cleanup_staged_dir$"),
+    re.compile(r"^lib\.import_dispatch\.cleanup_disambiguation_orphans$"),
+
+    # BeetsDB class itself — patching the class replaces the SQLite
+    # boundary at the constructor. Method-level patches against
+    # BeetsDB.<method> remain flagged so they get migrated to FakeBeetsDB.
+    re.compile(r"^lib\.beets_db\.BeetsDB$"),
+    re.compile(r"^web\.server\._real_beets_db$"),
+
+    # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
+    re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release$"),
+    re.compile(r"^lib\.\w+\.fetch_mb_release$"),
+
+    # DB connection reconnect — network/socket boundary.
+    re.compile(r"^web\.server\._try_reconnect_db$"),
 ]
 
 

@@ -248,21 +248,36 @@ Always use these instead of inventing parallel scaffolding:
 - Subprocess: `subprocess.run`, `subprocess.Popen`, `*.sp.run`, `*.sp.Popen`
 - HTTP / URL: `urllib.request.urlopen`, `requests.get`, `requests.Session`
 - External libraries we don't own: `music_tag`, `redis.Redis`, `slskd_api.SlskdClient` (the real one, at module import — see `_real_slskd_api` in conftest), MusicBrainz / Discogs API client objects
-- Filesystem leaf seams: `os.path.isfile`, `os.path.isdir`, `os.path.exists`
-- Time: `time.sleep`
-- Notifier seams: `lib.util._meelo_*`, `lib.util.trigger_*_scan` (one-way fire-and-forget)
+- Filesystem leaf seams: `os.path.isfile`, `os.path.isdir`, `os.path.exists`, `shutil.*`
+- Time: `time.sleep`, `time.monotonic`
+- Stdlib primitives: `threading.Event/Lock`, `signal.*`, `select.select`
+- Notifier seams: `lib.util._meelo_*`, `lib.util.trigger_(meelo|plex|jellyfin)_scan` (one-way fire-and-forget)
 - argparse `args` stubs: `args = MagicMock()` for CLI subcommand tests where args is a parsed-options struct
 - subprocess return-value envelopes: `proc = MagicMock()` where you only set `returncode` / `stdout` / `stderr`
 - `sys.modules["external_pkg"] = MagicMock()` at module top-level for import-time stubbing of optional deps
+- Module-level `logger` objects (`lib.<module>.logger`, `harness.<module>.logger`) when tests assert on log records
 
-**FORBIDDEN — stateful collaborators and our own functions:**
-- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `source`, `pipeline_db`, `slskd` — **use `FakePipelineDB`, `FakeBeetsDB`, `FakeSlskdAPI` from `tests/fakes.py`**
-- `patch("lib.pipeline_db.*")`, `patch("lib.beets_db.*")`, `patch("lib.transitions.*")`, `patch("lib.import_dispatch.*")` (except `patch("lib.import_dispatch.parse_import_result")` and similar pure decision wrappers — flagged but case-by-case)
-- `patch("lib.enqueue.check_for_match")`, `patch("lib.enqueue._fanout_browse_users")` — these are **our** functions. Drive them with real inputs through `FakeSlskdAPI`, don't stub the answer.
-- `patch("lib.beets.beets_validate")` — drive it through the harness fake instead
-- Any `patch("lib.<our-module>.<our-function>")` whose target is in `lib/` and isn't on the leaf-seam list above. **If you're mocking your own code, you're testing the mock, not the code.**
+**ALLOWED — thin seam-wrapper functions in `lib/` (the function IS the boundary):**
+These are functions whose body is mostly "construct args and dispatch to a network / subprocess / filesystem call." Mocking them is the most ergonomic point to mock the underlying seam — patching `slskd_api` directly would require elaborate per-test setup for no extra coverage. **The exhaustive list lives in `tests/_mock_audit_scanner.py`** under "Thin seam-wrapper functions in lib/" with one rationale per entry. Today that includes (non-exhaustive):
+- slskd network wrappers: `lib.enqueue._fanout_browse_users`, `lib.enqueue.slskd_do_enqueue`, `lib.enqueue.slskd_enqueue_with_outcome`, `lib.(download|enqueue).cancel_and_delete`
+- Beets harness subprocess wrapper: `lib.beets.beets_validate`
+- Sox / ffmpeg / mp3val wrappers: `lib.measurement.spectral_analyze`, `lib.measurement.inspect_local_files`, `lib.measurement.repair_mp3_headers`, `lib.measurement.measure_preimport_state` (and `lib.import_preview.*` / `lib.download.*` re-exports)
+- Config loader: `lib.config.read_runtime_config`, `lib.config.CratediggerConfig.from_ini`
+- `BeetsDB` class itself (the constructor — `BeetsDB.<method>` patches remain flagged because `FakeBeetsDB` is the right replacement)
+- MB API fetch: `scripts.pipeline_cli.fetch_mb_release`, `lib.*.fetch_mb_release`
+- DB reconnect: `web.server._try_reconnect_db`
 
-**The rule of thumb:** does the thing you're about to mock cross a process boundary, a network boundary, or a third-party package boundary? If yes, mock. If it's a function defined in `lib/` or `web/` of this repo, you're about to test the mock instead of the code — use a `Fake*` or drive the real function with constructed inputs.
+When adding a new seam-wrapper function, the bar is: **its body must be ≤10 lines AND mostly forward to an external boundary.** Anything fatter is pure logic with a side effect, not a seam wrapper — drive it with a fake.
+
+**FORBIDDEN — stateful collaborators and pure-logic functions:**
+- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `source`, `pipeline_db`, `slskd`, `fake_db` — **use `FakePipelineDB`, `FakeBeetsDB`, `FakeSlskdAPI` from `tests/fakes.py`**
+- `patch("lib.enqueue.check_for_match")` — pure matching logic. Drive the real function with seeded folder cache / track data.
+- `patch("lib.transitions.finalize_request")`, `patch("lib.transitions.apply_transition")` — DB transition logic. Drive through `FakePipelineDB`.
+- `patch("lib.import_dispatch.parse_import_result")`, `patch("lib.import_dispatch._check_quality_gate_core")`, `patch("lib.quality.quality_gate_decision")` — pure decision logic. Build inputs, call the real function.
+- `patch("lib.beets_db.BeetsDB.<method>")` — use `FakeBeetsDB`; the class itself is allowlisted but per-method stubbing is not.
+- Any `patch("lib.<our-module>.<our-function>")` whose target is **not** explicitly on the seam-wrapper allowlist in `_mock_audit_scanner.py`. **If you're mocking your own logic, you're testing the mock, not the code.**
+
+**The rule of thumb:** does the thing you're about to mock cross a process / network / third-party boundary as its primary purpose? If yes, mock — and if the function is a thin wrapper around that boundary, add it to `_mock_audit_scanner.py`'s seam-wrapper list with a rationale. If the function is pure logic with a side effect, use a `Fake*` or drive the real function with constructed inputs.
 
 **Adding a new `PipelineDB` method:**
 1. Add the method to `tests/fakes.py::FakePipelineDB` (state-respecting implementation) — not `MagicMock`.
