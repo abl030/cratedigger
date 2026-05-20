@@ -96,9 +96,6 @@
     "patch:lib.matching._track_titles_cross_check": 1,
     "stateful_mock_assign:slskd": 1
   },
-  "test_mbid_replace_service.py": {
-    "stateful_mock_assign:slskd": 1
-  },
   "test_measurement.py": {
     "patch:lib.measurement._iter_audio_files": 2,
     "patch:lib.measurement.hash_audio_content": 2,
