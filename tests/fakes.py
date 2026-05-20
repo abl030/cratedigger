@@ -4100,3 +4100,90 @@ class FakePipelineDBSource:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+class FakeBeetsDB:
+    """In-memory fake for ``lib.beets_db.BeetsDB`` — minimal surface.
+
+    Records state for assertions and lets tests register return values
+    for the query methods used by ``harness/import_one.py`` and a few
+    web routes. Intentionally narrow — extend only when a test surface
+    actually exercises a new method. The real ``BeetsDB`` is the
+    contract; the audit's ``test_fake_only_methods_stay_on_the_allowlist``
+    catches drift.
+
+    Usage:
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-123", False)
+        beets.set_album_ids_for_release("mbid-123", [77])
+        beets.set_album_info(77, AlbumInfo(...))
+        beets.set_item_paths("mbid-123", [(11, "/path/01.flac")])
+        # ... drive code that calls beets.album_exists("mbid-123") ...
+        assert beets.close_calls == 1
+    """
+
+    def __init__(self) -> None:
+        self._album_exists: dict[str, bool] = {}
+        self._album_ids_for_release: dict[str, list[int]] = {}
+        self._album_info: dict[str, Any] = {}
+        self._item_paths: dict[str, list[tuple[int, str]]] = {}
+        # Default return values for unseeded keys — match the real
+        # BeetsDB's "no row" shapes so tests don't crash on missing
+        # explicit seeds.
+        self._album_exists_default = False
+        self._album_ids_default: list[int] = []
+        self._item_paths_default: list[tuple[int, str]] = []
+        self.close_calls: int = 0
+        self.album_exists_calls: list[str] = []
+        self.get_album_info_calls: list[str] = []
+        self.get_all_album_ids_for_release_calls: list[str] = []
+        self.get_item_paths_calls: list[str] = []
+
+    # --- Seeding helpers ---
+
+    def set_album_exists(self, release_id: str, value: bool) -> None:
+        self._album_exists[release_id] = value
+
+    def set_album_ids_for_release(
+        self, release_id: str, ids: list[int],
+    ) -> None:
+        self._album_ids_for_release[release_id] = list(ids)
+
+    def set_album_info(self, mb_release_id: str, info: Any) -> None:
+        self._album_info[mb_release_id] = info
+
+    def set_item_paths(
+        self, release_id: str, paths: list[tuple[int, str]],
+    ) -> None:
+        self._item_paths[release_id] = list(paths)
+
+    # --- Real-method surface ---
+
+    def album_exists(self, release_id: str) -> bool:
+        self.album_exists_calls.append(release_id)
+        return self._album_exists.get(release_id, self._album_exists_default)
+
+    def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
+        self.get_all_album_ids_for_release_calls.append(release_id)
+        return self._album_ids_for_release.get(
+            release_id, list(self._album_ids_default))
+
+    def get_album_info(
+        self, mb_release_id: str, _cfg: Any = None,
+    ) -> Any:
+        self.get_album_info_calls.append(mb_release_id)
+        return self._album_info.get(mb_release_id)
+
+    def get_item_paths(self, release_id: str) -> list[tuple[int, str]]:
+        self.get_item_paths_calls.append(release_id)
+        return self._item_paths.get(
+            release_id, list(self._item_paths_default))
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    def __enter__(self) -> "FakeBeetsDB":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()

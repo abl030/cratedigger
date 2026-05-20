@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralContext, SpectralMeasurement, ValidationResult
-from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
     make_album_quality_evidence,
     make_download_file,
@@ -3363,3 +3363,68 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
                   test_only: bool = False) -> None:
                 ...
         self.assertEqual(_diff_signatures(Real, Fake), [])
+
+
+class TestFakeBeetsDB(unittest.TestCase):
+    """Self-tests for FakeBeetsDB — the minimal in-memory BeetsDB stand-in."""
+
+    def test_album_exists_returns_seeded_value(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-1", True)
+        beets.set_album_exists("mbid-2", False)
+        self.assertTrue(beets.album_exists("mbid-1"))
+        self.assertFalse(beets.album_exists("mbid-2"))
+        # Unseeded keys default to False (matches "no row" semantics).
+        self.assertFalse(beets.album_exists("mbid-unknown"))
+        self.assertEqual(
+            beets.album_exists_calls,
+            ["mbid-1", "mbid-2", "mbid-unknown"],
+        )
+
+    def test_get_album_info_keyed_by_release_id(self) -> None:
+        from lib.beets_db import AlbumInfo
+        beets = FakeBeetsDB()
+        info = AlbumInfo(
+            album_id=7,
+            track_count=10,
+            min_bitrate_kbps=320,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
+            format="MP3",
+            is_cbr=False,
+            album_path="/Beets/Artist/Album",
+        )
+        beets.set_album_info("mbid-1", info)
+        # Two-arg form (matches real signature: mb_release_id + cfg).
+        self.assertIs(beets.get_album_info("mbid-1", None), info)
+        # Unseeded returns None.
+        self.assertIsNone(beets.get_album_info("mbid-unknown"))
+        self.assertEqual(
+            beets.get_album_info_calls,
+            ["mbid-1", "mbid-unknown"],
+        )
+
+    def test_get_all_album_ids_for_release_returns_list(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release("mbid-1", [77, 88])
+        self.assertEqual(beets.get_all_album_ids_for_release("mbid-1"), [77, 88])
+        # Unseeded returns empty list (matches "no row" semantics).
+        self.assertEqual(beets.get_all_album_ids_for_release("mbid-other"), [])
+
+    def test_get_item_paths_returns_list_of_pairs(self) -> None:
+        beets = FakeBeetsDB()
+        paths = [(11, "/Beets/01.flac"), (12, "/Beets/02.flac")]
+        beets.set_item_paths("mbid-1", paths)
+        self.assertEqual(beets.get_item_paths("mbid-1"), paths)
+        self.assertEqual(beets.get_item_paths("mbid-other"), [])
+
+    def test_close_is_context_manager(self) -> None:
+        beets = FakeBeetsDB()
+        with beets as ctx:
+            self.assertIs(ctx, beets)
+            self.assertEqual(beets.close_calls, 0)
+        self.assertEqual(beets.close_calls, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

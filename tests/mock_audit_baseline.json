@@ -31,9 +31,7 @@
   "test_import_one_stages.py": {
     "patch:harness.import_one.determine_verified_lossless": 1,
     "patch:harness.import_one.provisional_lossless_decision": 1,
-    "patch:harness.import_one.quality_decision_stage": 1,
-    "stateful_mock_assign:beets": 4,
-    "stateful_mock_assign:db": 4
+    "patch:harness.import_one.quality_decision_stage": 1
   },
   "test_import_queue.py": {
     "patch:lib.download._handle_valid_result": 1,

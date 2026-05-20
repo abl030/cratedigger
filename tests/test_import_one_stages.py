@@ -6,7 +6,6 @@ takes data inputs and returns a StageResult without I/O.
 """
 
 import io
-import importlib
 import json
 import os
 import subprocess
@@ -14,7 +13,8 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import patch
 
 import msgspec
 
@@ -23,6 +23,8 @@ HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 
 sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, HARNESS_DIR)
+
+from tests.fakes import FakeBeetsDB, FakePipelineDB  # noqa: E402
 
 
 class TestImportBootstrap(unittest.TestCase):
@@ -68,7 +70,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
     ) -> None:
         from harness import import_one
 
-        db = MagicMock()
+        db = FakePipelineDB()
         mock_db_cls.return_value = db
 
         import_one.update_pipeline_db(
@@ -92,7 +94,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
                 "beets_scenario": "preflight_existing",
             },
         )
-        db.close.assert_called_once()
+        self.assertEqual(db.close_calls, 1)
 
     @patch("harness.import_one.finalize_request", side_effect=RuntimeError("boom"))
     @patch("lib.pipeline_db.PipelineDB")
@@ -103,14 +105,14 @@ class TestPipelineDbUpdate(unittest.TestCase):
     ) -> None:
         from harness import import_one
 
-        db = MagicMock()
+        db = FakePipelineDB()
         mock_db_cls.return_value = db
         stderr = io.StringIO()
 
         with patch("sys.stderr", stderr):
             import_one.update_pipeline_db(42, "imported")
 
-        db.close.assert_called_once()
+        self.assertEqual(db.close_calls, 1)
         self.assertIn("Pipeline DB update failed", stderr.getvalue())
 
     @patch("harness.import_one.finalize_request")
@@ -122,7 +124,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
     ) -> None:
         from harness import import_one
 
-        db = MagicMock()
+        db = FakePipelineDB()
         mock_db_cls.return_value = db
         stderr = io.StringIO()
 
@@ -134,7 +136,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
             )
 
         mock_finalize.assert_not_called()
-        db.close.assert_called_once()
+        self.assertEqual(db.close_calls, 1)
         self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
         self.assertIn("imported_path", stderr.getvalue())
 
@@ -147,7 +149,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
     ) -> None:
         from harness import import_one
 
-        db = MagicMock()
+        db = FakePipelineDB()
         mock_db_cls.return_value = db
         stderr = io.StringIO()
 
@@ -155,7 +157,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
             import_one.update_pipeline_db(42, "queued")
 
         mock_finalize.assert_not_called()
-        db.close.assert_called_once()
+        self.assertEqual(db.close_calls, 1)
         self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
         self.assertIn("queued", stderr.getvalue())
 
@@ -249,11 +251,11 @@ class TestPostflightBadExtensionWarnings(unittest.TestCase):
             with open(good_path, "wb") as f:
                 f.write(b"not real audio")
 
-            beets = MagicMock()
-            beets.get_item_paths.return_value = [
+            beets = FakeBeetsDB()
+            beets.set_item_paths("mbid-123", [
                 (11, bad_path),
                 (12, good_path),
-            ]
+            ])
             result = ImportResult(
                 postflight=PostflightInfo(
                     beets_id=99,
@@ -265,7 +267,7 @@ class TestPostflightBadExtensionWarnings(unittest.TestCase):
             with patch("os.rename") as mock_rename, \
                  patch("sqlite3.connect") as mock_connect:
                 found = import_one._record_bad_extension_warnings(
-                    beets, "mbid-123", result)
+                    cast(Any, beets), "mbid-123", result)
 
             self.assertEqual(found, ["01 Track.bak"])
             self.assertEqual(result.postflight.bad_extensions, ["01 Track.bak"])
@@ -1057,10 +1059,10 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             action_path = os.path.join(tmpdir, "action.json")
             self._write_payload(self._payload_for_album(album), action_path)
 
-            beets = MagicMock()
-            beets.album_exists.return_value = False
-            beets.get_all_album_ids_for_release.return_value = [77]
-            beets.get_album_info.return_value = AlbumInfo(
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-123", False)
+            beets.set_album_ids_for_release("mbid-123", [77])
+            beets.set_album_info("mbid-123", AlbumInfo(
                 album_id=77,
                 track_count=1,
                 min_bitrate_kbps=245,
@@ -1069,8 +1071,8 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 avg_bitrate_kbps=252,
                 median_bitrate_kbps=250,
                 format="MP3",
-            )
-            beets.get_item_paths.return_value = []
+            ))
+            beets.set_item_paths("mbid-123", [])
 
             stdout = io.StringIO()
             argv = [
@@ -1134,8 +1136,8 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             with open(track, "ab") as f:
                 f.write(b" changed")
 
-            beets = MagicMock()
-            beets.album_exists.return_value = False
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-123", False)
 
             stdout = io.StringIO()
             argv = [
@@ -1171,8 +1173,8 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             with open(action_path, "wb") as f:
                 f.write(b"{")
 
-            beets = MagicMock()
-            beets.album_exists.return_value = False
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-123", False)
 
             stdout = io.StringIO()
             argv = [
