@@ -1197,12 +1197,10 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             result = process_completed_album(album, [], ctx)
             self.assertTrue(result)
 
-    @patch("lib.download._process_beets_validation")
     @patch("lib.download.music_tag")
     def test_dispatch_outcome_summary_is_returned_to_queue_owner(
         self,
         mock_mt,
-        mock_validation,
     ):
         """Auto-import summaries must survive for the importer queue result."""
         from lib.download import process_completed_album
@@ -1223,15 +1221,22 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = True
             mock_mt.load_file.return_value = MagicMock()
-            mock_validation.return_value = DispatchOutcome(
+            stub_outcome = DispatchOutcome(
                 success=True,
                 message="Import successful",
             )
+            validate_calls: list[dict] = []
 
-            result = process_completed_album(album, [], ctx)
+            def _stub_validate(*args, **kwargs):
+                validate_calls.append(kwargs)
+                return stub_outcome
 
-            self.assertIs(result, mock_validation.return_value)
-            mock_validation.assert_called_once()
+            result = process_completed_album(
+                album, [], ctx, validate_fn=_stub_validate,
+            )
+
+            self.assertIs(result, stub_outcome)
+            self.assertEqual(len(validate_calls), 1)
 
     @patch("lib.beets.beets_validate")
     @patch("lib.download.music_tag")
@@ -1497,12 +1502,15 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 filetype_band="mp3",
             )
 
-            with patch("lib.download.dispatch_import_core") as mock_dispatch, \
-                 self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, [], ctx)
+            dispatch_calls: list[dict] = []
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(
+                    album, [], ctx,
+                    dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
+                )
 
             self.assertIsNone(result)
-            mock_dispatch.assert_not_called()
+            self.assertEqual(dispatch_calls, [])
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
     @patch("lib.download.music_tag")
@@ -1679,9 +1687,12 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 auto_import=True,
             )
 
-            with patch("lib.download.dispatch_import_core") as mock_dispatch, \
-                 self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, [], ctx)
+            dispatch_calls: list[dict] = []
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(
+                    album, [], ctx,
+                    dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
+                )
 
             from lib.import_dispatch import DispatchOutcome
             assert isinstance(result, DispatchOutcome)
@@ -1697,7 +1708,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertTrue(os.path.isfile(
                 os.path.join(failed_path, "01 - Track.mp3")))
             self.assertFalse(os.path.exists(unexpected_staged))
-            mock_dispatch.assert_not_called()
+            self.assertEqual(dispatch_calls, [])
             self.assertEqual(db.request(1)["status"], "wanted")
             self.assertEqual(db.recorded_attempts, [(1, "validation")])
             self.assertEqual(len(db.download_logs), 1)
@@ -1917,13 +1928,16 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 filetype_band="mp3",
             )
 
-            with patch("lib.download.dispatch_import_core") as mock_dispatch, \
-                 self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, [], ctx)
+            dispatch_calls: list[dict] = []
+            with self.assertLogs("cratedigger", level="ERROR") as logs:
+                result = process_completed_album(
+                    album, [], ctx,
+                    dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
+                )
 
             self.assertIsNone(result)
             mock_beets_validate.assert_not_called()
-            mock_dispatch.assert_not_called()
+            self.assertEqual(dispatch_calls, [])
             self.assertIn("legacy shared staged path", "\n".join(logs.output))
 
     @patch("lib.download.measure_preimport_state")
@@ -1986,11 +2000,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 filetype_band="mp3",
             )
 
-            with patch("lib.download.dispatch_import_core") as mock_dispatch:
-                result = process_completed_album(album, [], ctx)
+            dispatch_calls: list[dict] = []
+            result = process_completed_album(
+                album, [], ctx,
+                dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
+            )
 
             self.assertTrue(result)
-            mock_dispatch.assert_not_called()
+            self.assertEqual(dispatch_calls, [])
             source = ctx.pipeline_db_source
             assert isinstance(source, FakePipelineDBSource)
             self.assertEqual(len(source.mark_done_calls), 1)
@@ -2942,9 +2959,14 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         self.assertEqual(fake_db.status_history, [(1, "wanted")])
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_all_errors(self, mock_process):
-        """All files errored → timeout the album."""
+    def test_poll_active_all_errors(self):
+        """All files errored → timeout the album.
+
+        ``poll_active_downloads`` enqueues an import job rather than
+        calling ``process_completed_album`` directly, so the absence of a
+        new ``import_jobs`` row is the observable contract for "no
+        downstream processing started".
+        """
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
@@ -2963,7 +2985,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"):
             poll_active_downloads(ctx)
 
-        mock_process.assert_not_called()
+        self.assertEqual(fake_db._import_jobs, [])
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
 
@@ -3041,9 +3063,13 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.update_download_state_calls, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_transfer_vanished_partial(self, mock_process):
-        """7/12 files vanish → treated as errors, not complete."""
+    def test_poll_transfer_vanished_partial(self):
+        """7/12 files vanish → treated as errors, not complete.
+
+        ``poll_active_downloads`` only kicks off downstream processing
+        via the import-job queue, so the assertions below check the
+        observable contract (no new import_jobs row, no download_log).
+        """
         from lib.download import poll_active_downloads
         # 12 files, only 5 have transfers in slskd
         files = []
@@ -3079,7 +3105,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
         # Should NOT process — 7 files vanished (errored), album not complete
-        mock_process.assert_not_called()
+        self.assertEqual(fake_db._import_jobs, [])
         self.assertEqual(
             "\n".join(logs.output).count("Failed to re-enqueue file"),
             7,
@@ -3090,8 +3116,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "downloading")
 
 
-    @patch("lib.download.process_completed_album")
-    def test_poll_active_partial_errors_with_retry(self, mock_process):
+    def test_poll_active_partial_errors_with_retry(self):
         """Some files errored, retries available → re-enqueue those files."""
         from lib.download import poll_active_downloads
         # 3 files: 2 complete, 1 errored
@@ -3150,7 +3175,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
         # Should NOT process (not all done) and NOT timeout
-        mock_process.assert_not_called()
+        self.assertEqual(fake_db._import_jobs, [])
         self.assertEqual(fake_db.download_logs, [])
         # Should re-enqueue the errored file
         self.assertEqual(len(slskd.transfers.enqueue_calls), 1)

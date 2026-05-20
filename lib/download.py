@@ -1091,6 +1091,9 @@ def process_completed_album(
     ctx: CratediggerContext,
     *,
     import_job_id: int | None = None,
+    validate_fn: "Callable[..., DispatchOutcome | None] | None" = None,
+    handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
+    dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
 ) -> "bool | DispatchOutcome | None":
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
@@ -1127,11 +1130,14 @@ def process_completed_album(
         except Exception:
             logger.exception(f"Error writing tags for: {file.import_path}")
     if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
-        outcome = _process_beets_validation(
+        _validate = validate_fn if validate_fn is not None else _process_beets_validation
+        outcome = _validate(
             album_data,
             staged_album,
             ctx,
             import_job_id=import_job_id,
+            handle_valid_fn=handle_valid_fn,
+            dispatch_fn=dispatch_fn,
         )
         if outcome is not None:
             if outcome.deferred:
@@ -1153,6 +1159,8 @@ def _process_beets_validation(
     ctx: CratediggerContext,
     *,
     import_job_id: int | None = None,
+    handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
+    dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
@@ -1277,13 +1285,17 @@ def _process_beets_validation(
                     bv_result.matched_bad_track_path = measurement.matched_bad_track_path
 
     if bv_result.valid:
-        return _handle_valid_result(
+        _handle_valid = (
+            handle_valid_fn if handle_valid_fn is not None else _handle_valid_result
+        )
+        return _handle_valid(
             album_data,
             bv_result,
             staged_album,
             ctx,
             import_job_id=import_job_id,
             prevalidated_candidate_result=candidate_evidence_result,
+            dispatch_fn=dispatch_fn,
         )
     return _handle_rejected_result(
         album_data,
@@ -1421,6 +1433,7 @@ def _handle_valid_result(
     import_job_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn | None = None,
+    dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1610,7 +1623,8 @@ def _handle_valid_result(
             )
             if quality_gate_fn is not None:
                 core_kwargs["quality_gate_fn"] = quality_gate_fn
-            return dispatch_import_core(**core_kwargs)
+            _dispatch = dispatch_fn if dispatch_fn is not None else dispatch_import_core
+            return _dispatch(**core_kwargs)
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
         return None
@@ -2104,8 +2118,19 @@ def _run_completed_processing(
     ctx: CratediggerContext,
     *,
     import_job_id: int | None = None,
+    process_album_fn: "Callable[..., bool | DispatchOutcome | None] | None" = None,
 ) -> bool | DispatchOutcome | None:
-    """Run or resume local post-download processing for a completed album."""
+    """Run or resume local post-download processing for a completed album.
+
+    ``process_album_fn`` is an opt-in DI seam for tests that exercise the
+    outer transition flow without going through the full
+    ``process_completed_album`` body. Defaults to the real production
+    function so callers in ``scripts/importer.py`` are unchanged.
+    """
+    _process = (
+        process_album_fn if process_album_fn is not None else process_completed_album
+    )
+
     if state.processing_started_at is None:
         if entry.import_folder is None:
             entry.import_folder = _canonical_import_folder_path(
@@ -2116,7 +2141,7 @@ def _run_completed_processing(
         _persist_updated_download_state(db, request_id, entry, state)
 
     try:
-        outcome = process_completed_album(
+        outcome = _process(
             entry,
             [],
             ctx,

@@ -209,22 +209,6 @@ _LEAF_SEAM_PATTERNS = [
     # Album-level spectral analysis — same sox/ffmpeg seam as
     # analyze_track, just aggregating across an album's tracks.
     re.compile(r"^lib\.spectral_check\.analyze_album$"),
-    re.compile(r"^harness\.import_one\.fix_library_modes$"),
-
-    # harness.import_one subprocess wrappers. ``run_import`` invokes
-    # ``beet import``; ``convert_lossless`` runs ffmpeg; the probe
-    # helpers run ffprobe/sox; ``_get_folder_*`` read tag metadata.
-    re.compile(r"^harness\.import_one\.run_import$"),
-    re.compile(r"^harness\.import_one\.convert_lossless$"),
-    re.compile(r"^harness\.import_one\._probe_lossless_source_as_v0$"),
-    re.compile(r"^harness\.import_one\._probe_native_lossy_as_v0$"),
-    re.compile(r"^harness\.import_one\._get_folder_bitrates$"),
-    re.compile(r"^harness\.import_one\._get_folder_min_bitrate$"),
-    re.compile(r"^harness\.import_one\.BeetsDB$"),  # class replacement, see lib.beets_db.BeetsDB
-
-    # Album-level spectral analysis — same sox/ffmpeg seam as
-    # analyze_track, just aggregating across an album's tracks.
-    re.compile(r"^lib\.spectral_check\.analyze_album$"),
 
     # Logger objects — patching the module-level logger lets tests
     # assert against log records without subclassing the logger. Also
@@ -255,7 +239,9 @@ _LEAF_SEAM_PATTERNS = [
     # that can be exercised against a real test SQLite DB.
     re.compile(r"^lib\.beets_db\.BeetsDB$"),
     re.compile(r"^lib\.beets_db\.BeetsDB\.delete_album$"),  # SQLite write + file delete seam
-    re.compile(r"^web\.server\._real_beets_db$"),
+    # ``web.server._real_beets_db`` is already covered by the broader
+    # ``^web\.server\.(...|_real_beets_db|...)`` pattern higher up
+    # (MusicBrainz / Discogs / beets module-level boundaries).
 
     # PipelineDB class itself — patching the class replaces the
     # PostgreSQL boundary at the constructor. Per-method patches against
@@ -316,18 +302,15 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.pipeline_cli\.finalize_request$"),
     re.compile(r"^scripts\.repair\.finalize_request$"),
 
-    # ``lib.download`` in-module DI seams. ``lib.download.poll_active_downloads``
-    # calls ``process_completed_album`` (same module) which calls
-    # ``_process_beets_validation`` (same module) which calls
-    # ``dispatch_import_core`` (re-imported from ``lib.import_dispatch``).
-    # Tests that exercise the poll / completion / dispatch decision tree
-    # stub the inner step on its ``lib.download`` binding rather than
-    # restructuring every chain to take dependency kwargs. ``Dispatch
-    # decisions live in ONE place'' — these are seams for testing the
-    # caller's wrapper logic, not parallel decision paths.
-    re.compile(r"^lib\.download\.dispatch_import_core$"),
-    re.compile(r"^lib\.download\.process_completed_album$"),
-    re.compile(r"^lib\.download\._process_beets_validation$"),
+    # ``lib.download`` formerly had module-local DI seams for the chain
+    # ``poll_active_downloads`` → ``process_completed_album`` →
+    # ``_process_beets_validation`` → ``_handle_valid_result`` →
+    # ``dispatch_import_core``. The chain now exposes opt-in kwarg DI
+    # (``validate_fn``, ``handle_valid_fn``, ``dispatch_fn``) on each
+    # downstream step; tests pass stubs by value. Defensive guards
+    # against future regressions assert on observable state (no new
+    # ``import_jobs`` row, no ``download_log`` entry) rather than
+    # patching the production binding.
 
     # ``scripts.repair._collect_issues`` is the argparse-dispatched CLI
     # aggregator (``cmd_fix`` / ``cmd_scan`` call it without an injection
@@ -353,10 +336,8 @@ _LEAF_SEAM_PATTERNS = [
     # tests; queue tests are about the dispatcher around it.
     re.compile(r"^scripts\.import_preview_worker\.run_once$"),
 
-    # In-module DI seam for ``_handle_valid_result`` (defined in
-    # ``lib.download``). Same module-local DI shape as
-    # ``lib.download.process_completed_album`` etc.
-    re.compile(r"^lib\.download\._handle_valid_result$"),
+    # ``lib.download._handle_valid_result`` migrated to kwarg DI alongside
+    # the rest of the lib.download chain (see comment above).
 
     # Broadened ``resolve_failed_path`` re-export allowlist. The pattern
     # already covers ``web.routes.*`` re-exports; ``lib.wrong_matches``
