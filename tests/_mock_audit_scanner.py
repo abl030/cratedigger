@@ -316,6 +316,33 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.pipeline_cli\.finalize_request$"),
     re.compile(r"^scripts\.repair\.finalize_request$"),
 
+    # ``lib.download`` in-module DI seams. ``lib.download.poll_active_downloads``
+    # calls ``process_completed_album`` (same module) which calls
+    # ``_process_beets_validation`` (same module) which calls
+    # ``dispatch_import_core`` (re-imported from ``lib.import_dispatch``).
+    # Tests that exercise the poll / completion / dispatch decision tree
+    # stub the inner step on its ``lib.download`` binding rather than
+    # restructuring every chain to take dependency kwargs. ``Dispatch
+    # decisions live in ONE place'' — these are seams for testing the
+    # caller's wrapper logic, not parallel decision paths.
+    re.compile(r"^lib\.download\.dispatch_import_core$"),
+    re.compile(r"^lib\.download\.process_completed_album$"),
+    re.compile(r"^lib\.download\._process_beets_validation$"),
+
+    # Filesystem-write wrapper. ``log_validation_result`` (defined in
+    # ``lib.util``) appends to the beets-tracking JSONL file — a thin
+    # filesystem-boundary helper. Tests in ``test_download.py`` patch
+    # the ``lib.download`` re-export to skip the write side effect.
+    re.compile(r"^lib\.\w+\.log_validation_result$"),
+
+    # Service-layer DI seam (mirrors ``cleanup_all_wrong_matches`` above).
+    # ``cleanup_wrong_match`` triggers DB mutations + filesystem deletes;
+    # behaviour is tested in ``tests/test_wrong_match_cleanup_service.py``.
+    # Tests that exercise the post-rejection triage path in
+    # ``lib.download`` stub the service so the wrapper-layer assertion
+    # stays focused.
+    re.compile(r"^lib\.wrong_match_cleanup_service\.cleanup_wrong_match$"),
+
     # Deleted-shim regression guard. ``check_beets_by_artist_album``
     # was removed in issue #123; tests patch it with create=True to
     # ensure it stays gone (the patch acts as a RED guard against
