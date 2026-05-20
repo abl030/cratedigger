@@ -46,7 +46,15 @@ RG_ID = "11111111-1111-1111-1111-111111111111"
 OTHER_RG_ID = "22222222-2222-2222-2222-222222222222"
 
 
-def _empty_wrong_match_summary(request_id: int) -> WrongMatchDeleteSummary:
+def _empty_wrong_match_summary(_db, request_id: int) -> WrongMatchDeleteSummary:
+    """Stand-in for ``delete_wrong_match_group(db, request_id)``.
+
+    Matches the production signature (two positional args). Tests previously
+    declared this with one arg; production caught the resulting TypeError
+    and logged ``Replace: warning ... wrong-matches cleanup raised
+    TypeError`` while still passing because the warning path continued.
+    The migration to ``FakeSlskdAPI`` surfaced the latent mismatch.
+    """
     return WrongMatchDeleteSummary(
         request_id=request_id,
         outcome="group_empty",
