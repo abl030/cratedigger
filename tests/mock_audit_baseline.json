@@ -35,14 +35,12 @@
     "patch:harness.import_one.determine_verified_lossless": 1,
     "patch:harness.import_one.provisional_lossless_decision": 1,
     "patch:harness.import_one.quality_decision_stage": 1,
-    "patch:lib.pipeline_db.PipelineDB": 4,
     "patch:lib.transitions.finalize_request": 4,
     "stateful_mock_assign:beets": 4,
     "stateful_mock_assign:db": 4
   },
   "test_import_queue.py": {
     "patch:lib.download._handle_valid_result": 1,
-    "patch:scripts.import_preview_worker.PipelineDB": 4,
     "patch:scripts.import_preview_worker.run_once": 3,
     "stateful_mock_assign:beets": 1
   },
