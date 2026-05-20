@@ -43,6 +43,7 @@ from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          narrow_override_on_downgrade,
                          narrow_override_on_lossless_source_lock,
                          override_bitrate_from_current_evidence,
+                         quality_gate_decision,
                          rejection_backfill_override)
 from lib.quality_evidence import (
     audit_v0_probe_from_metric,
@@ -1310,7 +1311,7 @@ def _check_quality_gate_core(
     don't care about mixed-format reduction still work. Commit 5 will thread
     the real runtime config through from dispatch_import_core().
     """
-    from lib.quality import quality_gate_decision, QualityRankConfig, gate_rank
+    from lib.quality import QualityRankConfig, gate_rank
 
     if quality_ranks is None:
         quality_ranks = QualityRankConfig.defaults()

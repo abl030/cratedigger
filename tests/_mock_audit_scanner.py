@@ -340,6 +340,26 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.repair\.find_orphaned_downloads$"),
     re.compile(r"^scripts\.repair\.find_blocked_recovery_issues$"),
 
+    # Module-local DI seam for ``quality_gate_decision``. The orchestration
+    # wrapper ``lib.import_dispatch._check_quality_gate_core`` binds the
+    # pure decision at import time so orchestration tests can stub the
+    # branch via ``patch("lib.import_dispatch.quality_gate_decision")``
+    # without setting up full ``AudioQualityMeasurement`` fixtures for
+    # every requeue/accept/transcode/downgrade scenario. The decision's
+    # own contract is exercised in ``tests/test_quality_classification.py``
+    # (TestQualityGateDecision); this seam keeps wrapper tests focused
+    # on the orchestration around the gate (status transitions,
+    # search-override updates, requeue-vs-accept routing).
+    re.compile(r"^lib\.import_dispatch\.quality_gate_decision$"),
+
+    # Auto-import staging-destination seam. ``stage_to_ai_path`` is a
+    # path-construction helper that the auto-import flow consults to
+    # decide where to move staged audio. Tests patch its
+    # ``lib.download`` re-export to return a tempdir-relative path so
+    # downstream subprocess calls land inside the test's working dir
+    # rather than the production ``beets_staging_dir``.
+    re.compile(r"^lib\.download\.stage_to_ai_path$"),
+
     # Filesystem-write wrapper. ``log_validation_result`` (defined in
     # ``lib.util``) appends to the beets-tracking JSONL file — a thin
     # filesystem-boundary helper. Tests in ``test_download.py`` patch

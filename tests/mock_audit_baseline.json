@@ -14,11 +14,6 @@
   "test_enqueue_fanout.py": {
     "patch:lib.enqueue.check_for_match": 3
   },
-  "test_import_dispatch.py": {
-    "patch:lib.download.stage_to_ai_path": 1,
-    "patch:lib.quality.quality_gate_decision": 5,
-    "stateful_mock_assign:ctx": 1
-  },
   "test_import_one_stages.py": {
     "patch:harness.import_one.determine_verified_lossless": 1,
     "patch:harness.import_one.provisional_lossless_decision": 1,
