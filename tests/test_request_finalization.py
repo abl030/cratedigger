@@ -5,10 +5,12 @@ from __future__ import annotations
 import ast
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
 
 from lib.import_dispatch import DispatchOutcome
 from lib.transitions import RequestTransition, finalize_request
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_ROOTS = ("lib", "web", "harness", "scripts")
@@ -32,45 +34,58 @@ class TestDispatchOutcomeSummary(unittest.TestCase):
 class TestFinalizeRequest(unittest.TestCase):
     """Unit tests for the shared request-finalization seam."""
 
-    @patch("lib.transitions.apply_transition")
-    def test_forwards_transition_fields_and_attempt_type(
-        self,
-        mock_transition: MagicMock,
-    ) -> None:
-        db = MagicMock()
+    def test_forwards_transition_fields_and_attempt_type(self) -> None:
+        """``finalize_request`` writes through to the DB so the row reflects
+        the transition. Asserts on resulting DB state instead of mock call
+        args — the contract is "the row got these fields", not "this Python
+        function got these positional args."
+
+        ``prev_min_bitrate`` is intentionally not passed: the production
+        ``reset_downloading_to_wanted`` derives it via
+        ``prev_min_bitrate = COALESCE(min_bitrate, prev_min_bitrate)``,
+        i.e. the previous ``min_bitrate`` becomes ``prev_min_bitrate``.
+        Seeding with ``min_bitrate=320`` and transitioning to
+        ``min_bitrate=245`` exercises that derivation end-to-end.
+        """
+        db = FakePipelineDB()
+        db.seed_request(
+            make_request_row(
+                id=42,
+                status="downloading",
+                search_filetype_override=None,
+                min_bitrate=320,
+                prev_min_bitrate=None,
+            ),
+        )
 
         finalize_request(
-            db,
+            cast(Any, db),
             42,
             RequestTransition.to_wanted(
                 from_status="downloading",
                 attempt_type="download",
                 search_filetype_override="flac,mp3 v0",
                 min_bitrate=245,
-                prev_min_bitrate=320,
             ),
         )
 
-        mock_transition.assert_called_once_with(
-            db,
-            42,
-            "wanted",
-            from_status="downloading",
-            attempt_type="download",
-            search_filetype_override="flac,mp3 v0",
-            min_bitrate=245,
-            prev_min_bitrate=320,
-        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "flac,mp3 v0")
+        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["prev_min_bitrate"], 320)
+        # attempt_type="download" → an attempt counter advanced
+        self.assertEqual(row["download_attempts"], 1)
 
-    @patch("lib.transitions.apply_transition")
-    def test_rejects_target_specific_wrong_fields_at_construction(
-        self,
-        mock_transition: MagicMock,
-    ) -> None:
+    def test_rejects_target_specific_wrong_fields_at_construction(self) -> None:
+        """RequestTransition rejects target-specific kwargs at construction
+        time, before any DB call. The previous version of this test patched
+        ``apply_transition`` to verify it wasn't reached — but the
+        construction failure happens upstream of ``finalize_request``
+        entirely, so the patch was provably redundant.
+        """
         with self.assertRaises(TypeError):
             RequestTransition.to_wanted(beets_distance=0.12)  # type: ignore[call-arg]
-
-        mock_transition.assert_not_called()
 
 
 class _RequestStatusWriteVisitor(ast.NodeVisitor):

@@ -130,10 +130,6 @@
     "patch:scripts.repair.read_runtime_config": 3,
     "stateful_mock_assign:db": 5
   },
-  "test_request_finalization.py": {
-    "patch:lib.transitions.apply_transition": 2,
-    "stateful_mock_assign:db": 1
-  },
   "test_transitions.py": {
     "patch:lib.transitions.apply_transition": 4,
     "stateful_mock_assign:db": 6
