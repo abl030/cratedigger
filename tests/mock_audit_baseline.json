@@ -67,6 +67,8 @@
     "stateful_mock_assign:beets": 1
   },
   "test_integration_slices.py": {
+    "patch:lib.download.dispatch_import_core": 1,
+    "patch:lib.download.process_completed_album": 3,
     "patch:lib.enqueue.check_for_match": 4,
     "patch:lib.measurement.hash_audio_content": 1,
     "patch:lib.transitions.finalize_request": 1,
@@ -124,6 +126,7 @@
     "patch:web.routes.pipeline.resolve_failed_path": 2,
     "patch:web.server.check_beets_by_artist_album": 3,
     "patch:web.server.compute_library_rank": 1,
+    "patch:web.server.db": 18,
     "stateful_mock_assign:failing_db": 1,
     "stateful_mock_assign:mock_db": 1
   },

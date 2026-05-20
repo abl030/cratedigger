@@ -54,10 +54,29 @@ _STATEFUL_ASSIGN_RE = re.compile(
     r"^\s*(" + "|".join(sorted(STATEFUL_VAR_NAMES)) + r")\s*=\s*MagicMock\s*\("
 )
 
-# patch(...) / @patch(...) / patch.object(target_module, "name") / with patch(...)
-# We match either the string-form path ("lib.x.y") or attribute-form
-# (target_module="lib.x"). Both forms appear in this repo.
-_PATCH_RE = re.compile(r'\bpatch(?:\.object)?\s*\(\s*["\']([^"\']+)["\']')
+# patch(...) / @patch("...") / with patch("..."): — first arg is a string
+# literal naming the dotted path.
+_PATCH_RE = re.compile(r'\bpatch\s*\(\s*["\']([^"\']+)["\']')
+
+# patch.object(MODULE_REF, "name", ...) — first arg is a Python identifier
+# (typically a module alias from ``import x.y as alias`` or
+# ``from x import y as alias``), second arg is a string naming the
+# attribute. The string-first form (``patch.object("module.path", ...)``)
+# is also recognised by ``_PATCH_RE`` above.
+_PATCH_OBJECT_RE = re.compile(
+    r'\bpatch\.object\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*["\']([^"\']+)["\']'
+)
+
+# Module aliases the audit knows how to resolve to canonical paths.
+# Keep narrow — false positives become baseline noise. Detected by
+# scanning each file's import statements before classification.
+_ALIAS_TO_CANONICAL = {
+    "cratedigger": "cratedigger",
+    "enqueue_module": "lib.enqueue",
+    "dl_mod": "lib.download",
+    "srv": "web.server",
+    "server": "web.server",
+}
 
 # Leaf-seam allowlist. If a patch target matches any of these, the patch
 # is legitimate.
@@ -226,6 +245,22 @@ def scan_file(path: str) -> Dict[str, int]:
                 counts[f"stateful_mock_assign:{m.group(1)}"] += 1
             for pm in _PATCH_RE.finditer(line):
                 target = pm.group(1)
+                if not _is_repo_target(target):
+                    continue
+                if _is_leaf_seam(target):
+                    continue
+                counts[f"patch:{target}"] += 1
+            # patch.object(MODULE_REF, "name", ...) form — the first arg
+            # is an identifier (typically a module alias from imports);
+            # we resolve it against _ALIAS_TO_CANONICAL to recover the
+            # canonical patch target ``<canonical>.<name>``. Unknown
+            # aliases are reported verbatim so they show up in the
+            # baseline and either land on the allowlist or get migrated.
+            for pom in _PATCH_OBJECT_RE.finditer(line):
+                module_ref = pom.group(1)
+                attr_name = pom.group(2)
+                canonical = _ALIAS_TO_CANONICAL.get(module_ref, module_ref)
+                target = f"{canonical}.{attr_name}"
                 if not _is_repo_target(target):
                     continue
                 if _is_leaf_seam(target):
