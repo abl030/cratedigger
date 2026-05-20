@@ -33,7 +33,7 @@ from lib.mbid_replace_service import (
 from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
 from lib.release_cleanup import ReleaseCleanupResult
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import make_request_row
 
 
@@ -140,11 +140,26 @@ class _ServiceCase(unittest.TestCase):
         return MbidReplaceService(
             db=db,
             config=cfg or CratediggerConfig(),
-            slskd=MagicMock(),
+            slskd=FakeSlskdAPI(),
             beets_db_factory=beets_db_factory,
             mb_lookup=mb_lookup,
             search_plan_service=search_plan_service,
         )
+
+    def _assert_slskd_untouched(self, slskd: object) -> None:
+        """Assert FakeSlskdAPI recorded zero calls across every surface.
+
+        Replaces the legacy ``MagicMock.mock_calls == []`` snapshot pattern.
+        With a typed fake, every API entry-point appends to a per-method
+        call log — so "never touched" means every log is empty.
+        """
+        assert isinstance(slskd, FakeSlskdAPI)
+        self.assertEqual(slskd.transfers.enqueue_calls, [])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertEqual(slskd.transfers.get_all_downloads_calls, [])
+        self.assertEqual(slskd.transfers.get_download_calls, [])
+        self.assertEqual(slskd.users.directory_calls, [])
+        self.assertEqual(slskd.users.status_calls, [])
 
 
 class TestReplaceOutcomeMatrix(_ServiceCase):
@@ -605,7 +620,7 @@ class TestReplaceHappyPath(_ServiceCase):
             result.new_request_id, regenerate=False,
         )
         # slskd never touched.
-        self.assertEqual(slskd.mock_calls, [])
+        self._assert_slskd_untouched(slskd)
 
     def test_happy_path_imported_calls_beets_with_clear_false(self):
         self._patch_externals()
@@ -637,7 +652,7 @@ class TestReplaceHappyPath(_ServiceCase):
         # Warning about orphaned transfer.
         self.assertTrue(any("downloading" in w for w in result.warnings))
         # slskd was never called.
-        self.assertEqual(slskd.mock_calls, [])
+        self._assert_slskd_untouched(slskd)
 
     def test_happy_path_manual(self):
         self._patch_externals()
@@ -1032,11 +1047,9 @@ class TestReplaceCallOrder(_ServiceCase):
             manager.attach_mock(mock_jelly, "trigger_jellyfin_scan")
 
             svc = self._make_service(db)
-            slskd_calls_before = list(svc.slskd.mock_calls)
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            slskd_calls_after = list(svc.slskd.mock_calls)
 
         self.assertEqual(result.outcome, RESULT_REPLACED)
         # Extract the recorded call sequence as method names.
@@ -1059,7 +1072,7 @@ class TestReplaceCallOrder(_ServiceCase):
                 f"(call order: {call_names})",
             )
         # slskd was never touched (R23).
-        self.assertEqual(slskd_calls_before, slskd_calls_after)
+        self._assert_slskd_untouched(svc.slskd)
 
 
 if __name__ == "__main__":
