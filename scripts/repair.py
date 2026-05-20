@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -121,9 +121,21 @@ def _blocked_processing_issue_type(detail: str) -> str:
     return "blocked_post_move"
 
 
-def _collect_issues(db: PipelineDB, slskd_host: str | None,
-                    slskd_key: str | None) -> list:
-    """Collect all issues: DB inconsistencies + optional orphaned downloads."""
+def _collect_issues(
+    db: PipelineDB,
+    slskd_host: str | None,
+    slskd_key: str | None,
+    *,
+    find_orphaned_fn: "Callable[..., list[OrphanInfo]]" = find_orphaned_downloads,
+    find_blocked_recovery_fn: "Callable[..., list[Any]]" = find_blocked_recovery_issues,
+) -> list:
+    """Collect all issues: DB inconsistencies + optional orphaned downloads.
+
+    The two ``find_*_fn`` kwargs are dependency-injection seams. Production
+    leaves them at their default (the imported helpers); tests pass stubs
+    to drive each branch without going through real slskd / filesystem
+    fixtures.
+    """
     rows = _get_all_rows(db)
     issues = find_inconsistencies(rows)
     if slskd_host and slskd_key:
@@ -133,7 +145,7 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
             print(f"  slskd: could not check orphans: {e}")
             return _dedupe_issues(issues)
 
-        orphans = find_orphaned_downloads(
+        orphans = find_orphaned_fn(
             rows,
             active,
             existing_local_paths=None,
@@ -182,7 +194,7 @@ def _collect_issues(db: PipelineDB, slskd_host: str | None,
                     issue_type="blocked_recovery",
                     detail=issue.detail,
                 )
-                for issue in find_blocked_recovery_issues(
+                for issue in find_blocked_recovery_fn(
                     rows,
                     active,
                     staging_dir=cfg.beets_staging_dir,

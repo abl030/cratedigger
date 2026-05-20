@@ -329,16 +329,13 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.download\.process_completed_album$"),
     re.compile(r"^lib\.download\._process_beets_validation$"),
 
-    # ``scripts.repair`` in-module DI seams. The repair CLI orchestrates
-    # ``_collect_issues`` (aggregates orphan/recovery checks) which
-    # internally calls ``find_orphaned_downloads`` (from ``lib.quality``)
-    # and ``find_blocked_recovery_issues`` (from ``lib.download_recovery``)
-    # via local imports. Tests stub the inner pieces to drive each
-    # branch of ``cmd_fix`` / ``cmd_scan`` without setting up real
-    # orphan fixtures. Same module-local DI shape as ``lib.download``.
+    # ``scripts.repair._collect_issues`` is the argparse-dispatched CLI
+    # aggregator (``cmd_fix`` / ``cmd_scan`` call it without an injection
+    # path). The orphan and blocked-recovery helpers it composes are
+    # injected via kwarg DI (``find_orphaned_fn`` / ``find_blocked_recovery_fn``);
+    # tests pass stubs by value, so only ``_collect_issues`` itself
+    # retains the module-local seam shape.
     re.compile(r"^scripts\.repair\._collect_issues$"),
-    re.compile(r"^scripts\.repair\.find_orphaned_downloads$"),
-    re.compile(r"^scripts\.repair\.find_blocked_recovery_issues$"),
 
     # Service-class constructor replacement. ``MbidReplaceService`` is
     # the operator's MBID-replace surface (CLI + web route both wrap

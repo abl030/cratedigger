@@ -143,7 +143,6 @@ class TestCollectIssues(unittest.TestCase):
             stdout.getvalue(),
         )
 
-    @patch("scripts.repair.find_orphaned_downloads")
     @patch("scripts.repair._get_slskd_active_transfers", return_value=set())
     @patch("scripts.repair.read_runtime_config", side_effect=RuntimeError("cfg boom"))
     @patch("scripts.repair._get_all_rows", return_value=[])
@@ -152,9 +151,8 @@ class TestCollectIssues(unittest.TestCase):
         _mock_get_rows,
         _mock_read_runtime_config,
         _mock_active_transfers,
-        mock_find_orphaned,
     ) -> None:
-        mock_find_orphaned.return_value = [
+        orphans = [
             OrphanInfo(
                 request_id=17,
                 issue_type="orphaned_download",
@@ -168,6 +166,7 @@ class TestCollectIssues(unittest.TestCase):
                 MagicMock(),
                 slskd_host="http://slskd",
                 slskd_key="secret",
+                find_orphaned_fn=lambda rows, active, existing_local_paths=None: orphans,
             )
 
         self.assertEqual(len(issues), 1)
@@ -177,12 +176,10 @@ class TestCollectIssues(unittest.TestCase):
             stdout.getvalue(),
         )
 
-    @patch("scripts.repair.find_blocked_recovery_issues", return_value=[])
     @patch(
         "scripts.repair.find_blocked_processing_path_issues",
         side_effect=PermissionError("perm boom"),
     )
-    @patch("scripts.repair.find_orphaned_downloads")
     @patch("scripts.repair._get_slskd_active_transfers", return_value=set())
     @patch("scripts.repair.read_runtime_config")
     @patch("scripts.repair._get_all_rows", return_value=[])
@@ -191,15 +188,13 @@ class TestCollectIssues(unittest.TestCase):
         _mock_get_rows,
         mock_read_runtime_config,
         _mock_active_transfers,
-        mock_find_orphaned,
         _mock_find_blocked_processing,
-        _mock_find_blocked_recovery,
     ) -> None:
         mock_read_runtime_config.return_value = SimpleNamespace(
             beets_staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
         )
-        mock_find_orphaned.return_value = [
+        orphans = [
             OrphanInfo(
                 request_id=17,
                 issue_type="orphaned_download",
@@ -213,6 +208,8 @@ class TestCollectIssues(unittest.TestCase):
                 MagicMock(),
                 slskd_host="http://slskd",
                 slskd_key="secret",
+                find_orphaned_fn=lambda rows, active, existing_local_paths=None: orphans,
+                find_blocked_recovery_fn=lambda *args, **kwargs: [],
             )
 
         self.assertEqual(len(issues), 1)

@@ -48,27 +48,25 @@ Landed: `_dispatch_valid_result_cmd` now configures
 setup is needed. Allowlist entry removed from
 `tests/_mock_audit_scanner.py`.
 
-### Step 3 — In-module DI seam audit (~half day)
+### Step 3 — In-module DI seam audit ✅ DONE
 
-Module-local DI seams are legitimate when production is dispatched by URL or argparse (no kwarg path). For mid-tier private helpers called from other production functions, kwarg DI would be cleaner.
+Decisions per candidate:
 
-**Candidates to audit:**
+| Allowlist entry | Caller | Decision |
+|-----------------|--------|----------|
+| `lib.download._handle_valid_result` | `process_completed_album` | **Keep.** Chain is 5 levels deep (`poll_active_downloads` → `_run_completed_processing` → `process_completed_album` → `_process_beets_validation` → `_handle_valid_result`). Threading a kwarg through every level just to surface the test seam at the top would cascade for negligible win. |
+| `lib.download._process_beets_validation` | `process_completed_album` | **Keep.** Same chain. |
+| `lib.download.process_completed_album` | `poll_active_downloads` | **Keep.** Stateful poller; same chain. |
+| `lib.download.dispatch_import_core` | `_handle_valid_result` | **Keep.** Already provides its OWN kwarg DI for the post-import gate (`quality_gate_fn`); the re-import seam is for the wrapper tests. |
+| `scripts.repair._collect_issues` | `cmd_fix` / `cmd_scan` | **Keep.** CLI argparse dispatchers — no kwarg path from the entry point. |
+| `scripts.repair.find_orphaned_downloads` | `_collect_issues` | **Converted to kwarg DI.** `_collect_issues(..., find_orphaned_fn=find_orphaned_downloads)`. Allowlist entry removed. |
+| `scripts.repair.find_blocked_recovery_issues` | `_collect_issues` | **Converted to kwarg DI.** `_collect_issues(..., find_blocked_recovery_fn=find_blocked_recovery_issues)`. Allowlist entry removed. |
 
-| Current allowlist entry | Caller | Could be kwarg DI? |
-|-------------------------|--------|---------------------|
-| `lib.download._handle_valid_result` | `process_completed_album` | Likely yes — `process_completed_album` could take `handle_valid_fn=_handle_valid_result` |
-| `lib.download._process_beets_validation` | `process_completed_album` | Likely yes — same shape |
-| `lib.download.process_completed_album` | `poll_active_downloads` | Maybe — `poll_active_downloads` already wraps a stateful loop |
-| `lib.download.dispatch_import_core` | `_handle_valid_result` | Already wraps `dispatch_import_core`'s kwarg `quality_gate_fn`; the re-import is for testing the wrapper |
-| `scripts.repair._collect_issues` | `cmd_fix` / `cmd_scan` | CLI dispatch — keep as module-local seam |
-| `scripts.repair.find_orphaned_downloads` | `_collect_issues` | Mid-tier — could be kwarg DI |
-
-For each candidate that could be kwarg DI, prototype the change in a single tests/file pair, measure how the test reads vs the module-attribute version, and decide. Mid-tier wins might be small but they're more architecturally honest.
-
-**Approach for each:**
-- Add a kwarg to the calling function with the seam fn as the default.
-- Update tests to pass the stub by value.
-- Remove the allowlist entry.
+Net: 2 allowlist entries cleared (the two mid-tier helpers in
+`scripts.repair`); 5 entries documented as intentional in-module DI
+seams (chain depth / argparse dispatch). The lib.download chain decision
+is recorded in the allowlist rationale comment to head off "why not
+kwarg DI here?" follow-up audits.
 
 ### Step 4 — `test_web_server.py` shared MagicMock harness (multi-PR effort)
 
