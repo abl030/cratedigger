@@ -340,14 +340,6 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.repair\.find_orphaned_downloads$"),
     re.compile(r"^scripts\.repair\.find_blocked_recovery_issues$"),
 
-    # Auto-import staging-destination seam. ``stage_to_ai_path`` is a
-    # path-construction helper that the auto-import flow consults to
-    # decide where to move staged audio. Tests patch its
-    # ``lib.download`` re-export to return a tempdir-relative path so
-    # downstream subprocess calls land inside the test's working dir
-    # rather than the production ``beets_staging_dir``.
-    re.compile(r"^lib\.download\.stage_to_ai_path$"),
-
     # Service-class constructor replacement. ``MbidReplaceService`` is
     # the operator's MBID-replace surface (CLI + web route both wrap
     # it). The service's own behaviour is covered in

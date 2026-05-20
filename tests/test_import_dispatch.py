@@ -119,13 +119,16 @@ def _dispatch_valid_result_cmd(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         source_dir = os.path.join(tmpdir, "import")
-        dest_dir = os.path.join(tmpdir, "dest")
         os.makedirs(source_dir)
         with open(os.path.join(source_dir, "01 - Track.mp3"), "w", encoding="utf-8") as fp:
             fp.write("fake audio")
 
-        with patch("lib.download.stage_to_ai_path", return_value=dest_dir), \
-             patch("lib.download.log_validation_result"), \
+        # Drive the real ``stage_to_ai_path`` by pointing the staging dir at
+        # the tempdir. ``StagedAlbum.move_to`` creates the destination
+        # directory itself, so we just need the staging root to exist.
+        ctx.cfg.beets_staging_dir = tmpdir
+
+        with patch("lib.download.log_validation_result"), \
              patch_dispatch_externals() as ext, \
              patch("lib.import_dispatch.parse_import_result", return_value=ir):
             _handle_valid_result(
