@@ -135,11 +135,15 @@ _LEAF_SEAM_PATTERNS = [
     # Spectral / audio measurement wrappers. Each invokes sox / ffmpeg /
     # mp3val subprocesses and reads files on disk; equivalent to a
     # subprocess seam. ``inspect_local_files`` reads tag/codec metadata.
+    # ``spectral_check.analyze_track`` runs 17 sox commands per file
+    # (1 reference band + 16 test slices) — body is all subprocess
+    # dispatch despite the length.
     re.compile(r"^lib\.measurement\.spectral_analyze$"),
     re.compile(r"^lib\.measurement\.inspect_local_files$"),
     re.compile(r"^lib\.measurement\.repair_mp3_headers$"),
     re.compile(r"^lib\.measurement\._needs_spectral_check$"),
     re.compile(r"^lib\.measurement\.measure_preimport_state$"),
+    re.compile(r"^lib\.spectral_check\.analyze_track$"),
 
     # Re-exports of measurement / harness / dispatch into the
     # import_preview surface — same underlying subprocess seams.
