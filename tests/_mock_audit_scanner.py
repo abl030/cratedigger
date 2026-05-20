@@ -287,6 +287,23 @@ _LEAF_SEAM_PATTERNS = [
     # handlers are dispatched by URL and don't take dependency kwargs.
     re.compile(r"^web\.routes\.pipeline\.finalize_request$"),
 
+    # Route-to-service DI seam. ``cleanup_all_wrong_matches`` triggers
+    # real DB mutations + filesystem deletes via the wrong-match cleanup
+    # service. Service behaviour is tested in
+    # ``tests/test_wrong_matches_cleanup.py``; the contract tests in
+    # ``test_web_server.py`` pin the HTTP wire shape (status code,
+    # JSON fields, response summary). Patching the route-module binding
+    # keeps those contract tests focused on the wire shape.
+    re.compile(r"^web\.routes\.imports\.cleanup_all_wrong_matches$"),
+
+    # Web-server module-level swap, same pattern as ``web.server.db``.
+    # ``compute_library_rank`` is the in-library rank-badge producer
+    # (codec-aware tier label). Tests in ``test_web_server.py`` patch
+    # it via ``side_effect`` to stamp deterministic rank labels into
+    # browse / label / artist responses without setting up a real
+    # rank-config + beets album fixture for every contract test.
+    re.compile(r"^web\.server\.compute_library_rank$"),
+
     # Deleted-shim regression guard. ``check_beets_by_artist_album``
     # was removed in issue #123; tests patch it with create=True to
     # ensure it stays gone (the patch acts as a RED guard against

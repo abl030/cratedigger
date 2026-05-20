@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from lib.manual_import import FolderInfo, FolderMatch, ImportRequest
+from lib.manual_import import FolderInfo
 from lib.import_preview import ImportPreviewResult
 from lib.import_queue import ImportJob
 from lib.pipeline_db import SearchPlanProvenance
@@ -4937,9 +4937,13 @@ class TestManualImportRouteContracts(_WebServerCase):
         self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
         self.mock_db.get_by_status.side_effect = None
 
-    @patch("web.routes.imports.match_folders_to_requests")
     @patch("web.routes.imports.scan_complete_folder")
-    def test_manual_import_scan_contract(self, mock_scan, mock_match):
+    def test_manual_import_scan_contract(self, mock_scan):
+        # Drive the real ``match_folders_to_requests`` against folder +
+        # request inputs that share an artist/album token set so the
+        # fuzzy matcher produces a high-confidence FolderMatch. Patching
+        # the matcher away would hide its contract — score field,
+        # match-or-skip threshold, sort order — from this test.
         folder = FolderInfo(
             name="Test Artist - Test Album",
             path="/complete/Test Artist - Test Album",
@@ -4947,16 +4951,15 @@ class TestManualImportRouteContracts(_WebServerCase):
             album="Test Album",
             file_count=10,
         )
-        request = ImportRequest(
-            id=100,
-            artist_name="Test Artist",
-            album_title="Test Album",
-            mb_release_id="abc-123",
-        )
         mock_scan.return_value = [folder]
-        mock_match.return_value = [FolderMatch(folder=folder, request=request, score=0.91)]
         self.mock_db.get_by_status.return_value = [
-            make_request_row(id=100, status="wanted", mb_release_id="abc-123"),
+            make_request_row(
+                id=100,
+                status="wanted",
+                mb_release_id="abc-123",
+                artist_name="Test Artist",
+                album_title="Test Album",
+            ),
         ]
 
         status, data = self._get("/api/manual-import/scan")
@@ -4968,6 +4971,10 @@ class TestManualImportRouteContracts(_WebServerCase):
                                 "manual import folder")
         _assert_required_fields(self, data["folders"][0]["match"], self.MATCH_REQUIRED_FIELDS,
                                 "manual import match")
+        # Real matcher should report a perfect score for identical
+        # artist/album tokens — this is the actual production contract.
+        self.assertEqual(data["folders"][0]["match"]["request_id"], 100)
+        self.assertGreaterEqual(data["folders"][0]["match"]["score"], 0.99)
 
     @patch("web.routes.imports.resolve_failed_path",
            return_value="/complete/Test Artist - Test Album")
