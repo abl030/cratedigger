@@ -209,9 +209,12 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.import_dispatch\.cleanup_disambiguation_orphans$"),
 
     # BeetsDB class itself — patching the class replaces the SQLite
-    # boundary at the constructor. Method-level patches against
-    # BeetsDB.<method> remain flagged so they get migrated to FakeBeetsDB.
+    # boundary at the constructor. Specific methods whose bodies are
+    # pure SQLite/filesystem work are also seams. Other BeetsDB methods
+    # (album_exists, locate, search, etc.) are read-only query helpers
+    # that can be exercised against a real test SQLite DB.
     re.compile(r"^lib\.beets_db\.BeetsDB$"),
+    re.compile(r"^lib\.beets_db\.BeetsDB\.delete_album$"),  # SQLite write + file delete seam
     re.compile(r"^web\.server\._real_beets_db$"),
 
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.

@@ -69,9 +69,6 @@
     "patch:lib.transitions.finalize_request": 1,
     "stateful_mock_assign:source": 4
   },
-  "test_library_delete_service.py": {
-    "patch:lib.beets_db.BeetsDB.delete_album": 5
-  },
   "test_matching.py": {
     "patch:lib.matching._track_titles_cross_check": 1
   },
