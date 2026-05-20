@@ -19,6 +19,15 @@ from typing import Any, Callable, Sequence, TYPE_CHECKING
 import msgspec
 
 from lib import transitions
+
+# Module-level DI seam for ``transitions.finalize_request``. Internal
+# call sites bind through this name (not ``transitions.finalize_request``
+# directly) so tests can swap the dependency via
+# ``patch("lib.import_dispatch.finalize_request")`` at the same module
+# scope as the route-level seam in ``web.routes.pipeline``. See the
+# leaf-seam allowlist in ``tests/_mock_audit_scanner.py``.
+finalize_request = transitions.finalize_request
+
 from lib.quality import (parse_import_result, DispatchAction, DownloadInfo,
                          ImportResult, MeasurementFailure,
                          SpectralMeasurement, V0ProbeEvidence,
@@ -874,7 +883,7 @@ def _do_mark_done(
             ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
-    transitions.finalize_request(
+    finalize_request(
         db,
         request_id,
         transitions.RequestTransition.to_imported_fields(fields=update_fields),
@@ -966,7 +975,7 @@ def _finalize_request_and_log_rejection(
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        transitions.finalize_request(
+        finalize_request(
             db,
             request_id,
             transitions.RequestTransition.to_wanted_fields(
@@ -1331,7 +1340,7 @@ def _check_quality_gate_core(
 
         if decision == "requeue_upgrade":
             upgrade_override = QUALITY_UPGRADE_TIERS
-            transitions.finalize_request(
+            finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
@@ -1360,7 +1369,7 @@ def _check_quality_gate_core(
                 f"(searching {upgrade_override})")
         elif decision == "requeue_lossless":
             lossless_override = QUALITY_LOSSLESS
-            transitions.finalize_request(
+            finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_wanted(
@@ -1374,7 +1383,7 @@ def _check_quality_gate_core(
                 f"min_bitrate={min_br_kbps}kbps CBR, not verified lossless — "
                 f"searching for lossless to verify")
         else:  # accept
-            transitions.finalize_request(
+            finalize_request(
                 db,
                 request_id,
                 transitions.RequestTransition.to_imported(
@@ -1801,7 +1810,7 @@ def dispatch_import_core(
                     if decision in ("import", "preflight_existing"):
                         if prev_br is not None or new_br is not None:
                             try:
-                                transitions.finalize_request(
+                                finalize_request(
                                     db,
                                     request_id,
                                     transitions.RequestTransition.to_imported(
@@ -2031,7 +2040,7 @@ def dispatch_import_core(
                     }
                     if action.mark_done and new_br is not None:
                         requeue_fields["min_bitrate"] = new_br
-                    transitions.finalize_request(
+                    finalize_request(
                         db,
                         request_id,
                         transitions.RequestTransition.to_wanted_fields(

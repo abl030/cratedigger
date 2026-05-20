@@ -264,7 +264,7 @@ class TestCmdCancel(unittest.TestCase):
 
 class TestCmdSet(unittest.TestCase):
     @patch("builtins.print")
-    @patch("lib.transitions.finalize_request")
+    @patch("scripts.pipeline_cli.finalize_request")
     def test_set_routes_dynamic_status_through_shared_finalizer(
         self,
         mock_finalize,
@@ -1092,7 +1092,7 @@ class TestCmdSetIntent(unittest.TestCase):
         self.assertEqual(db.update_request_fields_calls, [(1, dict(target_format=None))])
 
     @patch("builtins.print")
-    @patch("lib.transitions.finalize_request")
+    @patch("scripts.pipeline_cli.finalize_request")
     def test_set_lossless_on_imported_requeues(self, mock_finalize, _mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1210,7 +1210,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
-                 patch("lib.transitions.finalize_request", finalize_request), \
+                 patch("scripts.pipeline_cli.finalize_request", finalize_request), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
 

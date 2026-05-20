@@ -20,7 +20,7 @@ from tests.fakes import FakePipelineDB
 
 
 class TestCmdFix(unittest.TestCase):
-    @patch("lib.transitions.finalize_request")
+    @patch("scripts.repair.finalize_request")
     @patch("scripts.repair._collect_issues")
     def test_reset_to_wanted_routes_through_shared_finalizer(
         self,
