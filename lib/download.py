@@ -38,7 +38,8 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          extract_usernames,
                          rejection_backfill_override)
 from lib import transitions
-from lib.import_dispatch import (DispatchOutcome, _build_download_info,
+from lib.import_dispatch import (DispatchOutcome, QualityGateFn,
+                                 _build_download_info,
                                  _record_rejection_and_maybe_requeue,
                                  _requeue_import_job_to_preview,
                                  dispatch_import_core)
@@ -1419,6 +1420,7 @@ def _handle_valid_result(
     *,
     import_job_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+    quality_gate_fn: QualityGateFn | None = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1585,7 +1587,7 @@ def _handle_valid_result(
             except Exception:
                 logger.debug("DB lookup failed for override-min-bitrate")
 
-            return dispatch_import_core(
+            core_kwargs: dict[str, Any] = dict(
                 path=dest,
                 mb_release_id=album_data.mb_release_id or "",
                 request_id=request_id,
@@ -1606,6 +1608,9 @@ def _handle_valid_result(
                 candidate_import_job_id=import_job_id,
                 prevalidated_candidate_result=prevalidated_candidate_result,
             )
+            if quality_gate_fn is not None:
+                core_kwargs["quality_gate_fn"] = quality_gate_fn
+            return dispatch_import_core(**core_kwargs)
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
         return None
