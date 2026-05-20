@@ -228,25 +228,31 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
             )
             staged_album = StagedAlbum(current_path=tmpdir, request_id=42)
 
+            handle_valid_calls: list[tuple] = []
+
+            def _record_handle_valid(*args, **kwargs):
+                handle_valid_calls.append((args, kwargs))
+                return None
+
             with patch("lib.beets.beets_validate", return_value=ValidationResult(
                 valid=True,
                 distance=0.05,
                 scenario="strong_match",
             )), \
-                 patch("lib.download.measure_preimport_state") as gates, \
-                 patch("lib.download._handle_valid_result") as handle_valid:
+                 patch("lib.download.measure_preimport_state") as gates:
                 result = _process_beets_validation(
                     album_data,
                     staged_album,
                     ctx,
                     import_job_id=job.id,
+                    handle_valid_fn=_record_handle_valid,
                 )
 
         assert result is not None
         self.assertFalse(result.success)
         self.assertIn("Candidate quality evidence unavailable", result.message)
         gates.assert_not_called()
-        handle_valid.assert_not_called()
+        self.assertEqual(handle_valid_calls, [])
 
 
 class TestImporterWorker(unittest.TestCase):

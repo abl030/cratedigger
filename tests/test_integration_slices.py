@@ -2249,8 +2249,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
         # The staged move and dispatch MUST NOT run on contention.
         import_folder_fullpath = "/tmp/test-import-folder"
-        with patch.object(dl_mod.StagedAlbum, "move_to") as mock_move, \
-             patch.object(dl_mod, "dispatch_import_core") as mock_dispatch:
+        dispatch_calls: list[dict] = []
+        with patch.object(dl_mod.StagedAlbum, "move_to") as mock_move:
             outcome = dl_mod._handle_valid_result(
                 entry,
                 bv_result,
@@ -2259,6 +2259,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                     request_id=42,
                 ),
                 ctx,
+                dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
             )
 
         assert outcome is not None
@@ -2268,7 +2269,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         # import_folder_fullpath where process_completed_album's
         # resume guard can pick them up next cycle.
         mock_move.assert_not_called()
-        mock_dispatch.assert_not_called()
+        self.assertEqual(dispatch_calls, [])
 
     def test_redownload_path_does_not_take_release_lock(self):
         """Redownload path (source != 'request') must NOT take the
@@ -2558,10 +2559,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             id=42, status="downloading",
             current_spectral_grade="genuine",
             current_spectral_bitrate=245))
-        with patch.object(dl_mod, "process_completed_album",
-                          return_value=None):
-            dl_mod._run_completed_processing(
-                self._entry(), 42, self._state(), db, self._ctx(db))
+        dl_mod._run_completed_processing(
+            self._entry(), 42, self._state(), db, self._ctx(db),
+            process_album_fn=lambda *_a, **_kw: None,
+        )
         self.assertEqual(db.request(42)["status"], "downloading")
         # Spectral untouched.
         self.assertEqual(
@@ -2576,10 +2577,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         from lib import download as dl_mod
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        with patch.object(dl_mod, "process_completed_album",
-                          return_value=True):
-            dl_mod._run_completed_processing(
-                self._entry(), 42, self._state(), db, self._ctx(db))
+        dl_mod._run_completed_processing(
+            self._entry(), 42, self._state(), db, self._ctx(db),
+            process_album_fn=lambda *_a, **_kw: True,
+        )
         self.assertEqual(db.request(42)["status"], "imported")
 
     def test_false_outcome_resets_to_wanted_with_attempt(self):
@@ -2589,10 +2590,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         from lib import download as dl_mod
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        with patch.object(dl_mod, "process_completed_album",
-                          return_value=False):
-            dl_mod._run_completed_processing(
-                self._entry(), 42, self._state(), db, self._ctx(db))
+        dl_mod._run_completed_processing(
+            self._entry(), 42, self._state(), db, self._ctx(db),
+            process_album_fn=lambda *_a, **_kw: False,
+        )
         self.assertEqual(db.request(42)["status"], "wanted")
 
     def test_false_outcome_after_inner_rejection_does_not_double_transition(self):
@@ -2615,18 +2616,14 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             )
             return False
 
-        with patch.object(
-            dl_mod,
-            "process_completed_album",
-            side_effect=reject_inside_process,
-        ):
-            dl_mod._run_completed_processing(
-                self._entry(),
-                42,
-                self._state(),
-                db,
-                self._ctx(db),
-            )
+        dl_mod._run_completed_processing(
+            self._entry(),
+            42,
+            self._state(),
+            db,
+            self._ctx(db),
+            process_album_fn=reject_inside_process,
+        )
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.status_history, [(42, "wanted")])
