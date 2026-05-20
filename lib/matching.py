@@ -6,7 +6,7 @@ import difflib
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Sequence, TYPE_CHECKING
 
 from lib.browse import (
     _browse_directories_for_ctx,
@@ -321,6 +321,9 @@ def check_for_match(
     file_dirs: list[str],
     username: str,
     ctx: CratediggerContext,
+    *,
+    album_match_fn: "Callable[..., Any] | None" = None,
+    cross_check_fn: "Callable[..., bool] | None" = None,
 ) -> MatchResult:
     """Check candidate directories for an album match.
 
@@ -331,7 +334,23 @@ def check_for_match(
     on filename ratio but failed `_track_titles_cross_check` (full score
     plus a negative_matches entry). U5 persists `candidates` to
     `search_log.candidates` for forensic introspection.
+
+    ``album_match_fn`` and ``cross_check_fn`` are dependency-injection
+    seams. Production callers leave them at their defaults (the
+    module-level :func:`album_match` and :func:`_track_titles_cross_check`);
+    tests pass stubs by value to exercise the try/finally credit
+    accumulator on exception and the cross-check-failure candidate path
+    without constructing inputs that happen to land in the right
+    rejection bucket. Both default to ``None`` so the function resolves
+    to the live module-level binding at call time — keeps the seam
+    cheap when callers don't override.
     """
+    _album_match: Callable[..., Any] = (
+        album_match_fn if album_match_fn is not None else album_match
+    )
+    _cross_check: Callable[..., bool] = (
+        cross_check_fn if cross_check_fn is not None else _track_titles_cross_check
+    )
     candidates: list[CandidateScore] = []
     pre_filter_skip_count = 0
     pre_filter_skip_samples_emitted = 0
@@ -496,7 +515,7 @@ def check_for_match(
 
             # Count gate passed — score the dir.
             score_files = _audio_files_for_filetype(directory, allowed_filetype)
-            score = album_match(tracks, score_files, username, allowed_filetype, ctx)
+            score = _album_match(tracks, score_files, username, allowed_filetype, ctx)
             candidates.append(CandidateScore(
                 username=username,
                 dir=file_dir,
@@ -513,7 +532,7 @@ def check_for_match(
                 and username not in ctx.cfg.ignored_users
             )
             if strict_accept:
-                if _track_titles_cross_check(tracks, score_files):
+                if _cross_check(tracks, score_files):
                     # Log SUCCESSFUL MATCH at the one place enqueue is going
                     # to happen — the previous log site in album_match fired
                     # before the cross-check / ignored_users gate at the
