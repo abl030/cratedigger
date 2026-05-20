@@ -400,6 +400,24 @@ _LEAF_SEAM_PATTERNS = [
     # ``lib.download.process_completed_album`` etc.
     re.compile(r"^lib\.download\._handle_valid_result$"),
 
+    # Broadened ``resolve_failed_path`` re-export allowlist. The pattern
+    # already covers ``web.routes.*`` re-exports; ``lib.wrong_matches``
+    # also re-exports ``resolve_failed_path`` from ``lib.util``. Same
+    # rationale: ``lib.util.resolve_failed_path`` is the actual
+    # filesystem boundary; the re-export is the test seam.
+    re.compile(r"^lib\.\w+\.resolve_failed_path$"),
+
+    # ``harness.import_one`` RED-guard seams. The test
+    # ``test_evidence_backed_import_skips_candidate_measurement_helpers``
+    # patches these three pure-decision helpers with ``side_effect=AssertionError``
+    # to assert NONE of them run when pre-recorded evidence is supplied.
+    # The patch is a regression guard, not a stub — if any helper runs,
+    # the test trips. The decisions themselves are tested in
+    # ``test_quality_classification.py``.
+    re.compile(r"^harness\.import_one\.determine_verified_lossless$"),
+    re.compile(r"^harness\.import_one\.provisional_lossless_decision$"),
+    re.compile(r"^harness\.import_one\.quality_decision_stage$"),
+
     # Filesystem-write wrapper. ``log_validation_result`` (defined in
     # ``lib.util``) appends to the beets-tracking JSONL file — a thin
     # filesystem-boundary helper. Tests in ``test_download.py`` patch
