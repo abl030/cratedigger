@@ -4,7 +4,7 @@ This is the **entry point** for picking up the stateful-MagicMock removal effort
 
 ## Current state
 
-Baseline last measured at **115 findings across 15 files**. To check the live count:
+Baseline last measured at **110 findings across 15 files**. To check the live count:
 
 ```bash
 nix-shell --run "python3 tests/_rebuild_mock_audit_baseline.py"
@@ -28,7 +28,7 @@ A finding is one of two things:
 
 The audit is in `tests/test_mock_audit.py`; the scanner heuristic lives in `tests/_mock_audit_scanner.py`; the frozen call-site count is in `tests/mock_audit_baseline.json`.
 
-## One concrete next move (in order of value-per-effort)
+## Next moves (in order of value-per-effort)
 
 ### ~~1. Item N in #301 — DI refactor for `try_enqueue` match function~~ (LANDED)
 
@@ -49,11 +49,35 @@ to `tests/helpers.py`. Migrated `test_dispatch_core.py` (4),
 `test_dispatch_from_db.py` (5), `test_import_dispatch.py` (3). Dropped 11
 findings (126 → 115).
 
-### 1. Item M in #301 — `_execute` support on `FakePipelineDB` (~2 hours)
+### ~~3. Item M in #301 — `_execute` support on `FakePipelineDB`~~ (LANDED)
 
-14 sites in `test_pipeline_cli.py` (mostly TestCmdQuery, TestCmdRepairSpectral) inject SQL cursor results via `db._execute.side_effect = [cursor1, cursor2, ...]`. Add a minimal `_execute` simulator to FakePipelineDB that lets tests register the cursor sequence — same shape as the existing `set_directory_*` pattern on FakeSlskdAPI. PR title: `test(fakes): add _execute cursor stubbing to FakePipelineDB`. Drops 14 findings.
+Shipped: `FakePipelineDB.queue_execute_results(*cursors)` registers a
+deterministic cursor sequence; `_execute(sql, params)` records calls in
+`db.execute_calls` and pops the next entry (raising it if it's an
+`Exception` instance). Migrated 5 sites in `test_pipeline_cli.py`
+(`TestCmdQuery` 4, `TestCmdRepairSpectral` 1). Other test_pipeline_cli
+sites use different MagicMock patterns that aren't `_execute` queues —
+those remain for separate migration. Dropped 5 findings (115 → 110).
 
-After this one: baseline drops 115 → ~101 remaining. That residual is mostly `finalize_request` in `test_web_server.py` contract tests (26 sites) — those need either per-test DB seeding (heavy) OR the same DI treatment for `finalize_request` (likely the right move; tracked separately).
+### 1. Residual `test_web_server.py` (~34 findings, the long pole)
+
+Biggest remaining block. Mix of `MagicMock()` assigned to `db` /
+`pipeline_db_source` / `mock_db` and `patch("lib.transitions.finalize_request")`.
+These contract tests assemble a minimal mock for the route handler's
+collaborator graph. Two viable paths:
+- Per-test DB seeding through `FakePipelineDB` plus `make_request_row` —
+  heavy because each contract test needs different shapes.
+- DI on `finalize_request` (matches Items N + K patterns; the route
+  handler would take `finalize_fn` and pass it through). 26 of the 34
+  findings would go away from that one change.
+
+Pick that up as `refactor(web): inject finalize_request through route handlers`.
+
+### 2. Smaller cleanups (~14 findings across 5 files)
+
+`test_import_one_stages.py` (15) and `test_download.py` (14) are the
+next clusters worth a look — both feel like they'd benefit from
+specific Fake helpers rather than a single DI move.
 
 ## What's NOT next
 
