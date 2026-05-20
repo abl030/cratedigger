@@ -30,7 +30,7 @@ from lib.quality import (
     ImportResult,
     PostflightInfo,
 )
-from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -2929,24 +2929,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         cratedigger = self._cratedigger
         cratedigger.cfg = cfg
         cratedigger.slskd = slskd
-        source = MagicMock()
-        source._get_db.return_value = db
-
-        def _get_tracks(album_record: Any) -> list[dict[str, Any]]:
-            request_id = getattr(album_record, "db_request_id", None)
-            if not request_id:
-                return []
-            rows = db.get_tracks(request_id)
-            album_id = request_id * -1
-            return [{
-                "title": r["title"],
-                "trackNumber": str(r["track_number"]),
-                "mediumNumber": r.get("disc_number", 1),
-                "duration": 0,
-                "id": 0,
-                "albumId": album_id,
-            } for r in rows]
-        source.get_tracks.side_effect = _get_tracks
+        # FakePipelineDBSource's get_tracks already mirrors the production
+        # negative-ID transform (request_id * -1), so the previous explicit
+        # ``source.get_tracks.side_effect = _get_tracks`` override is no
+        # longer needed — the fake exposes the same shape.
+        source = FakePipelineDBSource(db)
 
         cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
@@ -3001,7 +2988,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         import json
         import msgspec
         from lib.quality import CandidateScore
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg(search_response_limit=1500)
         slskd = FakeSlskdAPI()
@@ -3088,7 +3075,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         the threshold position; here we seed it directly to assert the
         executor hits it.
         """
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg(
             search_escalation_threshold=5, album_prepend_artist=True,
@@ -3122,7 +3109,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
 
     def test_unwild_year_variant_at_threshold_plus_one(self):
         """Plan-item strategy='unwild_year' produces an unwild+year query."""
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg(
             search_escalation_threshold=5, album_prepend_artist=True,
@@ -3163,7 +3150,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ``cursor_update_status='wrapped'``.
         """
         from album_source import AlbumRecord, MediaRecord, ReleaseRecord
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg(search_escalation_threshold=5)
         slskd = FakeSlskdAPI()
@@ -3225,7 +3212,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         empty_query). FakePipelineDB serialises ``[]`` to the JSON literal
         ``"[]"``.
         """
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -3324,7 +3311,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_discogs_source_request_produces_same_blob_shape(self):
         """A Discogs-source request flows through the same forensic capture."""
         import json
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -3386,7 +3373,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         this test selects the variant via the same helper the parallel loop
         uses, then passes it into ``_submit_search``.
         """
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg(search_response_limit=2500)
         slskd = FakeSlskdAPI()
@@ -3421,7 +3408,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         The plan generator (U2) materialises track tier slots; here we
         seed a track_0 slot directly to assert the executor uses it.
         """
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg(search_escalation_threshold=5)
         slskd = FakeSlskdAPI()
@@ -3465,7 +3452,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         non-consuming. Cursor stays at 0; backoff IS applied; the row is
         a pre_attempt stage row with attempt_consumed=False.
         """
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -3510,7 +3497,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_serial_collection_error_after_accept_is_consumed(self):
         """Once slskd returns a search id, polling/collection failures still
         consume the plan slot through the atomic consumed-attempt seam."""
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -3629,8 +3616,7 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
 
     def _ctx_with_db(self, db):
         from lib.context import CratediggerContext
-        source = MagicMock()
-        source._get_db.return_value = db
+        source = FakePipelineDBSource(db)
         self._cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
             cfg=self._cratedigger.cfg, slskd=MagicMock(),
@@ -4664,8 +4650,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         cratedigger = self._cratedigger
         cratedigger.cfg = cfg
         cratedigger.slskd = slskd
-        source = MagicMock()
-        source._get_db.return_value = db
+        source = FakePipelineDBSource(db)
         cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
             cfg=cfg, slskd=slskd, pipeline_db_source=source,
@@ -4693,7 +4678,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def test_AE6_active_plan_ordinal_executes_and_advances_cursor(self):
         """AE6: active plan ordinal executes. On success, log + advance."""
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -4725,7 +4710,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def test_AE7_pre_attempt_failure_is_non_consuming(self):
         """AE7: submit failure before accepted search is non-consuming."""
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -4755,7 +4740,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def test_AE8_final_ordinal_wraps_with_no_new_exhausted_row(self):
         """AE8: final ordinal wraps cursor + cycle. No new exhausted row."""
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -5034,7 +5019,7 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
         from lib.context import CratediggerContext
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
-        from tests.fakes import FakePipelineDB, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
         cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
         cfg = _replace(cfg, search_escalation_threshold=5)
@@ -5075,8 +5060,7 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
         )
         self._cratedigger.cfg = cfg
         self._cratedigger.slskd = slskd
-        source = MagicMock()
-        source._get_db.return_value = db
+        source = FakePipelineDBSource(db)
         ctx = CratediggerContext(
             cfg=cfg, slskd=slskd, pipeline_db_source=source,
         )
