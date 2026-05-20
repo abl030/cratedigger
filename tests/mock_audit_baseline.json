@@ -59,8 +59,7 @@
     "patch:lib.download.dispatch_import_core": 1,
     "patch:lib.download.process_completed_album": 3,
     "patch:lib.enqueue.check_for_match": 4,
-    "patch:lib.transitions.finalize_request": 1,
-    "stateful_mock_assign:source": 4
+    "patch:lib.transitions.finalize_request": 1
   },
   "test_matching.py": {
     "patch:lib.matching._track_titles_cross_check": 1
