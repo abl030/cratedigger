@@ -12,8 +12,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from typing import Any, cast
+
 from lib.quality import OrphanInfo
 from scripts import repair
+from tests.fakes import FakePipelineDB
 
 
 class TestCmdFix(unittest.TestCase):
@@ -24,7 +27,7 @@ class TestCmdFix(unittest.TestCase):
         mock_collect_issues,
         mock_finalize,
     ) -> None:
-        db = MagicMock()
+        db = FakePipelineDB()
         mock_collect_issues.return_value = [
             OrphanInfo(
                 request_id=17,
@@ -35,7 +38,7 @@ class TestCmdFix(unittest.TestCase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            repair.cmd_fix(db)
+            repair.cmd_fix(cast(Any, db))
 
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)

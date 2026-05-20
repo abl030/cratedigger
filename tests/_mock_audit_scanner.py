@@ -145,6 +145,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.enqueue\.slskd_do_enqueue$"),
     re.compile(r"^lib\.enqueue\.slskd_enqueue_with_outcome$"),
     re.compile(r"^lib\.(download|enqueue)\.cancel_and_delete$"),
+    re.compile(r"^lib\.download\.slskd_download_status$"),
 
     # Beets harness subprocess wrapper. ``beets_validate`` invokes
     # ``run_beets_harness.sh`` and parses JSON — equivalent to mocking
@@ -194,10 +195,16 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.permissions\.fix_library_modes$"),
 
     # Logger objects — patching the module-level logger lets tests
-    # assert against log records without subclassing the logger.
+    # assert against log records without subclassing the logger. Also
+    # logger.error / .warning / .exception methods directly.
     re.compile(r"^lib\.\w+\.logger$"),
     re.compile(r"^harness\.\w+\.logger$"),
     re.compile(r"^web\.\w+\.logger$"),
+    re.compile(r"^scripts\.\w+\.logger$"),
+    re.compile(r"^lib\.\w+\.logger\.(error|warning|exception|info|debug)$"),
+    re.compile(r"^scripts\.\w+\.logger\.(error|warning|exception|info|debug)$"),
+    re.compile(r"^web\.\w+\.logger\.(error|warning|exception|info|debug)$"),
+    re.compile(r"^harness\.\w+\.logger\.(error|warning|exception|info|debug)$"),
 
     # Internal logging helper in the harness — wraps stderr writes.
     re.compile(r"^harness\.import_one\._log$"),
