@@ -187,6 +187,7 @@ _LEAF_SEAM_PATTERNS = [
     # filesystem read. The replacement (constructing a CratediggerConfig
     # in-memory) is also valid and used in many tests.
     re.compile(r"^lib\.config\.read_runtime_config$"),
+    re.compile(r"^scripts\.\w+\.read_runtime_config$"),  # re-exports
     re.compile(r"^lib\.config\.CratediggerConfig\.from_ini$"),
 
     # Filesystem permission helper — wraps chmod calls.
@@ -220,6 +221,12 @@ _LEAF_SEAM_PATTERNS = [
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release$"),
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
+
+    # scripts.repair helpers that wrap external boundaries.
+    # ``_get_slskd_active_transfers`` is a thin slskd_api call;
+    # ``_get_all_rows`` runs a single SELECT against the pipeline DB.
+    re.compile(r"^scripts\.repair\._get_slskd_active_transfers$"),
+    re.compile(r"^scripts\.repair\._get_all_rows$"),
 
     # DB connection reconnect — network/socket boundary.
     re.compile(r"^web\.server\._try_reconnect_db$"),

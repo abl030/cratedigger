@@ -363,11 +363,11 @@ class TestRequestTransition(unittest.TestCase):
 class TestFinalizeRequest(unittest.TestCase):
     """Final request-state command execution lives in lib.transitions.
 
-    Migrated from ``patch('lib.transitions.apply_transition')`` +
-    ``mock.assert_called_with`` to driving real ``finalize_request``
-    against a ``FakePipelineDB`` and asserting on the resulting row.
-    Validation-error tests verify the DB row stays unchanged when the
-    transition raises before any mutation.
+    Tests drive real ``finalize_request`` against a ``FakePipelineDB``
+    and assert on the resulting row. Validation-error tests verify the
+    DB row stays unchanged when the transition raises before any
+    mutation. (Migrated from MagicMock + ``mock.assert_called_with``
+    introspection per issue #290.)
     """
 
     def test_forwards_transition_fields_and_attempt_type(self):
