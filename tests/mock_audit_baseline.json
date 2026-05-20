@@ -134,10 +134,6 @@
     "patch:lib.transitions.apply_transition": 2,
     "stateful_mock_assign:db": 1
   },
-  "test_search_max_inflight.py": {
-    "stateful_mock_assign:ctx": 1,
-    "stateful_mock_assign:source": 3
-  },
   "test_transitions.py": {
     "patch:lib.transitions.apply_transition": 4,
     "stateful_mock_assign:db": 6

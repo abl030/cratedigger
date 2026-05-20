@@ -394,16 +394,18 @@ def make_ctx_with_fake_db(
 ) -> Any:
     """Build a CratediggerContext wired to a FakePipelineDB.
 
-    The fake is wired via pipeline_db_source._get_db() so production code
-    that calls ctx.pipeline_db_source._get_db() gets the fake.
+    The fake is wrapped in a ``FakePipelineDBSource`` so production code
+    that calls ``ctx.pipeline_db_source._get_db()`` (or any of the source's
+    higher-level methods) hits a typed surface, not a MagicMock that
+    silently accepts arbitrary attribute access.
     """
     from lib.context import CratediggerContext
-    mock_source = MagicMock()
-    mock_source._get_db.return_value = fake_db
+    from tests.fakes import FakePipelineDBSource
+    source = FakePipelineDBSource(fake_db)
     return CratediggerContext(
         cfg=cfg if cfg is not None else MagicMock(),
         slskd=slskd if slskd is not None else MagicMock(),
-        pipeline_db_source=mock_source,
+        pipeline_db_source=source,
     )
 
 

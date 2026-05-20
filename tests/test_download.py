@@ -25,7 +25,7 @@ from tests.helpers import (
     make_grab_list_entry,
     make_request_row,
 )
-from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
 
 def _utc_now_iso() -> str:
@@ -83,7 +83,7 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
     if slskd is None:
         slskd = MagicMock()
     if pipeline_db_source is None:
-        pipeline_db_source = MagicMock()
+        pipeline_db_source = FakePipelineDBSource()
     return CratediggerContext(cfg=cfg, slskd=slskd,
                           pipeline_db_source=pipeline_db_source)
 
@@ -1296,7 +1296,9 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 result.message,
                 "Rejected: high_distance - distance=0.1919",
             )
-            ctx.pipeline_db_source.reject_and_requeue.assert_called_once()
+            source = ctx.pipeline_db_source
+            assert isinstance(source, FakePipelineDBSource)
+            self.assertEqual(len(source.reject_and_requeue_calls), 1)
 
     def test_returns_false_on_file_move_failure(self):
         """File move failure returns False."""
@@ -1989,8 +1991,9 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             self.assertTrue(result)
             mock_dispatch.assert_not_called()
-            mark_done = cast(Any, ctx.pipeline_db_source.mark_done)
-            mark_done.assert_called_once()
+            source = ctx.pipeline_db_source
+            assert isinstance(source, FakePipelineDBSource)
+            self.assertEqual(len(source.mark_done_calls), 1)
 
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
