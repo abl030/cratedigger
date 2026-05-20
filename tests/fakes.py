@@ -4132,6 +4132,7 @@ class FakeBeetsDB:
         # explicit seeds.
         self._album_exists_default = False
         self._album_ids_default: list[int] = []
+        self._album_info_default: Any = None
         self._item_paths_default: list[tuple[int, str]] = []
         self.close_calls: int = 0
         self.album_exists_calls: list[str] = []
@@ -4172,7 +4173,7 @@ class FakeBeetsDB:
         self, mb_release_id: str, _cfg: Any = None,
     ) -> Any:
         self.get_album_info_calls.append(mb_release_id)
-        return self._album_info.get(mb_release_id)
+        return self._album_info.get(mb_release_id, self._album_info_default)
 
     def get_item_paths(self, release_id: str) -> list[tuple[int, str]]:
         self.get_item_paths_calls.append(release_id)

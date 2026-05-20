@@ -1371,8 +1371,8 @@ class TestCmdQuality(unittest.TestCase):
                 or kwargs.get("verified_lossless_target"),
             }
 
-        db = MagicMock()
-        db.get_request.return_value = request_row
+        db = FakePipelineDB()
+        db.seed_request(request_row)
         stdout = io.StringIO()
         with patch("scripts.pipeline_cli._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
@@ -1383,7 +1383,7 @@ class TestCmdQuality(unittest.TestCase):
              patch("lib.quality.full_pipeline_decision",
                    side_effect=fake_full_pipeline_decision), \
              redirect_stdout(stdout):
-            pipeline_cli.cmd_quality(db, MagicMock(id=9))
+            pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=9))
 
         output = stdout.getvalue()
         # The gate must say NEEDS UPGRADE (not DONE)

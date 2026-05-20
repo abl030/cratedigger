@@ -360,6 +360,46 @@ _LEAF_SEAM_PATTERNS = [
     # rather than the production ``beets_staging_dir``.
     re.compile(r"^lib\.download\.stage_to_ai_path$"),
 
+    # ``preview_import_from_values`` is the preview-engine entrypoint —
+    # synthesises an ``ImportPreviewResult`` (verdict + decision tree)
+    # from caller-supplied measurement values. Same shape as
+    # ``quality_gate_decision``: pure decision being stubbed by
+    # orchestration tests that exercise the CLI / web route wrappers.
+    # Behaviour of the engine itself is covered by
+    # ``tests/test_import_preview.py``; CLI / route tests stub it to
+    # return a deterministic verdict and check the wire-shape mapping.
+    re.compile(r"^lib\.import_preview\.preview_import_from_values$"),
+    re.compile(r"^web\.routes\.pipeline\.preview_import_from_values$"),
+
+    # ``full_pipeline_decision`` is the flat-kwargs simulator twin of
+    # ``full_pipeline_decision_from_evidence`` — same pure-decision
+    # rationale as ``quality_gate_decision``. The simulator's own
+    # behaviour is covered in test_quality_classification.py; CLI
+    # orchestration tests stub it to control which decision branch
+    # ``pipeline-cli quality`` displays.
+    re.compile(r"^lib\.quality\.full_pipeline_decision$"),
+
+    # Service-class constructor replacement. ``MbidReplaceService`` is
+    # the operator's MBID-replace surface (CLI + web route both wrap
+    # it). The service's own behaviour is covered in
+    # ``tests/test_mbid_replace_service.py``; the CLI test in
+    # ``test_pipeline_cli.py`` only asserts the wire-shape mapping
+    # (exit code per outcome). Same constructor-replacement shape as
+    # ``lib.beets_db.BeetsDB`` / ``lib.pipeline_db.PipelineDB`` above.
+    re.compile(r"^lib\.mbid_replace_service\.MbidReplaceService$"),
+
+    # ``scripts.import_preview_worker.run_once`` is the preview-worker
+    # tick. Tests in ``test_import_queue.py`` stub it to drive the
+    # outer loop without going through full preview measurement on
+    # every iteration. Worker behaviour is covered by its own dedicated
+    # tests; queue tests are about the dispatcher around it.
+    re.compile(r"^scripts\.import_preview_worker\.run_once$"),
+
+    # In-module DI seam for ``_handle_valid_result`` (defined in
+    # ``lib.download``). Same module-local DI shape as
+    # ``lib.download.process_completed_album`` etc.
+    re.compile(r"^lib\.download\._handle_valid_result$"),
+
     # Filesystem-write wrapper. ``log_validation_result`` (defined in
     # ``lib.util``) appends to the beets-tracking JSONL file — a thin
     # filesystem-boundary helper. Tests in ``test_download.py`` patch
