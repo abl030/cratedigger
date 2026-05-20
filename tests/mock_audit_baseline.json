@@ -1,8 +1,4 @@
 {
-  "test_album_source.py": {
-    "patch:lib.import_dispatch._do_mark_done": 1,
-    "patch:lib.transitions.finalize_request": 1
-  },
   "test_beets_album_op.py": {
     "stateful_mock_assign:beets": 1
   },
@@ -33,9 +29,6 @@
     "stateful_mock_assign:db": 2,
     "stateful_mock_assign:slskd": 3,
     "stateful_mock_assign:source": 2
-  },
-  "test_force_import_gates.py": {
-    "patch:lib.spectral_check.analyze_track": 1
   },
   "test_import_dispatch.py": {
     "patch:lib.download.log_validation_result": 1,
@@ -87,17 +80,13 @@
     "patch:lib.beets_db.BeetsDB.delete_album": 5
   },
   "test_matching.py": {
-    "patch:lib.matching._track_titles_cross_check": 1,
-    "stateful_mock_assign:slskd": 1
+    "patch:lib.matching._track_titles_cross_check": 1
   },
   "test_measurement.py": {
     "patch:lib.measurement._iter_audio_files": 2,
     "patch:lib.measurement.hash_audio_content": 2,
     "patch:lib.measurement.validate_audio": 1,
     "stateful_mock_assign:db": 2
-  },
-  "test_overlay.py": {
-    "patch:web.server.compute_library_rank": 1
   },
   "test_pipeline_cli.py": {
     "patch:lib.import_preview.preview_import_from_values": 2,

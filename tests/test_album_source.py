@@ -95,11 +95,17 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
 class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
     """Pin the non-DB seam around reject-and-requeue finalization."""
 
-    @patch("lib.transitions.finalize_request")
-    def test_reject_and_requeue_defers_from_status_to_shared_seam(
-        self,
-        mock_finalize: MagicMock,
-    ) -> None:
+    def test_reject_and_requeue_defers_from_status_to_shared_seam(self) -> None:
+        """``reject_and_requeue`` lets the shared transition seam look up
+        ``from_status`` from the DB instead of pinning it at the call site.
+
+        End-to-end: seed a row in ``manual``, call ``reject_and_requeue``
+        without any ``from_status`` argument, observe the row land in
+        ``wanted``. If the source had hard-coded ``from_status="wanted"``
+        (or any other non-current value), the transition guard would have
+        refused the change. The user-visible behavior (status='wanted')
+        is therefore proof that the seam resolved from_status itself.
+        """
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(id=42, status="manual"))
 
@@ -116,11 +122,9 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
 
         source.reject_and_requeue(album_record, bv_result)
 
-        db_arg, request_id, outcome = mock_finalize.call_args.args
-        self.assertIs(db_arg, fake_db)
-        self.assertEqual(request_id, 42)
-        self.assertEqual(outcome.target_status, "wanted")
-        self.assertIsNone(outcome.from_status)
+        row = fake_db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
 
 
 class TestDatabaseSource(unittest.TestCase):
@@ -203,36 +207,13 @@ class TestDatabaseSource(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["status"], "imported")
 
-    @patch("lib.import_dispatch._do_mark_done")
-    def test_mark_done_delegates_to_shared_helper(self, mock_mark_done):
-        source, db = self._make_source()
-        req_id = db.add_request(
-            mb_release_id="delegate-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        record = _make_record(db_request_id=req_id, db_source="request")
-        bv_result = ValidationResult(
-            valid=True, distance=0.05, scenario="strong_match", detail="ok")
-        dl = DownloadInfo(username="user1", filetype="mp3")
-
-        source.mark_done(
-            record,
-            bv_result,
-            dest_path="/Incoming/A/B",
-            download_info=dl,
-        )
-
-        mock_mark_done.assert_called_once_with(
-            db=db,
-            request_id=req_id,
-            dl_info=dl,
-            distance=0.05,
-            scenario="strong_match",
-            dest_path="/Incoming/A/B",
-            detail="ok",
-        )
+    # NOTE: the former ``test_mark_done_delegates_to_shared_helper`` was a
+    # wire-check that patched ``lib.import_dispatch._do_mark_done`` and
+    # asserted the call args. It was redundant with
+    # ``test_mark_done_redownload_stages`` above, which exercises the real
+    # ``_do_mark_done`` and asserts the user-visible outcome (row status
+    # advances to ``imported``). Deleted as part of #290 migration: the
+    # behavioral test already proves the delegation works.
 
     def test_reject_and_requeue_updates_status_and_denylists(self):
         source, db = self._make_source()

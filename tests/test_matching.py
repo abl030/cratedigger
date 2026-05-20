@@ -28,6 +28,7 @@ from lib.matching import (
 )
 from lib.peer_cache import PeerCache
 from lib.quality import CandidateScore
+from tests.fakes import FakePipelineDBSource, FakeSlskdAPI
 from tests.test_peer_cache import FakeRedis
 
 
@@ -75,8 +76,8 @@ def _make_ctx(
 ) -> CratediggerContext:
     ctx = CratediggerContext(
         cfg=cfg,
-        slskd=MagicMock(),
-        pipeline_db_source=MagicMock(),
+        slskd=FakeSlskdAPI(),
+        pipeline_db_source=FakePipelineDBSource(),
     )
     ctx.current_album_cache[album_id] = _make_album(album_title, album_artist)
     return ctx

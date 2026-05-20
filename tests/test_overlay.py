@@ -31,9 +31,6 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             "bad-quality": {"beets_format": None, "beets_bitrate": None},
         }
 
-        def _rank(fmt, bitrate):
-            return f"{fmt or 'unknown'}:{bitrate}"
-
         with patch("web.server.check_beets_library",
                    return_value={"held", "both", "bad-quality"}), \
                 patch("web.server.check_pipeline",
@@ -41,8 +38,7 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                           "queued": {"id": 21, "status": "wanted"},
                           "both": {"id": 22, "status": "queued"},
                       }), \
-                patch("web.server._beets_db", return_value=mock_beets), \
-                patch("web.server.compute_library_rank", side_effect=_rank):
+                patch("web.server._beets_db", return_value=mock_beets):
             overlay_release_rows_in_place(rows, [r["id"] for r in rows])
 
         by_id = {row["id"]: row for row in rows}
@@ -51,7 +47,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["held"]["beets_album_id"], 10)
         self.assertEqual(by_id["held"]["library_format"], "FLAC")
         self.assertEqual(by_id["held"]["library_min_bitrate"], 1100)
-        self.assertEqual(by_id["held"]["library_rank"], "FLAC:1100")
+        # Real compute_library_rank — 1100kbps FLAC is lossless.
+        self.assertEqual(by_id["held"]["library_rank"], "lossless")
         self.assertIsNone(by_id["held"]["pipeline_status"])
 
         self.assertFalse(by_id["queued"]["in_library"])
@@ -71,7 +68,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
 
         self.assertEqual(by_id["bad-quality"]["library_format"], "")
         self.assertEqual(by_id["bad-quality"]["library_min_bitrate"], 0)
-        self.assertEqual(by_id["bad-quality"]["library_rank"], "unknown:0")
+        # Real compute_library_rank — empty format/bitrate is unknown.
+        self.assertEqual(by_id["bad-quality"]["library_rank"], "unknown")
 
     def test_empty_inputs_do_not_touch_backends(self):
         with patch("web.server.check_beets_library") as check_lib, \
