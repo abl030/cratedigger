@@ -90,15 +90,9 @@
   "test_repair_cli.py": {
     "patch:lib.transitions.finalize_request": 1,
     "patch:scripts.repair._collect_issues": 1,
-    "patch:scripts.repair._get_all_rows": 3,
-    "patch:scripts.repair._get_slskd_active_transfers": 3,
     "patch:scripts.repair.find_blocked_recovery_issues": 1,
     "patch:scripts.repair.find_orphaned_downloads": 2,
-    "patch:scripts.repair.read_runtime_config": 3,
     "stateful_mock_assign:db": 5
-  },
-  "test_transitions.py": {
-    "patch:lib.transitions.apply_transition": 1
   },
   "test_web_server.py": {
     "patch:lib.transitions.finalize_request": 26,
