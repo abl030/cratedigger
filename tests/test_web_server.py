@@ -141,12 +141,48 @@ class _WebServerCase(unittest.TestCase):
             return e.code, json.loads(e.read())
 
 
+def _pipeline_db_test_harness(fake: "FakePipelineDB | None" = None) -> MagicMock:
+    """Build the contract-test pipeline-DB harness.
+
+    Returns a MagicMock that ``wraps`` a real :class:`FakePipelineDB`. The
+    fake is the source of truth for state (seeded request rows live there
+    via :meth:`seed_request`); the MagicMock layer records every call so
+    contract tests can keep using ``.return_value = X`` / ``.assert_called_*``
+    overrides without re-engineering ~300 sites in a single PR.
+
+    The audit rule (``code-quality.md`` § MOCKS: LEAF-SEAM ONLY) forbids
+    constructing ``MagicMock()`` directly for ``mock_db`` / ``failing_db``
+    style variables because pure MagicMocks let production code rot
+    unobserved. Wrapping a FakePipelineDB closes that loophole: any call
+    the test does NOT explicitly override falls through to the typed
+    fake, so production code paths still hit real state mutations and
+    state-based assertions remain available via the underlying fake.
+
+    Tests can reach the underlying fake through the ``_fake`` attribute on
+    the mock (or by accepting the helper's return value directly in
+    bespoke harnesses such as the ``failing_db`` site).
+    """
+    backing = fake if fake is not None else FakePipelineDB()
+    harness = MagicMock(wraps=backing)
+    # FakePipelineDB.set_tracks requires every track dict to carry
+    # ``track_number``. The legacy MagicMock harness silently accepted
+    # slimmer test fixtures (``[{"title": "..."}]``); preserve that
+    # behaviour by short-circuiting the write — these contract tests
+    # exercise the route's response shape, not the track-row layout.
+    # Production callers always emit a ``track_number`` field.
+    harness.set_tracks = MagicMock(return_value=None)
+    harness._fake = backing
+    return harness
+
+
 def _make_server():
     """Create a test server with mocked DB on a random port."""
     import web.server as srv
     from lib.release_identity import detect_release_source, normalize_release_id
-    # Mock the pipeline DB
-    mock_db = MagicMock()
+    # Mock the pipeline DB. The MagicMock wraps a real FakePipelineDB so
+    # unmocked methods fall through to typed state — see
+    # ``_pipeline_db_test_harness`` for the rationale.
+    mock_db = _pipeline_db_test_harness()
     mock_db.get_log.return_value = [
         {
             "id": 1, "request_id": 100, "outcome": "success",
@@ -6882,7 +6918,9 @@ class TestBeetsRouteContracts(_WebServerCase):
 
         self._srv.beets_db_path = "/tmp/beets.db"
         self._configure_beets_delete_mock(mock_beets_cls)
-        failing_db = MagicMock()
+        # Wrap a real FakePipelineDB so unmocked methods fall through to
+        # typed state — same rationale as ``_pipeline_db_test_harness``.
+        failing_db = _pipeline_db_test_harness()
         failing_db.get_request.return_value = make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         )

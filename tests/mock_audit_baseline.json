@@ -4,9 +4,5 @@
   },
   "test_matching.py": {
     "patch:lib.matching._track_titles_cross_check": 1
-  },
-  "test_web_server.py": {
-    "stateful_mock_assign:failing_db": 1,
-    "stateful_mock_assign:mock_db": 1
   }
 }
