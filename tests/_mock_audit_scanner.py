@@ -71,12 +71,15 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"\.requests\."),
     re.compile(r"^urllib\."),
     re.compile(r"^requests\."),
-    # OS / filesystem leaf seams
+    # OS / filesystem leaf seams (stdlib os.*)
     re.compile(r"\.os\.path\."),
-    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|unlink|rmdir)$"),
+    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink)$"),
     re.compile(r"\.shutil\."),
     re.compile(r"^os\.path\."),
     re.compile(r"^shutil\."),
+    # threading / signal primitives
+    re.compile(r"\.threading\.(Event|Lock|RLock|Thread|Condition)$"),
+    re.compile(r"\.signal\.(signal|SIGINT|SIGTERM|alarm)$"),
     # Time
     re.compile(r"\.time\.(sleep|monotonic|time)$"),
     re.compile(r"^time\."),

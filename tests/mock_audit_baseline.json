@@ -15,7 +15,6 @@
     "patch:lib.browse.logger": 6
   },
   "test_config.py": {
-    "patch:cratedigger.os.getcwd": 1,
     "patch:lib.config.CratediggerConfig.from_ini": 1
   },
   "test_cooldown.py": {
@@ -28,10 +27,6 @@
   "test_cycle_summary.py": {
     "patch:lib.matching.album_match": 1,
     "stateful_mock_assign:slskd": 2
-  },
-  "test_disambiguation.py": {
-    "patch:harness.import_one.os.getpgid": 1,
-    "patch:harness.import_one.os.killpg": 1
   },
   "test_dispatch_core.py": {
     "patch:lib.beets_db.BeetsDB": 1,
@@ -125,7 +120,6 @@
     "patch:scripts.import_preview_worker.logger.exception": 2,
     "patch:scripts.import_preview_worker.logger.warning": 2,
     "patch:scripts.import_preview_worker.run_once": 3,
-    "patch:scripts.import_preview_worker.threading.Event": 1,
     "stateful_mock_assign:beets": 1
   },
   "test_integration.py": {
