@@ -922,12 +922,30 @@ class PipelineDB:
 
     def _execute(self, sql, params=()):
         self._ensure_conn()
-        cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        if params:
-            cur.execute(sql, params)
-        else:
-            cur.execute(sql)
-        return cur
+        try:
+            cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            if params:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+            return cur
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            # If libpq has just discovered the socket is dead (server-side
+            # close while the connection sat idle between statements), the
+            # error leaves ``conn.closed != 0``. Reconnect once and retry
+            # the statement; autocommit semantics mean no in-flight
+            # transaction state is being silently dropped. Statement-level
+            # OperationalErrors (e.g. statement_timeout) keep the
+            # connection open — re-raise those so the caller sees them.
+            if not self.conn.closed:
+                raise
+            self.conn = self._connect()
+            cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            if params:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+            return cur
 
     @contextmanager
     def advisory_lock(self, namespace: int, key: int) -> Iterator[bool]:

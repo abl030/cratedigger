@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import msgspec
+import psycopg2
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -667,7 +668,24 @@ def run_threaded_workers(
         thread_worker_id = f"{worker_id}:preview-{index}"
         try:
             while not stop.is_set():
-                job = run_once(thread_db, worker_id=thread_worker_id)
+                try:
+                    job = run_once(thread_db, worker_id=thread_worker_id)
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+                    # Transient DB connection loss — the live failure mode
+                    # is PostgreSQL dropping the worker's idle connection
+                    # between jobs. ``PipelineDB._execute`` reconnects on
+                    # subsequent calls, so we just need to back off and
+                    # keep polling rather than tearing the whole process
+                    # down. A persistent failure will surface as repeated
+                    # warnings and either Postgres recovery or systemd
+                    # restart resolves it.
+                    logger.warning(
+                        "Import preview worker thread %s lost DB connection; "
+                        "backing off and retrying: %s",
+                        index, exc,
+                    )
+                    stop.wait(poll_interval)
+                    continue
                 if job is None:
                     stop.wait(poll_interval)
         except BaseException as exc:

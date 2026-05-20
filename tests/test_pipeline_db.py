@@ -6441,5 +6441,109 @@ def psycopg2_extras_module():
     return _extras
 
 
+class _FakeCursor:
+    def __init__(self, conn, raise_on_execute=None, mark_conn_closed_on_error=False):
+        self._conn = conn
+        self._raise_on_execute = raise_on_execute
+        self._mark_conn_closed_on_error = mark_conn_closed_on_error
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+        exc = self._raise_on_execute
+        if exc is not None:
+            if self._mark_conn_closed_on_error:
+                self._conn.closed = 2
+            raise exc
+
+    def fetchone(self):
+        return {"ok": 1}
+
+
+class _FakeConn:
+    def __init__(self, raise_on_execute=None, mark_conn_closed_on_error=False):
+        self.closed = 0
+        self.autocommit = False
+        self._raise_on_execute = raise_on_execute
+        self._mark_conn_closed_on_error = mark_conn_closed_on_error
+        self.cursors = []
+
+    def cursor(self, *args, **kwargs):
+        cur = _FakeCursor(
+            self,
+            raise_on_execute=self._raise_on_execute,
+            mark_conn_closed_on_error=self._mark_conn_closed_on_error,
+        )
+        self.cursors.append(cur)
+        return cur
+
+    def close(self):
+        self.closed = 1
+
+
+class TestPipelineDBReconnectOnDeadConn(unittest.TestCase):
+    """``PipelineDB._execute`` must transparently reconnect when the
+    server has closed the socket between statements.
+
+    Reproduces the live failure mode from the import-preview worker:
+    the connection sits idle between jobs long enough that PostgreSQL
+    (or an intermediary) tears it down, libpq doesn't notice until the
+    next send, and the next ``cur.execute`` raises ``OperationalError``
+    with ``conn.closed != 0``. ``_execute`` must reconnect once and
+    retry the statement instead of letting the exception escape and
+    crash the worker thread.
+    """
+
+    def test_reconnects_and_retries_on_operational_error_with_dead_conn(self):
+        import psycopg2 as real_psycopg2
+
+        dead_conn = _FakeConn(
+            raise_on_execute=real_psycopg2.OperationalError(
+                "server closed the connection unexpectedly"
+            ),
+            mark_conn_closed_on_error=True,
+        )
+        live_conn = _FakeConn()
+        conn_iter = iter([dead_conn, live_conn])
+
+        with patch("psycopg2.connect", side_effect=lambda *a, **kw: next(conn_iter)):
+            from lib import pipeline_db
+            db = pipeline_db.PipelineDB(dsn="postgresql://fake")
+            cur = db._execute("SELECT 1")
+
+        # We consumed both fake conns: initial + reconnect-on-retry.
+        self.assertEqual(db.conn, live_conn)
+        # The retry happened on the live conn.
+        self.assertEqual(len(live_conn.cursors), 1)
+        self.assertIs(cur, live_conn.cursors[0])
+        self.assertEqual(cur.executed, [("SELECT 1", None)])  # type: ignore[attr-defined]
+
+    def test_does_not_retry_when_conn_still_open_after_error(self):
+        """Statement-level OperationalError (e.g. statement_timeout) keeps
+        the connection open. We must NOT silently retry — that would
+        mask real query failures and could double-execute side effects.
+        Re-raise so the caller sees the error.
+        """
+        import psycopg2 as real_psycopg2
+
+        live_but_failing_conn = _FakeConn(
+            raise_on_execute=real_psycopg2.OperationalError(
+                "canceling statement due to statement timeout"
+            ),
+            mark_conn_closed_on_error=False,
+        )
+        conn_iter = iter([live_but_failing_conn])
+
+        with patch("psycopg2.connect", side_effect=lambda *a, **kw: next(conn_iter)):
+            from lib import pipeline_db
+            db = pipeline_db.PipelineDB(dsn="postgresql://fake")
+            with self.assertRaises(real_psycopg2.OperationalError):
+                db._execute("SELECT 1")
+
+        # Only the original conn was used; no reconnect.
+        self.assertEqual(db.conn, live_but_failing_conn)
+        self.assertEqual(len(live_but_failing_conn.cursors), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

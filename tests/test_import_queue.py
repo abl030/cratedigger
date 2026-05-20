@@ -1769,6 +1769,79 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_threaded_worker_treats_db_operational_error_as_transient(self):
+        """A dead DB connection raised mid-poll must NOT kill the worker.
+
+        Live failure mode (2026-05-20): PostgreSQL drops the
+        preview-worker connection during long idle windows between
+        jobs; libpq doesn't notice until the next send, so the next
+        ``claim_next_import_preview_job`` raises
+        ``psycopg2.OperationalError``. Previously this propagated out of
+        ``worker_loop`` into the ``BaseException`` handler, which set
+        ``stop`` and crashed the whole process with exit-code 1 — even
+        though ``PipelineDB._execute`` now reconnects on subsequent
+        calls. Defense in depth: the worker must catch the transient
+        error, log it, back off, and keep polling.
+        """
+        import psycopg2
+        from scripts import import_preview_worker
+
+        class ThreadDB:
+            def close(self):
+                pass
+
+        calls = 0
+        calls_lock = threading.Lock()
+        stop_holder: dict[str, Any] = {}
+
+        def run_once(db, *, worker_id):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                current = calls
+            if current == 1:
+                raise psycopg2.OperationalError(
+                    "server closed the connection unexpectedly"
+                )
+            # On the second iteration, stop the workers so the test
+            # terminates. We grab the live ``stop`` event via the
+            # ``run_threaded_workers`` frame for visibility.
+            stop = stop_holder.get("stop")
+            if stop is not None:
+                stop.set()
+            return None
+
+        # Capture the ``stop`` event from inside ``run_threaded_workers``
+        # by monkeypatching ``threading.Event``.
+        real_event = threading.Event
+
+        def capturing_event():
+            ev = real_event()
+            stop_holder.setdefault("stop", ev)
+            return ev
+
+        with (
+            patch("scripts.import_preview_worker.PipelineDB",
+                  side_effect=lambda dsn: ThreadDB()),
+            patch("scripts.import_preview_worker.run_once",
+                  side_effect=run_once),
+            patch("scripts.import_preview_worker.threading.Event",
+                  side_effect=capturing_event),
+            patch("scripts.import_preview_worker.logger.warning"),
+            patch("scripts.import_preview_worker.logger.exception"),
+            patch("scripts.import_preview_worker.logger.error"),
+        ):
+            exit_code = import_preview_worker.run_threaded_workers(
+                dsn="postgresql://example",
+                worker_id="preview-test",
+                worker_count=1,
+                poll_interval=0.01,
+            )
+
+        self.assertEqual(exit_code, 0)
+        # We saw at least the transient raise + one post-recover poll.
+        self.assertGreaterEqual(calls, 2)
+
 
 class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     """U1: worker short-circuits measurement when stored candidate evidence
