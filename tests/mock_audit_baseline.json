@@ -38,12 +38,6 @@
     "patch:lib.quality.full_pipeline_decision": 2,
     "stateful_mock_assign:db": 1
   },
-  "test_repair_cli.py": {
-    "patch:scripts.repair._collect_issues": 1,
-    "patch:scripts.repair.find_blocked_recovery_issues": 1,
-    "patch:scripts.repair.find_orphaned_downloads": 2,
-    "stateful_mock_assign:db": 4
-  },
   "test_web_server.py": {
     "patch:web.routes.pipeline.preview_import_from_values": 1,
     "stateful_mock_assign:failing_db": 1,
