@@ -797,9 +797,10 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            raise unittest.SkipTest(
+            raise AssertionError(
                 f"ffmpeg cannot synthesize 5.1(side) FLAC fixture "
-                f"(rc={result.returncode}): {result.stderr[-300:]}"
+                f"(rc={result.returncode}): {result.stderr[-300:]} — "
+                "nix-shell ffmpeg should support this"
             )
 
     def test_5_1_flac_converts_to_opus_via_stereo_downmix(self):
@@ -860,7 +861,7 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=30)
             if result.returncode != 0:
-                raise unittest.SkipTest(
+                raise AssertionError(
                     f"ffmpeg stereo fixture failed: {result.stderr[-300:]}")
             opus_128 = parse_verified_lossless_target("opus 128")
             converted, failed, _ext, channels = convert_lossless(

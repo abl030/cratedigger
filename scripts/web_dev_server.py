@@ -106,10 +106,10 @@ class DevHTTPServer(ThreadingHTTPServer):
 
 
 class DevHandler(BaseHTTPRequestHandler):
-    server: DevHTTPServer
+    server: DevHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
-    def log_message(self, fmt: str, *args: object) -> None:
-        print(f"{self.address_string()} - {fmt % args}", flush=True)
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - match base signature
+        print(f"{self.address_string()} - {format % args}", flush=True)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)

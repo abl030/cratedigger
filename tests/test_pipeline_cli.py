@@ -51,7 +51,6 @@ def make_db():
     return db
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdAdd(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
@@ -206,7 +205,6 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         self.assertEqual(len(db.search_plans), before_plan_count)
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdList(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
@@ -228,7 +226,6 @@ class TestCmdList(unittest.TestCase):
         pipeline_cli.cmd_list(self.db, args)
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdRetry(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
@@ -246,7 +243,6 @@ class TestCmdRetry(unittest.TestCase):
         self.assertEqual(req["status"], "wanted")
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdCancel(unittest.TestCase):
     def setUp(self):
         self.db = make_db()
@@ -999,7 +995,6 @@ class TestCmdQuery(unittest.TestCase):
         self.assertEqual(db._execute.call_count, 3)
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdQueryIntegration(unittest.TestCase):
     """Integration test: read-only session rejects writes against real DB."""
 
@@ -1040,7 +1035,6 @@ class TestCmdQueryIntegration(unittest.TestCase):
         self.assertNotIn("IndexError", stderr.getvalue())
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdStatusShowsDownloading(unittest.TestCase):
     def setUp(self):
         self.db = make_db()

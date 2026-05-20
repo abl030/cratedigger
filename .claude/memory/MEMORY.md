@@ -7,10 +7,12 @@
 - [Playwright test artists](feedback_playwright_test_artists.md) — Brief the playwright agent to use small/obscure artists, not Radiohead — 15s mirror timeout
 - [Prose over picker](feedback_prose_over_picker.md) — User dislikes the AskUserQuestion picker; default to plain prose questions in chat
 - [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
+- [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
+- [Pyright on the full repo](feedback_pyright_full_repo.md) — Always `nix-shell --run "pyright"` on the whole repo, never a subset; fix pre-existing errors in the same pass
+- [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
 - [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
 - [Audio quality type system](project_audio_quality_types.md) — AudioFileSpec + AudioQualityMeasurement deployed; AudioQualityState deferred
 - [Refactoring phases](project_refactoring_phases.md) — Status of the multi-phase refactoring of cratedigger.py through pyright cleanup
 - [Renamed to cratedigger](project_cratedigger_rename.md) — Project is cratedigger now across the board (repo, DB, systemd, working dir, memory dir)
-- [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
 - [Plex asciify_paths split](project_plex_asciify_split.md) — 2026-05-18: asciify_paths + beet move split 1,178 Plex albums; fix is Plex merge API, not Empty Trash

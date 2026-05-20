@@ -28,7 +28,6 @@ from tests.audio_fixtures import make_test_flac, make_test_album, get_bitrate_kb
 # Audio fixtures sanity
 # ============================================================================
 
-@unittest.skipUnless(shutil.which("sox"), "sox not available")
 class TestAudioFixtures(unittest.TestCase):
     """Verify the synthetic audio fixture produces expected bitrates."""
 
@@ -460,7 +459,6 @@ class TestFlacSpec(unittest.TestCase):
 # E2E conversion tests — real files through convert_lossless
 # ============================================================================
 
-@unittest.skipUnless(shutil.which("sox"), "sox not available")
 class TestConvertLosslessE2E(unittest.TestCase):
     """Generate real FLAC files, convert with ConversionSpec, verify disk state."""
 
@@ -681,7 +679,6 @@ class TestConvertLosslessE2E(unittest.TestCase):
 # Full pipeline decision tests — real files through decision chain
 # ============================================================================
 
-@unittest.skipUnless(shutil.which("sox"), "sox not available")
 class TestConversionPipelineE2E(unittest.TestCase):
     """Exercise the full decision chain with real files.
 
@@ -876,8 +873,6 @@ class TestConversionPipelineE2E(unittest.TestCase):
 # Native lossy V0 research probe — temp re-encode of lossy candidates
 # ============================================================================
 
-@unittest.skipUnless(shutil.which("sox") and shutil.which("ffmpeg"),
-                     "sox or ffmpeg not available")
 class TestProbeNativeLossyAsV0(unittest.TestCase):
     """`_probe_native_lossy_as_v0` re-encodes a candidate's lossy audio files
     to V0 in a temp dir and returns research-kind probe evidence. It must

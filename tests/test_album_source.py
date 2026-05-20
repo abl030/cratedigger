@@ -123,7 +123,6 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
         self.assertIsNone(outcome.from_status)
 
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set — skipping PostgreSQL tests")
 class TestDatabaseSource(unittest.TestCase):
     def _make_source(self):
         """Create a DatabaseSource with test PostgreSQL DB."""

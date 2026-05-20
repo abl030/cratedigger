@@ -276,62 +276,6 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
 # Integration tests — require sox + test audio files
 # ============================================================
 
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "albums")
-HAS_SOX = shutil.which("sox") is not None
-HAS_FIXTURES = os.path.isdir(FIXTURES_DIR) and os.path.isdir(os.path.join(FIXTURES_DIR, "01_genuine_flac"))
-
-
-def _fixture(name):
-    return os.path.join(FIXTURES_DIR, name)
-
-
-@unittest.skipUnless(HAS_SOX, "sox not available")
-@unittest.skipUnless(HAS_FIXTURES, "fixtures not generated — run tests/fixtures/generate_fixtures.sh")
-class TestSpectralIntegration(unittest.TestCase):
-    """Integration tests with real sox and generated audio fixtures."""
-
-    def test_genuine_flac_all_genres(self):
-        from lib.spectral_check import analyze_album
-        result = analyze_album(_fixture("01_genuine_flac"))
-        self.assertEqual(result.grade, "genuine",
-                         f"Genuine FLACs flagged as {result.grade} ({result.suspect_pct:.0f}% suspect)")
-
-    def test_genuine_v0_all_genres(self):
-        from lib.spectral_check import analyze_album
-        result = analyze_album(_fixture("02_genuine_v0"))
-        self.assertEqual(result.grade, "genuine",
-                         f"Genuine V0s flagged as {result.grade} ({result.suspect_pct:.0f}% suspect)")
-
-    def test_genuine_320_all_genres(self):
-        from lib.spectral_check import analyze_album
-        result = analyze_album(_fixture("04_cbr_320"))
-        self.assertEqual(result.grade, "genuine",
-                         f"Genuine 320s flagged as {result.grade} ({result.suspect_pct:.0f}% suspect)")
-
-    def test_transcode_128_flac_detected(self):
-        from lib.spectral_check import analyze_album
-        result = analyze_album(_fixture("09_fake_flac_128"))
-        self.assertIn(result.grade, ("suspect", "likely_transcode"),
-                      f"128→FLAC transcodes not detected: {result.grade} ({result.suspect_pct:.0f}%)")
-        # Should estimate ~128kbps
-        for t in result.tracks:
-            if t.cliff_detected:
-                self.assertIsNotNone(t.estimated_bitrate_kbps)
-                self.assertLessEqual(t.estimated_bitrate_kbps, 160)
-
-    def test_transcode_192_flac_detected(self):
-        from lib.spectral_check import analyze_album
-        result = analyze_album(_fixture("11_fake_flac_192"))
-        self.assertIn(result.grade, ("suspect", "likely_transcode"),
-                      f"192→FLAC transcodes not detected: {result.grade} ({result.suspect_pct:.0f}%)")
-
-    def test_album_grade_has_estimated_bitrate(self):
-        from lib.spectral_check import analyze_album
-        result = analyze_album(_fixture("09_fake_flac_128"))
-        self.assertIsNotNone(result.estimated_bitrate_kbps,
-                             "Album-level estimated bitrate should be set for transcodes")
-
-
 class TestDecodeFailureNotGenuine(unittest.TestCase):
     """A sox decode failure must NOT be silently graded as genuine.
 
@@ -377,10 +321,6 @@ class TestDecodeFailureNotGenuine(unittest.TestCase):
         self.assertEqual(result.hf_deficit_db, 0.0)
 
 
-HAS_FFMPEG = shutil.which("ffmpeg") is not None
-
-
-@unittest.skipUnless(HAS_SOX and HAS_FFMPEG, "needs sox + ffmpeg")
 class TestM4aFallback(unittest.TestCase):
     """Real ALAC .m4a file must produce a real spectral measurement.
 
@@ -447,18 +387,16 @@ class TestArgvFlagConfusion(unittest.TestCase):
         # could ship via Soulseek. Sox CAN decode FLAC natively, so any
         # failure here proves argv-flag confusion (not a decode failure).
         cls.dash_flac = os.path.join(cls.tmpdir, "-evil.flac")
-        if HAS_SOX:
-            subprocess.run(
-                ["sox", "-n", "-r", "44100", "-c", "2",
-                 cls.dash_flac, "synth", "2", "sin", "1000", "vol", "0.5"],
-                check=True, capture_output=True,
-            )
+        subprocess.run(
+            ["sox", "-n", "-r", "44100", "-c", "2",
+             cls.dash_flac, "synth", "2", "sin", "1000", "vol", "0.5"],
+            check=True, capture_output=True,
+        )
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
-    @unittest.skipUnless(HAS_SOX, "sox not available")
     def test_leading_dash_filename_does_not_get_parsed_as_flag(self):
         """A real FLAC named '-evil.flac' must analyze normally, not be
         parsed as a sox flag and abort."""
@@ -491,7 +429,6 @@ class TestAlbumLevelSilentGenuineCollapse(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
-    @unittest.skipUnless(HAS_SOX and HAS_FFMPEG, "needs sox + ffmpeg")
     def test_all_tracks_error_grades_album_error_not_genuine(self):
         """If every track in a non-empty album errors, the album grade
         must be 'error', not the silent-default 'genuine'."""

@@ -322,7 +322,7 @@ def _inspect_audio_file(path: str) -> tuple[dict[str, list[str]], float | None, 
 
     tags: dict[str, list[str]] = {}
     raw_tags = getattr(audio, "tags", None)
-    if hasattr(raw_tags, "items"):
+    if raw_tags is not None and hasattr(raw_tags, "items"):
         for raw_key, value in raw_tags.items():
             key = _normalized_tag_key(raw_key)
             if key is None:

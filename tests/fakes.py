@@ -877,7 +877,8 @@ class FakePipelineDB:
                 and int(row["id"]) == int(ignore_import_job_id)
             ):
                 continue
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            payload_raw = row.get("payload")
+            payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
             payload_dirs = {
                 str(path) for path in payload.get("source_dirs", [])
                 if path

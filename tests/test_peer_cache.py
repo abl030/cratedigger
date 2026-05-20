@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import os
 import time
 import unittest
-from typing import Any, cast
+from typing import Any
 from unittest.mock import MagicMock, patch
-
-import redis
 
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
@@ -301,25 +298,3 @@ class TestSearchResultScalarMerge(unittest.TestCase):
         self.assertEqual(redis.get("peer_dir_count:user1:dirA"), 20)
 
 
-@unittest.skipUnless(
-    os.environ.get("CRATEDIGGER_REAL_REDIS_PORT"),
-    "set CRATEDIGGER_REAL_REDIS_PORT to run the real Redis peer-cache slice",
-)
-class TestPeerCacheRealRedis(unittest.TestCase):
-    def test_real_redis_stores_directory_as_bytes_with_ttl(self) -> None:
-        port = int(os.environ["CRATEDIGGER_REAL_REDIS_PORT"])
-        host = os.environ.get("CRATEDIGGER_REAL_REDIS_HOST", "127.0.0.1")
-        client = redis.Redis(host=host, port=port, decode_responses=False)
-        cache = PeerCache(client, ttl_seconds=60, speed_ttl_seconds=10)
-        username = f"real-test-{int(time.time() * 1000)}"
-        file_dir = "Music:Artist/Album"
-        key = f"peer_dir:{username}:{file_dir}"
-        directory = {"directory": file_dir, "files": [{"filename": "01.flac"}]}
-        self.addCleanup(client.delete, key)
-
-        cache.set_directory(username, file_dir, directory)
-
-        raw = client.get(key)
-        self.assertIsInstance(raw, bytes)
-        self.assertGreater(cast(int, client.ttl(key)), 0)
-        self.assertEqual(cache.get_directory(username, file_dir), directory)

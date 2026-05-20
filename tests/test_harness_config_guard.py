@@ -25,6 +25,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 
@@ -123,7 +124,7 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
                 "discogs_albumid": 0,
             }
 
-        task = SimpleNamespace(chosen_info=lambda: FakeAlbumInfo())
+        task = cast(Any, SimpleNamespace(chosen_info=lambda: FakeAlbumInfo()))
 
         data = beets_harness._duplicate_lookup_metadata(task)
 
@@ -132,11 +133,11 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
         self.assertEqual(data["albumartist"], "The National")
 
     def test_maps_raw_album_id_to_mb_albumid(self):
-        task = SimpleNamespace(chosen_info=lambda: {
+        task = cast(Any, SimpleNamespace(chosen_info=lambda: {
             "artist": "The National",
             "album": "High Violet",
             "album_id": "mb-123",
-        })
+        }))
 
         data = beets_harness._duplicate_lookup_metadata(task)
 
@@ -167,10 +168,10 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
             items=lambda: [SimpleNamespace(path=b"/beets/old/01.opus")])
         lib = MagicMock()
         lib.albums.return_value = [duplicate]
-        task = SimpleNamespace(
+        task = cast(Any, SimpleNamespace(
             chosen_info=lambda: FakeAlbumInfo(),
             items=[SimpleNamespace(path=b"/incoming/new/01.opus")],
-        )
+        ))
 
         old_config = beets_harness.config
         old_album = beets_harness.library.Album
@@ -184,10 +185,11 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
             beets_harness.library.Album = old_album
 
         self.assertEqual(duplicates, [duplicate])
-        self.assertEqual(FakeAlbum.last.kwargs["mb_albumid"], "mb-123")
-        self.assertEqual(FakeAlbum.last.kwargs["discogs_albumid"], 0)
-        self.assertEqual(FakeAlbum.last.keys,
-                         ["mb_albumid", "discogs_albumid"])
+        last = FakeAlbum.last
+        assert last is not None
+        self.assertEqual(last.kwargs["mb_albumid"], "mb-123")
+        self.assertEqual(last.kwargs["discogs_albumid"], 0)
+        self.assertEqual(last.keys, ["mb_albumid", "discogs_albumid"])
 
 
 if __name__ == "__main__":

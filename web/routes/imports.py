@@ -2,6 +2,7 @@
 
 import json
 import os
+from typing import cast
 
 import msgspec
 
@@ -662,8 +663,11 @@ def _delete_wrong_match_row(pdb, log_id: int):
 def post_wrong_match_delete(h, body: dict) -> None:
     """Operator-triggered deletion of one visible Wrong Matches candidate."""
     raw_id = body.get("download_log_id")
+    if raw_id is None:
+        h._error("download_log_id must be an integer")
+        return
     try:
-        log_id = int(raw_id)
+        log_id = int(raw_id)  # pyright: ignore[reportArgumentType]
     except (TypeError, ValueError):
         h._error("download_log_id must be an integer")
         return
@@ -690,8 +694,11 @@ def post_wrong_match_delete(h, body: dict) -> None:
 def post_wrong_match_delete_group(h, body: dict) -> None:
     """Operator-triggered deletion of all current Wrong Matches for a request."""
     raw_id = body.get("request_id")
+    if raw_id is None:
+        h._error("request_id must be an integer")
+        return
     try:
-        request_id = int(raw_id)
+        request_id = int(raw_id)  # pyright: ignore[reportArgumentType]
     except (TypeError, ValueError):
         h._error("request_id must be an integer")
         return
@@ -820,7 +827,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
         unmatched_log_ids.append(lid)
 
     for candidate in green_candidates:
-        lid = candidate["download_log_id"]
+        lid = cast(int, candidate["download_log_id"])
         source_username_raw = candidate.get("source_username")
         source_username = (
             str(source_username_raw)
@@ -834,7 +841,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
                 download_log_id=lid,
                 failed_path=str(candidate["failed_path"]),
                 source_username=source_username,
-                source_dirs=list(candidate["source_dirs"]),
+                source_dirs=cast(list, candidate["source_dirs"]),
             ),
             message=(
                 f"Force import queued for "

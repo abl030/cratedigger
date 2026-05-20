@@ -2437,7 +2437,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db = FakePipelineDB()
         for row in downloading_rows or []:
             fake_db.seed_request(row)
-        cfg = _make_ctx().cfg
+        cfg = cast(Any, _make_ctx().cfg)
         tmpdir = tempfile.mkdtemp(prefix="cratedigger-poll-test-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")

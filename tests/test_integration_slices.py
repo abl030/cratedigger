@@ -6308,7 +6308,6 @@ def _u7_test_dsn() -> str | None:
     return os.environ.get("TEST_DB_DSN")
 
 
-@unittest.skipUnless(_u7_test_dsn(), "TEST_DB_DSN not set — slice needs real PG")
 class TestU7RecoverySweepSlice(unittest.TestCase):
     """AE8 integration slice: pre-seed an ``import_jobs`` row with
     ``preview_status='uncertain'``, run the migration-020 sweep against the

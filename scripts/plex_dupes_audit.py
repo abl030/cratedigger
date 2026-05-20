@@ -89,7 +89,7 @@ if failures:
             try:
                 _, raw = fut.result()
                 root = ET.fromstring(raw)
-                files = [p.get('file') for p in root.findall('.//Part') if p.get('file')]
+                files = [f for f in (p.get('file') for p in root.findall('.//Part')) if f]
                 folders = sorted({os.path.dirname(f) for f in files})
                 rk_data[rk] = {'files': files, 'folders': folders, 'track_count': len(files)}
             except Exception as e:

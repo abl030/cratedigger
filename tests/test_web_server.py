@@ -1712,7 +1712,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         status, data = self._post("/api/wrong-matches/triage", {})
 
         self.assertEqual(status, 400)
-        self.assertIn("confirm_all_wrong_matches", data.get("message") or data.get("error"))
+        self.assertIn("confirm_all_wrong_matches", data.get("message") or data.get("error") or "")
         mock_cleanup.assert_not_called()
 
     def test_import_jobs_contract(self):
@@ -7022,7 +7022,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         # never through cleanup_wrong_match.
         from lib.wrong_match_cleanup_service import cleanup_wrong_match as _cwm_sentinel
         import web.routes.imports as _imports_mod
-        _imports_mod.cleanup_wrong_match = _cwm_sentinel
+        _imports_mod.cleanup_wrong_match = _cwm_sentinel  # pyright: ignore[reportAttributeAccessIssue]
         cleanup_patch = patch(
             "web.routes.imports.cleanup_wrong_match",
             side_effect=lambda _db, lid: self._cleanup_result(lid),
@@ -7990,7 +7990,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         status, data = self._post("/api/wrong-matches/triage", {})
 
         self.assertEqual(status, 400)
-        self.assertIn("confirm_all_wrong_matches", data.get("message") or data.get("error"))
+        self.assertIn("confirm_all_wrong_matches", data.get("message") or data.get("error") or "")
 
     @patch("web.routes.imports.cleanup_all_wrong_matches")
     def test_bulk_triage_runs_full_wrong_matches_queue(self, mock_cleanup):

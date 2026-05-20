@@ -455,15 +455,16 @@ def _active_jobs(
     source_dirs: Iterable[str],
     ignore_import_job_id: int | None,
 ) -> list[Any]:
-    finder = getattr(db, "list_active_import_jobs_for_wrong_match", None)
+    finder: Any = getattr(db, "list_active_import_jobs_for_wrong_match", None)
     if callable(finder):
-        return list(finder(
+        result: Any = finder(
             download_log_id=download_log_id,
             request_id=request_id,
             failed_paths=failed_paths,
             source_dirs=source_dirs,
             ignore_import_job_id=ignore_import_job_id,
-        ))
+        )
+        return list(result)
 
     jobs = getattr(db, "list_active_import_jobs", lambda **_: [])(
         request_id=request_id

@@ -378,6 +378,18 @@ nix-shell --run "python3 -m unittest tests.test_X -v"      # single module
 
 **Never re-run the full suite just to grep output differently.** Read `/tmp/cratedigger-test-output.txt`.
 
+### Skipped tests are an anti-pattern
+
+**At our size, a test either runs or it doesn't exist.** No `@unittest.skipUnless`, no `raise unittest.SkipTest`, no env-gated "only when CRATEDIGGER_REAL_X is set", no "fixtures must be generated first." If you write a test, it runs every single invocation of `bash scripts/run_tests.sh` on a freshly-cloned dev shell. Period.
+
+A skipped test is either:
+1. **Irrelevant** — delete it. The test you "might run someday" with the right env var has never run and gates nothing. "OK (skipped=N)" in the test output is a lie that grows over time as the suite quietly shrinks by attrition while the headline number climbs.
+2. **Mis-designed** — re-design it so it runs without external infrastructure. Use a Nix-provided binary (sox, ffmpeg, redis-server), generate fixtures in `setUp` from a synthetic in-process source, or move it to a slice with `FakeSlskdAPI` / `FakePipelineDB`. If you need a real slskd / real Redis / real audio, the test belongs as an out-of-band manual procedure, not as a `unittest.TestCase` masquerading as coverage.
+
+The audit suite (`tests/test_skip_audit.py`) enforces this: it fails if any test in the suite reports as skipped. If you add a skip-gated test, the audit will fail and CI will block the merge. There is no allowlist.
+
+Why: we hit this on 2026-05-20. The suite was reporting `OK (skipped=56)` for months. The 38 spectral fixture tests had never run since they were committed in March (hardcoded source path that didn't exist on any machine). The 14 slskd-gated tests had never run in the dev shell (no daemon available). The Redis slice had never run (nothing sets the env var). They were all aspirational coverage — pyright-clean but never executed once. Treat any future "let's just gate this on having X" the same way: it will silently rot, and the next person will believe it.
+
 ### Pre-commit hook
 
 Install with: `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`. Runs pyright on staged `.py` files.

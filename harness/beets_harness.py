@@ -270,7 +270,7 @@ def _duplicate_lookup_metadata(task: "ImportTask") -> dict:
     """
     info = task.chosen_info()
     if hasattr(info, "item_data"):
-        data = dict(info.item_data)
+        data = dict(info.item_data)  # pyright: ignore[reportAttributeAccessIssue]
     else:
         data = dict(info)
 
@@ -318,7 +318,7 @@ def _install_release_id_duplicate_lookup() -> None:
     def find_duplicates(self, lib):
         return _find_duplicates_with_mapped_release_ids(self, lib)
 
-    find_duplicates._cratedigger_release_id_mapping = True
+    setattr(find_duplicates, "_cratedigger_release_id_mapping", True)
     BeetsImportTask.find_duplicates = find_duplicates
 
 
@@ -348,7 +348,7 @@ def _album_item_count(album) -> int:
     items = getattr(album, "items", None)
     if callable(items):
         try:
-            return len(list(items()))
+            return len(list(items()))  # pyright: ignore[reportArgumentType]
         except Exception:
             return 0
     return 0
@@ -368,7 +368,7 @@ def _album_path(album) -> str:
     items = getattr(album, "items", None)
     if callable(items):
         try:
-            for item in items():
+            for item in items():  # pyright: ignore[reportGeneralTypeIssues]
                 path = getattr(item, "path", None)
                 if path:
                     return os.path.dirname(_path_str(path))

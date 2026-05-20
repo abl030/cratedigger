@@ -96,7 +96,6 @@ class TestImportOneForceFlag(unittest.TestCase):
 # pipeline_db: get_download_log_entry and force_import outcome
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestGetDownloadLogEntry(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_db()
@@ -158,7 +157,6 @@ class TestGetDownloadLogEntry(unittest.TestCase):
 # pipeline_cli: force-import command
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(TEST_DSN, "TEST_DB_DSN not set")
 class TestCmdForceImport(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_db()

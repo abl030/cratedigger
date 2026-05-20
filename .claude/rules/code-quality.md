@@ -53,6 +53,11 @@ gate should reject obviously-bad candidates early". All of these are wrong.
 Call the full pipeline.
 
 ## Type Safety
+
+# PYRIGHT CLEAN ALWAYS
+
+**Never run pyright on just the files you touched.** Run `nix-shell --run "pyright"` on the full repo, every time. Pre-existing errors are not someone else's problem — they accumulate as drift the moment you decide they're not yours to fix. Fixing each one is cheap; the expensive part is re-discovering them later and arguing about ownership. Triaging "is this mine or pre-existing?" via `git checkout` costs more tokens than just fixing it. **The repo is either 0-errors or it is not. Make it 0-errors.**
+
 - All new dataclasses, functions, and module-level code must pass pyright with 0 errors
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries
 - **No dual-interface types.** Never add `__getitem__`, `.get()`, or `isinstance(x, dict)` dispatch to a dataclass. If a function receives both dicts and dataclasses, that is a type error — fix the callers, not the receiver. Temporary bridges become permanent bugs.

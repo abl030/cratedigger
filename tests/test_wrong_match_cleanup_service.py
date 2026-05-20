@@ -466,7 +466,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
         )
 
-        def raise_get_entry(_download_log_id: int):
+        def raise_get_entry(log_id: int):
             raise RuntimeError("db unavailable")
 
         self.db.get_download_log_entry = raise_get_entry

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import unittest
 from dataclasses import replace
+from typing import Any
 
 import requests
+import requests.adapters
 
 import cratedigger
 from lib.config import CratediggerConfig
@@ -73,7 +76,7 @@ class TestSlskdHttpPoolSizing(unittest.TestCase):
         self.assertEqual(result.sessions_configured, 1)
         self.assertGreaterEqual(result.pool_size, 46)
         for prefix in ("http://", "https://"):
-            adapter = client._session.adapters[prefix]
+            adapter: Any = client._session.adapters[prefix]
             self.assertEqual(adapter._pool_connections, result.pool_size)
             self.assertEqual(adapter._pool_maxsize, result.pool_size)
             self.assertTrue(adapter._pool_block)
@@ -95,11 +98,24 @@ class TestSlskdHttpPoolSizing(unittest.TestCase):
         self.assertIn("Could not configure slskd HTTP pool", captured.output[0])
 
     def test_installed_slskd_client_shape_is_configurable_without_network(self):
-        from tests import conftest
+        # IMPORTANT: import as `conftest`, NOT `from tests import conftest`.
+        # Both work, but they resolve to DIFFERENT module instances in
+        # sys.modules (one loaded via the `tests/` sys.path entry, one via
+        # the `tests` package), and conftest's top-level code runs twice.
+        # The second run captures `slskd_api` AFTER other tests have mocked
+        # it in sys.modules, so the snapshot is a MagicMock. Test files that
+        # import conftest do so as `import conftest` (no package prefix), so
+        # match that.
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import conftest
 
         slskd_api = conftest._real_slskd_api
-        if slskd_api is None or isinstance(slskd_api, Mock):  # pragma: no cover
-            raise unittest.SkipTest("real slskd_api unavailable")
+        assert slskd_api is not None and not isinstance(slskd_api, Mock), (
+            f"real slskd_api snapshot missing — conftest captured "
+            f"{type(slskd_api).__name__!r} ({slskd_api!r}); "
+            "tests mocked sys.modules['slskd_api'] before conftest ran"
+        )
 
         client = slskd_api.SlskdClient(
             host="http://localhost:5030",
@@ -109,7 +125,7 @@ class TestSlskdHttpPoolSizing(unittest.TestCase):
 
         self.assertTrue(result.configured)
         self.assertGreaterEqual(result.sessions_configured, 1)
-        adapter = client.users.session.adapters["http://"]
+        adapter: Any = client.users.session.adapters["http://"]
         self.assertEqual(adapter._pool_maxsize, result.pool_size)
         self.assertTrue(adapter._pool_block)
         self.assertTrue(hasattr(adapter, "timeout"))
