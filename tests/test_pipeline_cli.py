@@ -16,7 +16,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from typing import Any, cast
+
 from scripts import pipeline_cli
+from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -267,16 +270,16 @@ class TestCmdSet(unittest.TestCase):
         mock_finalize,
         _mock_print,
     ):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=9,
             status="manual",
             artist_name="A",
             album_title="B",
-        )
+        ))
 
         args = MagicMock(id=9, status="imported")
-        pipeline_cli.cmd_set(db, args)
+        pipeline_cli.cmd_set(cast(Any, db), args)
 
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)
@@ -300,79 +303,77 @@ class TestCmdForceImport(unittest.TestCase):
     def test_force_import_passes_source_username_to_queue(self, _mock_resolve, _mock_print):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 
-        db = MagicMock()
-        db.get_download_log_entry.return_value = {
-            "request_id": 123,
-            "soulseek_username": "baduser",
-            "validation_result": {"failed_path": "/tmp/Test Album"},
-        }
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
+        ))
+        # Seed a download_log entry that ``get_download_log_entry`` will
+        # retrieve.  ``cmd_force_import`` reads it for the failed_path
+        # and soulseek_username.  Production stores validation_result as
+        # a JSONB dict — pass a dict, not the typed Struct, so the
+        # downstream ``json.loads`` branch isn't tripped.
+        db.log_download(
+            request_id=123,
+            soulseek_username="baduser",
+            outcome="rejected",
+            validation_result={"failed_path": "/tmp/Test Album"},
         )
-        db.enqueue_import_job.return_value = SimpleNamespace(
-            id=55,
-            status="queued",
-            deduped=False,
-        )
+        log_id = db.download_logs[0].id
 
-        args = MagicMock(download_log_id=42)
-        pipeline_cli.cmd_force_import(db, args)
+        args = MagicMock(download_log_id=log_id)
+        pipeline_cli.cmd_force_import(cast(Any, db), args)
 
-        db.enqueue_import_job.assert_called_once()
-        args_, kwargs = db.enqueue_import_job.call_args
-        self.assertEqual(args_, (IMPORT_JOB_FORCE,))
-        self.assertEqual(kwargs["request_id"], 123)
-        self.assertEqual(kwargs["dedupe_key"], force_import_dedupe_key(42))
-        self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Test Album")
-        self.assertEqual(kwargs["payload"]["source_username"], "baduser")
+        # Exactly one import job was enqueued. Inspect the persisted row.
+        self.assertEqual(len(db._import_jobs), 1)
+        job_row = db._import_jobs[0]
+        self.assertEqual(job_row["job_type"], IMPORT_JOB_FORCE)
+        self.assertEqual(job_row["request_id"], 123)
+        self.assertEqual(job_row["dedupe_key"], force_import_dedupe_key(log_id))
+        self.assertEqual(job_row["payload"]["failed_path"], "/tmp/Test Album")
+        self.assertEqual(job_row["payload"]["source_username"], "baduser")
 
 
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
     def test_manual_import_prints_queued_job(self, _mock_resolve, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
-        )
-        db.enqueue_import_job.return_value = SimpleNamespace(
-            id=66,
-            status="queued",
-            deduped=False,
-        )
+        ))
 
         args = MagicMock(id=123, path="/tmp/Album")
-        pipeline_cli.cmd_manual_import(db, args)
+        pipeline_cli.cmd_manual_import(cast(Any, db), args)
 
-        _mock_print.assert_any_call("  [OK] Queued import job #66 (queued).")
+        # FakePipelineDB assigns its own job ID; assert against the
+        # actual one rather than the previous MagicMock placeholder.
+        self.assertEqual(len(db._import_jobs), 1)
+        job_id = db._import_jobs[0]["id"]
+        _mock_print.assert_any_call(f"  [OK] Queued import job #{job_id} (queued).")
 
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
     def test_manual_import_enqueues_job(self, _mock_resolve, _mock_print):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_dedupe_key
 
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
-        )
-        db.enqueue_import_job.return_value = SimpleNamespace(
-            id=66,
-            status="queued",
-            deduped=False,
-        )
+        ))
 
         args = MagicMock(id=123, path="/tmp/Album")
-        pipeline_cli.cmd_manual_import(db, args)
+        pipeline_cli.cmd_manual_import(cast(Any, db), args)
 
-        db.enqueue_import_job.assert_called_once()
-        args_, kwargs = db.enqueue_import_job.call_args
-        self.assertEqual(args_, (IMPORT_JOB_MANUAL,))
-        self.assertEqual(kwargs["request_id"], 123)
-        self.assertEqual(kwargs["dedupe_key"], manual_import_dedupe_key(123, "/tmp/Album"))
-        self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Album")
+        # Exactly one import job was enqueued; assert on the persisted row.
+        self.assertEqual(len(db._import_jobs), 1)
+        job = db._import_jobs[0]
+        self.assertEqual(job["job_type"], IMPORT_JOB_MANUAL)
+        self.assertEqual(job["request_id"], 123)
+        self.assertEqual(job["dedupe_key"], manual_import_dedupe_key(123, "/tmp/Album"))
+        self.assertEqual(job["payload"]["failed_path"], "/tmp/Album")
 
     @patch("builtins.print")
     @patch("scripts.pipeline_cli._resolve_failed_path",
@@ -382,22 +383,18 @@ class TestCmdManualImport(unittest.TestCase):
         does, so a user can type ``failed_imports/Foo - Bar`` without
         pre-absolutizing. Matches cmd_force_import behavior.
         """
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
-        )
-        db.enqueue_import_job.return_value = SimpleNamespace(
-            id=66,
-            status="queued",
-            deduped=False,
-        )
+        ))
         args = MagicMock(id=123, path="failed_imports/Foo - Bar")
-        pipeline_cli.cmd_manual_import(db, args)
+        pipeline_cli.cmd_manual_import(cast(Any, db), args)
 
         _mock_resolve.assert_called_once_with("failed_imports/Foo - Bar")
+        self.assertEqual(len(db._import_jobs), 1)
         self.assertEqual(
-            db.enqueue_import_job.call_args.kwargs["payload"]["failed_path"],
+            db._import_jobs[0]["payload"]["failed_path"],
             "/mnt/virtio/music/slskd/failed_imports/Foo - Bar",
         )
 
@@ -407,14 +404,14 @@ class TestCmdManualImport(unittest.TestCase):
         self, _mock_resolve, mock_print
     ):
         """When the path can't be resolved, abort without calling dispatch."""
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=123, status="manual", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
-        )
+        ))
         args = MagicMock(id=123, path="nonexistent/path")
-        pipeline_cli.cmd_manual_import(db, args)
-        db.enqueue_import_job.assert_not_called()
+        pipeline_cli.cmd_manual_import(cast(Any, db), args)
+        self.assertEqual(db._import_jobs, [])
         mock_print.assert_any_call("  Files not found at: nonexistent/path")
 
 
@@ -422,7 +419,7 @@ class TestCmdImportPreview(unittest.TestCase):
     def test_values_json_outputs_common_preview_json(self):
         from lib.import_preview import ImportPreviewResult
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(
             download_log_id=None,
             request_id=None,
@@ -456,7 +453,7 @@ class TestCmdImportPreview(unittest.TestCase):
     def test_values_args_thread_existing_spectral_grade(self):
         from lib.import_preview import ImportPreviewResult
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(
             download_log_id=None,
             request_id=None,
@@ -496,7 +493,7 @@ class TestCmdImportPreview(unittest.TestCase):
         self.assertEqual(values.existing_spectral_grade, "genuine")
 
     def test_values_json_rejects_invalid_spectral_grade(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(
             download_log_id=None,
             request_id=None,
@@ -517,7 +514,7 @@ class TestCmdImportPreview(unittest.TestCase):
         self.assertIn("spectral_grade must be one of", stderr.getvalue())
 
     def test_values_json_rejects_invalid_existing_spectral_grade(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(
             download_log_id=None,
             request_id=None,
@@ -543,7 +540,7 @@ class TestCmdImportPreview(unittest.TestCase):
     def test_download_log_mode_delegates_to_preview_service(self):
         from lib.import_preview import ImportPreviewResult
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(
             download_log_id=99,
             request_id=None,
@@ -574,7 +571,7 @@ class TestCmdImportPreview(unittest.TestCase):
 
 class TestCmdWrongMatchTriage(unittest.TestCase):
     def test_triage_requires_apply(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(apply=False, json=False)
         stderr = io.StringIO()
         with patch(
@@ -587,7 +584,7 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
         self.assertIn("--apply", stderr.getvalue())
 
     def test_triage_rejects_scope_flags(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(
             download_log_id=99,
             apply=True,
@@ -607,7 +604,7 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
     def test_triage_apply_delegates_to_full_queue_service(self):
         from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(apply=True, json=True)
         summary = WrongMatchCleanupSummary(processed=1, deleted=1)
         stdout = io.StringIO()
@@ -626,7 +623,7 @@ class TestCmdWrongMatchTriage(unittest.TestCase):
 
 class TestCmdWrongMatchDelete(unittest.TestCase):
     def test_delete_requires_apply(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(download_log_id=42, apply=False, json=False)
         stderr = io.StringIO()
         with patch(
@@ -644,7 +641,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             WrongMatchDeleteResult,
         )
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(download_log_id=42, apply=True, json=True)
         result = WrongMatchDeleteResult(
             download_log_id=42,
@@ -672,7 +669,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             WrongMatchDeleteResult,
         )
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(download_log_id=42, apply=True, json=True)
         result = WrongMatchDeleteResult(
             download_log_id=42,
@@ -694,7 +691,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             WrongMatchDeleteResult,
         )
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(download_log_id=42, apply=True, json=True)
         result = WrongMatchDeleteResult(
             download_log_id=42,
@@ -716,7 +713,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
             WrongMatchDeleteResult,
         )
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(download_log_id=42, apply=True, json=True)
         result = WrongMatchDeleteResult(
             download_log_id=42,
@@ -735,7 +732,7 @@ class TestCmdWrongMatchDelete(unittest.TestCase):
 
 class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
     def test_delete_group_requires_apply(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(request_id=42, apply=False, json=False)
         stderr = io.StringIO()
         with patch(
@@ -750,7 +747,7 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
     def test_delete_group_apply_delegates_to_service(self):
         from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(request_id=42, apply=True, json=True)
         summary = WrongMatchDeleteSummary(
             request_id=42,
@@ -786,7 +783,7 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
             WrongMatchDeleteSummary,
         )
 
-        db = MagicMock()
+        db = FakePipelineDB()
         args = SimpleNamespace(request_id=42, apply=True, json=True)
         result = WrongMatchDeleteResult(
             download_log_id=100,
@@ -825,7 +822,7 @@ class TestMainExitCodes(unittest.TestCase):
             "postgresql://example/test",
             "wrong-match-triage",
         ]
-        db = MagicMock()
+        db = FakePipelineDB()
         with patch.object(sys, "argv", argv), patch(
             "scripts.pipeline_cli.PipelineDB",
             return_value=db,
@@ -834,7 +831,7 @@ class TestMainExitCodes(unittest.TestCase):
                 pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 2)
-        db.close.assert_called_once_with()
+        self.assertEqual(db.close_calls, 1)
 
     def test_main_routes_wrong_match_delete(self):
         from lib.wrong_match_delete_service import (
@@ -851,7 +848,7 @@ class TestMainExitCodes(unittest.TestCase):
             "--apply",
             "--json",
         ]
-        db = MagicMock()
+        db = FakePipelineDB()
         result = WrongMatchDeleteResult(
             download_log_id=42,
             outcome=OUTCOME_DELETED,
@@ -870,7 +867,7 @@ class TestMainExitCodes(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         delete.assert_called_once_with(db, 42, require_visible=True)
-        db.close.assert_called_once_with()
+        self.assertEqual(db.close_calls, 1)
 
     def test_main_routes_wrong_match_delete_group(self):
         from lib.wrong_match_delete_service import WrongMatchDeleteSummary
@@ -884,7 +881,7 @@ class TestMainExitCodes(unittest.TestCase):
             "--apply",
             "--json",
         ]
-        db = MagicMock()
+        db = FakePipelineDB()
         summary = WrongMatchDeleteSummary(
             request_id=42,
             outcome="empty",
@@ -911,7 +908,7 @@ class TestMainExitCodes(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         delete.assert_called_once_with(db, 42)
-        db.close.assert_called_once_with()
+        self.assertEqual(db.close_calls, 1)
 
 
 class TestCmdQuery(unittest.TestCase):
@@ -1077,34 +1074,34 @@ class TestCmdSetIntent(unittest.TestCase):
 
     @patch("builtins.print")
     def test_set_lossless_on_wanted(self, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=1, status="wanted", artist_name="A", album_title="B",
-        )
+        ))
         args = MagicMock(id=1, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
-        db.update_request_fields.assert_called_once_with(1, target_format="lossless")
+        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(db.update_request_fields_calls, [(1, dict(target_format="lossless"))])
 
     @patch("builtins.print")
     def test_set_default_clears_target(self, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=1, status="wanted", artist_name="A", album_title="B",
-        )
+        ))
         args = MagicMock(id=1, intent="default")
-        pipeline_cli.cmd_set_intent(db, args)
-        db.update_request_fields.assert_called_once_with(1, target_format=None)
+        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(db.update_request_fields_calls, [(1, dict(target_format=None))])
 
     @patch("builtins.print")
     @patch("lib.transitions.finalize_request")
     def test_set_lossless_on_imported_requeues(self, mock_finalize, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=2, status="imported", artist_name="A", album_title="B",
             min_bitrate=245,
-        )
+        ))
         args = MagicMock(id=2, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
+        pipeline_cli.cmd_set_intent(cast(Any, db), args)
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)
         self.assertEqual(request_id, 2)
@@ -1114,37 +1111,37 @@ class TestCmdSetIntent(unittest.TestCase):
             transition.fields,
             {"search_filetype_override": "lossless", "min_bitrate": 245},
         )
-        db.update_request_fields.assert_called_once_with(2, target_format="lossless")
+        self.assertEqual(db.update_request_fields_calls, [(2, dict(target_format="lossless"))])
 
     @patch("builtins.print")
     def test_set_default_clears_stale_lossless_override(self, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=4, status="wanted", artist_name="A", album_title="B",
             target_format="lossless", search_filetype_override="lossless",
-        )
+        ))
         args = MagicMock(id=4, intent="default")
-        pipeline_cli.cmd_set_intent(db, args)
-        db.update_request_fields.assert_called_once_with(
-            4, target_format=None, search_filetype_override=None)
+        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(db.update_request_fields_calls, [(
+            4, dict(target_format=None, search_filetype_override=None))])
 
     @patch("builtins.print")
     def test_set_intent_refuses_downloading(self, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = make_request_row(
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
             id=3, status="downloading", artist_name="A", album_title="B",
-        )
+        ))
         args = MagicMock(id=3, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
-        db.update_request_fields.assert_not_called()
+        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(db.update_request_fields_calls, [])
 
     @patch("builtins.print")
     def test_set_intent_not_found(self, _mock_print):
-        db = MagicMock()
-        db.get_request.return_value = None
+        db = FakePipelineDB()
+        # no rows seeded → get_request returns None
         args = MagicMock(id=99, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
-        db.update_request_fields.assert_not_called()
+        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        self.assertEqual(db.update_request_fields_calls, [])
 
 
 class TestCmdRepairSpectral(unittest.TestCase):
@@ -1242,8 +1239,8 @@ class TestCmdQuality(unittest.TestCase):
     def _run_quality(self, request_row, *, runtime_target: str | None):
         from lib.quality import QualityRankConfig
 
-        db = MagicMock()
-        db.get_request.return_value = request_row
+        db = FakePipelineDB()
+        db.seed_request(request_row)
 
         beets_info = SimpleNamespace(
             is_cbr=False,
@@ -1282,7 +1279,7 @@ class TestCmdQuality(unittest.TestCase):
              patch("lib.quality.full_pipeline_decision",
                    side_effect=fake_full_pipeline_decision), \
              redirect_stdout(stdout):
-            pipeline_cli.cmd_quality(db, MagicMock(id=request_row["id"]))
+            pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_row["id"]))
 
         return stdout.getvalue(), captured_kwargs
 
@@ -1404,13 +1401,40 @@ class TestCmdQuality(unittest.TestCase):
         self.assertNotIn("(rank=EXCELLENT)", output)
 
 
+class _ForensicsDB(FakePipelineDB):
+    """Minimal FakePipelineDB subclass that lets each test return a
+    fixed list from ``get_search_history`` without forcing tests to
+    encode/decode the ``candidates`` JSONB blob.
+
+    The four tests below historically used MagicMock to inject the raw
+    list-of-dicts shape that ``cmd_show`` consumes. ``log_search`` +
+    ``get_search_history`` decode round-trips a JSON-encoded
+    ``list[CandidateScore]`` — fine for live code, but here the test
+    payload IS the shape ``cmd_show`` reads. Overriding the read
+    method lets the original dict fixtures stay readable while still
+    satisfying #290's "no MagicMock as a stateful collaborator" rule.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._stub_search_history: list[dict[str, object]] = []
+
+    def set_stub_search_history(self, rows: list[dict[str, object]]) -> None:
+        self._stub_search_history = list(rows)
+
+    def get_search_history(self, request_id: int) -> list[dict[str, object]]:  # type: ignore[override]
+        return [row for row in self._stub_search_history
+                if row.get("request_id") == request_id]
+
+
 class TestCmdShowSearchForensics(unittest.TestCase):
     """Unit cover for U7 forensic surfacing in `pipeline-cli show`.
 
-    No TEST_DB_DSN required — stubs the DB and verifies the printed text
-    contains variant + final_state + manual_reason + the top-3 candidate
-    table from the JSONB blob, and degrades gracefully on NULL/empty
-    candidates.
+    No TEST_DB_DSN required — drives ``cmd_show`` against a
+    ``_ForensicsDB`` (typed FakePipelineDB subclass) seeded with the
+    forensic blob the test author cared about, and verifies the printed
+    text contains variant + final_state + manual_reason + the top-3
+    candidate table from the JSONB blob.
     """
 
     def _row(self, **overrides):
@@ -1420,15 +1444,14 @@ class TestCmdShowSearchForensics(unittest.TestCase):
     def _capture(self, db, request_id):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            pipeline_cli.cmd_show(db, SimpleNamespace(id=request_id))
+            pipeline_cli.cmd_show(cast(Any, db), SimpleNamespace(id=request_id))
         return stdout.getvalue()
 
     def test_show_renders_variant_final_state_and_top_3(self):
-        db = MagicMock()
-        db.get_request.return_value = self._row(
+        db = _ForensicsDB()
+        db.seed_request(self._row(
             id=1843, manual_reason=None, status="wanted",
-        )
-        db.get_tracks.return_value = []
+        ))
         # JSONB candidates blob — psycopg2 returns parsed Python list.
         candidates_blob = [
             {"username": "alice", "dir": "A\\Album", "filetype": "flac",
@@ -1444,15 +1467,13 @@ class TestCmdShowSearchForensics(unittest.TestCase):
              "matched_tracks": 20, "total_tracks": 26, "avg_ratio": 0.99,
              "missing_titles": ["a", "b"], "file_count": 20},
         ]
-        db.get_search_history.return_value = [{
+        db.set_stub_search_history([{
             "id": 99, "request_id": 1843, "query": "*lice Album",
             "result_count": 100, "elapsed_s": 1.2, "outcome": "no_match",
             "created_at": "2026-04-29T00:00:00+00:00",
             "candidates": candidates_blob,
             "variant": "v3_artist_only", "final_state": "Completed",
-        }]
-        db.get_download_history.return_value = []
-        db.get_denylisted_users.return_value = []
+        }])
 
         out = self._capture(db, 1843)
 
@@ -1473,20 +1494,17 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertEqual(dave_idx, -1, "4th candidate must be truncated")
 
     def test_show_renders_manual_reason_chip(self):
-        db = MagicMock()
-        db.get_request.return_value = self._row(
+        db = _ForensicsDB()
+        db.seed_request(self._row(
             id=2, manual_reason="search_exhausted", status="manual",
-        )
-        db.get_tracks.return_value = []
-        db.get_search_history.return_value = [{
+        ))
+        db.set_stub_search_history([{
             "id": 1, "request_id": 2, "query": "q",
             "result_count": 0, "elapsed_s": 0.1, "outcome": "exhausted",
             "created_at": "2026-04-29T00:00:00+00:00",
             "candidates": None,
             "variant": "exhausted", "final_state": None,
-        }]
-        db.get_download_history.return_value = []
-        db.get_denylisted_users.return_value = []
+        }])
 
         out = self._capture(db, 2)
 
@@ -1495,17 +1513,14 @@ class TestCmdShowSearchForensics(unittest.TestCase):
 
     def test_show_handles_null_candidates_gracefully(self):
         """Historical row with NULL candidates → no crash, no top list."""
-        db = MagicMock()
-        db.get_request.return_value = self._row(id=3, manual_reason=None)
-        db.get_tracks.return_value = []
-        db.get_search_history.return_value = [{
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=3, manual_reason=None))
+        db.set_stub_search_history([{
             "id": 1, "request_id": 3, "query": "q",
             "result_count": None, "elapsed_s": None, "outcome": "timeout",
             "created_at": "2026-04-29T00:00:00+00:00",
             "candidates": None, "variant": None, "final_state": None,
-        }]
-        db.get_download_history.return_value = []
-        db.get_denylisted_users.return_value = []
+        }])
 
         out = self._capture(db, 3)
 
@@ -1516,18 +1531,15 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("-", out)
 
     def test_show_handles_empty_candidates_list(self):
-        db = MagicMock()
-        db.get_request.return_value = self._row(id=4, manual_reason=None)
-        db.get_tracks.return_value = []
-        db.get_search_history.return_value = [{
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=4, manual_reason=None))
+        db.set_stub_search_history([{
             "id": 1, "request_id": 4, "query": "q",
             "result_count": 0, "elapsed_s": 0.1, "outcome": "no_results",
             "created_at": "2026-04-29T00:00:00+00:00",
             "candidates": [], "variant": "v2_artist_album_no_year",
             "final_state": "Completed",
-        }]
-        db.get_download_history.return_value = []
-        db.get_denylisted_users.return_value = []
+        }])
 
         out = self._capture(db, 4)
 
