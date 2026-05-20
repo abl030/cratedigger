@@ -1,8 +1,4 @@
 {
-  "test_album_source.py": {
-    "patch:lib.import_dispatch._do_mark_done": 1,
-    "patch:lib.transitions.finalize_request": 1
-  },
   "test_beets_album_op.py": {
     "stateful_mock_assign:beets": 1
   },
