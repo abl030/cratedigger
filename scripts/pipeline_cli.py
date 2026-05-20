@@ -49,6 +49,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 from lib import transitions
+
+# Module-level DI seam for ``transitions.finalize_request`` — see
+# ``lib.import_dispatch.finalize_request`` for the rationale.
+finalize_request = transitions.finalize_request
+
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
@@ -422,7 +427,7 @@ def cmd_retry(db, args):
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    transitions.finalize_request(
+    finalize_request(
         db,
         args.id,
         transitions.RequestTransition.to_wanted(from_status=req["status"]),
@@ -435,7 +440,7 @@ def cmd_cancel(db, args):
     if not req:
         print(f"  Request {args.id} not found.")
         return
-    transitions.finalize_request(
+    finalize_request(
         db,
         args.id,
         transitions.RequestTransition.to_manual(from_status=req["status"]),
@@ -455,7 +460,7 @@ def cmd_set(db, args):
     if old_status == args.status:
         print(f"  [{args.id}] already has status '{args.status}'.")
         return
-    transitions.finalize_request(
+    finalize_request(
         db,
         args.id,
         transitions.RequestTransition.status_only(
@@ -489,7 +494,7 @@ def cmd_set_intent(db, args):
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        transitions.finalize_request(
+        finalize_request(
             db,
             args.id,
             transitions.RequestTransition.to_wanted(
@@ -1382,7 +1387,7 @@ def cmd_repair_spectral(db, args):
 
         # If quality gate would accept, transition to imported
         if decision == "accept" and effective_min_br is not None:
-            transitions.finalize_request(
+            finalize_request(
                 db,
                 rid,
                 transitions.RequestTransition.to_imported(

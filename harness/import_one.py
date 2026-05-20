@@ -51,6 +51,11 @@ from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
 from lib.util import beets_subprocess_env, repair_mp3_headers
+from lib import transitions
+
+# Module-level DI seam for ``transitions.finalize_request`` — see
+# ``lib.import_dispatch.finalize_request`` for the rationale.
+finalize_request = transitions.finalize_request
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DuplicateRemoveCandidate,
                          DuplicateRemoveGuardInfo, ImportResult,
@@ -1036,7 +1041,6 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
     Best-effort — failures are logged but do not block the import harness.
     """
     try:
-        from lib import transitions
         from lib.pipeline_db import PipelineDB
         dsn = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger")
         db = PipelineDB(dsn)
@@ -1062,7 +1066,7 @@ def update_pipeline_db(request_id, status, imported_path=None, distance=None, sc
                 transition = transitions.RequestTransition.to_manual()
             else:
                 transition = transitions.RequestTransition.status_only(status)
-            transitions.finalize_request(
+            finalize_request(
                 db,
                 request_id,
                 transition,

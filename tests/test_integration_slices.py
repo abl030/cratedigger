@@ -5504,7 +5504,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         )
 
         # Spy on finalize_request to prove it is NOT called.
-        with patch("lib.transitions.finalize_request") as mock_finalize:
+        with patch("lib.import_dispatch.finalize_request") as mock_finalize:
             _record_preview_measurement_failed(
                 cast(Any, db),
                 request_id=None,

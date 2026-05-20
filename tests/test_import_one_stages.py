@@ -59,7 +59,7 @@ class TestImportBootstrap(unittest.TestCase):
 
 
 class TestPipelineDbUpdate(unittest.TestCase):
-    @patch("lib.transitions.finalize_request")
+    @patch("harness.import_one.finalize_request")
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_routes_through_shared_finalizer(
         self,
@@ -94,7 +94,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
         )
         db.close.assert_called_once()
 
-    @patch("lib.transitions.finalize_request", side_effect=RuntimeError("boom"))
+    @patch("harness.import_one.finalize_request", side_effect=RuntimeError("boom"))
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_closes_db_when_finalizer_raises(
         self,
@@ -113,7 +113,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
         db.close.assert_called_once()
         self.assertIn("Pipeline DB update failed", stderr.getvalue())
 
-    @patch("lib.transitions.finalize_request")
+    @patch("harness.import_one.finalize_request")
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_distinguishes_transition_whitelist_errors(
         self,
@@ -138,7 +138,7 @@ class TestPipelineDbUpdate(unittest.TestCase):
         self.assertIn("Pipeline DB transition rejected", stderr.getvalue())
         self.assertIn("imported_path", stderr.getvalue())
 
-    @patch("lib.transitions.finalize_request")
+    @patch("harness.import_one.finalize_request")
     @patch("lib.pipeline_db.PipelineDB")
     def test_update_pipeline_db_rejects_unknown_status_and_closes_db(
         self,

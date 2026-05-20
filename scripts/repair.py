@@ -20,6 +20,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.config import read_runtime_config
 from lib import transitions
+
+# Module-level DI seam for ``transitions.finalize_request`` — see
+# ``lib.import_dispatch.finalize_request`` for the rationale.
+finalize_request = transitions.finalize_request
+
 from lib.download_recovery import (find_blocked_processing_path_issues,
                                    find_blocked_recovery_issues)
 from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
@@ -241,7 +246,7 @@ def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
     for issue in issues:
         repair = suggest_repair(issue)
         if repair.action == "reset_to_wanted":
-            transitions.finalize_request(
+            finalize_request(
                 db,
                 issue.request_id,
                 transitions.RequestTransition.to_wanted(

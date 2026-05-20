@@ -26,14 +26,12 @@
     "patch:lib.download.log_validation_result": 1,
     "patch:lib.download.stage_to_ai_path": 1,
     "patch:lib.quality.quality_gate_decision": 5,
-    "patch:lib.transitions.finalize_request": 1,
     "stateful_mock_assign:ctx": 1
   },
   "test_import_one_stages.py": {
     "patch:harness.import_one.determine_verified_lossless": 1,
     "patch:harness.import_one.provisional_lossless_decision": 1,
     "patch:harness.import_one.quality_decision_stage": 1,
-    "patch:lib.transitions.finalize_request": 4,
     "stateful_mock_assign:beets": 4,
     "stateful_mock_assign:db": 4
   },
@@ -44,8 +42,7 @@
   },
   "test_integration_slices.py": {
     "patch:lib.download.dispatch_import_core": 1,
-    "patch:lib.download.process_completed_album": 3,
-    "patch:lib.transitions.finalize_request": 1
+    "patch:lib.download.process_completed_album": 3
   },
   "test_matching.py": {
     "patch:lib.matching._track_titles_cross_check": 1
@@ -54,11 +51,9 @@
     "patch:lib.import_preview.preview_import_from_values": 2,
     "patch:lib.mbid_replace_service.MbidReplaceService": 1,
     "patch:lib.quality.full_pipeline_decision": 2,
-    "patch:lib.transitions.finalize_request": 3,
     "stateful_mock_assign:db": 1
   },
   "test_repair_cli.py": {
-    "patch:lib.transitions.finalize_request": 1,
     "patch:scripts.repair._collect_issues": 1,
     "patch:scripts.repair.find_blocked_recovery_issues": 1,
     "patch:scripts.repair.find_orphaned_downloads": 2,

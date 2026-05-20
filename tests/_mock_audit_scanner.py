@@ -304,6 +304,18 @@ _LEAF_SEAM_PATTERNS = [
     # rank-config + beets album fixture for every contract test.
     re.compile(r"^web\.server\.compute_library_rank$"),
 
+    # Module-local DI seams for ``transitions.finalize_request``. Each
+    # calling module binds ``finalize_request = transitions.finalize_request``
+    # at import time so tests swap the dependency on the route/CLI/harness/
+    # dispatch module rather than on ``lib.transitions``. Same shape as
+    # ``web.routes.pipeline.finalize_request`` above — route handlers
+    # and CLI subcommands are dispatched without keyword args, so
+    # module-attribute swap is the established DI shape in this codebase.
+    re.compile(r"^lib\.import_dispatch\.finalize_request$"),
+    re.compile(r"^harness\.import_one\.finalize_request$"),
+    re.compile(r"^scripts\.pipeline_cli\.finalize_request$"),
+    re.compile(r"^scripts\.repair\.finalize_request$"),
+
     # Deleted-shim regression guard. ``check_beets_by_artist_album``
     # was removed in issue #123; tests patch it with create=True to
     # ensure it stays gone (the patch acts as a RED guard against
