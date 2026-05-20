@@ -66,10 +66,6 @@
     "patch:scripts.import_preview_worker.run_once": 3,
     "stateful_mock_assign:beets": 1
   },
-  "test_integration.py": {
-    "stateful_mock_assign:db": 3,
-    "stateful_mock_assign:source": 3
-  },
   "test_integration_slices.py": {
     "patch:lib.enqueue.check_for_match": 4,
     "patch:lib.measurement.hash_audio_content": 1,

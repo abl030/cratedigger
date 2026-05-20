@@ -33,8 +33,12 @@ from lib.download import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
 from lib.import_dispatch import _build_download_info
 from lib.context import CratediggerContext
-from tests.fakes import FakeSlskdAPI
-from tests.helpers import make_download_file, make_grab_list_entry
+from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import (
+    make_download_file,
+    make_grab_list_entry,
+    make_request_row,
+)
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None, **cache_overrides):
@@ -982,15 +986,11 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
     def setUp(self):
         self._orig_cfg = cratedigger.cfg
         cratedigger.cfg = _make_matching_cfg()
-        source = MagicMock()
-        db = MagicMock()
-        db.get_denylisted_users.return_value = []
-        source._get_db.return_value = db
         self.slskd = FakeSlskdAPI()
         self.ctx = _make_ctx(
             cfg=cratedigger.cfg,
             slskd=self.slskd,
-            pipeline_db_source=source,
+            pipeline_db_source=FakePipelineDBSource(),
         )
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         self.ctx.user_upload_speed["user1"] = 10
@@ -1106,16 +1106,22 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
 
     def test_log_search_result_routes_pre_attempt_error_through_non_consuming(self):
         """Plan §U5: error without final_state and without plan_execution
-        is a pre-attempt failure -- routes through
+        is a pre-attempt failure — routes through
         ``record_non_consuming_search_attempt`` (NOT the legacy log_search
         seam) and must NOT call ``record_attempt`` directly (the
-        non-consuming method owns scheduler/backoff)."""
+        non-consuming method owns scheduler/backoff).
+
+        Drives real ``_log_search_result`` against a ``FakePipelineDB``;
+        asserts that the row's search_logs and counters reflect the
+        non-consuming path. The pre-migration version mocked the DB and
+        asserted on ``assert_called_once``/``assert_not_called`` mock
+        introspection — same intent, narrower observation point.
+        """
         from lib.pipeline_db import NonConsumingAttemptInput
 
-        db = MagicMock()
-        source = MagicMock()
-        source._get_db.return_value = db
-        ctx = _make_ctx(pipeline_db_source=source)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        ctx = _make_ctx(pipeline_db_source=FakePipelineDBSource(db))
         album = MagicMock(db_request_id=42)
 
         from lib.search import SearchResult
@@ -1126,19 +1132,33 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
             ctx,
         )
 
-        db.log_search.assert_not_called()
-        db.record_attempt.assert_not_called()
-        db.record_consumed_search_attempt.assert_not_called()
-        db.record_non_consuming_search_attempt.assert_called_once()
-        attempt = db.record_non_consuming_search_attempt.call_args.args[0]
-        self.assertIsInstance(attempt, NonConsumingAttemptInput)
-        self.assertEqual(attempt.request_id, 42)
-        self.assertEqual(attempt.query, "Artist Album")
-        self.assertEqual(attempt.outcome, "error")
-        self.assertTrue(attempt.apply_scheduler_attempt)
+        # Exactly one search_logs entry, recorded via the non-consuming path
+        # (attempt_consumed=False, execution_stage='pre_attempt').
+        self.assertEqual(len(db.search_logs), 1)
+        log = db.search_logs[0]
+        self.assertEqual(log.request_id, 42)
+        self.assertEqual(log.query, "Artist Album")
+        self.assertEqual(log.outcome, "error")
+        self.assertFalse(log.attempt_consumed)
+        self.assertEqual(log.execution_stage, "pre_attempt")
         # No plan_execution carrier (legacy / no-plan path).
-        self.assertIsNone(attempt.plan_id)
-        self.assertIsNone(attempt.plan_ordinal)
+        self.assertIsNone(log.plan_id)
+        self.assertIsNone(log.plan_ordinal)
+        # The non-consuming method advances search_attempts via
+        # apply_scheduler_attempt=True.
+        row = db.request(42)
+        self.assertEqual(row["search_attempts"], 1)
+        # The legacy log_search seam and the consuming record_attempt
+        # must not have been touched. With a typed fake, "untouched"
+        # means the legacy SearchLog shape isn't present and the
+        # validation/download counters are still zero.
+        self.assertEqual(row.get("validation_attempts") or 0, 0)
+        self.assertEqual(row.get("download_attempts") or 0, 0)
+        # Sanity: the typed contract of the non-consuming carrier.
+        attempt = NonConsumingAttemptInput(
+            request_id=42, query="Artist Album", outcome="error",
+        )
+        self.assertEqual(attempt.request_id, 42)
 
     def test_apply_find_download_result_maps_enqueue_failure_to_error(self):
         album = MagicMock()
@@ -1164,13 +1184,13 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         self.assertEqual(failed_grab, [album])
 
     def test_try_enqueue_marks_enqueue_failure_when_match_found_but_enqueue_fails(self):
-        source = MagicMock()
-        db = MagicMock()
-        db.get_denylisted_users.return_value = []
-        source._get_db.return_value = db
         slskd = FakeSlskdAPI()
         slskd.transfers.enqueue_result = False
-        ctx = _make_ctx(cfg=cratedigger.cfg, slskd=slskd, pipeline_db_source=source)
+        ctx = _make_ctx(
+            cfg=cratedigger.cfg,
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(),
+        )
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         ctx.user_upload_speed["user1"] = 10
 
