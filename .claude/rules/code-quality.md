@@ -239,7 +239,36 @@ Always use these instead of inventing parallel scaffolding:
 **`tests/test_web_server.py`** — `_WebServerCase` harness with `_get`/`_post` helpers + `TestRouteContractAudit` guard.
 
 ### General test rules
-- **Fakes over mocks for stateful collaborators.** Use `MagicMock` for leaf seams. Use `FakePipelineDB`/`FakeSlskdAPI` when the test reasons about state transitions over time.
+
+# MOCKS: LEAF-SEAM ONLY
+
+`MagicMock` and `patch(...)` are for the **outermost edge** of the test — the place where our code calls something external we don't own. They are forbidden as a substitute for our own stateful types or our own functions. Enforced by `tests/test_mock_audit.py` (issue #290).
+
+**ALLOWED — leaf seams (mock freely):**
+- Subprocess: `subprocess.run`, `subprocess.Popen`, `*.sp.run`, `*.sp.Popen`
+- HTTP / URL: `urllib.request.urlopen`, `requests.get`, `requests.Session`
+- External libraries we don't own: `music_tag`, `redis.Redis`, `slskd_api.SlskdClient` (the real one, at module import — see `_real_slskd_api` in conftest), MusicBrainz / Discogs API client objects
+- Filesystem leaf seams: `os.path.isfile`, `os.path.isdir`, `os.path.exists`
+- Time: `time.sleep`
+- Notifier seams: `lib.util._meelo_*`, `lib.util.trigger_*_scan` (one-way fire-and-forget)
+- argparse `args` stubs: `args = MagicMock()` for CLI subcommand tests where args is a parsed-options struct
+- subprocess return-value envelopes: `proc = MagicMock()` where you only set `returncode` / `stdout` / `stderr`
+- `sys.modules["external_pkg"] = MagicMock()` at module top-level for import-time stubbing of optional deps
+
+**FORBIDDEN — stateful collaborators and our own functions:**
+- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `source`, `pipeline_db`, `slskd` — **use `FakePipelineDB`, `FakeBeetsDB`, `FakeSlskdAPI` from `tests/fakes.py`**
+- `patch("lib.pipeline_db.*")`, `patch("lib.beets_db.*")`, `patch("lib.transitions.*")`, `patch("lib.import_dispatch.*")` (except `patch("lib.import_dispatch.parse_import_result")` and similar pure decision wrappers — flagged but case-by-case)
+- `patch("lib.enqueue.check_for_match")`, `patch("lib.enqueue._fanout_browse_users")` — these are **our** functions. Drive them with real inputs through `FakeSlskdAPI`, don't stub the answer.
+- `patch("lib.beets.beets_validate")` — drive it through the harness fake instead
+- Any `patch("lib.<our-module>.<our-function>")` whose target is in `lib/` and isn't on the leaf-seam list above. **If you're mocking your own code, you're testing the mock, not the code.**
+
+**The rule of thumb:** does the thing you're about to mock cross a process boundary, a network boundary, or a third-party package boundary? If yes, mock. If it's a function defined in `lib/` or `web/` of this repo, you're about to test the mock instead of the code — use a `Fake*` or drive the real function with constructed inputs.
+
+**Adding a new `PipelineDB` method:**
+1. Add the method to `tests/fakes.py::FakePipelineDB` (state-respecting implementation) — not `MagicMock`.
+2. Add a self-test in `tests/test_fakes.py`.
+3. Tests that use it consume the fake; they do NOT do `mock_db.new_method.return_value = ...`.
+
 - **Equivalence proof for deleted tests.** When removing a test, document in the commit message: what behavior was covered, where it's covered now, what branch is still protected.
 - **Short docstrings.** One-line docstrings are fine. Long `NOTE:` paragraphs justifying a test's existence are a smell — extract a helper, move the explanation to the PR, or restructure the test.
 - **Builders for structured data.** Hand-rolled dicts with many fields drift silently when the schema evolves.
