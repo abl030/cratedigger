@@ -96,9 +96,6 @@
     "patch:lib.measurement.validate_audio": 1,
     "stateful_mock_assign:db": 2
   },
-  "test_overlay.py": {
-    "patch:web.server.compute_library_rank": 1
-  },
   "test_pipeline_cli.py": {
     "patch:lib.import_preview.preview_import_from_values": 2,
     "patch:lib.mbid_replace_service.MbidReplaceService": 1,
