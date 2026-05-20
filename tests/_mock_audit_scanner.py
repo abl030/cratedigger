@@ -220,7 +220,15 @@ _LEAF_SEAM_PATTERNS = [
 
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release$"),
+    re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release_group_year$"),
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
+
+    # scripts.pipeline_cli loaders — each is a thin wrapper around a
+    # disk/SQLite read in lib.config or lib.beets_db.
+    re.compile(r"^scripts\.pipeline_cli\._load_runtime_rank_config$"),
+    re.compile(r"^scripts\.pipeline_cli\._load_runtime_verified_lossless_target$"),
+    re.compile(r"^scripts\.pipeline_cli\._load_beets_album_info$"),
+    re.compile(r"^scripts\.pipeline_cli\._resolve_failed_path$"),
 
     # scripts.repair helpers that wrap external boundaries.
     # ``_get_slskd_active_transfers`` is a thin slskd_api call;
