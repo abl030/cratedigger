@@ -7,12 +7,10 @@
   },
   "test_dispatch_core.py": {
     "patch:lib.import_dispatch._check_quality_gate_core": 4,
-    "patch:lib.import_dispatch.parse_import_result": 4,
     "stateful_mock_assign:beets": 1
   },
   "test_dispatch_from_db.py": {
-    "patch:lib.import_dispatch._check_quality_gate_core": 5,
-    "patch:lib.import_dispatch.parse_import_result": 5
+    "patch:lib.import_dispatch._check_quality_gate_core": 5
   },
   "test_download.py": {
     "patch:lib.download._process_beets_validation": 1,
@@ -33,7 +31,6 @@
     "patch:lib.download.log_validation_result": 1,
     "patch:lib.download.stage_to_ai_path": 1,
     "patch:lib.import_dispatch._check_quality_gate_core": 4,
-    "patch:lib.import_dispatch.parse_import_result": 5,
     "patch:lib.quality.quality_gate_decision": 5,
     "patch:lib.transitions.finalize_request": 1,
     "stateful_mock_assign:ctx": 1
