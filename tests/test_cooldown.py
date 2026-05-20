@@ -9,7 +9,12 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.quality import CooldownConfig, should_cooldown
 from cratedigger import TrackRecord
-from tests.fakes import FakePipelineDB
+from tests.fakes import (
+    DenylistEntry,
+    FakePipelineDB,
+    FakePipelineDBSource,
+    FakeSlskdAPI,
+)
 from tests.helpers import (
     make_ctx_with_fake_db,
     make_download_file,
@@ -74,30 +79,44 @@ class TestShouldCooldown(unittest.TestCase):
 class TestEnqueueCooldownFiltering(unittest.TestCase):
     """Cooled-down users should be skipped during enqueue with distinct log messages."""
 
-    def _make_ctx(self, cooled_down_users: set[str] | None = None,
-                  denied_users: list[str] | None = None) -> CratediggerContext:
-        source = MagicMock()
-        db = MagicMock()
-        db.get_denylisted_users.return_value = [
-            {"username": u} for u in (denied_users or [])
-        ]
-        source._get_db.return_value = db
+    def _make_ctx(
+        self,
+        cooled_down_users: set[str] | None = None,
+        denied_users: list[str] | None = None,
+        slskd: FakeSlskdAPI | None = None,
+    ) -> CratediggerContext:
+        """Build a context with cooldowns + denylist seeded into a real
+        FakePipelineDB. Replaces the prior MagicMock-source pattern so the
+        cooldown-filter test can observe outcomes through the FakeSlskdAPI
+        call log rather than mock introspection."""
+        db = FakePipelineDB()
+        for username in denied_users or []:
+            db.denylist.append(
+                DenylistEntry(request_id=1, username=username),
+            )
         # Use a real CratediggerConfig with defaults so wave-based enqueue
         # (issue #198 U3) reads numeric values for browse_top_k rather
         # than MagicMock proxies.
         cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
         ctx = CratediggerContext(
             cfg=cfg,
-            slskd=MagicMock(),
-            pipeline_db_source=source,
+            slskd=slskd if slskd is not None else FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(db),
             cooled_down_users=cooled_down_users or set(),
         )
         return ctx
 
     def test_cooled_user_skipped_in_try_enqueue(self):
-        """A user on cooldown should be skipped even if they have matching results."""
+        """A user on cooldown should be filtered before any slskd traffic.
+
+        The cooldown gate runs in ``try_enqueue`` upstream of the browse
+        wave, so a cooled user's directories should never be requested.
+        Asserts on ``FakeSlskdAPI.users.directory_calls`` instead of
+        patching ``check_for_match`` and counting mock invocations.
+        """
         from lib.enqueue import try_enqueue
-        ctx = self._make_ctx(cooled_down_users={"deaduser"})
+        slskd = FakeSlskdAPI()
+        ctx = self._make_ctx(cooled_down_users={"deaduser"}, slskd=slskd)
         ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         ctx.user_upload_speed["deaduser"] = 100
 
@@ -106,12 +125,19 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
         ]
         results = {"deaduser": {"flac": ["Music\\Album"]}}
 
-        with patch("lib.enqueue.check_for_match") as mock_match:
-            attempt = try_enqueue(tracks, results, "flac", ctx)
+        attempt = try_enqueue(tracks, results, "flac", ctx)
 
-        # check_for_match should never have been called for the cooled-down user
-        mock_match.assert_not_called()
         self.assertFalse(attempt.matched)
+        # The cooled user must never have had their directory browsed —
+        # the cooldown filter is upstream of the slskd browse phase.
+        cooled_browse_calls = [
+            (u, d) for (u, d) in slskd.users.directory_calls
+            if u == "deaduser"
+        ]
+        self.assertEqual(
+            cooled_browse_calls, [],
+            f"cooldown filter let a browse through: {cooled_browse_calls}",
+        )
 
     def test_non_cooled_user_proceeds(self):
         """A user NOT on cooldown should proceed through normal matching."""

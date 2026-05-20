@@ -6,12 +6,6 @@
   "test_beets_album_op.py": {
     "stateful_mock_assign:beets": 1
   },
-  "test_cooldown.py": {
-    "patch:lib.enqueue.check_for_match": 1,
-    "stateful_mock_assign:db": 1,
-    "stateful_mock_assign:slskd": 1,
-    "stateful_mock_assign:source": 1
-  },
   "test_cycle_summary.py": {
     "patch:lib.matching.album_match": 1,
     "stateful_mock_assign:slskd": 2
