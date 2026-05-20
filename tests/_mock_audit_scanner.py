@@ -278,6 +278,15 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^web\.routes\.pipeline\.hash_audio_content$"),
     re.compile(r"^web\.routes\.imports\.scan_complete_folder$"),
 
+    # Route-to-transition DI seam. ``web.routes.pipeline.finalize_request``
+    # is the module-level swap point for ``transitions.finalize_request``;
+    # routes call it through this binding so tests can inject a recorder
+    # or no-op without monkey-patching ``lib.transitions``. Same shape as
+    # the ``web.server.db`` constructor-replacement entry above — this is
+    # how route-scope DI is expressed in this codebase, since route
+    # handlers are dispatched by URL and don't take dependency kwargs.
+    re.compile(r"^web\.routes\.pipeline\.finalize_request$"),
+
     # Deleted-shim regression guard. ``check_beets_by_artist_album``
     # was removed in issue #123; tests patch it with create=True to
     # ensure it stays gone (the patch acts as a RED guard against

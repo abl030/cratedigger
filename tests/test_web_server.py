@@ -3968,7 +3968,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add discogs exists response")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_update_contract(self, _mock_transition):
         status, data = self._post("/api/pipeline/update", {"id": 100, "status": "manual"})
 
@@ -3976,7 +3976,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
                                 "pipeline update response")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_upgrade_contract(self, _mock_transition):
         self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
 
@@ -3986,7 +3986,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
                                 "pipeline upgrade response")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     @patch("web.routes.pipeline.discogs_api.get_release")
     @patch("web.routes.pipeline.mb_api.get_release")
     def test_pipeline_upgrade_discogs_new_request_uses_discogs_api(
@@ -4020,7 +4020,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
                                 "pipeline upgrade response (discogs)")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_set_quality_contract(self, _mock_transition):
         self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
 
@@ -4033,7 +4033,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
                                 "pipeline set-quality response")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_set_quality_discogs_request_normalizes_and_falls_back(
         self, _mock_transition,
     ):
@@ -4057,7 +4057,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
                                 "pipeline set-quality response (discogs)")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_upgrade_normalizes_uppercase_uuid(self, mock_transition):
         import web.server as srv
 
@@ -4090,7 +4090,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
                                 "pipeline set-intent response")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_ban_source_contract(self, _mock_transition):
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -4225,7 +4225,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         mock_get_release.assert_called_once_with(83182, fresh=True)
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     @patch("routes.pipeline.mb_api.get_release")
     def test_pipeline_upgrade_new_mb_fetches_release_fresh(
             self, mock_get_release, _mock_transition):
@@ -4248,7 +4248,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         mock_get_release.assert_called_once_with(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", fresh=True)
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     @patch("routes.pipeline.discogs_api.get_release")
     def test_pipeline_upgrade_new_discogs_fetches_release_fresh(
             self, mock_get_release, _mock_transition):
@@ -4359,7 +4359,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
     # -- Upgrade --------------------------------------------------------
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_upgrade_preserves_stricter_override(self, mock_transition):
         """Upgrade on an imported album with override='lossless' must keep it."""
         self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
@@ -4373,7 +4373,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_upgrade_preserves_narrowed_override(self, mock_transition):
         """Upgrade must preserve a post-downgrade-narrow like 'lossless,mp3 v0'."""
         self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
@@ -4387,7 +4387,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless,mp3 v0")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_upgrade_falls_back_to_full_tiers_when_no_override(self, mock_transition):
         """Upgrade on an imported album with no override falls back to the full ladder."""
         from lib.quality import QUALITY_UPGRADE_TIERS
@@ -4404,7 +4404,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(self._override_passed(mock_transition),
                          QUALITY_UPGRADE_TIERS)
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_upgrade_omits_min_bitrate_when_beets_lookup_misses(
             self, mock_transition):
         """Missing Beets quality data must not clear the existing DB baseline."""
@@ -4424,7 +4424,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
     # -- Update (status → wanted) ---------------------------------------
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_update_to_wanted_preserves_stricter_override(self, mock_transition):
         """Flipping an imported album back to wanted must preserve 'lossless'."""
         self.mock_db.get_request.return_value = make_request_row(
@@ -4439,7 +4439,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_update_to_wanted_falls_back_to_full_tiers_when_no_override(
             self, mock_transition):
         """Flipping imported→wanted with no override uses the full upgrade ladder."""
@@ -4460,7 +4460,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
     # -- Ban source (regression pin) ------------------------------------
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_preserves_stricter_override(self, mock_transition):
         """Pin: ban_source already preserves override. Guard against future regression."""
         self.mock_db.get_request.return_value = make_request_row(
@@ -4478,7 +4478,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertEqual(self._override_passed(mock_transition), "lossless")
 
     @patch("lib.beets_album_op.sp.run")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_clears_on_disk_quality_fields(
             self, _mock_transition, mock_subprocess):
         """After ``beet remove -d``, pipeline DB must forget on-disk quality.
@@ -4516,7 +4516,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
 
     @patch("lib.beets_album_op.sp.run")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_skips_clear_when_beet_remove_failed(
             self, _mock_transition, mock_subprocess):
         """Conservative: if beets still holds the album after the remove
@@ -4561,7 +4561,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         self.assertFalse(data["beets_removed"])
 
     @patch("lib.beets_album_op.sp.run")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_uses_discogs_selector_for_numeric_id(
             self, _mock_transition, mock_subprocess):
         """Discogs-backed requests carry a numeric ID. ``beet remove -d``
@@ -4601,7 +4601,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
                       "so older beets libraries don't regress.")
 
     @patch("lib.beets_album_op.sp.run")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_clears_stale_state_when_album_already_gone(
             self, _mock_transition, mock_subprocess):
         """Ghost state can pre-date the handler: a user runs
@@ -4639,7 +4639,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         # No remove ran — the handler had nothing to remove.
         mock_subprocess.assert_not_called()
 
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_rejects_missing_mb_release_id(self, _mock_transition):
         """Plan 2026-04-29-005 U4: ``mb_release_id`` is now required so
         the bad-rip flow can locate the audio files to hash before
@@ -4710,7 +4710,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
 
     # AE1, AE2 — body-without-username, server resolves uploader, hashes recorded.
     @patch("web.routes.pipeline.hash_audio_content")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_resolves_username_and_records_hashes(
             self, _mock_transition, mock_hash):
         """POST {request_id, mb_release_id} only — server resolves
@@ -4766,7 +4766,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
 
     # AE4 — partial hash failure does not block the ban.
     @patch("web.routes.pipeline.hash_audio_content")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_hash_failure_partial_does_not_block_ban(
             self, _mock_transition, mock_hash):
         """One unreadable track → ``hashes_recorded`` reflects the
@@ -4809,7 +4809,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
 
     # E1.1 — no successful uploader on record.
     @patch("web.routes.pipeline.hash_audio_content")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_no_uploader_records_hashes_with_null_username(
             self, _mock_transition, mock_hash):
         """No successful download_log → ``username: null`` returned,
@@ -4844,7 +4844,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.mock_db.add_denylist.assert_not_called()
 
     # E1.2 — album not in beets / no track paths.
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_no_tracks_in_beets_records_capture_error(
             self, _mock_transition):
         """``get_item_paths`` empty → response includes
@@ -4901,7 +4901,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
 
     # E1.6 — idempotency: second click is a no-op insert.
     @patch("web.routes.pipeline.hash_audio_content")
-    @patch("lib.transitions.finalize_request")
+    @patch("web.routes.pipeline.finalize_request")
     def test_idempotent_second_click_records_zero_new_hashes(
             self, _mock_transition, mock_hash):
         """Second call inserts 0 new rows (ON CONFLICT DO NOTHING in
