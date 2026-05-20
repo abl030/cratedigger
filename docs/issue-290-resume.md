@@ -31,21 +31,13 @@ If the live count differs from this doc, trust the live count and update this fi
 
 These are the four open work items, ordered by value-per-effort. Each is a separate PR.
 
-### Step 1 — Migrate pure-decision allowlists to real-input tests (~3 entries, biggest correctness win)
+### Step 1 — Migrate pure-decision allowlists to real-input tests ✅ DONE
 
-Three allowlist entries explicitly contradict the audit rule's "drive with real inputs" guidance:
-
-- `lib.import_dispatch.quality_gate_decision` — used by `_check_quality_gate_core` orchestration tests in `test_import_dispatch.py` (5 patch sites in `TestQualityGate*` classes around `_run_quality_gate(gate_decision)`).
-- `lib.quality.full_pipeline_decision` — used by `test_pipeline_cli.py::TestCmdQuality` and `TestQualityLabel` (2 patch sites, via `fake_full_pipeline_decision`).
-- `lib.import_preview.preview_import_from_values` + `web.routes.pipeline.preview_import_from_values` re-export — used by `test_pipeline_cli.py::TestCmdImportPreview` (2 sites) and `test_web_server.py::TestImportPreviewRouteContract` (1 site).
-
-**Why migrate:** the decision functions have dedicated coverage in `test_quality_classification.py::TestQualityGateDecision` and `tests/test_import_preview.py`. The orchestration tests currently stub the branch and assert the wrapper's downstream behaviour. That's a defensible scoping argument BUT the rule explicitly forbids this pattern — the tests don't actually exercise the real decision, so silent drift between decision-output shape and orchestration-input shape can creep in.
-
-**The migration:** for each test, construct real measurement / value inputs that produce the desired decision branch. Fixtures already exist in `test_quality_classification.py::TestLiveBugReproductions` — borrow them.
-
-- Remove the three allowlist entries in `tests/_mock_audit_scanner.py`.
-- Rewrite 8 orchestration tests to pass real inputs.
-- Update `.claude/rules/code-quality.md` to remove the "pure-decision allowlist debt" callout once cleared.
+Landed: orchestration tests now drive the real `quality_gate_decision`,
+`full_pipeline_decision`, and `preview_import_from_values` via constructed
+inputs. Allowlist entries removed from `tests/_mock_audit_scanner.py`;
+`.claude/rules/code-quality.md` "Pure-decision allowlist policy" callout
+flipped from "known cleanup" to "never reintroduce".
 
 ### Step 2 — `stage_to_ai_path` allowlist removal (~30 min, smallest)
 
