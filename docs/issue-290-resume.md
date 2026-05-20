@@ -4,7 +4,7 @@ This is the **entry point** for picking up the stateful-MagicMock removal effort
 
 ## Current state
 
-Baseline last measured at **84 findings across 15 files**. To check the live count:
+Baseline last measured at **61 findings across 15 files**. To check the live count:
 
 ```bash
 nix-shell --run "python3 tests/_rebuild_mock_audit_baseline.py"
@@ -69,25 +69,54 @@ allowlisted as a route-scope DI seam in the same way
 `web.server.db` is. Migrated all 26 patch sites in
 `tests/test_web_server.py`. Dropped 26 findings (110 → 84).
 
-### 1. Smaller cleanups (~29 findings across 5 files)
+### ~~5. Allowlist remaining web.routes DI seams + migrate match_folders_to_requests~~ (LANDED)
 
-`test_import_one_stages.py` (15) and `test_download.py` (14) are the
-next clusters worth a look — both feel like they'd benefit from
-specific Fake helpers rather than a single DI move.
+Shipped in PR #323. `web.routes.imports.cleanup_all_wrong_matches` (3
+sites) and `web.server.compute_library_rank` (1 site) allowlisted as
+route-scope DI seams. `web.routes.imports.match_folders_to_requests` (1
+site) migrated to drive the real fuzzy matcher with shared
+artist/album tokens. Dropped 5 findings (84 → 79).
 
-### 2. Remaining `lib.transitions.finalize_request` patches in non-web tests (10 findings)
+### ~~6. Item P — per-module `finalize_request` DI seams for non-web tests~~ (LANDED)
 
-After the web migration, ~10 patches on `lib.transitions.finalize_request`
-remain in CLI / import / repair tests:
-- `test_import_one_stages.py` (4)
-- `test_pipeline_cli.py` (3)
-- `test_import_dispatch.py` (1)
-- `test_integration_slices.py` (1)
-- `test_repair_cli.py` (1)
+Shipped in PR #324. Same shape as PR #322 applied to four more
+modules: `lib.import_dispatch`, `harness.import_one`,
+`scripts.pipeline_cli`, `scripts.repair`. Each binds
+`finalize_request = transitions.finalize_request` at module scope and
+exposes it as an allowlisted seam. Migrated 10 test patches. Dropped
+10 findings (79 → 69).
 
-These flow through different code paths and would need either DI on
-each entry point or migration to `FakePipelineDB` (let
-`finalize_request` actually run against fake state).
+### ~~7. test_import_one_stages.py harness migration~~ (LANDED)
+
+Shipped in PR #325. Built `FakeBeetsDB` in `tests/fakes.py` (minimal
+surface: `album_exists`, `get_album_info(mb_release_id, cfg)`,
+`get_all_album_ids_for_release`, `get_item_paths`, `close` +
+seed-helpers + a context-manager) with five self-tests in
+`tests/test_fakes.py`. Migrated `TestPipelineDbUpdate` (4 sites,
+`MagicMock()` → `FakePipelineDB()`) and the four
+`beets = MagicMock()` sites to `FakeBeetsDB`. Dropped 8 findings
+(69 → 61).
+
+### 1. test_download.py harness migration (~14 findings)
+
+Now the largest remaining single-file cluster. Likely a similar shape
+to test_import_one_stages.py — mix of `db = MagicMock()` and
+`beets = MagicMock()` patterns that could move to
+`FakePipelineDB` / `FakeBeetsDB` now that the latter exists.
+
+### 2. Remaining `test_import_dispatch.py` / `test_repair_cli.py` clusters (~16 findings)
+
+`test_import_dispatch.py` (8) and `test_repair_cli.py` (8) are the
+next-biggest clusters after `test_download.py`. Mixed patterns; both
+warrant per-file analysis.
+
+### 3. Pure-decision patches in `test_import_one_stages.py` (3 findings)
+
+Still patches on `harness.import_one.determine_verified_lossless`,
+`harness.import_one.provisional_lossless_decision`, and
+`harness.import_one.quality_decision_stage`. Migrating these would
+require driving the real decision functions with real audio
+measurement scaffolding — likely worth the effort but non-trivial.
 
 ## What's NOT next
 
