@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
@@ -788,6 +789,13 @@ def get_pipeline_search_plan_history(
     h._error(f"Unknown history outcome: {result.outcome}", 500)
 
 
+class PipelineSearchPlanRegenerateRequest(BaseModel):
+    # ``strict=True`` because Pydantic v2's default lax mode coerces
+    # ``"true"``/``"false"`` strings to bool — the regenerate route's
+    # contract is JSON-bool only and the test pins that.
+    prepend_artist: bool | None = Field(default=None, strict=True)
+
+
 def post_pipeline_search_plan_regenerate(
     h, body: dict, req_id_str: str,
 ) -> None:
@@ -818,17 +826,10 @@ def post_pipeline_search_plan_regenerate(
     except (TypeError, ValueError):
         h._error("Invalid request id")
         return
-    # F2: guard against non-dict bodies (e.g. raw JSON string) before
-    # calling body.get(), mirroring post_pipeline_search_plan_advance.
-    if body is not None and not isinstance(body, dict):
-        h._error("Invalid body — expected JSON object", 400)
+    req_body = parse_body(h, body or {}, PipelineSearchPlanRegenerateRequest)
+    if req_body is None:
         return
-    prepend_artist: bool | None = None
-    if body is not None and "prepend_artist" in body:
-        if not isinstance(body["prepend_artist"], bool):
-            h._json({"error": "prepend_artist must be a boolean"}, status=400)
-            return
-        prepend_artist = body["prepend_artist"]
+    prepend_artist: bool | None = req_body.prepend_artist
     db = _server()._db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
@@ -879,6 +880,26 @@ def post_pipeline_search_plan_regenerate(
     h._json(payload)
 
 
+class PipelineSearchPlanAdvanceRequest(BaseModel):
+    """HTTP body for ``POST /api/pipeline/<id>/search-plan/advance``.
+
+    Exactly one of ``to_ordinal`` / ``to_strategy`` is required. The
+    ``@model_validator`` enforces the XOR — Pydantic checks types but
+    not "exactly one of two".
+    """
+
+    to_ordinal: int | None = None
+    to_strategy: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self) -> "PipelineSearchPlanAdvanceRequest":
+        if (self.to_ordinal is None) == (self.to_strategy is None):
+            raise ValueError(
+                "exactly one of to_ordinal or to_strategy is required"
+            )
+        return self
+
+
 def post_pipeline_search_plan_advance(
     h, body: dict, req_id_str: str,
 ) -> None:
@@ -917,29 +938,17 @@ def post_pipeline_search_plan_advance(
     except (TypeError, ValueError):
         h._error("Invalid request id")
         return
-    body = body or {}
-    if not isinstance(body, dict):
-        h._json({"error": "body must be a JSON object"}, status=400)
-        return
-    to_ordinal = body.get("to_ordinal")
-    to_strategy = body.get("to_strategy")
-    if (to_ordinal is None) == (to_strategy is None):
-        h._json({
-            "error": "exactly one of to_ordinal or to_strategy is required",
-        }, status=400)
-        return
-    if to_ordinal is not None and not isinstance(to_ordinal, int):
-        h._json({"error": "to_ordinal must be an integer"}, status=400)
-        return
-    if to_strategy is not None and not isinstance(to_strategy, str):
-        h._json({"error": "to_strategy must be a string"}, status=400)
+    req_body = parse_body(h, body or {}, PipelineSearchPlanAdvanceRequest)
+    if req_body is None:
         return
 
     db = _server()._db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
     result = svc.advance_for_request(
-        request_id, to_ordinal=to_ordinal, to_strategy=to_strategy,
+        request_id,
+        to_ordinal=req_body.to_ordinal,
+        to_strategy=req_body.to_strategy,
     )
     payload: dict[str, object] = {
         "request_id": result.request_id,
@@ -1106,6 +1115,10 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
     })
 
 
+class PipelineReplaceRequest(BaseModel):
+    target_mb_release_id: str = Field(min_length=1)
+
+
 def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
     """``POST /api/pipeline/<id>/replace``.
 
@@ -1147,14 +1160,11 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
         h._error("Invalid request id")
         return
 
-    # The server dispatcher (web/server.py::do_POST) always passes a
-    # JSON-decoded value here; for empty bodies that's ``{}``. The
-    # picker only ever sends a dict, so no defensive type check is
-    # needed. If a list or scalar somehow slipped through, the
-    # ``.get`` below would raise and the dispatcher's outer except
-    # would surface a 500 — acceptable for a malformed request.
-    target = body.get("target_mb_release_id")
-    if not isinstance(target, str) or not target.strip():
+    req_body = parse_body(h, body, PipelineReplaceRequest)
+    if req_body is None:
+        return
+    target = req_body.target_mb_release_id.strip()
+    if not target:
         h._json({
             "error": "target_mb_release_id must be a non-empty string",
         }, status=400)
@@ -1164,7 +1174,7 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
     cfg = read_runtime_config()
     svc = MbidReplaceService(db=db, config=cfg)
     result = svc.replace_request_mbid(
-        request_id, target_mb_release_id=target.strip(),
+        request_id, target_mb_release_id=target,
     )
 
     payload: dict[str, object] = {
@@ -1456,17 +1466,18 @@ def post_pipeline_add(h, body: dict) -> None:
     })
 
 
-def post_pipeline_update(h, body: dict) -> None:
-    s = _server()
-    req_id = body.get("id")
-    new_status = body.get("status", "").strip()
+class PipelineUpdateRequest(BaseModel):
+    id: int = Field(gt=0)
+    status: Literal["wanted", "imported", "manual"]
 
-    if not req_id or not new_status:
-        h._error("Missing id or status")
+
+def post_pipeline_update(h, body: dict) -> None:
+    req_body = parse_body(h, body, PipelineUpdateRequest)
+    if req_body is None:
         return
-    if new_status not in ("wanted", "imported", "manual"):
-        h._error(f"Invalid status: {new_status}")
-        return
+    s = _server()
+    req_id = req_body.id
+    new_status = req_body.status
 
     req = s._db().get_request(int(req_id))
     if not req:
@@ -1635,11 +1646,20 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         })
 
 
+class PipelineSetQualityRequest(BaseModel):
+    mb_release_id: str = Field(min_length=1)
+    status: Literal["", "wanted", "imported", "manual"] = ""
+    min_bitrate: int | None = None
+
+
 def post_pipeline_set_quality(h, body: dict) -> None:
+    req_body = parse_body(h, body, PipelineSetQualityRequest)
+    if req_body is None:
+        return
     s = _server()
-    mbid = normalize_release_id(body.get("mb_release_id"))
-    new_status = body.get("status", "").strip()
-    min_bitrate = body.get("min_bitrate")
+    mbid = normalize_release_id(req_body.mb_release_id)
+    new_status = req_body.status
+    min_bitrate = req_body.min_bitrate
 
     if not mbid:
         h._error("Missing mb_release_id")
@@ -1703,19 +1723,31 @@ def post_pipeline_set_quality(h, body: dict) -> None:
     })
 
 
+class PipelineSetIntentRequest(BaseModel):
+    """HTTP body for ``POST /api/pipeline/set-intent``.
+
+    ``intent`` aliases (``flac``/``flac_only`` → ``lossless``,
+    ``best_effort``/``upgrade`` → ``default``) are normalised inside the
+    handler, not the model — the model accepts any string and the
+    handler validates against the canonical set after the alias swap.
+    """
+
+    id: int = Field(gt=0)
+    intent: str = ""
+
+
 def post_pipeline_set_intent(h, body: dict) -> None:
     """Toggle lossless-on-disk intent for a pipeline request.
 
     Accepts intent: "lossless" (keep lossless on disk) or "default" (pipeline decides).
     Backward compat: "flac", "flac_only" → "lossless"; "best_effort" → "default".
     """
-    s = _server()
-    req_id = body.get("id")
-    intent_str = body.get("intent", "").strip()
-
-    if not req_id:
-        h._error("Missing id")
+    req_body = parse_body(h, body, PipelineSetIntentRequest)
+    if req_body is None:
         return
+    s = _server()
+    req_id = req_body.id
+    intent_str = req_body.intent.strip()
 
     # Normalize to toggle: lossless or default
     _ALIASES = {"flac": "lossless", "flac_only": "lossless",
@@ -1775,15 +1807,25 @@ def post_pipeline_set_intent(h, body: dict) -> None:
         })
 
 
-def post_pipeline_ban_source(h, body: dict) -> None:
-    s = _server()
-    req_id = body.get("request_id")
-    username_raw = body.get("username")
-    username_in = username_raw.strip() if isinstance(username_raw, str) else ""
-    mb_release_id = normalize_release_id(body.get("mb_release_id"))
+class PipelineBanSourceRequest(BaseModel):
+    request_id: int = Field(gt=0)
+    mb_release_id: str = Field(min_length=1)
+    username: str | None = None
 
-    if not req_id or not mb_release_id:
-        h._error("Missing request_id or mb_release_id")
+
+def post_pipeline_ban_source(h, body: dict) -> None:
+    req_body = parse_body(h, body, PipelineBanSourceRequest)
+    if req_body is None:
+        return
+    s = _server()
+    req_id = req_body.request_id
+    username_in = req_body.username.strip() if req_body.username else ""
+    mb_release_id = normalize_release_id(req_body.mb_release_id)
+
+    if not mb_release_id:
+        # ``normalize_release_id`` can strip whitespace down to None
+        # even when the min_length=1 raw input passed Pydantic.
+        h._error("Missing mb_release_id")
         return
 
     db = s._db()
@@ -1971,13 +2013,16 @@ def post_pipeline_ban_source(h, body: dict) -> None:
     h._json(payload)
 
 
-def post_pipeline_force_import(h, body: dict) -> None:
-    s = _server()
-    log_id = body.get("download_log_id")
+class PipelineForceImportRequest(BaseModel):
+    download_log_id: int = Field(gt=0)
 
-    if not log_id:
-        h._error("Missing download_log_id")
+
+def post_pipeline_force_import(h, body: dict) -> None:
+    req_body = parse_body(h, body, PipelineForceImportRequest)
+    if req_body is None:
         return
+    s = _server()
+    log_id = req_body.download_log_id
 
     entry = s._db().get_download_log_entry(int(log_id))
     if not entry:
@@ -2031,12 +2076,16 @@ def post_pipeline_force_import(h, body: dict) -> None:
     }, status=202)
 
 
+class PipelineDeleteRequest(BaseModel):
+    id: int = Field(gt=0)
+
+
 def post_pipeline_delete(h, body: dict) -> None:
-    s = _server()
-    req_id = body.get("id")
-    if not req_id:
-        h._error("Missing id")
+    req_body = parse_body(h, body, PipelineDeleteRequest)
+    if req_body is None:
         return
+    s = _server()
+    req_id = req_body.id
     db = s._db()
     req = db.get_request(int(req_id))
     if not req:
