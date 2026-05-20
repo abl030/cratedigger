@@ -4,7 +4,7 @@ This is the **entry point** for picking up the stateful-MagicMock removal effort
 
 ## Current state
 
-Baseline last measured at **110 findings across 15 files**. To check the live count:
+Baseline last measured at **84 findings across 15 files**. To check the live count:
 
 ```bash
 nix-shell --run "python3 tests/_rebuild_mock_audit_baseline.py"
@@ -59,25 +59,35 @@ deterministic cursor sequence; `_execute(sql, params)` records calls in
 sites use different MagicMock patterns that aren't `_execute` queues —
 those remain for separate migration. Dropped 5 findings (115 → 110).
 
-### 1. Residual `test_web_server.py` (~34 findings, the long pole)
+### ~~4. Web routes `finalize_request` DI (the long pole)~~ (LANDED)
 
-Biggest remaining block. Mix of `MagicMock()` assigned to `db` /
-`pipeline_db_source` / `mock_db` and `patch("lib.transitions.finalize_request")`.
-These contract tests assemble a minimal mock for the route handler's
-collaborator graph. Two viable paths:
-- Per-test DB seeding through `FakePipelineDB` plus `make_request_row` —
-  heavy because each contract test needs different shapes.
-- DI on `finalize_request` (matches Items N + K patterns; the route
-  handler would take `finalize_fn` and pass it through). 26 of the 34
-  findings would go away from that one change.
+Shipped: `web/routes/pipeline.py` now binds `finalize_request =
+transitions.finalize_request` at module scope. Routes call the local
+name (not `transitions.finalize_request` directly), so tests can swap
+the dependency with `patch("web.routes.pipeline.finalize_request")` —
+allowlisted as a route-scope DI seam in the same way
+`web.server.db` is. Migrated all 26 patch sites in
+`tests/test_web_server.py`. Dropped 26 findings (110 → 84).
 
-Pick that up as `refactor(web): inject finalize_request through route handlers`.
-
-### 2. Smaller cleanups (~14 findings across 5 files)
+### 1. Smaller cleanups (~29 findings across 5 files)
 
 `test_import_one_stages.py` (15) and `test_download.py` (14) are the
 next clusters worth a look — both feel like they'd benefit from
 specific Fake helpers rather than a single DI move.
+
+### 2. Remaining `lib.transitions.finalize_request` patches in non-web tests (10 findings)
+
+After the web migration, ~10 patches on `lib.transitions.finalize_request`
+remain in CLI / import / repair tests:
+- `test_import_one_stages.py` (4)
+- `test_pipeline_cli.py` (3)
+- `test_import_dispatch.py` (1)
+- `test_integration_slices.py` (1)
+- `test_repair_cli.py` (1)
+
+These flow through different code paths and would need either DI on
+each entry point or migration to `FakePipelineDB` (let
+`finalize_request` actually run against fake state).
 
 ## What's NOT next
 

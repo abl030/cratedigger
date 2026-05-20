@@ -9,6 +9,13 @@ import msgspec
 logger = logging.getLogger(__name__)
 
 from lib import transitions
+
+# Module-level DI seam for ``transitions.finalize_request``. Routes call
+# this name (not ``transitions.finalize_request`` directly) so tests can
+# swap it via ``patch.object(routes.pipeline, "finalize_request", new=...)``
+# at the same module-level scope as ``web.server.db``. See the leaf-seam
+# allowlist in ``tests/_mock_audit_scanner.py``.
+finalize_request = transitions.finalize_request
 from lib.audio_hash import AudioHashError, hash_audio_content
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
@@ -1460,7 +1467,7 @@ def post_pipeline_update(h, body: dict) -> None:
             wanted_fields["search_filetype_override"] = quality
         if min_br is not None:
             wanted_fields["min_bitrate"] = min_br
-        transitions.finalize_request(
+        finalize_request(
             s._db(),
             int(req_id),
             transitions.RequestTransition.to_wanted_fields(
@@ -1469,7 +1476,7 @@ def post_pipeline_update(h, body: dict) -> None:
             ),
         )
     else:
-        transitions.finalize_request(
+        finalize_request(
             s._db(),
             int(req_id),
             transitions.RequestTransition.status_only(
@@ -1510,7 +1517,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         }
         if min_bitrate is not None:
             transition_fields["min_bitrate"] = min_bitrate
-        transitions.finalize_request(
+        finalize_request(
             s._db(),
             req_id,
             transitions.RequestTransition.to_wanted_fields(
@@ -1575,7 +1582,7 @@ def post_pipeline_upgrade(h, body: dict) -> None:
             release_group_year=rg_year_upgrade,
         )
         # Newly added request — status is already 'wanted', set quality override
-        transitions.finalize_request(
+        finalize_request(
             s._db(),
             req_id,
             transitions.RequestTransition.to_wanted(
@@ -1628,7 +1635,7 @@ def post_pipeline_set_quality(h, body: dict) -> None:
             }
             if min_bitrate is not None:
                 imported_fields["min_bitrate"] = int(min_bitrate)
-            transitions.finalize_request(
+            finalize_request(
                 s._db(),
                 req_id,
                 transitions.RequestTransition.to_imported_fields(
@@ -1637,14 +1644,14 @@ def post_pipeline_set_quality(h, body: dict) -> None:
                 ),
             )
         elif new_status == "wanted" and existing["status"] != "wanted":
-            transitions.finalize_request(
+            finalize_request(
                 s._db(),
                 req_id,
                 transitions.RequestTransition.to_wanted(
                     from_status=existing["status"]),
             )
         else:
-            transitions.finalize_request(
+            finalize_request(
                 s._db(),
                 req_id,
                 transitions.RequestTransition.status_only(
@@ -1697,7 +1704,7 @@ def post_pipeline_set_intent(h, body: dict) -> None:
     if req["status"] == "imported" and target_format:
         # Re-queue to search for lossless source
         min_br = req.get("min_bitrate")
-        transitions.finalize_request(
+        finalize_request(
             s._db(),
             int(req_id),
             transitions.RequestTransition.to_wanted(
@@ -1877,7 +1884,7 @@ def post_pipeline_ban_source(h, body: dict) -> None:
         }
         if min_br is not None:
             ban_fields["min_bitrate"] = min_br
-        transitions.finalize_request(
+        finalize_request(
             db,
             request_id_int,
             transitions.RequestTransition.to_wanted_fields(

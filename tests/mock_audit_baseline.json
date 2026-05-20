@@ -65,7 +65,6 @@
     "stateful_mock_assign:db": 4
   },
   "test_web_server.py": {
-    "patch:lib.transitions.finalize_request": 26,
     "patch:web.routes.imports.cleanup_all_wrong_matches": 3,
     "patch:web.routes.imports.match_folders_to_requests": 1,
     "patch:web.routes.pipeline.preview_import_from_values": 1,
