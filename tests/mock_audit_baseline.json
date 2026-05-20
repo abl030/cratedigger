@@ -11,19 +11,10 @@
   "test_dispatch_core.py": {
     "stateful_mock_assign:beets": 1
   },
-  "test_download.py": {
-    "patch:lib.download._process_beets_validation": 1,
-    "patch:lib.download.dispatch_import_core": 4,
-    "patch:lib.download.log_validation_result": 1,
-    "patch:lib.download.process_completed_album": 3,
-    "patch:lib.wrong_match_cleanup_service.cleanup_wrong_match": 4,
-    "stateful_mock_assign:slskd": 1
-  },
   "test_enqueue_fanout.py": {
     "patch:lib.enqueue.check_for_match": 3
   },
   "test_import_dispatch.py": {
-    "patch:lib.download.log_validation_result": 1,
     "patch:lib.download.stage_to_ai_path": 1,
     "patch:lib.quality.quality_gate_decision": 5,
     "stateful_mock_assign:ctx": 1
@@ -37,10 +28,6 @@
     "patch:lib.download._handle_valid_result": 1,
     "patch:scripts.import_preview_worker.run_once": 3,
     "stateful_mock_assign:beets": 1
-  },
-  "test_integration_slices.py": {
-    "patch:lib.download.dispatch_import_core": 1,
-    "patch:lib.download.process_completed_album": 3
   },
   "test_matching.py": {
     "patch:lib.matching._track_titles_cross_check": 1

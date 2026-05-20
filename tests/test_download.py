@@ -81,7 +81,7 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
         cfg.pipeline_db_enabled = True
         cfg.meelo_url = None
     if slskd is None:
-        slskd = MagicMock()
+        slskd = FakeSlskdAPI()
     if pipeline_db_source is None:
         pipeline_db_source = FakePipelineDBSource()
     return CratediggerContext(cfg=cfg, slskd=slskd,
