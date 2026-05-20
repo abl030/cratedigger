@@ -257,6 +257,15 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.beets_db\.BeetsDB\.delete_album$"),  # SQLite write + file delete seam
     re.compile(r"^web\.server\._real_beets_db$"),
 
+    # PipelineDB class itself — patching the class replaces the
+    # PostgreSQL boundary at the constructor. Per-method patches against
+    # PipelineDB.<method> stay flagged (FakePipelineDB is the right
+    # replacement); the class entry is for tests that swap the
+    # constructor wholesale (e.g. ``patch("scripts.X.PipelineDB",
+    # return_value=fake_db)``).
+    re.compile(r"^lib\.pipeline_db\.PipelineDB$"),
+    re.compile(r"^scripts\.\w+\.PipelineDB$"),
+
     # web.server.db — module-level pipeline DB connection cache.
     # Tests patch.object(server, "db", fake) to inject a per-test DB.
     # Equivalent to the constructor-replacement pattern.
