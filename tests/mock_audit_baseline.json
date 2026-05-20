@@ -3,8 +3,7 @@
     "stateful_mock_assign:beets": 1
   },
   "test_cycle_summary.py": {
-    "patch:lib.matching.album_match": 1,
-    "stateful_mock_assign:slskd": 2
+    "patch:lib.matching.album_match": 1
   },
   "test_dispatch_core.py": {
     "patch:lib.import_dispatch._check_quality_gate_core": 4,

@@ -15,13 +15,17 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.cycle_summary import format_cycle_summary
 from lib.matching import check_for_match
+from tests.fakes import FakePipelineDBSource, FakeSlskdAPI
 
 
 def _make_ctx() -> CratediggerContext:
     cfg = MagicMock()
     cfg.var_dir = "/tmp/unused"
-    slskd = MagicMock()
-    return CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=MagicMock())
+    return CratediggerContext(
+        cfg=cfg,
+        slskd=FakeSlskdAPI(),
+        pipeline_db_source=FakePipelineDBSource(),
+    )
 
 
 def _make_real_cfg() -> CratediggerConfig:
@@ -39,8 +43,8 @@ def _make_real_ctx() -> CratediggerContext:
     cfg = _make_real_cfg()
     ctx = CratediggerContext(
         cfg=cfg,
-        slskd=MagicMock(),
-        pipeline_db_source=MagicMock(),
+        slskd=FakeSlskdAPI(),
+        pipeline_db_source=FakePipelineDBSource(),
     )
     album = MagicMock()
     album.title = "Cool Album"
