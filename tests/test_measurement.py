@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import patch
 
 from lib.measurement import _check_bad_audio_hashes, _iter_audio_files
 from tests.fakes import FakePipelineDB
@@ -150,9 +151,8 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
-        db = MagicMock()
-        db.has_any_bad_audio_hashes.return_value = False
-
+        db = FakePipelineDB()
+        # empty bad_audio_hashes table → fast-path skip
         cfg = CratediggerConfig(audio_check_mode="off")
 
         # Bypass spectral and existing-album lookups so we isolate the
@@ -167,12 +167,16 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,
+                db=cast(Any, db),
                 request_id=42,
             )
 
-        db.has_any_bad_audio_hashes.assert_called_once()
-        db.lookup_bad_audio_hash.assert_not_called()
+        # ``has_any_bad_audio_hashes`` is the fast-path gate — it must be
+        # called once. ``lookup_bad_audio_hash`` and ``hash_audio_content``
+        # must NOT have been touched (the gate short-circuited because
+        # the table is empty).
+        self.assertEqual(db.has_any_bad_audio_hashes_calls, 1)
+        self.assertEqual(db.lookup_bad_audio_hash_calls, [])
         hashfn.assert_not_called()
 
 
@@ -191,8 +195,7 @@ class TestMeasurePreimportState(unittest.TestCase):
         from lib.measurement import measure_preimport_state
         from lib.util import AudioValidationResult
 
-        db = MagicMock()
-        db.has_any_bad_audio_hashes.return_value = False
+        db = FakePipelineDB()
         cfg = CratediggerConfig(audio_check_mode="normal")
         bad_result = AudioValidationResult(
             valid=False, error="decode failed",
@@ -208,7 +211,7 @@ class TestMeasurePreimportState(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,
+                db=cast(Any, db),
                 request_id=42,
             )
         self.assertTrue(m.audio_corrupt)

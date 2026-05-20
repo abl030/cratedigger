@@ -162,7 +162,11 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.measurement\.repair_mp3_headers$"),
     re.compile(r"^lib\.measurement\._needs_spectral_check$"),
     re.compile(r"^lib\.measurement\.measure_preimport_state$"),
+    re.compile(r"^lib\.measurement\._iter_audio_files$"),
+    re.compile(r"^lib\.measurement\.hash_audio_content$"),
+    re.compile(r"^lib\.measurement\.validate_audio$"),
     re.compile(r"^lib\.spectral_check\.analyze_track$"),
+    re.compile(r"^lib\.audio_hash\.hash_audio_content$"),
 
     # Re-exports of measurement / harness / dispatch into the
     # import_preview surface — same underlying subprocess seams.
