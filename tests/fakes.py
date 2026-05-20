@@ -668,6 +668,11 @@ class FakePipelineDB:
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
+        # Call-count tracking for the bad-audio-hash gate. Tests that
+        # used to assert ``mock.assert_called_once()`` / ``assert_not_called()``
+        # on the MagicMock-source can now inspect these instead.
+        self.has_any_bad_audio_hashes_calls: int = 0
+        self.lookup_bad_audio_hash_calls: list[tuple[bytes, str]] = []
         # Keyed by (mb_release_id, snapshot_fingerprint) — content-addressed
         # after migration 021. Each row also has a surrogate ``id``; the
         # parallel ``_evidence_by_id`` dict mirrors load-by-id lookups.
@@ -1782,12 +1787,14 @@ class FakePipelineDB:
         hash_value: bytes,
         audio_format: str,
     ) -> BadAudioHashRow | None:
+        self.lookup_bad_audio_hash_calls.append((hash_value, audio_format))
         for row in self.bad_audio_hashes:
             if row.hash_value == hash_value and row.audio_format == audio_format:
                 return row
         return None
 
     def has_any_bad_audio_hashes(self) -> bool:
+        self.has_any_bad_audio_hashes_calls += 1
         return bool(self.bad_audio_hashes)
 
     def get_recent_successful_uploader(

@@ -69,7 +69,6 @@
     "patch:lib.download.dispatch_import_core": 1,
     "patch:lib.download.process_completed_album": 3,
     "patch:lib.enqueue.check_for_match": 4,
-    "patch:lib.measurement.hash_audio_content": 1,
     "patch:lib.transitions.finalize_request": 1,
     "stateful_mock_assign:source": 4
   },
@@ -78,12 +77,6 @@
   },
   "test_matching.py": {
     "patch:lib.matching._track_titles_cross_check": 1
-  },
-  "test_measurement.py": {
-    "patch:lib.measurement._iter_audio_files": 2,
-    "patch:lib.measurement.hash_audio_content": 2,
-    "patch:lib.measurement.validate_audio": 1,
-    "stateful_mock_assign:db": 2
   },
   "test_pipeline_cli.py": {
     "patch:lib.import_preview.preview_import_from_values": 2,
