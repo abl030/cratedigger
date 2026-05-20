@@ -41,7 +41,12 @@ from lib.download import SlskdEnqueueOutcome
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.grab_list import DownloadFile
 from lib.matching import MatchResult
-from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.fakes import (
+    DenylistEntry,
+    FakePipelineDB,
+    FakePipelineDBSource,
+    FakeSlskdAPI,
+)
 from tests.helpers import make_request_row
 
 
@@ -76,16 +81,13 @@ def _make_ctx(
     denied_users: list[str] | None = None,
 ) -> CratediggerContext:
     """Build a context with controllable cooldowns and denylist."""
-    source = MagicMock()
-    db = MagicMock()
-    db.get_denylisted_users.return_value = [
-        {"username": u} for u in (denied_users or [])
-    ]
-    source._get_db.return_value = db
+    db = FakePipelineDB()
+    for username in denied_users or []:
+        db.denylist.append(DenylistEntry(request_id=1, username=username))
     ctx = CratediggerContext(
         cfg=cfg,
-        slskd=MagicMock(),
-        pipeline_db_source=source,
+        slskd=FakeSlskdAPI(),
+        pipeline_db_source=FakePipelineDBSource(db),
         user_upload_speed=user_upload_speed or {},
         cooled_down_users=cooled_down_users or set(),
     )
@@ -347,23 +349,41 @@ class TestBrokenUserPerCycle(unittest.TestCase):
     def test_broken_user_is_per_cycle_not_persistent(self):
         """A fresh CratediggerContext starts with empty broken_user."""
         cfg = _make_cfg()
-        ctx = CratediggerContext(cfg=cfg, slskd=MagicMock(), pipeline_db_source=MagicMock())
+        ctx = CratediggerContext(
+            cfg=cfg,
+            slskd=FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(),
+        )
         self.assertEqual(ctx.broken_user, [])
+
+
+class _PrefetchSource(FakePipelineDBSource):
+    """FakePipelineDBSource variant that returns a configurable stub list
+    from ``get_tracks`` so the prefetch-contract test can assert on the
+    exact rows the source delivered without the production negative-ID
+    transform interfering."""
+
+    def __init__(self, stub_tracks: list[dict[str, object]]) -> None:
+        super().__init__()
+        self._stub_tracks = list(stub_tracks)
+
+    def get_tracks(self, album_record: object) -> list[dict[str, object]]:  # type: ignore[override]
+        self.get_tracks_calls.append(album_record)
+        return list(self._stub_tracks)
 
 
 class TestFindDownloadWorkerContext(unittest.TestCase):
     def test_worker_context_snapshots_inputs_and_prefetches_db_data(self):
         cfg = _make_cfg()
-        source = MagicMock()
-        db = MagicMock()
-        db.get_denylisted_users.return_value = [{"username": "blocked"}]
-        source._get_db.return_value = db
-        source.get_tracks.return_value = [
-            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
-        ]
+        db = FakePipelineDB()
+        db.denylist.append(DenylistEntry(request_id=1, username="blocked"))
+        source = _PrefetchSource(
+            stub_tracks=[{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
+        )
+        source.db = db
         ctx = CratediggerContext(
             cfg=cfg,
-            slskd=MagicMock(),
+            slskd=FakeSlskdAPI(),
             pipeline_db_source=source,
             search_cache={1: {"fast": {"flac": ["dirA"]}}},
             user_upload_speed={"fast": 100},
@@ -393,11 +413,15 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
         self.assertIs(worker_ctx.folder_cache, ctx.folder_cache)
         self.assertIs(worker_ctx.browse_coordinator, ctx.browse_coordinator)
 
-        source.get_tracks.reset_mock()
+        # After the prefetch, additional ``get_album_tracks`` calls must
+        # not reach back to the source. Reset the call counter so we
+        # measure only what happens after prepare_find_download_context.
+        calls_before = len(source.get_tracks_calls)
         self.assertEqual(get_album_tracks(album, worker_ctx), [
             {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
         ])
-        source.get_tracks.assert_not_called()
+        self.assertEqual(len(source.get_tracks_calls), calls_before,
+                         "get_tracks must not be re-invoked after prefetch")
         with self.assertRaises(AssertionError):
             worker_ctx.pipeline_db_source._get_db()
 
@@ -406,7 +430,7 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
 
         ctx = CratediggerContext(
             cfg=_make_cfg(),
-            slskd=MagicMock(),
+            slskd=FakeSlskdAPI(),
             pipeline_db_source=_WorkerPipelineDBSource(),  # type: ignore[arg-type]
         )
 
@@ -864,7 +888,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         # Route pipeline_db_source -> same FakePipelineDB so the download_log
         # write is observable (in production both seams connect to the same
         # Postgres; in this fixture they're independent unless wired here).
-        ctx.pipeline_db_source._get_db.return_value = db  # type: ignore[attr-defined]
+        cast(FakePipelineDBSource, ctx.pipeline_db_source).db = db
         users = ["pooyork"]
         results = _make_results(users)
         file_dir = "musiclibrary\\Mercury Rev\\Deserter's Songs"

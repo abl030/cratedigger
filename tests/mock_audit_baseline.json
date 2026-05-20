@@ -22,10 +22,7 @@
     "stateful_mock_assign:slskd": 1
   },
   "test_enqueue_fanout.py": {
-    "patch:lib.enqueue.check_for_match": 33,
-    "stateful_mock_assign:db": 2,
-    "stateful_mock_assign:slskd": 3,
-    "stateful_mock_assign:source": 2
+    "patch:lib.enqueue.check_for_match": 33
   },
   "test_import_dispatch.py": {
     "patch:lib.download.log_validation_result": 1,
