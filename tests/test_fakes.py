@@ -4,7 +4,7 @@ import inspect
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -229,6 +229,43 @@ class TestFakePipelineDB(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.audio_file_count, 0)
         self.assertEqual(loaded.files, [])
+
+    def test_execute_records_calls_and_returns_queued_cursors(self):
+        """``queue_execute_results`` registers a deterministic cursor sequence;
+        each ``_execute`` call pops the next entry and records the call."""
+        db = FakePipelineDB()
+        cur1 = MagicMock(name="cur1")
+        cur2 = MagicMock(name="cur2")
+        db.queue_execute_results(cur1, cur2)
+
+        result1 = db._execute("SELECT 1")
+        result2 = db._execute("SELECT 2", (42,))
+
+        self.assertIs(result1, cur1)
+        self.assertIs(result2, cur2)
+        self.assertEqual(
+            db.execute_calls,
+            [("SELECT 1", ()), ("SELECT 2", (42,))],
+        )
+
+    def test_execute_raises_when_queued_entry_is_exception(self):
+        """Queued ``Exception`` entries are raised, not returned — replaces
+        ``side_effect=[..., ProgrammingError(...), ...]`` from MagicMock."""
+        db = FakePipelineDB()
+        boom = RuntimeError("syntax error")
+        db.queue_execute_results(MagicMock(), boom)
+
+        db._execute("SELECT 1")
+        with self.assertRaises(RuntimeError) as raised:
+            db._execute("BOOM")
+        self.assertIs(raised.exception, boom)
+
+    def test_execute_with_empty_queue_returns_default(self):
+        """Empty queue returns ``None`` so tests that don't care about the
+        cursor result can still call ``_execute`` without setup."""
+        db = FakePipelineDB()
+        self.assertIsNone(db._execute("SELECT 1"))
+        self.assertEqual(db.execute_calls, [("SELECT 1", ())])
 
     def test_record_attempt_updates_retry_metadata(self):
         db = FakePipelineDB()
@@ -2923,6 +2960,7 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "assert_log",
             "set_advisory_lock_result",
             "set_cooldown_result",
+            "queue_execute_results",
         }
         real = _public_methods(PipelineDB)
         fake = _public_methods(FakePipelineDB)

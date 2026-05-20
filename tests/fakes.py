@@ -716,6 +716,16 @@ class FakePipelineDB:
         self.search_plan_items: dict[int, _FakeSearchPlanItemRow] = {}
         self._next_search_plan_id = 0
         self._next_search_plan_item_id = 0
+        # ``_execute`` stubbing for tests that drive raw-SQL CLI paths
+        # (``pipeline-cli query``, ``pipeline-cli repair-spectral``, ...).
+        # ``queue_execute_results`` lets tests register a deterministic
+        # cursor sequence; each ``_execute`` call pops the next entry,
+        # raising it if it is an ``Exception`` and otherwise returning
+        # it as the cursor. ``execute_calls`` records the (sql, params)
+        # arguments for assertion.
+        self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self._execute_queue: list[Any] = []
+        self._execute_default: Any = None
 
     # --- Seeding ---
 
@@ -729,6 +739,33 @@ class FakePipelineDB:
     def request(self, request_id: int) -> dict[str, Any]:
         """Get a request row (for test assertions). Raises KeyError if missing."""
         return self._requests[request_id]
+
+    def queue_execute_results(self, *results: Any) -> None:
+        """Register a deterministic cursor sequence for ``_execute`` calls.
+
+        Each subsequent ``_execute(sql, params)`` call pops the next entry:
+        - If the entry is an ``Exception`` instance/subclass, it is raised
+          (so tests can simulate ``psycopg2.ProgrammingError`` etc.).
+        - Otherwise the entry is returned as the cursor.
+
+        Replaces ``MagicMock(); db._execute.side_effect = [c1, c2, c3]``.
+        Inspect call args via ``db.execute_calls``.
+        """
+        self._execute_queue = list(results)
+
+    def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+        """Stand-in for ``PipelineDB._execute``.
+
+        Records the call and returns the next entry from
+        ``queue_execute_results``. If the queue is empty, returns
+        ``self._execute_default`` (defaults to ``None``)."""
+        self.execute_calls.append((sql, params))
+        if not self._execute_queue:
+            return self._execute_default
+        entry = self._execute_queue.pop(0)
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
 
     def set_cooldown_result(self, result: bool | Callable[[str], bool]) -> None:
         """Configure what check_and_apply_cooldown returns.

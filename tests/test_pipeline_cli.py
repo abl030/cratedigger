@@ -913,13 +913,13 @@ class TestMainExitCodes(unittest.TestCase):
 
 class TestCmdQuery(unittest.TestCase):
     def test_query_renders_table_output_in_read_only_mode(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         query_cur = MagicMock()
         query_cur.description = [("id",), ("artist_name",), ("details",)]
         query_cur.fetchall.return_value = [
             {"id": 7, "artist_name": "Buke and Gase", "details": {"tracks": 3}},
         ]
-        db._execute.side_effect = [MagicMock(), query_cur, MagicMock()]
+        db.queue_execute_results(MagicMock(), query_cur, MagicMock())
 
         args = MagicMock(sql="SELECT id, artist_name, details FROM album_requests", json=False)
         stdout = io.StringIO()
@@ -929,36 +929,35 @@ class TestCmdQuery(unittest.TestCase):
         # Behavior: query succeeds, output is formatted, read-only mode was used
         self.assertIsNone(rc)
         # 3 _execute calls: enable read-only, run query, disable read-only
-        self.assertEqual(db._execute.call_count, 3)
+        self.assertEqual(len(db.execute_calls), 3)
         output = stdout.getvalue()
         self.assertIn("id | artist_name", output)
         self.assertIn('{"tracks": 3}', output)
         self.assertIn("(1 row)", output)
 
     def test_query_reads_sql_from_stdin_when_dash_is_passed(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         query_cur = MagicMock()
         query_cur.description = [("value",)]
         query_cur.fetchall.return_value = [{"value": 1}]
-        db._execute.side_effect = [MagicMock(), query_cur, MagicMock()]
+        db.queue_execute_results(MagicMock(), query_cur, MagicMock())
 
         args = MagicMock(sql="-", json=False)
         stdout = io.StringIO()
         with patch("sys.stdin", io.StringIO("SELECT 1 AS value")), redirect_stdout(stdout):
             pipeline_cli.cmd_query(db, args)
 
-        self.assertEqual(
-            db._execute.call_args_list[1][0][0],
-            "SELECT 1 AS value",
-        )
+        # Second _execute call is the query itself; the first/third are
+        # read-only session toggles.
+        self.assertEqual(db.execute_calls[1][0], "SELECT 1 AS value")
         self.assertIn("value", stdout.getvalue())
 
     def test_query_can_emit_json(self):
-        db = MagicMock()
+        db = FakePipelineDB()
         query_cur = MagicMock()
         query_cur.description = [("id",), ("status",)]
         query_cur.fetchall.return_value = [{"id": 3, "status": "wanted"}]
-        db._execute.side_effect = [MagicMock(), query_cur, MagicMock()]
+        db.queue_execute_results(MagicMock(), query_cur, MagicMock())
 
         args = MagicMock(sql="SELECT id, status FROM album_requests", json=True)
         stdout = io.StringIO()
@@ -973,12 +972,12 @@ class TestCmdQuery(unittest.TestCase):
     def test_query_reports_sql_errors_and_cleans_up(self):
         import psycopg2
 
-        db = MagicMock()
-        db._execute.side_effect = [
+        db = FakePipelineDB()
+        db.queue_execute_results(
             MagicMock(),
             psycopg2.ProgrammingError('syntax error at or near "BOOM"'),
             MagicMock(),
-        ]
+        )
 
         args = MagicMock(sql="BOOM", json=False)
         stderr = io.StringIO()
@@ -989,7 +988,7 @@ class TestCmdQuery(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("syntax error", stderr.getvalue())
         # Cleanup call happened (3rd _execute call for read-only reset)
-        self.assertEqual(db._execute.call_count, 3)
+        self.assertEqual(len(db.execute_calls), 3)
 
 
 class TestCmdQueryIntegration(unittest.TestCase):
@@ -1177,8 +1176,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
             delete_cur.fetchall.return_value = []
             finalize_request = MagicMock()
 
-            db = MagicMock()
-            db.get_request.return_value = make_request_row(
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
                 id=42,
                 status="wanted",
                 mb_release_id="mbid-123",
@@ -1189,12 +1188,8 @@ class TestCmdRepairSpectral(unittest.TestCase):
                 current_spectral_bitrate=96,
                 verified_lossless=True,
                 final_format="mp3 v0",
-            )
-            db._execute.side_effect = [
-                candidate_cur,
-                clear_cur,
-                delete_cur,
-            ]
+            ))
+            db.queue_execute_results(candidate_cur, clear_cur, delete_cur)
 
             beets_info = AlbumInfo(
                 album_id=1,
@@ -1217,12 +1212,12 @@ class TestCmdRepairSpectral(unittest.TestCase):
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
                  patch("lib.transitions.finalize_request", finalize_request), \
                  redirect_stdout(stdout):
-                pipeline_cli.cmd_repair_spectral(db, args)
+                pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
 
             output = stdout.getvalue()
             self.assertIn("quality_gate_decision → accept", output)
             self.assertIn("→ transitioned to imported", output)
-            self.assertEqual(db._execute.call_count, 3)
+            self.assertEqual(len(db.execute_calls), 3)
             called_db, request_id, transition = finalize_request.call_args.args
             self.assertIs(called_db, db)
             self.assertEqual(request_id, 42)
