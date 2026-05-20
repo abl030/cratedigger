@@ -1,6 +1,6 @@
 # MagicMock removal — cleanup-phase resume note
 
-This is the **entry point** for picking up the cleanup phase of the stateful-MagicMock removal effort with fresh context. Read this first. The long-form history (Phase 1 + Phase 2, 30+ landed PRs, 160→4 baseline) lives in **closed** issues #290 and #301. The remaining work is tracked in the **active cover issue** (linked at the top of those closed issues).
+This is the **entry point** for picking up the cleanup phase of the stateful-MagicMock removal effort with fresh context. Read this first. The long-form history (Phase 1 + Phase 2, 30+ landed PRs, 160→4 baseline) lives in **closed** issues #290 and #301. The remaining work is tracked in the **active cover issue #333**.
 
 ## Where we are
 
@@ -140,7 +140,7 @@ The pre-commit hook, audit, and skip-audit gates all enforce themselves. If the 
 
 ## Pointers
 
-- **Active cover issue**: see the GitHub issue tracker (filed after #290 / #301 closed).
+- **Active cover issue**: #333.
 - **History**: closed issues #290 (master plan), #301 (deferred items log).
 - **Rule**: `.claude/rules/code-quality.md` § "MOCKS: LEAF-SEAM ONLY".
 - **Audit**: `tests/test_mock_audit.py`, `tests/_mock_audit_scanner.py`.
