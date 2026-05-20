@@ -161,6 +161,51 @@ def _nomatch() -> MatchResult:
     return MatchResult(matched=False, directory={}, file_dir="", candidates=[])
 
 
+def _always_nomatch(*_args, **_kwargs) -> MatchResult:
+    """Stub ``match_fn`` that never matches — replaces
+    ``patch("lib.enqueue.check_for_match", return_value=_nomatch())``."""
+    return _nomatch()
+
+
+def _const_match(result: MatchResult):
+    """Stub ``match_fn`` that always returns ``result`` — replaces
+    ``patch("lib.enqueue.check_for_match", return_value=result)``."""
+
+    def _fn(*_args, **_kwargs) -> MatchResult:
+        return result
+
+    return _fn
+
+
+class _RecordingMatchFn:
+    """Recorder ``match_fn`` for tests that previously did
+    ``patch("lib.enqueue.check_for_match") as m_match`` and then asserted
+    on call shape (``assert_not_called``, ``call_count``, ``call_args``).
+
+    Wraps an inner stub and records each invocation's positional args so
+    tests can assert call counts and arguments without mocking module
+    globals.
+    """
+
+    def __init__(self, inner=_always_nomatch):
+        self._inner = inner
+        self.calls: list[tuple] = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append(args)
+        return self._inner(*args, **kwargs)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    def assert_not_called(self) -> None:
+        if self.calls:
+            raise AssertionError(
+                f"expected match_fn never to be called, got {len(self.calls)} call(s)"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Wave-shape tests
 # ---------------------------------------------------------------------------
@@ -183,9 +228,10 @@ class TestWaveShape(unittest.TestCase):
             return _nomatch()
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan, \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(m_fan.call_count, 1, "expected a single fan-out wave for top-K hit")
@@ -210,9 +256,10 @@ class TestWaveShape(unittest.TestCase):
             return _nomatch()
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan, \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(m_fan.call_count, 2, "expected exactly two fan-out waves")
@@ -228,9 +275,10 @@ class TestWaveShape(unittest.TestCase):
         results = _make_results(users)
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan, \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_always_nomatch,
+            )
 
         self.assertFalse(attempt.matched)
         self.assertFalse(attempt.enqueue_failed)
@@ -248,9 +296,11 @@ class TestWaveShape(unittest.TestCase):
         )
         results = _make_results(users)
 
-        with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan, \
-             patch("lib.enqueue.check_for_match") as m_match:
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+        m_match = _RecordingMatchFn()
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan:
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=m_match,
+            )
 
         self.assertFalse(attempt.matched)
         m_fan.assert_not_called()
@@ -262,9 +312,10 @@ class TestWaveShape(unittest.TestCase):
         ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
         results = _make_results(users)
 
-        with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan, \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan:
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_always_nomatch,
+            )
 
         self.assertEqual(m_fan.call_count, 1)
         work = m_fan.call_args[0][0]
@@ -281,9 +332,10 @@ class TestWaveShape(unittest.TestCase):
         for u in users[:2]:
             ctx.folder_cache[u] = {f"Music\\{u}\\Album": {"directory": "x", "files": []}}
 
-        with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan, \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()) as m_fan:
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_always_nomatch,
+            )
 
         self.assertEqual(m_fan.call_count, 1)
         work = m_fan.call_args[0][0]
@@ -307,9 +359,10 @@ class TestWaveShape(unittest.TestCase):
                     "files": [],
                 }
 
-        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+        with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout):
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_always_nomatch,
+            )
 
         self.assertGreater(ctx.browse_time_s, 0.0)
         self.assertEqual(ctx.fanout_waves, 1)
@@ -332,9 +385,10 @@ class TestWaveShape(unittest.TestCase):
             self.assertIn((user, file_dir), ctx.peer_cache_negative_skips)
             return _nomatch()
 
-        with patch("lib.enqueue._fanout_browse_users", return_value=browse_result), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+        with patch("lib.enqueue._fanout_browse_users", return_value=browse_result):
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertEqual(ctx.peers_browsed, 0)
         self.assertEqual(ctx.peer_cache_negative_skips, {(user, file_dir)})
@@ -466,12 +520,11 @@ class TestEnqueueFailureTracking(unittest.TestCase):
             return [MagicMock()]
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch(
-                 "lib.enqueue.check_for_match",
-                 side_effect=lambda tracks, ft, dirs, u, ctx: match_returns[u],
-             ), \
              patch("lib.enqueue.slskd_do_enqueue", side_effect=fake_enqueue):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx,
+                match_fn=lambda tracks, ft, dirs, u, ctx: match_returns[u],
+            )
 
         # All three users were tried; final user succeeded.
         self.assertEqual(enqueue_calls, list(users))
@@ -487,12 +540,11 @@ class TestEnqueueFailureTracking(unittest.TestCase):
         }
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch(
-                 "lib.enqueue.check_for_match",
-                 side_effect=lambda tracks, ft, dirs, u, ctx: match_returns[u],
-             ), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=None):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx,
+                match_fn=lambda tracks, ft, dirs, u, ctx: match_returns[u],
+            )
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
@@ -521,9 +573,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             downloads=[],
         ))
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
-            attempt = try_enqueue(_make_tracks(), results, "mp3", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "mp3", ctx, match_fn=_const_match(match),
+            )
 
         self.assertFalse(attempt.matched)
         self.assertFalse(attempt.enqueue_failed)
@@ -564,9 +617,11 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         ))
         with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
              patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
-            attempt = try_multi_enqueue(release, tracks, results, "mp3", ctx)
+            attempt = try_multi_enqueue(
+                release, tracks, results, "mp3", ctx,
+                match_fn=_const_match(match),
+            )
 
         self.assertFalse(attempt.matched)
         self.assertFalse(attempt.enqueue_failed)
@@ -620,9 +675,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             ])
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.status_history, [(1, "downloading")])
@@ -647,10 +703,11 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
-                try_enqueue(_make_tracks(), results, "flac", ctx)
+                try_enqueue(
+                    _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+                )
 
         row = db.request(1)
         self.assertEqual(row["status"], "downloading")
@@ -680,12 +737,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="rejected"),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
@@ -711,9 +769,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         enqueue_mock = MagicMock()
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue_mock):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         # Probe was consulted; enqueue was never called.
         self.assertEqual(slskd.users.status_calls, ["u00"])
@@ -737,7 +796,6 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         match = _match_for("u00", "Music\\u00\\Album")
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(
@@ -751,7 +809,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                      )],
                  ),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertEqual(slskd.users.status_calls, ["u00"])
         self.assertTrue(attempt.matched)
@@ -770,7 +830,6 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         match = _match_for("u00", "Music\\u00\\Album")
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(
@@ -784,7 +843,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                      )],
                  ),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -804,7 +865,6 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         match = _match_for("u00", "Music\\u00\\Album")
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(
@@ -818,7 +878,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                      )],
                  ),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -836,16 +898,11 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         users = ["u00", "u01"]
         results = _make_results(users)
 
-        def match_side_effect(_tracks, _allowed_filetype, _file_dirs, ctx, *, username, **_kwargs):
+        def match_per_user(_tracks, _ft, _dirs, username, _ctx):
             return _match_for(username, f"Music\\{username}\\Album")
 
         # Each user gets its own match.
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match",
-                   side_effect=lambda *a, **kw: _match_for(
-                       kw.get("username", a[3] if len(a) > 3 else "u00"),
-                       f"Music\\{kw.get('username', 'u00')}\\Album",
-                   )), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(
@@ -859,7 +916,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                      )],
                  ),
              ) as enq:
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=match_per_user,
+            )
 
         self.assertEqual(slskd.users.status_calls, ["u00", "u01"])
         # enqueue called once, for u01
@@ -903,12 +962,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="rejected"),
              ):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         # One log row, attributed to the rejected user.
         self.assertEqual(len(db.download_logs), 1)
@@ -949,12 +1009,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="rejected"),
              ):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         # Verified-no-acceptance failed; claim left for recovery — no log.
         self.assertEqual(db.download_logs, [])
@@ -984,12 +1045,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="rejected"),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -1021,12 +1083,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="rejected"),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -1051,12 +1114,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="unknown"),
              ):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -1131,9 +1195,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             ])
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
-            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.status_history, [(1, "downloading")])
@@ -1206,9 +1271,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             ])
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
-            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
@@ -1252,12 +1318,13 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  return_value=SlskdEnqueueOutcome(status="rejected"),
              ):
-            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -1332,9 +1399,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             ])
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
-            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -1405,9 +1473,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             ])
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue):
-            attempt = try_multi_enqueue(release, tracks, results, "flac", ctx)
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -1470,10 +1539,11 @@ class TestMultiDiscFanout(unittest.TestCase):
             return _nomatch()
 
         with patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]), \
              patch("lib.enqueue.cancel_and_delete"):
-            attempt = try_multi_enqueue(release, all_tracks, results, "flac", ctx)
+            attempt = try_multi_enqueue(
+                release, all_tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched, f"expected match, got {attempt!r}")
         # No (user, dir) duplicate across the per-disc passes — the cache from
@@ -1521,9 +1591,10 @@ class TestAlbumBrowseLogContract(unittest.TestCase):
 
         with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
              patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            attempt = try_enqueue(_make_tracks(), results, "flac", ctx)
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=fake_match,
+            )
 
         self.assertTrue(attempt.matched)
         lines = self._capture_album_browse(log_ctx.output)
@@ -1551,9 +1622,10 @@ class TestAlbumBrowseLogContract(unittest.TestCase):
 
         with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
              patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=fake_match,
+            )
 
         line = self._capture_album_browse(log_ctx.output)[0]
         self.assertIn("matched=True", line)
@@ -1568,9 +1640,10 @@ class TestAlbumBrowseLogContract(unittest.TestCase):
 
         with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
              patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=_nomatch()), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
-            try_enqueue(_make_tracks(), results, "flac", ctx)
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_always_nomatch,
+            )
 
         line = self._capture_album_browse(log_ctx.output)[0]
         self.assertIn("matched=False", line)
@@ -1614,10 +1687,11 @@ class TestAlbumBrowseLogContract(unittest.TestCase):
 
         with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
              patch("lib.enqueue._fanout_browse_users", side_effect=fake_fanout), \
-             patch("lib.enqueue.check_for_match", side_effect=fake_match), \
              patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]), \
              patch("lib.enqueue.cancel_and_delete"):
-            try_multi_enqueue(release, all_tracks, results, "flac", ctx)
+            try_multi_enqueue(
+                release, all_tracks, results, "flac", ctx, match_fn=fake_match,
+            )
 
         lines = self._capture_album_browse(log_ctx.output)
         self.assertEqual(len(lines), 2, f"expected 2 disc lines, got {lines!r}")

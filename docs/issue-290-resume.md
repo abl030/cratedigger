@@ -4,7 +4,7 @@ This is the **entry point** for picking up the stateful-MagicMock removal effort
 
 ## Current state
 
-Baseline last measured at **160 findings across 15 files**. To check the live count:
+Baseline last measured at **126 findings across 15 files**. To check the live count:
 
 ```bash
 nix-shell --run "python3 tests/_rebuild_mock_audit_baseline.py"
@@ -28,27 +28,25 @@ A finding is one of two things:
 
 The audit is in `tests/test_mock_audit.py`; the scanner heuristic lives in `tests/_mock_audit_scanner.py`; the frozen call-site count is in `tests/mock_audit_baseline.json`.
 
-## Three concrete next moves (in order of value-per-effort)
+## Two concrete next moves (in order of value-per-effort)
 
-### 1. Item N in #301 — DI refactor for `try_enqueue` match function (~half day)
+### ~~1. Item N in #301 — DI refactor for `try_enqueue` match function~~ (LANDED)
 
-`test_enqueue_fanout.py` carries **37 patches** of `lib.enqueue.check_for_match` — the wave-shape tests need to control which user "wins" the match. Migrating cleanly requires either elaborate per-user `FakeSlskdAPI.users.set_directory` setup or a small production DI refactor:
+Shipped: `try_enqueue` / `try_multi_enqueue` / `_iter_wave_matches` now take
+`match_fn: MatchFn = check_for_match` (keyword-only). Migrated all wave-shape
+tests in `test_enqueue_fanout.py`, plus three sites in
+`test_integration_slices.py` and three in `test_integration.py`. Dropped 34
+findings (160 → 126).
 
-```python
-def try_enqueue(..., match_fn: MatchFn = check_for_match): ...
-```
-
-Then tests pass a stub callable by value. Production stays the same default. PR title: `refactor(enqueue): inject check_for_match for wave-shape testability`. Drops 37 findings.
-
-### 2. Item K in #301 — DI refactor for `_check_quality_gate_core` (~half day)
+### 1. Item K in #301 — DI refactor for `_check_quality_gate_core` (~half day)
 
 13 patches across `test_dispatch_core.py` (4), `test_dispatch_from_db.py` (5), `test_import_dispatch.py` (4). Same DI pattern: pass the quality gate as a function arg into `dispatch_import_core(..., quality_gate_fn=_check_quality_gate_core)`. PR title: `refactor(import-dispatch): inject quality_gate_core for orchestration tests`. Drops 13 findings.
 
-### 3. Item M in #301 — `_execute` support on `FakePipelineDB` (~2 hours)
+### 2. Item M in #301 — `_execute` support on `FakePipelineDB` (~2 hours)
 
 14 sites in `test_pipeline_cli.py` (mostly TestCmdQuery, TestCmdRepairSpectral) inject SQL cursor results via `db._execute.side_effect = [cursor1, cursor2, ...]`. Add a minimal `_execute` simulator to FakePipelineDB that lets tests register the cursor sequence — same shape as the existing `set_directory_*` pattern on FakeSlskdAPI. PR title: `test(fakes): add _execute cursor stubbing to FakePipelineDB`. Drops 14 findings.
 
-After all three: baseline drops ~64 → ~96 remaining. That residual is mostly `finalize_request` in `test_web_server.py` contract tests (26 sites) — those need either per-test DB seeding (heavy) OR the same DI treatment for `finalize_request` (likely the right move; tracked separately).
+After both: baseline drops 126 → ~99 remaining. That residual is mostly `finalize_request` in `test_web_server.py` contract tests (26 sites) — those need either per-test DB seeding (heavy) OR the same DI treatment for `finalize_request` (likely the right move; tracked separately).
 
 ## What's NOT next
 

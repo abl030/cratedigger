@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass, replace
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence, cast
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
 from lib.download import (
@@ -29,6 +29,16 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("cratedigger")
+
+
+MatchFn = Callable[
+    [Sequence["TrackRecord"], str, list[str], str, "CratediggerContext"],
+    MatchResult,
+]
+"""Type of the matching callable injected into ``_iter_wave_matches`` and
+``try_enqueue`` / ``try_multi_enqueue``. Production passes
+:func:`lib.matching.check_for_match`; tests can pass a stub callable that
+controls per-user match outcomes instead of patching the module attribute."""
 
 
 @dataclass(frozen=True)
@@ -782,6 +792,8 @@ def _iter_wave_matches(
     ctx: CratediggerContext,
     accumulated: list[CandidateScore],
     pre_filter_skips: list[int] | None = None,
+    *,
+    match_fn: MatchFn = check_for_match,
 ) -> Iterator[tuple[str, MatchResult, int]]:
     """Yield ``(username, match_result, wave_index)`` for every dir match.
 
@@ -853,7 +865,7 @@ def _iter_wave_matches(
             file_dirs = user_dirs.get(username)
             if not file_dirs:
                 continue
-            match_result = check_for_match(
+            match_result = match_fn(
                 tracks, allowed_filetype, file_dirs, username, ctx,
             )
             accumulated.extend(match_result.candidates)
@@ -868,6 +880,8 @@ def try_enqueue(
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
     ctx: CratediggerContext,
+    *,
+    match_fn: MatchFn = check_for_match,
 ) -> EnqueueAttempt:
     """Single album match and enqueue.
 
@@ -892,7 +906,7 @@ def try_enqueue(
     match_wave: int | None = None
     for username, match_result, wave_idx in _iter_wave_matches(
         all_tracks, eligible, user_dirs, allowed_filetype, ctx, accumulated,
-        pre_filter_skips,
+        pre_filter_skips, match_fn=match_fn,
     ):
         if match_wave is None:
             match_wave = wave_idx
@@ -1062,6 +1076,8 @@ def try_multi_enqueue(
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
     ctx: CratediggerContext,
+    *,
+    match_fn: MatchFn = check_for_match,
 ) -> EnqueueAttempt:
     """Locate and enqueue a multi-disc album.
 
@@ -1097,7 +1113,7 @@ def try_multi_enqueue(
         first_match = next(
             _iter_wave_matches(
                 disk["tracks"], eligible, user_dirs, allowed_filetype, ctx,
-                accumulated, pre_filter_skips,
+                accumulated, pre_filter_skips, match_fn=match_fn,
             ),
             None,
         )

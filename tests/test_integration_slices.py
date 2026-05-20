@@ -182,12 +182,14 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
             ])
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match", return_value=match), \
              patch(
                  "lib.enqueue.slskd_enqueue_with_outcome",
                  side_effect=accepted_without_id,
              ):
-            attempt = try_enqueue(tracks, results, "flac", enqueue_ctx)
+            attempt = try_enqueue(
+                tracks, results, "flac", enqueue_ctx,
+                match_fn=lambda *a, **kw: match,
+            )
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
@@ -316,10 +318,11 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match",
-                   side_effect=self._wave_match_side_effect()), \
              patch("time.sleep"):
-            attempt = try_enqueue(tracks, results, "flac", ctx)
+            attempt = try_enqueue(
+                tracks, results, "flac", ctx,
+                match_fn=self._wave_match_side_effect(),
+            )
 
         # Both peers probed (in upload-speed order).
         self.assertEqual(
@@ -353,10 +356,11 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match",
-                   side_effect=self._wave_match_side_effect()), \
              patch("time.sleep"):
-            attempt = try_enqueue(tracks, results, "flac", ctx)
+            attempt = try_enqueue(
+                tracks, results, "flac", ctx,
+                match_fn=self._wave_match_side_effect(),
+            )
 
         self.assertEqual(slskd.users.status_calls, ["u00", "u01"])
         self.assertEqual(slskd.transfers.enqueue_calls, [])
@@ -384,10 +388,11 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.check_for_match",
-                   side_effect=self._wave_match_side_effect()), \
              patch("time.sleep"):
-            try_enqueue(tracks, results, "flac", ctx)
+            try_enqueue(
+                tracks, results, "flac", ctx,
+                match_fn=self._wave_match_side_effect(),
+            )
 
         # Probe said Online, so we did try.
         self.assertEqual(slskd.users.status_calls, ["pooyork"])
