@@ -11,7 +11,7 @@ handled; routes never catch it inline.
 
 from __future__ import annotations
 
-from typing import Any, Type, TypeVar
+from typing import Any, Sequence, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -47,15 +47,40 @@ def parse_body(handler: Any, body: Any, model: Type[M]) -> M | None:
         # ``@model_validator`` errors, which the stdlib ``json`` encoder
         # cannot serialise. ``include_input=False`` keeps the response
         # compact (the frontend only needs ``loc`` + ``msg`` + ``type``).
+        errors = exc.errors(
+            include_url=False,
+            include_context=False,
+            include_input=False,
+        )
         handler._json(
             {
-                "error": "validation failed",
-                "errors": exc.errors(
-                    include_url=False,
-                    include_context=False,
-                    include_input=False,
-                ),
+                "error": _summarise_error(errors),
+                "errors": errors,
             },
             status=400,
         )
         return None
+
+
+def _summarise_error(errors: Sequence[Any]) -> str:
+    """Single-line summary of the first error for the legacy ``error`` field.
+
+    Pre-Pydantic routes returned ad-hoc strings like ``"to_ordinal must be
+    an integer"`` in the top-level ``error`` field. Keep the legacy
+    surface alive — existing tests + the frontend's older error toasts
+    grep this string — while ``errors`` carries the structured list.
+
+    Shape (canonical):
+      - "<field>: <msg>" when the error has a non-root location.
+      - "<msg>" for model-level / root errors.
+    """
+    if not errors:
+        return "validation failed"
+    first = errors[0]
+    msg = str(first.get("msg") or "validation failed")
+    loc = first.get("loc") or ()
+    if loc:
+        field = ".".join(str(x) for x in loc if x != "__root__")
+        if field:
+            return f"{field}: {msg}"
+    return msg

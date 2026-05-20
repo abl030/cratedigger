@@ -2681,6 +2681,12 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertIsNone(mock_gen.call_args.kwargs.get("prepend_artist"))
 
     def test_regenerate_rejects_string_prepend_artist(self):
+        """Strict-bool field rejects the string ``"false"`` (Pydantic
+        v2 lax mode would coerce it). The exact phrasing comes from
+        Pydantic now; assert the field name appears in the error so
+        the frontend can render a sensible message regardless of which
+        validator wrote it.
+        """
         from unittest.mock import patch as _patch
         with _patch(
             "lib.search_plan_service.SearchPlanService.generate_for_request",
@@ -2689,7 +2695,7 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
                 "/api/pipeline/100/search-plan/regenerate",
                 {"prepend_artist": "false"})
         self.assertEqual(status, 400)
-        self.assertEqual(data["error"], "prepend_artist must be a boolean")
+        self.assertIn("prepend_artist", data["error"])
         mock_gen.assert_not_called()
 
     def test_regenerate_rejects_non_dict_body_with_400(self):
