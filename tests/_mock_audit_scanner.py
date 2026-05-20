@@ -151,6 +151,14 @@ _LEAF_SEAM_PATTERNS = [
     # a subprocess seam.
     re.compile(r"^lib\.beets\.beets_validate$"),
 
+    # ``parse_import_result`` is the parsed-output side of the SAME
+    # harness subprocess: scans import_one.py's stdout for the
+    # ``__IMPORT_RESULT__`` sentinel and decodes it via msgspec.
+    # Patching it is morally equivalent to constructing a fake harness
+    # stdout — same wire-boundary seam as ``beets_validate``.
+    re.compile(r"^lib\.quality\.parse_import_result$"),
+    re.compile(r"^lib\.import_dispatch\.parse_import_result$"),
+
     # Spectral / audio measurement wrappers. Each invokes sox / ffmpeg /
     # mp3val subprocesses and reads files on disk; equivalent to a
     # subprocess seam. ``inspect_local_files`` reads tag/codec metadata.
