@@ -83,8 +83,7 @@
     "patch:lib.beets_db.BeetsDB.delete_album": 5
   },
   "test_matching.py": {
-    "patch:lib.matching._track_titles_cross_check": 1,
-    "stateful_mock_assign:slskd": 1
+    "patch:lib.matching._track_titles_cross_check": 1
   },
   "test_measurement.py": {
     "patch:lib.measurement._iter_audio_files": 2,
