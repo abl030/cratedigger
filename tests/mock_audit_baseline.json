@@ -21,7 +21,7 @@
     "stateful_mock_assign:slskd": 1
   },
   "test_enqueue_fanout.py": {
-    "patch:lib.enqueue.check_for_match": 33
+    "patch:lib.enqueue.check_for_match": 3
   },
   "test_import_dispatch.py": {
     "patch:lib.download.log_validation_result": 1,
@@ -47,7 +47,6 @@
   "test_integration_slices.py": {
     "patch:lib.download.dispatch_import_core": 1,
     "patch:lib.download.process_completed_album": 3,
-    "patch:lib.enqueue.check_for_match": 4,
     "patch:lib.transitions.finalize_request": 1
   },
   "test_matching.py": {

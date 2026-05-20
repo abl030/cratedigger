@@ -828,16 +828,17 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
         )
 
         from lib.matching import MatchResult
-        with patch.object(
-            enqueue_module,
-            "check_for_match",
-            side_effect=[
-                MatchResult(matched=True, directory=dir1, file_dir="Music\\Disc1"),
-                MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
-            ],
-        ), patch("time.sleep"):
+        match_results = iter([
+            MatchResult(matched=True, directory=dir1, file_dir="Music\\Disc1"),
+            MatchResult(matched=True, directory=dir2, file_dir="Music\\Disc2"),
+        ])
+
+        def fake_match(*_args, **_kwargs):
+            return next(match_results)
+
+        with patch("time.sleep"):
             attempt = cratedigger.try_multi_enqueue(
-                release, tracks, results, "flac", self.ctx
+                release, tracks, results, "flac", self.ctx, match_fn=fake_match,
             )
 
         self.assertTrue(attempt.matched)
@@ -1013,18 +1014,16 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
         }])
 
         from lib.matching import MatchResult
-        with patch.object(
-            enqueue_module,
-            "check_for_match",
-            return_value=MatchResult(
-                matched=True, directory=directory, file_dir="Music\\Album",
-            ),
-        ), patch("time.sleep"):
+        match_result = MatchResult(
+            matched=True, directory=directory, file_dir="Music\\Album",
+        )
+        with patch("time.sleep"):
             attempt = cratedigger.try_enqueue(
                 make_tracks((1, "Track One", 1)),
                 results,
                 "flac",
                 self.ctx,
+                match_fn=lambda *a, **kw: match_result,
             )
 
         self.assertTrue(attempt.matched)
@@ -1200,19 +1199,16 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         results = {"user1": {"flac": ["Music\\Album"]}}
 
         from lib.matching import MatchResult
-        with patch.object(
-            enqueue_module,
-            "check_for_match",
-            return_value=MatchResult(
-                matched=True, directory=directory, file_dir="Music\\Album",
-            ),
-        ):
-            attempt = cratedigger.try_enqueue(
-                make_tracks((1, "Track One", 1)),
-                results,
-                "flac",
-                ctx,
-            )
+        match_result = MatchResult(
+            matched=True, directory=directory, file_dir="Music\\Album",
+        )
+        attempt = cratedigger.try_enqueue(
+            make_tracks((1, "Track One", 1)),
+            results,
+            "flac",
+            ctx,
+            match_fn=lambda *a, **kw: match_result,
+        )
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
