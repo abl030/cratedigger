@@ -77,11 +77,6 @@
     "patch:lib.mbid_replace_service.MbidReplaceService": 1,
     "patch:lib.quality.full_pipeline_decision": 2,
     "patch:lib.transitions.finalize_request": 3,
-    "patch:scripts.pipeline_cli._load_beets_album_info": 2,
-    "patch:scripts.pipeline_cli._load_runtime_rank_config": 2,
-    "patch:scripts.pipeline_cli._load_runtime_verified_lossless_target": 2,
-    "patch:scripts.pipeline_cli._resolve_failed_path": 5,
-    "patch:scripts.pipeline_cli.fetch_mb_release_group_year": 3,
     "stateful_mock_assign:db": 42
   },
   "test_repair_cli.py": {
