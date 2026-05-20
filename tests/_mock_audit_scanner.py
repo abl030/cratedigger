@@ -329,6 +329,17 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.download\.process_completed_album$"),
     re.compile(r"^lib\.download\._process_beets_validation$"),
 
+    # ``scripts.repair`` in-module DI seams. The repair CLI orchestrates
+    # ``_collect_issues`` (aggregates orphan/recovery checks) which
+    # internally calls ``find_orphaned_downloads`` (from ``lib.quality``)
+    # and ``find_blocked_recovery_issues`` (from ``lib.download_recovery``)
+    # via local imports. Tests stub the inner pieces to drive each
+    # branch of ``cmd_fix`` / ``cmd_scan`` without setting up real
+    # orphan fixtures. Same module-local DI shape as ``lib.download``.
+    re.compile(r"^scripts\.repair\._collect_issues$"),
+    re.compile(r"^scripts\.repair\.find_orphaned_downloads$"),
+    re.compile(r"^scripts\.repair\.find_blocked_recovery_issues$"),
+
     # Filesystem-write wrapper. ``log_validation_result`` (defined in
     # ``lib.util``) appends to the beets-tracking JSONL file — a thin
     # filesystem-boundary helper. Tests in ``test_download.py`` patch
