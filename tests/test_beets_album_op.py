@@ -22,8 +22,10 @@ import re
 import subprocess as sp
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+from tests.fakes import FakeBeetsDB
 from lib.beets_album_op import (BeetsAlbumHandle, BeetsOpFailure,
                                 BeetsOpResult, move_album, remove_album,
                                 remove_by_selector)
@@ -176,9 +178,12 @@ class TestRemoveAlbum(unittest.TestCase):
 class TestMoveAlbum(unittest.TestCase):
 
     def _beets(self, new_path: str | None = "/Beets/Artist/Album [2007]"
-               ) -> MagicMock:
-        beets = MagicMock()
-        beets.get_album_path_by_id.return_value = new_path
+               ) -> FakeBeetsDB:
+        beets = FakeBeetsDB()
+        # The default ``new_path`` covers album_id 42 (the only album_id
+        # exercised by these tests); use the default-path field so any
+        # album_id query returns it without per-test seeding.
+        beets._album_path_by_id_default = new_path
         return beets
 
     @patch("lib.beets_album_op.sp.run")
@@ -188,7 +193,7 @@ class TestMoveAlbum(unittest.TestCase):
         # patch the source module so the deferred lookup resolves to the mock.
         mock_run.return_value = _ok()
         with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), self._beets())
+            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, self._beets()))
         self.assertTrue(r.success)
         self.assertEqual(r.new_path, "/Beets/Artist/Album [2007]")
         mock_fix.assert_called_once_with("/Beets/Artist/Album [2007]")
@@ -199,7 +204,7 @@ class TestMoveAlbum(unittest.TestCase):
         mock_run.return_value = _ok()
         beets = self._beets()
         with patch("lib.permissions.fix_library_modes"):
-            move_album(BeetsAlbumHandle(album_id=42), beets)
+            move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
         argv = mock_run.call_args.args[0]
         self.assertEqual(argv[1:], ["move", "-a", "id:42"])
         # -d must NEVER appear on a move
@@ -212,12 +217,12 @@ class TestMoveAlbum(unittest.TestCase):
             cmd=["beet", "move"], timeout=120)
         beets = self._beets()
         with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), beets)
+            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
         self.assertFalse(r.success)
         assert r.failure is not None
         self.assertEqual(r.failure.reason, "timeout")
         self.assertIsNone(r.new_path)
-        beets.get_album_path_by_id.assert_not_called()
+        self.assertEqual(beets.get_album_path_by_id_calls, [])
         mock_fix.assert_not_called()
 
     @patch("lib.beets_album_op.sp.run")
@@ -225,11 +230,11 @@ class TestMoveAlbum(unittest.TestCase):
         mock_run.return_value = _rc(2, stderr="no matching albums\n")
         beets = self._beets()
         with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), beets)
+            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
         self.assertFalse(r.success)
         assert r.failure is not None
         self.assertEqual(r.failure.reason, "nonzero_rc")
-        beets.get_album_path_by_id.assert_not_called()
+        self.assertEqual(beets.get_album_path_by_id_calls, [])
         mock_fix.assert_not_called()
 
     @patch("lib.beets_album_op.sp.run")
@@ -241,7 +246,7 @@ class TestMoveAlbum(unittest.TestCase):
         mock_run.return_value = _ok()
         beets = self._beets(new_path=None)
         with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), beets)
+            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
         self.assertTrue(r.success)
         self.assertIsNone(r.new_path)
         mock_fix.assert_not_called()

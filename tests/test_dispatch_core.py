@@ -22,7 +22,7 @@ from lib.quality import (
     QualityEvidenceActionPayload,
     VerifiedLosslessProof,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
     make_import_result,
@@ -79,10 +79,8 @@ _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 
 
 def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
-    beets = MagicMock()
-    beets.__enter__.return_value = beets
-    beets.__exit__.return_value = None
-    beets.get_album_info.return_value = (
+    beets = FakeBeetsDB()
+    beets._album_info_default = (
         AlbumInfo(
             album_id=1,
             track_count=1,

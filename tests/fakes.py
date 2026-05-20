@@ -4127,17 +4127,20 @@ class FakeBeetsDB:
         self._album_ids_for_release: dict[str, list[int]] = {}
         self._album_info: dict[str, Any] = {}
         self._item_paths: dict[str, list[tuple[int, str]]] = {}
+        self._album_path_by_id: dict[int, str | None] = {}
         # Default return values for unseeded keys — match the real
         # BeetsDB's "no row" shapes so tests don't crash on missing
         # explicit seeds.
         self._album_exists_default = False
         self._album_ids_default: list[int] = []
         self._album_info_default: Any = None
+        self._album_path_by_id_default: str | None = None
         self._item_paths_default: list[tuple[int, str]] = []
         self.close_calls: int = 0
         self.album_exists_calls: list[str] = []
         self.get_album_info_calls: list[str] = []
         self.get_all_album_ids_for_release_calls: list[str] = []
+        self.get_album_path_by_id_calls: list[int] = []
         self.get_item_paths_calls: list[str] = []
 
     # --- Seeding helpers ---
@@ -4157,6 +4160,9 @@ class FakeBeetsDB:
         self, release_id: str, paths: list[tuple[int, str]],
     ) -> None:
         self._item_paths[release_id] = list(paths)
+
+    def set_album_path_by_id(self, album_id: int, path: str | None) -> None:
+        self._album_path_by_id[album_id] = path
 
     # --- Real-method surface ---
 
@@ -4179,6 +4185,11 @@ class FakeBeetsDB:
         self.get_item_paths_calls.append(release_id)
         return self._item_paths.get(
             release_id, list(self._item_paths_default))
+
+    def get_album_path_by_id(self, album_id: int) -> str | None:
+        self.get_album_path_by_id_calls.append(album_id)
+        return self._album_path_by_id.get(
+            album_id, self._album_path_by_id_default)
 
     def close(self) -> None:
         self.close_calls += 1
