@@ -1,16 +1,21 @@
 # MagicMock removal — cleanup-phase resume note
 
-This is the **entry point** for picking up the cleanup phase of the stateful-MagicMock removal effort with fresh context. Read this first. The long-form history (Phase 1 + Phase 2, 30+ landed PRs, 160→4 baseline) lives in **closed** issues #290 and #301. The remaining work is tracked in the **active cover issue #333**.
+**Status (2026-05-21): COMPLETE.** All four cleanup steps landed in
+PRs #335-#338. Cover issue #333 closed. The long-form history
+(Phase 1 + Phase 2, 30+ landed PRs, 160→4 baseline) lives in closed
+issues #290 and #301. This doc is kept as historical evidence — read
+it for context on the decisions, not for active work.
 
 ## Where we are
 
-- Mock-audit baseline: **4 findings across 3 files** (down from 613 → 160 → 4).
+- Mock-audit baseline: **2 findings across 2 files** (down from 613 → 160 → 4 → 2).
 - Pyright clean on full repo.
 - Full suite: 3700 tests green.
-- Infrastructure shipped: `FakePipelineDB` (+ `queue_execute_results`), `FakeBeetsDB`, `FakeSlskdAPI`, `FakePipelineDBSource`, `make_ctx_with_fake_db`, `noop_quality_gate`, `RecordingQualityGate`, `try_enqueue(match_fn=)`, `dispatch_import_core(quality_gate_fn=)`.
-- DI seams shipped: module-local `finalize_request` bindings across `web.routes.pipeline`, `lib.import_dispatch`, `harness.import_one`, `scripts.pipeline_cli`, `scripts.repair`. Module-local `quality_gate_decision` binding on `lib.import_dispatch`. In-module DI seams in `lib.download` and `scripts.repair`.
-
-The 4-finding floor sounds great but masks **allowlist debt**. The cleanup phase below is about repaying that debt and addressing the documented deferred items, not chasing the baseline further per se.
+- Remaining 2 findings are the explicitly-deferred items A and J
+  in `lib.matching` — both are tracked as "address only if a future
+  change touches the file" and are not in scope for further work.
+- Infrastructure shipped: `FakePipelineDB` (+ `queue_execute_results`), `FakeBeetsDB`, `FakeSlskdAPI`, `FakePipelineDBSource`, `make_ctx_with_fake_db`, `noop_quality_gate`, `RecordingQualityGate`, `try_enqueue(match_fn=)`, `dispatch_import_core(quality_gate_fn=)`, `_pipeline_db_test_harness()` (web_server FakePipelineDB-wrap).
+- DI seams shipped: module-local `finalize_request` bindings across `web.routes.pipeline`, `lib.import_dispatch`, `harness.import_one`, `scripts.pipeline_cli`, `scripts.repair`. Module-local `quality_gate_decision` binding on `lib.import_dispatch`. In-module DI seams in `lib.download` and `scripts.repair`. Kwarg-DI on `_collect_issues(find_orphaned_fn=, find_blocked_recovery_fn=)`.
 
 ## Live count check
 
@@ -27,9 +32,9 @@ for f, kinds in sorted(b.items(), key=lambda kv: sum(kv[1].values())):
 
 If the live count differs from this doc, trust the live count and update this file as part of the next PR.
 
-## The cleanup phase — 4 steps
+## The cleanup phase — 4 steps (all complete)
 
-These are the four open work items, ordered by value-per-effort. Each is a separate PR.
+Original ordering by value-per-effort. Each landed in its own PR.
 
 ### Step 1 — Migrate pure-decision allowlists to real-input tests ✅ DONE
 
