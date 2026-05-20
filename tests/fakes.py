@@ -673,6 +673,10 @@ class FakePipelineDB:
         # on the MagicMock-source can now inspect these instead.
         self.has_any_bad_audio_hashes_calls: int = 0
         self.lookup_bad_audio_hash_calls: list[tuple[bytes, str]] = []
+        # ``clear_on_disk_quality_fields`` is invoked when a release is
+        # purged from beets; tests on lib.release_cleanup assert the
+        # exact request_id flushed (and whether it fired at all).
+        self.clear_on_disk_quality_fields_calls: list[int] = []
         # Keyed by (mb_release_id, snapshot_fingerprint) — content-addressed
         # after migration 021. Each row also has a surrogate ``id``; the
         # parallel ``_evidence_by_id`` dict mirrors load-by-id lookups.
@@ -1969,6 +1973,7 @@ class FakePipelineDB:
         return int(val) if val is not None else None
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
+        self.clear_on_disk_quality_fields_calls.append(request_id)
         row = self._requests.get(request_id)
         if row is None:
             return

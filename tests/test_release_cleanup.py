@@ -25,12 +25,15 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 from unittest.mock import MagicMock, patch
 
+from typing import Any, cast
+
 from lib.release_cleanup import (
     ReleaseCleanupResult,
     SelectorFailure,
     remove_album_by_selectors,
     remove_and_reset_release,
 )
+from tests.fakes import FakePipelineDB
 
 
 @dataclass
@@ -111,10 +114,10 @@ class TestAllSelectorsSucceed(unittest.TestCase):
             _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=42)
 
         self.assertIsInstance(result, ReleaseCleanupResult)
@@ -123,7 +126,7 @@ class TestAllSelectorsSucceed(unittest.TestCase):
         self.assertEqual(result.selector_failures, ())
         self.assertEqual(mock_run.call_count, 1)
         # Pipeline DB clear fires on absent_after=True.
-        pdb.clear_on_disk_quality_fields.assert_called_once_with(42)
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [42])
 
     @patch("lib.beets_album_op.sp.run")
     def test_argv_uses_album_mode_flag(
@@ -141,10 +144,10 @@ class TestAllSelectorsSucceed(unittest.TestCase):
             _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=42)
 
         argv = mock_run.call_args.args[0]
@@ -162,10 +165,10 @@ class TestAllSelectorsSucceed(unittest.TestCase):
             _StubLocation("exact", 1, selectors),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=DISCOGS_ID, request_id=42)
 
         self.assertEqual(mock_run.call_count, 2,
@@ -199,10 +202,10 @@ class TestTimeoutOnOneSelector(unittest.TestCase):
             _StubLocation("exact", 1, selectors),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=DISCOGS_ID, request_id=42)
 
         self.assertEqual(
@@ -229,10 +232,10 @@ class TestTimeoutOnOneSelector(unittest.TestCase):
             _StubLocation("exact", 1, selectors),
             _StubLocation("exact", 1, selectors),  # still present after
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=DISCOGS_ID, request_id=42)
 
         self.assertEqual(
@@ -242,7 +245,7 @@ class TestTimeoutOnOneSelector(unittest.TestCase):
         self.assertFalse(result.beets_removed)
         self.assertEqual(len(result.selector_failures), 2)
         # No DB clear when album still present — conservative.
-        pdb.clear_on_disk_quality_fields.assert_not_called()
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [])
 
 
 class TestNonZeroExitCodeLoopContinues(unittest.TestCase):
@@ -260,10 +263,10 @@ class TestNonZeroExitCodeLoopContinues(unittest.TestCase):
             _StubLocation("exact", 1, selectors),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=DISCOGS_ID, request_id=42)
 
         self.assertEqual(mock_run.call_count, 2)
@@ -292,19 +295,19 @@ class TestMissingBeetBinary(unittest.TestCase):
             _StubLocation("exact", 1, selectors),
             _StubLocation("exact", 1, selectors),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         # Must not raise — the caller expects a result object it can
         # surface to the user, not a 500.
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=42)
 
         self.assertEqual(len(result.selector_failures), 1)
         self.assertEqual(result.selector_failures[0].reason, "exception")
         self.assertFalse(result.absent_after)
         # Conservative: album still present by locate() so no clear.
-        pdb.clear_on_disk_quality_fields.assert_not_called()
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [])
 
 
 class TestAlreadyGoneBeforeCall(unittest.TestCase):
@@ -317,17 +320,17 @@ class TestAlreadyGoneBeforeCall(unittest.TestCase):
             _StubLocation("absent", None, ()),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=42)
 
         mock_run.assert_not_called()
         self.assertFalse(result.beets_removed)
         self.assertTrue(result.absent_after)
         self.assertEqual(result.selector_failures, ())
-        pdb.clear_on_disk_quality_fields.assert_called_once_with(42)
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [42])
 
 
 class TestEmptyReleaseIdRejected(unittest.TestCase):
@@ -335,10 +338,10 @@ class TestEmptyReleaseIdRejected(unittest.TestCase):
 
     def test_empty_release_id_raises(self) -> None:
         beets = _StubBeetsDB([])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
         with self.assertRaises(ValueError):
             remove_and_reset_release(
-                beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+                beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
                 release_id="", request_id=42)
 
 
@@ -454,14 +457,14 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
             _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=7)
 
         self.assertTrue(result.absent_after)
-        pdb.clear_on_disk_quality_fields.assert_called_once_with(7)
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [7])
 
     @patch("lib.beets_album_op.sp.run")
     def test_skips_pipeline_db_clear_when_album_still_present(
@@ -477,14 +480,14 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
             _StubLocation("exact", 1, selectors),
             _StubLocation("exact", 1, selectors),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=7)
 
         self.assertFalse(result.absent_after)
-        pdb.clear_on_disk_quality_fields.assert_not_called()
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [])
 
     @patch("lib.beets_album_op.sp.run")
     def test_clear_pipeline_state_false_skips_clear(
@@ -499,15 +502,15 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
             _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=7,
             clear_pipeline_state=False)
 
         self.assertTrue(result.absent_after)
-        pdb.clear_on_disk_quality_fields.assert_not_called()
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [])
 
     @patch("lib.beets_album_op.sp.run")
     def test_clear_pipeline_state_true_default_preserves_behavior(
@@ -520,15 +523,15 @@ class TestRemoveAndResetDelegatesToSeam(unittest.TestCase):
             _StubLocation("exact", 1, (f"mb_albumid:{RELEASE_UUID}",)),
             _StubLocation("absent", None, ()),
         ])
-        pdb = MagicMock()
+        pdb = FakePipelineDB()
 
         result = remove_and_reset_release(
-            beets_db=beets, pipeline_db=pdb,  # type: ignore[arg-type]
+            beets_db=cast(Any, beets), pipeline_db=cast(Any, pdb),
             release_id=RELEASE_UUID, request_id=7,
             clear_pipeline_state=True)
 
         self.assertTrue(result.absent_after)
-        pdb.clear_on_disk_quality_fields.assert_called_once_with(7)
+        self.assertEqual(pdb.clear_on_disk_quality_fields_calls, [7])
 
 
 if __name__ == "__main__":

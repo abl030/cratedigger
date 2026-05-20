@@ -84,9 +84,6 @@
     "patch:scripts.pipeline_cli.fetch_mb_release_group_year": 3,
     "stateful_mock_assign:db": 42
   },
-  "test_release_cleanup.py": {
-    "stateful_mock_assign:pdb": 13
-  },
   "test_repair_cli.py": {
     "patch:lib.transitions.finalize_request": 1,
     "patch:scripts.repair._collect_issues": 1,
