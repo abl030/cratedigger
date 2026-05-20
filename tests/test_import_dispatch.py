@@ -21,7 +21,13 @@ from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
                          V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence)
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_import_result, make_request_row, patch_dispatch_externals
+from tests.helpers import (
+    RecordingQualityGate,
+    make_import_result,
+    make_request_row,
+    noop_quality_gate,
+    patch_dispatch_externals,
+)
 
 
 # --- Local helpers for auto-import seam tests ---
@@ -109,7 +115,6 @@ def _dispatch_valid_result_cmd(
         with patch("lib.download.stage_to_ai_path", return_value=dest_dir), \
              patch("lib.download.log_validation_result"), \
              patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch._check_quality_gate_core"), \
              patch("lib.import_dispatch.parse_import_result", return_value=ir):
             _handle_valid_result(
                 album_data,
@@ -119,6 +124,7 @@ def _dispatch_valid_result_cmd(
                     request_id=album_data.db_request_id,
                 ),
                 ctx,
+                quality_gate_fn=noop_quality_gate,
             )
             return ext.run.call_args[0][0]
 
@@ -479,10 +485,10 @@ class TestDispatchImport(unittest.TestCase):
         )
         dl_info = DownloadInfo(filetype="mp3")
 
+        mock_gate = RecordingQualityGate()
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
@@ -497,6 +503,7 @@ class TestDispatchImport(unittest.TestCase):
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
+                    quality_gate_fn=mock_gate,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -969,7 +976,6 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         ir = make_import_result(decision="import")
 
         with patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch._check_quality_gate_core"), \
              patch("lib.import_dispatch.parse_import_result", return_value=ir):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="mbid-1",
@@ -979,6 +985,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                 db=db,  # type: ignore[arg-type]
                 dl_info=DownloadInfo(filetype="mp3"),
                 files=[MagicMock(username="user1", filename="01.mp3")],
+                quality_gate_fn=noop_quality_gate,
             )
             return ext.run.call_args[0][0]
 
@@ -1412,7 +1419,6 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                                 new_min_bitrate=227)
 
         with patch_dispatch_externals(), \
-             patch("lib.import_dispatch._check_quality_gate_core"), \
              patch("lib.import_dispatch.parse_import_result", return_value=ir):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
@@ -1421,6 +1427,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                 db=db,  # type: ignore[arg-type]
                 dl_info=DownloadInfo(filetype="mp3"),
                 files=[MagicMock(username="user1", filename="01.mp3")],
+                quality_gate_fn=noop_quality_gate,
             )
 
         row = db.request(42)

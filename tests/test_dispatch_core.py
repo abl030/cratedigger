@@ -27,6 +27,7 @@ from tests.helpers import (
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
+    noop_quality_gate,
     patch_dispatch_externals,
 )
 from lib.quality_evidence import snapshot_audio_files
@@ -128,7 +129,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir):
                 result = dispatch_import_core(
                     path=tmpdir,
@@ -149,6 +149,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     cfg=cfg,
                     outcome_label=outcome_label,
                     requeue_on_failure=requeue_on_failure,
+                    quality_gate_fn=noop_quality_gate,
                 )
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
@@ -354,7 +355,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             ir = make_import_result(decision="import", new_min_bitrate=245)
             decoded_payload: dict[str, QualityEvidenceActionPayload] = {}
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  _patch_beets_album(current_dir, min_bitrate=128):
                 def run_side_effect(cmd, *_args, **_kwargs):
@@ -380,6 +380,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     files=[MagicMock(username="user1", filename="01.mp3")],
                     cfg=cfg,
                     candidate_import_job_id=import_job_id,
+                    quality_gate_fn=noop_quality_gate,
                 )
 
             self.assertTrue(result.success)
@@ -495,7 +496,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             ir = make_import_result(decision="import", new_min_bitrate=245)
             decoded_payload: dict[str, QualityEvidenceActionPayload] = {}
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  _patch_beets_album(None):
                 def run_side_effect(cmd, *_args, **_kwargs):
@@ -521,6 +521,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     files=[MagicMock(username="user1", filename="01.mp3")],
                     cfg=cfg,
                     candidate_import_job_id=job.id,
+                    quality_gate_fn=noop_quality_gate,
                 )
 
             self.assertTrue(result.success)
@@ -848,7 +849,6 @@ class TestDispatchCoreSeams(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
@@ -859,6 +859,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     db=db,  # type: ignore[arg-type]
                     dl_info=DownloadInfo(),
                     cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
                     **kwargs,
                 )
                 return ext.run.call_args[0][0] if ext.run.call_args else []

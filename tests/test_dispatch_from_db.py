@@ -18,9 +18,11 @@ from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 from lib.quality import AudioQualityMeasurement
 from lib.quality_evidence import snapshot_audio_files
 from tests.helpers import (
+    RecordingQualityGate,
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
+    noop_quality_gate,
     patch_dispatch_externals,
 )
 from tests.fakes import FakePipelineDB
@@ -184,8 +186,8 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3",
             )
 
+            mock_gate = RecordingQualityGate()
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core") as mock_gate, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
@@ -198,6 +200,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     force=force, source_username=source_username,
                     outcome_label=outcome_label,
                     import_job_id=import_job_id,
+                    quality_gate_fn=mock_gate,
                 )
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
@@ -367,7 +370,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3 128",
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -381,6 +383,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     force=True,
                     source_username="alice",
                     download_log_id=download_log_id,
+                    quality_gate_fn=noop_quality_gate,
                 )
 
             self.assertTrue(result.success)
@@ -443,7 +446,6 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3 128",
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -458,6 +460,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                     source_username="alice",
                     import_job_id=import_job_id,
                     outcome_label="manual_import",
+                    quality_gate_fn=noop_quality_gate,
                 )
 
             self.assertTrue(result.success)
@@ -852,7 +855,6 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                 payload=manual_import_payload(failed_path=tmpdir),
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -863,6 +865,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                     db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
                     force=True,
                     import_job_id=job.id,
+                    quality_gate_fn=noop_quality_gate,
                 )
                 return result, ext, tmpdir
         finally:
@@ -974,7 +977,6 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                 storage_format="mp3 320",
             )
             with patch_dispatch_externals(), \
-                 patch("lib.import_dispatch._check_quality_gate_core"), \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config", return_value=cfg) as mock_read:
                 dispatch_import_from_db(
@@ -983,6 +985,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                     failed_path=tmpdir,
                     force=True,
                     import_job_id=job.id,
+                    quality_gate_fn=noop_quality_gate,
                 )
         finally:
             import shutil

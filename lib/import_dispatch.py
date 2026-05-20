@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Sequence, TYPE_CHECKING
 
 import msgspec
 
@@ -1392,6 +1392,15 @@ def _check_quality_gate_core(
 
 
 
+QualityGateFn = Callable[..., None]
+"""Type of the post-import quality-gate callable injected into
+``dispatch_import_core``. Production passes :func:`_check_quality_gate_core`;
+tests can pass a stub or a recorder instead of patching the module
+attribute. Signature matches ``_check_quality_gate_core`` (keyword-args
+including ``mb_id``, ``label``, ``request_id``, ``files``, ``db``,
+``quality_ranks``)."""
+
+
 def dispatch_import_core(
     *,
     path: str,
@@ -1416,6 +1425,7 @@ def dispatch_import_core(
     candidate_import_job_id: int | None = None,
     candidate_download_log_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+    quality_gate_fn: QualityGateFn = _check_quality_gate_core,
 ) -> "DispatchOutcome":
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -2031,7 +2041,7 @@ def dispatch_import_core(
                     )
 
                 if action.run_quality_gate:
-                    _check_quality_gate_core(
+                    quality_gate_fn(
                         mb_id=mb_release_id,
                         label=label,
                         request_id=request_id,
@@ -2112,6 +2122,7 @@ def dispatch_import_from_db(
     source_dirs: list[str] | None = None,
     import_job_id: int | None = None,
     download_log_id: int | None = None,
+    quality_gate_fn: "QualityGateFn | None" = None,
 ) -> "DispatchOutcome":
     """Run a force-import or manual-import through the full dispatch pipeline.
 
@@ -2174,6 +2185,7 @@ def dispatch_import_from_db(
             source_dirs=source_dirs,
             import_job_id=import_job_id,
             download_log_id=download_log_id,
+            quality_gate_fn=quality_gate_fn,
         )
 
 
@@ -2188,6 +2200,7 @@ def _dispatch_import_from_db_locked(
     source_dirs: list[str] | None,
     import_job_id: int | None,
     download_log_id: int | None,
+    quality_gate_fn: "QualityGateFn | None" = None,
 ) -> "DispatchOutcome":
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -2262,7 +2275,7 @@ def _dispatch_import_from_db_locked(
         candidate_result.evidence,
         username=source_username,
     )
-    return dispatch_import_core(
+    core_kwargs: dict[str, Any] = dict(
         path=failed_path,
         mb_release_id=mbid,
         request_id=request_id,
@@ -2285,3 +2298,6 @@ def _dispatch_import_from_db_locked(
         candidate_download_log_id=download_log_id,
         prevalidated_candidate_result=candidate_result,
     )
+    if quality_gate_fn is not None:
+        core_kwargs["quality_gate_fn"] = quality_gate_fn
+    return dispatch_import_core(**core_kwargs)

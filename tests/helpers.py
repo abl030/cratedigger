@@ -409,6 +409,47 @@ def make_ctx_with_fake_db(
     )
 
 
+def noop_quality_gate(**_kwargs: Any) -> None:
+    """No-op quality-gate stub for ``dispatch_import_core(quality_gate_fn=...)``.
+
+    Replaces ``patch("lib.import_dispatch._check_quality_gate_core")`` for
+    dispatch tests that don't care about the post-import quality gate's
+    side effects — they want a no-op so the dispatch decision tree runs
+    end-to-end without inspecting beets DB state."""
+    return None
+
+
+class RecordingQualityGate:
+    """Recorder ``quality_gate_fn`` stub. Replaces
+    ``patch("lib.import_dispatch._check_quality_gate_core") as mock_gate``
+    for tests that assert ``mock_gate.assert_called_once()``.
+
+    Records each invocation's kwargs (the gate is keyword-only) so tests
+    can assert call counts and arguments."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    def assert_called_once(self) -> None:
+        if len(self.calls) != 1:
+            raise AssertionError(
+                f"expected quality_gate_fn called exactly once, got {len(self.calls)}"
+            )
+
+    def assert_not_called(self) -> None:
+        if self.calls:
+            raise AssertionError(
+                f"expected quality_gate_fn not called, got {len(self.calls)} call(s)"
+            )
+
+
 @contextmanager
 def patch_dispatch_externals():
     """Patch external edges shared by all dispatch_import_core tests.
