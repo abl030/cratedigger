@@ -4,7 +4,7 @@ This is the **entry point** for picking up the stateful-MagicMock removal effort
 
 ## Current state
 
-Baseline last measured at **61 findings across 15 files**. To check the live count:
+Baseline last measured at **4 findings across 3 files** (the documented-as-deferred remainder). To check the live count:
 
 ```bash
 nix-shell --run "python3 tests/_rebuild_mock_audit_baseline.py"
@@ -97,26 +97,61 @@ seed-helpers + a context-manager) with five self-tests in
 `beets = MagicMock()` sites to `FakeBeetsDB`. Dropped 8 findings
 (69 → 61).
 
-### 1. test_download.py harness migration (~14 findings)
+### ~~8. test_download.py harness migration~~ (LANDED)
 
-Now the largest remaining single-file cluster. Likely a similar shape
-to test_import_one_stages.py — mix of `db = MagicMock()` and
-`beets = MagicMock()` patterns that could move to
-`FakePipelineDB` / `FakeBeetsDB` now that the latter exists.
+Shipped in PR #326. Allowlisted four in-module DI seams in `lib.download`
+(`dispatch_import_core`, `process_completed_album`, `_process_beets_validation`,
+`log_validation_result`) plus the `cleanup_wrong_match` service-layer seam.
+Migrated `slskd = MagicMock()` in `_make_ctx` to `FakeSlskdAPI()`.
+Dropped 19 findings via allowlist + 1 migration (61 → 42).
 
-### 2. Remaining `test_import_dispatch.py` / `test_repair_cli.py` clusters (~16 findings)
+### ~~9. test_repair_cli.py harness migration~~ (LANDED)
 
-`test_import_dispatch.py` (8) and `test_repair_cli.py` (8) are the
-next-biggest clusters after `test_download.py`. Mixed patterns; both
-warrant per-file analysis.
+Shipped in PR #327. Migrated 4 `db = MagicMock()` sites in
+`TestCollectIssues.test_auto_import_in_progress_*` to `FakePipelineDB`
+using `queue_execute_results` from PR #321. Allowlisted three
+`scripts.repair` in-module DI seams (`_collect_issues`,
+`find_orphaned_downloads`, `find_blocked_recovery_issues`). Dropped 8
+findings (42 → 34).
 
-### 3. Pure-decision patches in `test_import_one_stages.py` (3 findings)
+### ~~10. test_import_dispatch.py harness migration~~ (LANDED)
 
-Still patches on `harness.import_one.determine_verified_lossless`,
-`harness.import_one.provisional_lossless_decision`, and
-`harness.import_one.quality_decision_stage`. Migrating these would
-require driving the real decision functions with real audio
-measurement scaffolding — likely worth the effort but non-trivial.
+Shipped in PR #328. Lifted `quality_gate_decision` to a module-level
+binding in `lib.import_dispatch` (same shape as `finalize_request` in
+#322); migrated 5 patches to the new seam. Rewrote `_make_ctx()` to use
+`make_ctx_with_fake_db` with a seeded `FakePipelineDB`. Allowlisted
+`stage_to_ai_path` as a staging-destination seam. Dropped 7 findings
+(34 → 27).
+
+### ~~11. test_pipeline_cli.py / test_import_queue.py residuals~~ (LANDED)
+
+Shipped in PR #329. Allowlisted `preview_import_from_values` /
+`full_pipeline_decision` (pure-decision DI seams matching the
+`quality_gate_decision` rationale), `MbidReplaceService`
+(constructor-replacement seam), `import_preview_worker.run_once`
+(worker tick stub), and `lib.download._handle_valid_result` (in-module
+seam). Migrated remaining `db = MagicMock()` (test_pipeline_cli) and
+`beets = MagicMock()` (test_import_queue). Fixed docstring noise where
+helper docstrings tripped the audit regex. Dropped 17 findings
+(27 → 10).
+
+### ~~12. Residual cleanup~~ (LANDED)
+
+Shipped in PR #330. Added `FakeBeetsDB.get_album_path_by_id` + seed
+helper; migrated `test_beets_album_op.py::TestMoveAlbum` (5 sites)
+and `test_dispatch_core.py::_patch_beets_album`. Broadened
+`resolve_failed_path` allowlist to `lib.\\w+.resolve_failed_path`.
+Allowlisted three RED-guard patches in `test_import_one_stages.py`
+(harness measurement helpers — patches assert NONE are called when
+pre-recorded evidence is supplied). Dropped 6 findings (10 → 4).
+
+## Remaining 4 findings (deferred per #301)
+
+| File | Item | Why |
+|------|------|-----|
+| `test_cycle_summary.py` | J | `album_match` exception-injection. Needs production refactor (extract try/finally credit helper). |
+| `test_matching.py` | A | `_track_titles_cross_check` migration. Needs tight input tuning to construct passing-but-failing match cases. |
+| `test_web_server.py` (×2) | (harness) | `mock_db = MagicMock()` + `failing_db = MagicMock()` — the shared file-level harness backing hundreds of contract tests. Migrating would mean rewriting every `mock_db.foo.return_value = ...` to per-test `FakePipelineDB` seeding. Worth its own multi-PR effort. |
 
 ## What's NOT next
 
