@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, TYPE_CHECKING
 
-import music_tag
 
 from lib.download_recovery import (
     classify_processing_path,
@@ -1117,18 +1116,6 @@ def process_completed_album(
         return materialized
 
     logger.info(f"Processing completed download: {album_data.artist} - {album_data.title}")
-    for file in album_data.files:
-        try:
-            song = music_tag.load_file(file.import_path)
-            assert song is not None
-            if file.disk_no is not None:
-                song["discnumber"] = file.disk_no
-                song["totaldiscs"] = file.disk_count
-            song["albumartist"] = album_data.artist
-            song["album"] = album_data.title
-            song.save()
-        except Exception:
-            logger.exception(f"Error writing tags for: {file.import_path}")
     if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
         _validate = validate_fn if validate_fn is not None else _process_beets_validation
         outcome = _validate(

@@ -1173,8 +1173,7 @@ class TestRederiveTransferIds(unittest.TestCase):
 class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     """Test process_completed_album return ownership."""
 
-    @patch("lib.download.music_tag")
-    def test_returns_true_on_success(self, mock_mt):
+    def test_returns_true_on_success(self):
         """Successful file move + processing returns True."""
         from lib.download import process_completed_album
         import tempfile, os
@@ -1193,14 +1192,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            mock_mt.load_file.return_value = MagicMock()
             result = process_completed_album(album, [], ctx)
             self.assertTrue(result)
 
-    @patch("lib.download.music_tag")
     def test_dispatch_outcome_summary_is_returned_to_queue_owner(
         self,
-        mock_mt,
     ):
         """Auto-import summaries must survive for the importer queue result."""
         from lib.download import process_completed_album
@@ -1220,7 +1216,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = True
-            mock_mt.load_file.return_value = MagicMock()
             stub_outcome = DispatchOutcome(
                 success=True,
                 message="Import successful",
@@ -1239,10 +1234,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertEqual(len(validate_calls), 1)
 
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_beets_rejection_summary_is_returned_to_queue_owner(
         self,
-        mock_mt,
         mock_beets_validate,
     ):
         """Validation rejections must fail the queue job, not look completed."""
@@ -1272,7 +1265,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            mock_mt.load_file.return_value = MagicMock()
             mock_beets_validate.return_value = ValidationResult(
                 valid=False,
                 distance=0.1919,
@@ -1321,8 +1313,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             result = process_completed_album(album, [], ctx)
             self.assertFalse(result)
 
-    @patch("lib.download.music_tag")
-    def test_resumes_from_persisted_current_path(self, mock_mt):
+    def test_resumes_from_persisted_current_path(self):
         """A post-move retry must process the persisted current_path, not slskd."""
         from lib.download import process_completed_album
         import tempfile
@@ -1351,7 +1342,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
 
             result = process_completed_album(album, [], ctx)
 
@@ -1359,8 +1349,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertEqual(files[0].import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
-    @patch("lib.download.music_tag")
-    def test_resumes_multi_disc_from_persisted_current_path(self, mock_mt):
+    def test_resumes_multi_disc_from_persisted_current_path(self):
         """Resume must preserve the staged multi-disc filenames on disk."""
         from lib.download import process_completed_album
         import tempfile
@@ -1391,7 +1380,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
 
             result = process_completed_album(album, [], ctx)
 
@@ -1399,8 +1387,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertEqual(file.import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
-    @patch("lib.download.music_tag")
-    def test_persists_canonical_current_path_for_fresh_materialization(self, mock_mt):
+    def test_persists_canonical_current_path_for_fresh_materialization(self):
         """The first local materialization must persist the canonical path to DB."""
         from lib.download import process_completed_album
         import tempfile
@@ -1432,7 +1419,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_validation_enabled = False
             ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
-            mock_mt.load_file.return_value = MagicMock()
 
             result = process_completed_album(album, [], ctx)
 
@@ -1444,10 +1430,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
     @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_returns_none_for_post_move_auto_import_retry(
         self,
-        mock_mt,
         mock_beets_validate,
         mock_measure_preimport_state,
     ):
@@ -1489,7 +1473,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
             mock_beets_validate.return_value = ValidationResult(
                 valid=True,
                 distance=0.05,
@@ -1513,10 +1496,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertEqual(dispatch_calls, [])
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
-    @patch("lib.download.music_tag")
     def test_request_scoped_staged_path_without_request_id_blocks_manual_recovery(
         self,
-        mock_mt,
     ):
         """Request-scoped auto-import staging without request id must stay blocked."""
         from lib.download import process_completed_album
@@ -1554,7 +1535,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_staging_dir = staging_root
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
 
             with self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(album, [], ctx)
@@ -1562,10 +1542,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertIsNone(result)
             self.assertIn("missing db_request_id", "\n".join(logs.output))
 
-    @patch("lib.download.music_tag")
     def test_post_validation_staged_path_without_request_id_still_resumes(
         self,
-        mock_mt,
     ):
         """Post-validation staging remains resumable without the auto-import guard."""
         from lib.download import process_completed_album
@@ -1604,7 +1582,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_staging_dir = staging_root
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
 
             result = process_completed_album(album, [], ctx)
 
@@ -1613,10 +1590,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
     @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_request_auto_import_without_request_id_fails_before_staging_move(
         self,
-        mock_mt,
         mock_beets_validate,
         mock_measure_preimport_state,
     ):
@@ -1662,7 +1637,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            mock_mt.load_file.return_value = MagicMock()
             mock_beets_validate.return_value = ValidationResult(
                 valid=True,
                 distance=0.05,
@@ -1729,10 +1703,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
     @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_request_auto_import_without_resolvable_request_logs_warning(
         self,
-        mock_mt,
         mock_beets_validate,
         mock_measure_preimport_state,
     ):
@@ -1769,7 +1741,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            mock_mt.load_file.return_value = MagicMock()
             mock_beets_validate.return_value = ValidationResult(
                 valid=True,
                 distance=0.05,
@@ -1806,10 +1777,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
     @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_request_auto_import_without_request_id_matches_row_when_album_year_blank(
         self,
-        mock_mt,
         mock_beets_validate,
         mock_measure_preimport_state,
     ):
@@ -1854,7 +1823,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            mock_mt.load_file.return_value = MagicMock()
             mock_beets_validate.return_value = ValidationResult(
                 valid=True,
                 distance=0.05,
@@ -1883,10 +1851,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
     @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_returns_none_for_legacy_shared_staged_retry(
         self,
-        mock_mt,
         mock_beets_validate,
         mock_measure_preimport_state,
     ):
@@ -1920,7 +1886,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
             from lib.measurement import PreimportMeasurement
             mock_measure_preimport_state.return_value = PreimportMeasurement(
                 folder_layout="flat",
@@ -1942,10 +1907,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
     @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
-    @patch("lib.download.music_tag")
     def test_retries_post_move_redownload_path_without_blocking(
         self,
-        mock_mt,
         mock_beets_validate,
         mock_measure_preimport_state,
     ):
@@ -1987,7 +1950,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_mt.load_file.return_value = MagicMock()
             mock_beets_validate.return_value = ValidationResult(
                 valid=True,
                 distance=0.05,
@@ -2289,8 +2251,7 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
     rename. Directly reproduces the issue #144 crash — file landed on disk
     with ``_<ticks>`` appended; the move must still succeed."""
 
-    @patch("lib.download.music_tag")
-    def test_moves_collision_renamed_files(self, mock_mt):
+    def test_moves_collision_renamed_files(self):
         from lib.download import process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2313,7 +2274,6 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            mock_mt.load_file.return_value = MagicMock()
             result = process_completed_album(album, [], ctx)
             self.assertTrue(result)
             # Source should be gone; destination should exist.
@@ -2325,8 +2285,7 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             # Destination keeps the clean (non-suffixed) basename.
             self.assertEqual(moved[0], f"{base}.mp3")
 
-    @patch("lib.download.music_tag")
-    def test_moves_file_from_incomplete_ancestor_folder(self, mock_mt):
+    def test_moves_file_from_incomplete_ancestor_folder(self):
         """Regression: full processing must tolerate legacy slskd layouts
         where the finished files still sit under ``incomplete/<album>/CD2``.
         """
@@ -2362,7 +2321,6 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            mock_mt.load_file.return_value = MagicMock()
 
             result = process_completed_album(album, [], ctx)
 
@@ -2374,8 +2332,7 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             moved = os.listdir(import_folder)
             self.assertEqual(moved, ["Disk 2 - 01.- The Ronettes - Be My Baby.mp3"])
 
-    @patch("lib.download.music_tag")
-    def test_moves_file_with_forward_slash_remote_path(self, mock_mt):
+    def test_moves_file_with_forward_slash_remote_path(self):
         """Compatibility: some remote path payloads may arrive slash-normalized.
         Basename extraction and on-disk resolution must accept either separator.
         """
@@ -2401,7 +2358,6 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            mock_mt.load_file.return_value = MagicMock()
 
             result = process_completed_album(album, [], ctx)
 
