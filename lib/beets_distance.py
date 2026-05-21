@@ -62,24 +62,6 @@ from beets.autotag import match as _beets_match_mod  # noqa: E402
 log = logging.getLogger(__name__)
 
 
-# === Outcomes ===========================================================
-
-# Public outcome string set. Tests pin against these — adding a new
-# outcome is a contract change and must be reflected at the route /
-# CLI / frontend boundaries.
-OUTCOMES = (
-    "ok",
-    "download_log_not_found",
-    "request_not_found",
-    "folder_missing",
-    "no_audio",
-    "mb_lookup_failed",
-    "mb_no_release_group",
-    "wrong_release_group",
-    "distance_failed",
-)
-
-
 class BeetsDistanceResult(msgspec.Struct, kw_only=True):
     """Typed result of a single distance computation.
 
@@ -118,26 +100,14 @@ class BeetsDistanceResult(msgspec.Struct, kw_only=True):
 class BeetsDistanceCache(Protocol):
     """Minimal key-value cache protocol the service depends on.
 
-    Implementations adapt Redis or any in-process dict. Production
-    wires this to the existing Redis client in ``web/_cache.py``; tests
-    pass a ``DictCache`` (see below) or ``None`` for "no caching".
+    Implementations adapt Redis or any in-process dict. Production wires
+    this to the Redis client adapter in ``web/routes/pipeline.py``; tests
+    pass an in-process dict-backed implementation or ``None`` for "no
+    caching".
     """
 
     def get(self, key: str) -> Optional[bytes]: ...
     def set(self, key: str, value: bytes, ttl_seconds: int) -> None: ...
-
-
-class DictCache:
-    """In-memory ``BeetsDistanceCache`` for tests + single-process runs."""
-
-    def __init__(self) -> None:
-        self._store: dict[str, bytes] = {}
-
-    def get(self, key: str) -> Optional[bytes]:
-        return self._store.get(key)
-
-    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
-        self._store[key] = value
 
 
 # Reasonable defaults — folder reads are dominated by tag IO so a long
