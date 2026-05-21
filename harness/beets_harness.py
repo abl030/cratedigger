@@ -481,13 +481,15 @@ class HarnessImportSession(ImportSession):
                 return Action.SKIP
         elif action == "skip":
             return Action.SKIP
-        elif action == "asis":
-            return Action.ASIS
-        elif action == "tracks":
-            return Action.TRACKS
-        elif action == "albums":
-            return Action.ALBUMS
         else:
+            # Defensive default. Cratedigger's two controllers
+            # (lib/beets.py::beets_validate and harness/import_one.py)
+            # only ever send "apply" / "skip" / "remove" (the last is
+            # handled in resolve_duplicate, not here); the asis /
+            # tracks / albums actions beets itself supports are never
+            # selected by us. Surface anything unexpected so a future
+            # controller change shows up loud instead of silently
+            # importing the wrong thing.
             _send({
                 "type": "error",
                 "message": f"unknown action '{action}', skipping",
@@ -531,14 +533,12 @@ class HarnessImportSession(ImportSession):
         decision = _recv()
         resolution = decision.get("action", "skip")
 
-        if resolution == "skip":
-            task.set_choice(Action.SKIP)
-        elif resolution == "keep":
-            pass  # Keep both — do nothing
-        elif resolution == "remove":
+        # Cratedigger's importer (harness/import_one.py) only ever sends
+        # "skip" (dup-guard refuse) or "remove" (dup-guard allow,
+        # beets-owned replacement). "keep" / "merge" were never selected
+        # and are folded into the defensive skip default.
+        if resolution == "remove":
             task.should_remove_duplicates = True
-        elif resolution == "merge":
-            task.should_merge_duplicates = True
         else:
             task.set_choice(Action.SKIP)
 
