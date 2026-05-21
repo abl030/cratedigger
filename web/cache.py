@@ -1,20 +1,9 @@
 """Redis cache layer for the Cratedigger web UI.
 
-Two separate namespaces:
-
-- `meta:<key>` — PURE MusicBrainz / Discogs metadata. 24h TTL (mirrors
-  sync daily). Populated via `memoize_meta()` inside `web/mb.py` and
-  `web/discogs.py`. **Never** invalidated by pipeline / library
-  writes — MB/Discogs metadata doesn't care about pipeline state.
-
-- `web:<url>` — legacy routing-level cache for whole HTTP responses.
-  Only used today for the pure-search endpoints (`/api/search`,
-  `/api/discogs/search`). Overlay-baking endpoints (release, release-
-  group, discogs master/release, beets, pipeline, library/artist,
-  disambiguate, …) MUST NOT be cached here — that baked
-  `pipeline_status` / `in_library` into the payload and leaked stale
-  badges when cratedigger-the-pipeline updated Postgres outside the web
-  UI's POST invalidation paths. See issue #101.
+`meta:<key>` namespace — PURE MusicBrainz / Discogs metadata. 24h TTL
+(mirrors sync daily). Populated via `memoize_meta()` inside `web/mb.py`
+and `web/discogs.py`. **Never** invalidated by pipeline / library
+writes — MB/Discogs metadata doesn't care about pipeline state.
 
 All operations fail-safe — Redis being down means cache miss, never
 an error.
@@ -22,7 +11,6 @@ an error.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from typing import Any, Callable
@@ -31,7 +19,6 @@ log = logging.getLogger(__name__)
 
 # TTL constants (seconds)
 TTL_MB = 86400       # 24h — MB/Discogs mirror data, effectively static
-TTL_LIBRARY = 300    # 5min — legacy routing cache (now only for search)
 
 # Key prefix for the pure-metadata namespace. Kept as a module constant
 # so `meta_get` / `meta_set` / `memoize_meta` all agree, and callers /
@@ -131,32 +118,6 @@ def redis_metrics() -> dict[str, Any]:
         return {"enabled": True, "status": "error", "error": str(e)}
 
 
-# ── Routing-level cache (legacy `web:` namespace) ─────────────────────
-
-
-def cache_get(key: str) -> dict | list | None:
-    """Get cached value. Returns None on miss or Redis error."""
-    if _redis is None:
-        return None
-    try:
-        raw = _redis.get(key)  # type: ignore[union-attr]
-        if raw is None:
-            return None
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
-def cache_set(key: str, value: dict | list, ttl: int = TTL_MB) -> None:
-    """Set cached value with TTL. Silently fails if Redis is down."""
-    if _redis is None:
-        return
-    try:
-        _redis.setex(key, ttl, json.dumps(value))  # type: ignore[union-attr]
-    except Exception:
-        pass
-
-
 # ── Pure-metadata cache (`meta:` namespace) ──────────────────────────
 #
 # These helpers prefix the key with `meta:` so the patterns in
@@ -216,16 +177,6 @@ def memoize_meta(key: str, fetch_fn: Callable[[], Any], ttl: int = TTL_MB,
 # ── Invalidation ──────────────────────────────────────────────────────
 
 
-def invalidate(key: str) -> None:
-    """Delete a single cache key."""
-    if _redis is None:
-        return
-    try:
-        _redis.delete(key)  # type: ignore[union-attr]
-    except Exception:
-        pass
-
-
 def invalidate_pattern(pattern: str) -> None:
     """Delete all keys matching a glob pattern (e.g. 'library:*').
 
@@ -260,6 +211,3 @@ def invalidate_groups(*groups: str) -> None:
             invalidate_pattern(pattern)
 
 
-def key_hash(value: str) -> str:
-    """Short hash for use in cache keys (e.g. search queries)."""
-    return hashlib.md5(value.encode()).hexdigest()[:12]
