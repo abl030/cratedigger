@@ -8,23 +8,6 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 
-class TestSanitizeFolderName(unittest.TestCase):
-
-    def test_strips_invalid_chars(self):
-        from lib.util import sanitize_folder_name
-        self.assertEqual(sanitize_folder_name('AC/DC - Back:In "Black"'),
-                         'ACDC - BackIn Black')
-
-    def test_preserves_valid_name(self):
-        from lib.util import sanitize_folder_name
-        self.assertEqual(sanitize_folder_name("Radiohead - OK Computer (1997)"),
-                         "Radiohead - OK Computer (1997)")
-
-    def test_strips_trailing_whitespace(self):
-        from lib.util import sanitize_folder_name
-        self.assertEqual(sanitize_folder_name("Album Name   "), "Album Name")
-
-
 class TestMoveFailedImport(unittest.TestCase):
 
     def setUp(self):
@@ -407,34 +390,6 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
                     len(result.failed_files), 1,
                     f"{desc}: expected one failed file",
                 )
-
-
-class TestDenylist(unittest.TestCase):
-
-    def test_round_trip(self):
-        from lib.util import (load_search_denylist, save_search_denylist,
-                              update_search_denylist, is_search_denylisted)
-        tmpfile = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        tmpfile.close()
-        try:
-            dl = load_search_denylist(tmpfile.name)
-            self.assertEqual(dl, {})
-            update_search_denylist(dl, 42, success=False)
-            self.assertEqual(dl["42"]["failures"], 1)
-            save_search_denylist(tmpfile.name, dl)
-            dl2 = load_search_denylist(tmpfile.name)
-            self.assertEqual(dl2["42"]["failures"], 1)
-        finally:
-            os.unlink(tmpfile.name)
-
-    def test_threshold(self):
-        from lib.util import is_search_denylisted, update_search_denylist
-        dl = {}
-        update_search_denylist(dl, 1, success=False)
-        self.assertFalse(is_search_denylisted(dl, 1, max_failures=3))
-        update_search_denylist(dl, 1, success=False)
-        update_search_denylist(dl, 1, success=False)
-        self.assertTrue(is_search_denylisted(dl, 1, max_failures=3))
 
 
 class TestCleanupDisambiguationOrphans(unittest.TestCase):

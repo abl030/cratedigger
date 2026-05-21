@@ -29,7 +29,7 @@ from lib.grab_list import GrabListEntry
 from lib.processing_paths import stage_to_ai_path
 from lib.quality import ValidationResult
 from lib.staged_album import StagedAlbum
-from lib.util import log_validation_result, sanitize_folder_name
+from lib.util import log_validation_result
 
 
 def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
@@ -557,7 +557,7 @@ class TestStagedAlbumMoveTo(unittest.TestCase):
         )
         StagedAlbum(current_path=source).move_to(dest)
 
-        # sanitize_folder_name removes <>:"/\|?*
+        # sanitize_processing_folder_name removes <>:"/\|?*
         self.assertNotIn(":", os.path.basename(os.path.dirname(dest)))
         self.assertNotIn("?", os.path.basename(dest))
         self.assertTrue(os.path.exists(dest))
@@ -620,15 +620,6 @@ class TestLogValidationResult(unittest.TestCase):
             lines = f.readlines()
 
         self.assertEqual(len(lines), 2)
-
-
-class TestSanitizeFolderName(unittest.TestCase):
-    """Verify sanitize_folder_name works correctly for staged album paths."""
-
-    def test_removes_special_chars(self):
-        self.assertEqual(sanitize_folder_name('Test: "Artist"'), 'Test Artist')
-        self.assertEqual(sanitize_folder_name("Album/Title?"), "AlbumTitle")
-        self.assertEqual(sanitize_folder_name("Normal Name"), "Normal Name")
 
 
 if __name__ == "__main__":
