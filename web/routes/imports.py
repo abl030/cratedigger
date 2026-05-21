@@ -2,9 +2,12 @@
 
 import json
 import os
-from typing import cast
+from typing import Any, cast
 
 import msgspec
+from pydantic import BaseModel, Field, model_validator
+
+from web.routes._pydantic import parse_body
 
 from lib.manual_import import (
     scan_complete_folder,
@@ -201,13 +204,18 @@ def get_manual_import_scan(h, params: dict[str, list[str]]) -> None:
     })
 
 
+class ManualImportRequest(BaseModel):
+    request_id: int = Field(gt=0)
+    path: str = Field(min_length=1)
+
+
 def post_manual_import(h, body: dict) -> None:
-    srv = _server()
-    request_id = body.get("request_id")
-    path = body.get("path")
-    if not request_id or not path:
-        h._error("Missing request_id or path")
+    req_body = parse_body(h, body, ManualImportRequest)
+    if req_body is None:
         return
+    srv = _server()
+    request_id = req_body.request_id
+    path = req_body.path
 
     req = srv._db().get_request(int(request_id))
     if not req:
@@ -660,17 +668,16 @@ def _delete_wrong_match_row(pdb, log_id: int):
     return delete_wrong_match(pdb, log_id, require_visible=True)
 
 
+class WrongMatchDeleteRequest(BaseModel):
+    download_log_id: int = Field(gt=0)
+
+
 def post_wrong_match_delete(h, body: dict) -> None:
     """Operator-triggered deletion of one visible Wrong Matches candidate."""
-    raw_id = body.get("download_log_id")
-    if raw_id is None:
-        h._error("download_log_id must be an integer")
+    req_body = parse_body(h, body, WrongMatchDeleteRequest)
+    if req_body is None:
         return
-    try:
-        log_id = int(raw_id)  # pyright: ignore[reportArgumentType]
-    except (TypeError, ValueError):
-        h._error("download_log_id must be an integer")
-        return
+    log_id = req_body.download_log_id
 
     result = delete_wrong_match(_server()._db(), log_id, require_visible=True)
     if result.success:
@@ -691,17 +698,16 @@ def post_wrong_match_delete(h, body: dict) -> None:
     h._error(result.error or result.reason or result.outcome, 500)
 
 
+class WrongMatchDeleteGroupRequest(BaseModel):
+    request_id: int = Field(gt=0)
+
+
 def post_wrong_match_delete_group(h, body: dict) -> None:
     """Operator-triggered deletion of all current Wrong Matches for a request."""
-    raw_id = body.get("request_id")
-    if raw_id is None:
-        h._error("request_id must be an integer")
+    req_body = parse_body(h, body, WrongMatchDeleteGroupRequest)
+    if req_body is None:
         return
-    try:
-        request_id = int(raw_id)  # pyright: ignore[reportArgumentType]
-    except (TypeError, ValueError):
-        h._error("request_id must be an integer")
-        return
+    request_id = req_body.request_id
 
     summary = delete_wrong_match_group(_server()._db(), request_id)
     status = "ok" if summary.success else "partial"
@@ -729,6 +735,11 @@ def _wrong_match_delete_group_http_status(summary) -> int:
     return 409
 
 
+class WrongMatchConvergeRequest(BaseModel):
+    request_id: int = Field(gt=0)
+    threshold_milli: Any = None
+
+
 def post_wrong_match_converge(h, body: dict) -> None:
     """Queue acceptable candidates and delete the rest for the release.
 
@@ -749,17 +760,12 @@ def post_wrong_match_converge(h, body: dict) -> None:
     permanent; if you find yourself reaching for cleanup_wrong_match here,
     re-read this docstring.
     """
-    request_id = body.get("request_id")
-    if request_id is None:
-        h._error("Missing request_id")
+    req_body = parse_body(h, body, WrongMatchConvergeRequest)
+    if req_body is None:
         return
-    try:
-        rid = int(request_id)
-    except (TypeError, ValueError):
-        h._error("request_id must be an integer")
-        return
+    rid = req_body.request_id
 
-    threshold_milli = _threshold_milli(body.get("threshold_milli"))
+    threshold_milli = _threshold_milli(req_body.threshold_milli)
     # Converge is intentionally a one-click cleanup workflow: green rows are
     # queued, and non-green rows for the same release are removed immediately.
     # Keep accepting the legacy field from older clients, but do not let it
@@ -947,9 +953,26 @@ def post_import_preview(h, body: dict) -> None:
     h._json(preview.to_dict())
 
 
+class WrongMatchTriageRequest(BaseModel):
+    """Confirmation guard so the destructive triage isn't accidental.
+
+    ``confirm_all_wrong_matches`` must be the literal ``True``; Pydantic
+    enforces type-and-value via a model validator (a plain ``bool``
+    default would let ``False`` through).
+    """
+
+    confirm_all_wrong_matches: bool
+
+    @model_validator(mode="after")
+    def _must_be_true(self) -> "WrongMatchTriageRequest":
+        if self.confirm_all_wrong_matches is not True:
+            raise ValueError("confirm_all_wrong_matches must be true")
+        return self
+
+
 def post_wrong_match_triage(h, body: dict) -> None:
-    if body.get("confirm_all_wrong_matches") is not True:
-        h._error("confirm_all_wrong_matches must be true")
+    req_body = parse_body(h, body, WrongMatchTriageRequest)
+    if req_body is None:
         return
     try:
         summary = cleanup_all_wrong_matches(
