@@ -170,18 +170,6 @@ def _hash_lossy_container(path: Path, muxer: str) -> bytes:
     return _hash_subprocess_stdout(cmd)
 
 
-def _flac_streaminfo_is_zero(path: Path) -> bool:
-    """Return True if the FLAC's STREAMINFO.md5_signature is missing/zero.
-
-    The plan calls out that some FLAC encoders emit zero MD5; we detect that
-    here so callers / tests can verify the fallback. We never actually USE the
-    STREAMINFO MD5 for the public hash (option (a)); this is informational only
-    and is exposed via :func:`flac_streaminfo_md5` for tests.
-    """
-    md5 = flac_streaminfo_md5(path)
-    return md5 is None or md5 == b"\x00" * 16
-
-
 def flac_streaminfo_md5(path: Path) -> bytes | None:
     """Return the FLAC STREAMINFO md5_signature as 16 bytes, or None.
 
