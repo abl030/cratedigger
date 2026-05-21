@@ -1,7 +1,11 @@
 """Beets library route handlers — search, album detail, recent, delete."""
 
 import re
-from typing import assert_never
+from typing import Literal, assert_never
+
+from pydantic import BaseModel, Field
+
+from web.routes._pydantic import parse_body
 
 
 def _server():
@@ -52,6 +56,20 @@ def get_beets_recent(h, params: dict[str, list[str]]) -> None:
     h._json({"albums": albums})
 
 
+class BeetsDeleteRequest(BaseModel):
+    """HTTP body for ``POST /api/beets/delete``.
+
+    ``confirm`` must be the literal string ``"DELETE"`` to avoid
+    accidental destructive calls (the frontend dialog wires this).
+    """
+
+    id: int = Field(gt=0)
+    confirm: Literal["DELETE"]
+    purge_pipeline: bool = False
+    pipeline_id: int | None = None
+    release_id: str = ""
+
+
 def post_beets_delete(h, body: dict) -> None:
     from lib.library_delete_service import (
         DeleteBeetsFailure,
@@ -64,23 +82,14 @@ def post_beets_delete(h, body: dict) -> None:
         delete_release_from_library,
     )
 
-    album_id = body.get("id")
-    confirm = body.get("confirm")
-    if not album_id:
-        h._error("Missing id")
-        return
-    if confirm != "DELETE":
-        h._error("Must send confirm: 'DELETE'")
+    req_body = parse_body(h, body, BeetsDeleteRequest)
+    if req_body is None:
         return
     request = DeleteRequest(
-        album_id=int(album_id),
-        purge_pipeline=bool(body.get("purge_pipeline")),
-        pipeline_id=(
-            int(body["pipeline_id"])
-            if body.get("pipeline_id") is not None
-            else None
-        ),
-        release_id=str(body.get("release_id") or ""),
+        album_id=req_body.id,
+        purge_pipeline=req_body.purge_pipeline,
+        pipeline_id=req_body.pipeline_id,
+        release_id=req_body.release_id,
     )
     srv = _server()
     result = delete_release_from_library(
