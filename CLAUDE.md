@@ -378,6 +378,8 @@ nix-shell --run "python3 -m unittest tests.test_X -v"      # single module
 
 **Never re-run the full suite just to grep output differently.** Read `/tmp/cratedigger-test-output.txt`.
 
+The suite has three Python-side gates that all must pass: JS syntax + JS unit tests, then `bash scripts/find_dead_code.sh` (vulture against the whitelist baseline at `tools/vulture/whitelist.py`), then the Python unittest discovery. The dead-code sweep fails the run as soon as a new vulture finding appears that isn't whitelisted — operator either deletes it or regenerates the baseline per CLAUDE.md § "Finding dead code".
+
 ### Skipped tests are an anti-pattern
 
 **At our size, a test either runs or it doesn't exist.** No `@unittest.skipUnless`, no `raise unittest.SkipTest`, no env-gated "only when CRATEDIGGER_REAL_X is set", no "fixtures must be generated first." If you write a test, it runs every single invocation of `bash scripts/run_tests.sh` on a freshly-cloned dev shell. Period.

@@ -23,6 +23,14 @@ node tests/test_js_history.mjs || exit 1
 node tests/test_js_wrong_matches.mjs || exit 1
 echo ""
 
+# Dead-code sweep — fails fast on new vulture findings before the slow
+# Python suite runs. Whitelist baseline lives at tools/vulture/whitelist.py;
+# operator either deletes the dead code or regenerates the whitelist with
+# the new entry (see CLAUDE.md § "Finding dead code").
+echo "=== Dead-code sweep ==="
+bash "$(dirname "$0")/find_dead_code.sh"
+echo ""
+
 # Python tests
 echo "=== Python tests ==="
 python3 -m unittest discover tests -v 2>&1 | tee "$OUT"
