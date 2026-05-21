@@ -118,9 +118,7 @@ Minimal to collapse current callsites. More added as needed.
 | `run_import`              | `harness/import_one.py` main flow             | Full import; emits same `ImportResult` shape              |
 | `remove_album_by_id`      | `beets_album_op.remove_album`                 | PK match, safe by construction                            |
 | `remove_by_selector`      | `beets_album_op.remove_by_selector`           | For ban-source Discogs/MB selector loop                  |
-| `move_album`              | `beets_album_op.move_album`                   | PK match, re-reads new path, fixes perms                 |
 | `get_album_by_id`         | `beets_db.get_album_info` (fetched via lib)   | Replaces direct SQLite read when we need authoritative   |
-| `list_albums_by_mbid`     | `beets_db.get_release_ids_by_album_id`        | For split-brain detection; returns list of ids           |
 | `fix_library_modes`       | `lib.permissions.fix_library_modes`           | Can stay in cratedigger side; included only if simpler    |
 | `shutdown`                | —                                             | Clean exit                                                |
 

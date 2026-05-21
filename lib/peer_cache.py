@@ -81,11 +81,6 @@ class PeerCache:
     def available(self) -> bool:
         return self.client is not None and not self._is_fused()
 
-    def reset_fuse(self) -> None:
-        if self.client is not None:
-            with self._fuse.lock:
-                self._fuse.fused = False
-
     def fork(self) -> "PeerCache":
         return PeerCache(
             self.client,

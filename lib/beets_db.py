@@ -462,52 +462,6 @@ class BeetsDB:
             return None
         return os.path.dirname(self._decode_path(row[0]))
 
-    def get_release_ids_by_album_id(
-            self, album_id: int) -> tuple[str, str]:
-        """Return ``(mb_albumid, discogs_albumid)`` for a beets album id.
-
-        Either or both may be the empty string depending on the album
-        layout: MB-sourced rows carry an ``mb_albumid`` (UUID) and an
-        empty ``discogs_albumid``, Discogs-sourced rows carry the
-        opposite, and legacy pre-plugin-patch Discogs imports may have
-        their numeric id in ``mb_albumid`` with an empty
-        ``discogs_albumid``.
-
-        Originally used by sibling ``imported_path`` propagation
-        (issue #132 P2) after the legacy post-import canonicalization
-        move. Returning both columns still lets legacy import-result
-        rows and tests match across every layout combo.
-
-        **Type coercion at the boundary.** Beets' ``albums`` table
-        declares ``discogs_albumid INTEGER`` in SQLite, so SQLite
-        returns a Python ``int`` for that column (not a ``str``).
-        ``mb_albumid`` is ``TEXT`` so it arrives as ``str``. The
-        legacy downstream ``MovedSibling`` ``msgspec.Struct`` types
-        both fields as ``str``, so the strict-typed decode via
-        ``msgspec.convert(d, type=ImportResult)`` in
-        ``ImportResult.from_dict`` WILL reject an int — the
-        exception bubbles up through ``parse_import_result`` and the
-        dispatcher would treat a successful kept-duplicate import as
-        a generic exception AFTER beets already moved the album (a
-        "semi-lie" that can trigger duplicate force-import attempts,
-        the same hazard PR #131 documented for earlier
-        missing-sentinel cases). Coerce both columns to ``str`` here
-        so the wire stays clean at the emit site — matches the
-        ``.claude/rules/code-quality.md`` § "Wire-boundary types"
-        "normalise early" directive.
-
-        Returns ``("", "")`` if the album id is not present.
-        """
-        row = self._conn.execute(
-            "SELECT mb_albumid, discogs_albumid FROM albums "
-            "WHERE id = ?",
-            (album_id,)
-        ).fetchone()
-        if not row:
-            return ("", "")
-        return (str(row[0]) if row[0] else "",
-                str(row[1]) if row[1] else "")
-
     # ── Web UI query methods ────────────────────────────────────────
 
     def check_mbids(self, mbids: list[str]) -> set[str]:
