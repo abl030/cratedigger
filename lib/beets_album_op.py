@@ -1,16 +1,21 @@
-"""Typed wrapper around ``beet remove`` / ``beet move`` subprocess ops (issue #133).
+"""Typed wrapper around ``beet remove`` subprocess ops (issue #133).
 
-Single source of truth for invoking beets destructive or path-changing
-commands at the subprocess level. Extracted to unify the five+ ad-hoc
-callsites that PR #131 spread across the codebase before the
-Cratedigger-owned replacement state machine was removed. Every new callsite
-that touches ``beet remove`` or ``beet move`` must route through this module.
+Single source of truth for invoking beets destructive commands at the
+subprocess level. Extracted to unify the five+ ad-hoc callsites that
+PR #131 spread across the codebase before the Cratedigger-owned
+replacement state machine was removed. Every new callsite that touches
+``beet remove`` must route through this module.
 
 A contract test (``tests/test_beets_album_op.py::TestBeetOpArgvIsCentralised``)
 greps the repo at test time and fails if any file outside this module
-constructs ``["beet", "remove", ...]`` or ``["beet", "move", ...]`` argv.
-The grep is the enforcement mechanism — nothing stops you from writing
-raw argv elsewhere, but the suite fails if you do.
+constructs ``["beet", "remove", ...]`` argv. The grep is the enforcement
+mechanism — nothing stops you from writing raw argv elsewhere, but the
+suite fails if you do.
+
+(Previously this module also wrapped ``beet move`` via ``move_album``;
+the legacy replacement cleanup that called it was removed in
+``01ede8d``, and ``move_album`` was retired here in the dead-code audit
+that opened #352.)
 
 Invariants this module enforces by construction (callers cannot bypass
 without rewriting the op). Note these are *structural* guarantees —
@@ -26,23 +31,18 @@ a type-level constraint:
    matching unrelated tracks.
 
 2. **Primary-key-scoped selectors for id-based ops.** ``remove_album``
-   and ``move_album`` take a ``BeetsAlbumHandle`` and always emit
-   ``id:<album_id>``. The PK selector is a ``SELECT ... WHERE id = ?``
-   which cannot match cross-MBID siblings (the Palo Santo data-loss
-   root cause). Arbitrary selectors route through ``remove_by_selector``
-   where the caller is explicitly opting out of PK narrowing.
+   takes a ``BeetsAlbumHandle`` and always emits ``id:<album_id>``. The
+   PK selector is a ``SELECT ... WHERE id = ?`` which cannot match
+   cross-MBID siblings (the Palo Santo data-loss root cause). Arbitrary
+   selectors route through ``remove_by_selector`` where the caller is
+   explicitly opting out of PK narrowing.
 
 3. **Source-agnostic.** ``mb_albumid`` is empty for Discogs rows and
    ``discogs_albumid`` is empty for MB rows; ``albums.id`` is the one
    identifier always populated. PR #131 round 3 P3 and round 4 P3
    flagged the earlier MBID-based moves silently no-oping for Discogs.
 
-4. **``fix_library_modes`` on every move.** Issue #84: ``beet move``
-   can create fresh disambiguated directories at 0o755 despite systemd
-   ``UMask=0000``. ``move_album`` calls ``fix_library_modes`` on the
-   post-move path unconditionally — no callsite can forget it.
-
-5. **Never raise.** Every subprocess invocation is wrapped in
+4. **Never raise.** Every subprocess invocation is wrapped in
    try/except for ``TimeoutExpired`` and ``OSError`` and every non-zero
    rc becomes a typed failure. Callers inspect the returned
    ``BeetsOpResult`` — they never parse stderr or catch ``sp`` errors.
@@ -69,10 +69,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("cratedigger")
 
 
-# Default timeouts. ``remove`` is a quick DB delete; ``move`` can copy
-# files on disk so it gets a longer budget. Callers may override.
+# Default timeout. ``remove`` is a quick DB delete; callers may override.
 DEFAULT_REMOVE_TIMEOUT = 30  # seconds
-DEFAULT_MOVE_TIMEOUT = 120  # seconds
 
 
 BeetsOpFailureReason = Literal["timeout", "nonzero_rc", "exception"]
@@ -130,25 +128,20 @@ class BeetsAlbumHandle:
 
 @dataclass(frozen=True)
 class BeetsOpResult:
-    """Outcome of a single ``remove_album`` or ``move_album`` call.
+    """Outcome of a single ``remove_album`` call.
 
     Never raised — callers inspect and branch.
 
     - ``success``: ``True`` iff the subprocess exited rc=0 with no
       raised exception. ``failure`` is ``None`` in that case.
     - ``failure``: the typed failure when ``success=False``.
-    - ``new_path``: only populated by ``move_album`` on success — the
-      album's on-disk path re-read from beets DB after the move. May
-      be ``None`` if the album row vanished between move and lookup
-      (should not happen in normal operation).
     """
     success: bool
     failure: BeetsOpFailure | None = None
-    new_path: str | None = None
 
 
 def _run_beet_op(
-    verb: Literal["remove", "move"],
+    verb: Literal["remove"],
     selector: str,
     *,
     delete_files: bool = False,
@@ -156,8 +149,8 @@ def _run_beet_op(
 ) -> BeetsOpFailure | None:
     """Run one ``beet <verb> -a [...] <selector>`` invocation. Never raises.
 
-    Internal primitive; ``remove_album`` / ``move_album`` /
-    ``remove_by_selector`` are the public entry points. Captures every
+    Internal primitive; ``remove_album`` and ``remove_by_selector`` are
+    the public entry points. Captures every
     fragile failure mode (``TimeoutExpired``, ``OSError`` from a
     missing ``beet`` binary, non-zero returncode) and classifies each
     into a typed ``BeetsOpFailure``. Returns ``None`` on clean exit.
@@ -245,50 +238,6 @@ def remove_album(
     failure = _run_beet_op(
         "remove", selector, delete_files=delete_files, timeout=timeout)
     return BeetsOpResult(success=failure is None, failure=failure)
-
-
-def move_album(
-    handle: BeetsAlbumHandle,
-    beets_db: "BeetsDB",
-    *,
-    timeout: int = DEFAULT_MOVE_TIMEOUT,
-) -> BeetsOpResult:
-    """Move one beets album by numeric primary key; repair library perms.
-
-    Runs ``beet move -a id:<album_id>``. On clean exit, re-reads the
-    album's path from beets DB and calls ``fix_library_modes`` on it
-    (invariant 4 — issue #84). The perm repair lives inside the op so
-    no callsite can forget it; ``beet move`` can create fresh
-    disambiguated directories at 0o755 despite systemd ``UMask=0000``.
-
-    Returns a ``BeetsOpResult`` with:
-      - ``success=True, new_path=<path>`` on clean subprocess exit.
-        Caller compares ``new_path`` to whatever prior path it held
-        to decide whether the move actually relocated the files.
-      - ``success=False, failure=<typed>, new_path=None`` on any
-        subprocess failure. Caller should treat the path as
-        potentially changed (``beet move`` may have partially
-        completed) but has no fresh path to record.
-
-    ``fix_library_modes`` is only called when ``new_path`` resolves
-    to a directory on disk — an album row that vanished between move
-    and lookup (impossible under normal operation) yields a no-op
-    perm repair, not a crash.
-    """
-    # Deferred import: ``lib.permissions`` doesn't depend on this
-    # module but the harness imports both; keep them at their natural
-    # layer and resolve at call time.
-    from lib.permissions import fix_library_modes
-
-    selector = f"id:{handle.album_id}"
-    failure = _run_beet_op("move", selector, timeout=timeout)
-    if failure is not None:
-        return BeetsOpResult(success=False, failure=failure)
-
-    new_path = beets_db.get_album_path_by_id(handle.album_id)
-    if new_path:
-        fix_library_modes(new_path)
-    return BeetsOpResult(success=True, new_path=new_path)
 
 
 def remove_by_selector(
