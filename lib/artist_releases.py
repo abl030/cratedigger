@@ -8,7 +8,7 @@ Multiple pressings of the same release group are unioned.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # Tier ordering: lower number = higher priority (Album beats EP beats Single).
@@ -63,15 +63,6 @@ class ReleaseGroupInfo:
     library_status: str | None = None
     pipeline_status: str | None = None
     pipeline_id: int | None = None
-
-
-@dataclass(frozen=True)
-class ArtistDisambiguation:
-    """Full disambiguation result for an artist."""
-
-    artist_id: str
-    artist_name: str
-    release_groups: list[ReleaseGroupInfo] = field(default_factory=list)
 
 
 _REMASTER_RE = re.compile(

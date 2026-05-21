@@ -209,17 +209,6 @@ def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def snapshot_fingerprint_for_path(root: str) -> str:
-    """Snapshot the audio inventory under ``root`` and fingerprint it.
-
-    Thin wrapper combining :func:`snapshot_audio_files` and
-    :func:`snapshot_fingerprint` for the common "compute from disk" path.
-    Returns the same digest as ``snapshot_fingerprint(snapshot_audio_files(root))``.
-    """
-
-    return snapshot_fingerprint(snapshot_audio_files(root))
-
-
 def _snapshot_match_key(
     file: AlbumQualityEvidenceFile,
 ) -> tuple[str, int, str, str, str | None]:

@@ -520,8 +520,7 @@ def _get_folder_bitrates(folder_path,
     (e.g. {".mp3"} to measure only V0 files when FLAC coexists).
 
     Returns a list of strictly-positive bitrates (kbps) in filesystem-listed
-    order. Use _get_folder_min_bitrate() / _get_folder_avg_bitrate() for the
-    aggregate helpers.
+    order. Use _get_folder_min_bitrate() for the min-aggregate helper.
     """
     bitrates: list[int] = []
     for fname in os.listdir(folder_path):
@@ -564,20 +563,6 @@ def _get_folder_min_bitrate(folder_path,
     """Legacy alias: minimum per-file bitrate (kbps), or None if none probed."""
     bitrates = _get_folder_bitrates(folder_path, ext_filter=ext_filter)
     return min(bitrates) if bitrates else None
-
-
-def _get_folder_avg_bitrate(folder_path,
-                            ext_filter: set[str] | None = None) -> int | None:
-    """Mean per-file bitrate (kbps), or None if no probable files.
-
-    Truncated to int. Used by the codec-aware rank model as the preferred
-    metric for VBR codecs (issue #60) — album-mean is more robust to
-    legitimate per-track VBR variance than the min.
-    """
-    bitrates = _get_folder_bitrates(folder_path, ext_filter=ext_filter)
-    if not bitrates:
-        return None
-    return int(sum(bitrates) / len(bitrates))
 
 
 # ---------------------------------------------------------------------------

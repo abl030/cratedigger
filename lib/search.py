@@ -107,43 +107,6 @@ class PlanExecutionContext:
     cycle_count_snapshot: int
 
 
-def is_plan_execution_current(
-    request_row: dict[str, Any] | None,
-    plan_execution: "PlanExecutionContext | None",
-) -> bool:
-    """Return True iff the request's active plan still matches the executed plan.
-
-    Pure — facts in, decision out. Used as a stale-completion guard before
-    any active-state mutation driven by an in-flight search (download
-    ownership claims, status transitions, request-level cursor writes that
-    are NOT routed through ``record_consumed_search_attempt``).
-
-    A plan-execution-less request_row is never current with no plan_execution
-    (returns False). When ``plan_execution`` is None we treat the call as
-    "non-plan-aware" and return True so legacy paths still work; the only
-    real-world callers of this guard are search-execution-driven mutations
-    that always have plan context.
-    """
-    if plan_execution is None:
-        return True
-    if request_row is None:
-        return False
-    active_plan_id = request_row.get("active_plan_id")
-    if active_plan_id != plan_execution.plan_id:
-        return False
-    next_ordinal = request_row.get("next_plan_ordinal")
-    if next_ordinal is None:
-        return False
-    if int(next_ordinal) != plan_execution.plan_ordinal:
-        return False
-    cycle_count = request_row.get("plan_cycle_count")
-    if cycle_count is None:
-        return False
-    if int(cycle_count) != plan_execution.cycle_count_snapshot:
-        return False
-    return True
-
-
 # Soulseek's distributed search times out with too many tokens.
 # 4 is the safe maximum.
 MAX_SEARCH_TOKENS = 4
