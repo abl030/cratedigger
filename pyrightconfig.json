@@ -1,5 +1,9 @@
 {
   "extraPaths": ["."],
   "pythonVersion": "3.13",
-  "reportMissingImports": "error"
+  "reportMissingImports": "error",
+  "exclude": [
+    "build",
+    "tools/vulture"
+  ]
 }

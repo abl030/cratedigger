@@ -3,13 +3,20 @@
 let
   cratedigger = import ./package.nix { inherit pkgs; };
 
-  # Dev env: production deps. ``ps.beets`` was previously listed
-  # again here because the production env excluded it; now that
-  # ``lib.beets_distance`` makes beets a first-class library
-  # dependency it's already in ``pythonPackages``, so the dev shell
-  # inherits it without duplication.
+  # Dev env: production deps + dev-only tooling. ``ps.beets`` was
+  # previously listed again here because the production env excluded
+  # it; now that ``lib.beets_distance`` makes beets a first-class
+  # library dependency it's already in ``pythonPackages``, so the
+  # dev shell inherits it without duplication.
+  #
+  # Dev-only additions:
+  #   - vulture: static dead-code finder (scripts/find_dead_code.sh)
+  #   - coverage: runtime coverage for both the test suite and
+  #     production-instrumented systemd units (scripts/coverage_report.sh
+  #     + scripts/coverage_diff.py)
   testPythonEnv = pkgs.python3.withPackages (ps:
     cratedigger.pythonPackages ps
+    ++ [ ps.vulture ps.coverage ]
   );
 in
 pkgs.mkShell {

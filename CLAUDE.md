@@ -441,6 +441,36 @@ ssh doc2 'set -a; . /run/secrets/cratedigger-pgpass; set +a; export PGPASSWORD="
 
 `pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD".
 
+## Finding dead code
+
+Two complementary tools — use them together when the test suite starts feeling like a tax on code nobody runs in production.
+
+**Static (fast, noisy):** vulture flags unreferenced functions / classes / variables.
+
+```bash
+nix-shell --run "bash scripts/find_dead_code.sh"             # diff vs whitelist — only new findings
+nix-shell --run "bash scripts/find_dead_code.sh --baseline"  # all candidates (initial hunt)
+```
+
+The whitelist at `tools/vulture/whitelist.py` masks the 166 known false positives on main (msgspec Struct fields, beets ImportSession overrides, route handler dispatch, SQL DictRow attribute access). After deleting genuinely-dead code, regenerate the baseline:
+
+```bash
+nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py > tools/vulture/whitelist.py"
+```
+
+**Runtime (slow, unambiguous):** coverage.py against production traffic, then diff against test coverage.
+
+1. Enable in `~/nixosconfig/modules/nixos/services/cratedigger.nix` (downstream wrapper): `services.cratedigger.coverage.enable = true;`. Deploy. Data accumulates at `/var/lib/cratedigger/coverage/` from the cratedigger oneshot, importer, preview worker, and web server. ~5-10% CPU overhead per process. The subprocess `.pth` shim (`nix/coverage-subprocess.nix`) makes `import_one.py` runs participate too.
+2. After a representative window (a week, including at least one operator action: Replace, force-import, ban-source — otherwise rare operator paths look dead):
+   ```bash
+   nix-shell --run "bash scripts/run_tests_with_coverage.sh"   # populates build/test-coverage/
+   nix-shell --run "bash scripts/coverage_report.sh doc2"      # rsyncs from prod, builds build/coverage-html/
+   nix-shell --run "python3 scripts/coverage_diff.py"          # the test-only-lines report
+   ```
+3. `build/test-only-lines.txt` lists every line that tests cover but production never executed. That's the actionable dead-code candidates — either delete or demote from unit tests to a manual smoke procedure.
+
+**Caveat:** coverage.py traces only Python; the `beet` subprocess is third-party and unmeasured. Anything reachable only via `beet` plugins won't appear in either side of the diff.
+
 ## Critical rules
 
 1. **NEVER use `beet remove -d`** — deletes files permanently (exceptions: ban-source endpoint and Replace action, both explicit user actions composed via `lib/release_cleanup.py::remove_and_reset_release`).
