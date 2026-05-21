@@ -1192,7 +1192,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
             self.assertTrue(result)
 
     def test_dispatch_outcome_summary_is_returned_to_queue_owner(
@@ -1227,7 +1227,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 return stub_outcome
 
             result = process_completed_album(
-                album, [], ctx, validate_fn=_stub_validate,
+                album, [], ctx, import_job_id=1, validate_fn=_stub_validate,
             )
 
             self.assertIs(result, stub_outcome)
@@ -1284,7 +1284,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 db_source="request",
             )
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             assert isinstance(result, DispatchOutcome)
             self.assertFalse(result.success)
@@ -1310,7 +1310,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
             self.assertFalse(result)
 
     def test_resumes_from_persisted_current_path(self):
@@ -1343,7 +1343,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertTrue(result)
             self.assertEqual(files[0].import_path, resumed_file)
@@ -1381,7 +1381,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertTrue(result)
             self.assertEqual(file.import_path, resumed_file)
@@ -1420,7 +1420,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertTrue(result)
             self.assertEqual(
@@ -1428,12 +1428,10 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 os.path.join(tmpdir, "downloads", "Artist - Album (2024)"),
             )
 
-    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     def test_returns_none_for_post_move_auto_import_retry(
         self,
         mock_beets_validate,
-        mock_measure_preimport_state,
     ):
         """Post-move auto-import retries must stop before re-dispatch."""
         from lib.download import process_completed_album
@@ -1478,17 +1476,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            from lib.measurement import PreimportMeasurement
-            mock_measure_preimport_state.return_value = PreimportMeasurement(
-                folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-            )
 
             dispatch_calls: list[dict] = []
             with self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(
-                    album, [], ctx,
+                    album, [], ctx, import_job_id=1,
                     dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
                 )
 
@@ -1537,7 +1529,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
             with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, [], ctx)
+                result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertIsNone(result)
             self.assertIn("missing db_request_id", "\n".join(logs.output))
@@ -1583,278 +1575,15 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertTrue(result)
             self.assertEqual(album.files[0].import_path, resumed_file)
 
-    @patch("lib.download.measure_preimport_state")
-    @patch("lib.beets.beets_validate")
-    def test_request_auto_import_without_request_id_fails_before_staging_move(
-        self,
-        mock_beets_validate,
-        mock_measure_preimport_state,
-    ):
-        """Fresh request auto-imports must fail before moving into staged auto-import."""
-        from lib.download import process_completed_album
-        from lib.processing_paths import stage_to_ai_path
-        from lib.quality import ValidationResult
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloads_root = os.path.join(tmpdir, "downloads")
-            source_dir = os.path.join(downloads_root, "Music")
-            os.makedirs(source_dir)
-            source_file = os.path.join(source_dir, "01 - Track.mp3")
-            with open(source_file, "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                album_id=1,
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="test-mbid",
-                db_request_id=None,
-                db_source="request",
-            )
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(
-                id=1,
-                status="downloading",
-                artist_name="Artist",
-                album_title="Album",
-                year=2024,
-                mb_release_id="test-mbid",
-            ))
-            cfg = cast(Any, _make_ctx().cfg)
-            ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = downloads_root
-            cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
-            cfg.beets_validation_enabled = True
-            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            mock_beets_validate.return_value = ValidationResult(
-                valid=True,
-                distance=0.05,
-                scenario="strong_match",
-            )
-            from lib.measurement import PreimportMeasurement
-            mock_measure_preimport_state.return_value = PreimportMeasurement(
-                folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-            )
-
-            expected_canonical = os.path.join(
-                downloads_root,
-                "Artist - Album (2024)",
-            )
-            unexpected_staged = stage_to_ai_path(
-                artist="Artist",
-                title="Album",
-                staging_dir=cfg.beets_staging_dir,
-                request_id=None,
-                auto_import=True,
-            )
-
-            dispatch_calls: list[dict] = []
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(
-                    album, [], ctx,
-                    dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
-                )
-
-            from lib.import_dispatch import DispatchOutcome
-            assert isinstance(result, DispatchOutcome)
-            self.assertFalse(result.success)
-            self.assertFalse(result.deferred)
-            self.assertIn("missing db_request_id", result.message)
-            failed_path = os.path.join(
-                downloads_root,
-                "failed_imports",
-                "Artist - Album (2024)",
-            )
-            self.assertFalse(os.path.exists(expected_canonical))
-            self.assertTrue(os.path.isfile(
-                os.path.join(failed_path, "01 - Track.mp3")))
-            self.assertFalse(os.path.exists(unexpected_staged))
-            self.assertEqual(dispatch_calls, [])
-            self.assertEqual(db.request(1)["status"], "wanted")
-            self.assertEqual(db.recorded_attempts, [(1, "validation")])
-            self.assertEqual(len(db.download_logs), 1)
-            self.assertEqual(
-                db.download_logs[0].beets_scenario,
-                "request_missing_request_id",
-            )
-            self.assertIsNotNone(db.download_logs[0].validation_result)
-            self.assertIn(
-                "missing_request_id",
-                str(db.download_logs[0].validation_result),
-            )
-            self.assertIn(
-                "failed_imports",
-                str(db.download_logs[0].validation_result),
-            )
-            self.assertIn("missing db_request_id", "\n".join(logs.output))
-
-    @patch("lib.download.measure_preimport_state")
-    @patch("lib.beets.beets_validate")
-    def test_request_auto_import_without_resolvable_request_logs_warning(
-        self,
-        mock_beets_validate,
-        mock_measure_preimport_state,
-    ):
-        """Unresolvable request ids must block in place, not orphan files."""
-        from lib.download import process_completed_album
-        from lib.quality import ValidationResult
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloads_root = os.path.join(tmpdir, "downloads")
-            source_dir = os.path.join(downloads_root, "Music")
-            os.makedirs(source_dir)
-            source_file = os.path.join(source_dir, "01 - Track.mp3")
-            with open(source_file, "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                album_id=-1,
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="test-mbid",
-                db_request_id=None,
-                db_source="request",
-            )
-            db = FakePipelineDB()
-            cfg = cast(Any, _make_ctx().cfg)
-            ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = downloads_root
-            cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
-            cfg.beets_validation_enabled = True
-            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            mock_beets_validate.return_value = ValidationResult(
-                valid=True,
-                distance=0.05,
-                scenario="strong_match",
-            )
-            from lib.measurement import PreimportMeasurement
-            mock_measure_preimport_state.return_value = PreimportMeasurement(
-                folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-            )
-
-            expected_canonical = os.path.join(
-                downloads_root,
-                "Artist - Album (2024)",
-            )
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, [], ctx)
-
-            self.assertIsNone(result)
-            self.assertEqual(db.download_logs, [])
-            self.assertEqual(db.status_history, [])
-            self.assertTrue(os.path.isfile(
-                os.path.join(expected_canonical, "01 - Track.mp3")))
-            self.assertFalse(os.path.exists(os.path.join(
-                downloads_root,
-                "failed_imports",
-                "Artist - Album (2024)",
-            )))
-            self.assertIn(
-                "BLOCKED WITHOUT REQUEST AUDIT",
-                "\n".join(logs.output),
-            )
-
-    @patch("lib.download.measure_preimport_state")
-    @patch("lib.beets.beets_validate")
-    def test_request_auto_import_without_request_id_matches_row_when_album_year_blank(
-        self,
-        mock_beets_validate,
-        mock_measure_preimport_state,
-    ):
-        """Blank album years must not block safe request-row recovery."""
-        from lib.download import process_completed_album
-        from lib.quality import ValidationResult
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloads_root = os.path.join(tmpdir, "downloads")
-            source_dir = os.path.join(downloads_root, "Music")
-            os.makedirs(source_dir)
-            source_file = os.path.join(source_dir, "01 - Track.mp3")
-            with open(source_file, "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                album_id=1,
-                artist="Artist",
-                title="Album",
-                year="",
-                mb_release_id="test-mbid",
-                db_request_id=None,
-                db_source="request",
-            )
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(
-                id=1,
-                status="downloading",
-                artist_name="Artist",
-                album_title="Album",
-                year=2024,
-                mb_release_id="test-mbid",
-            ))
-            cfg = cast(Any, _make_ctx().cfg)
-            ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = downloads_root
-            cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
-            cfg.beets_validation_enabled = True
-            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            mock_beets_validate.return_value = ValidationResult(
-                valid=True,
-                distance=0.05,
-                scenario="strong_match",
-            )
-            from lib.measurement import PreimportMeasurement
-            mock_measure_preimport_state.return_value = PreimportMeasurement(
-                folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-            )
-
-            result = process_completed_album(album, [], ctx)
-
-            from lib.import_dispatch import DispatchOutcome
-            assert isinstance(result, DispatchOutcome)
-            self.assertFalse(result.success)
-            self.assertFalse(result.deferred)
-            self.assertIn("missing db_request_id", result.message)
-            self.assertEqual(db.request(1)["status"], "wanted")
-            self.assertEqual(len(db.download_logs), 1)
-            self.assertEqual(
-                db.download_logs[0].beets_scenario,
-                "request_missing_request_id",
-            )
-
-    @patch("lib.download.measure_preimport_state")
     @patch("lib.beets.beets_validate")
     def test_returns_none_for_legacy_shared_staged_retry(
         self,
         mock_beets_validate,
-        mock_measure_preimport_state,
     ):
         """Legacy shared staged retries must stop before validation reruns."""
         from lib.download import process_completed_album
@@ -1886,17 +1615,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = True
             cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            from lib.measurement import PreimportMeasurement
-            mock_measure_preimport_state.return_value = PreimportMeasurement(
-                folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-            )
 
             dispatch_calls: list[dict] = []
             with self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(
-                    album, [], ctx,
+                    album, [], ctx, import_job_id=1,
                     dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
                 )
 
@@ -1904,75 +1627,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             mock_beets_validate.assert_not_called()
             self.assertEqual(dispatch_calls, [])
             self.assertIn("legacy shared staged path", "\n".join(logs.output))
-
-    @patch("lib.download.measure_preimport_state")
-    @patch("lib.beets.beets_validate")
-    def test_retries_post_move_redownload_path_without_blocking(
-        self,
-        mock_beets_validate,
-        mock_measure_preimport_state,
-    ):
-        """Post-move non-auto retries should re-enter and finish mark_done."""
-        from lib.download import process_completed_album
-        from lib.quality import ValidationResult
-        from lib.processing_paths import stage_to_ai_path
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Artist",
-                title="Album",
-                staging_dir=staging_root,
-                request_id=42,
-                auto_import=False,
-            )
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="test-mbid",
-                db_request_id=42,
-                db_source="redownload",
-            )
-            album.import_folder = resumed_path
-            ctx = _make_ctx()
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.beets_staging_dir = staging_root
-            cfg.beets_validation_enabled = True
-            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_beets_validate.return_value = ValidationResult(
-                valid=True,
-                distance=0.05,
-                scenario="strong_match",
-            )
-            from lib.measurement import PreimportMeasurement
-            mock_measure_preimport_state.return_value = PreimportMeasurement(
-                folder_layout="flat",
-                audio_file_count=1,
-                filetype_band="mp3",
-            )
-
-            dispatch_calls: list[dict] = []
-            result = process_completed_album(
-                album, [], ctx,
-                dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
-            )
-
-            self.assertTrue(result)
-            self.assertEqual(dispatch_calls, [])
-            source = ctx.pipeline_db_source
-            assert isinstance(source, FakePipelineDBSource)
-            self.assertEqual(len(source.mark_done_calls), 1)
 
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
@@ -1995,7 +1649,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_validation_enabled = False
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertFalse(result)
 
@@ -2023,7 +1677,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertFalse(result)
 
@@ -2274,7 +1928,7 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
             self.assertTrue(result)
             # Source should be gone; destination should exist.
             self.assertFalse(os.path.exists(src_suffixed))
@@ -2322,7 +1976,7 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertTrue(result)
             self.assertFalse(os.path.exists(src))
@@ -2359,7 +2013,7 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
 
-            result = process_completed_album(album, [], ctx)
+            result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertTrue(result)
             self.assertFalse(os.path.exists(src))
