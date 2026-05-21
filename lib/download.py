@@ -57,6 +57,7 @@ from lib.util import (
     move_abandoned_auto_import,
     move_failed_import,
     log_validation_result,
+    repair_mp3_headers,
 )
 
 if TYPE_CHECKING:
@@ -1228,6 +1229,10 @@ def _process_beets_validation(
             # ``_handle_rejected_result`` → ``reject_and_requeue`` (which
             # writes the standard "beets validation rejected" denylist
             # entry). This caller does not issue per-fact denylist writes.
+            try:
+                repair_mp3_headers(current_path)
+            except Exception:
+                pass
             measurement = measure_preimport_state(
                 path=current_path,
                 mb_release_id=album_data.mb_release_id or "",

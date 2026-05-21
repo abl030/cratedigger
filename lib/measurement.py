@@ -34,7 +34,7 @@ from lib.audio_hash import AudioHashError, hash_audio_content
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import SPECTRAL_TRANSCODE_GRADES, SpectralMeasurement
-from lib.util import repair_mp3_headers, validate_audio
+from lib.util import validate_audio
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -98,11 +98,11 @@ class LocalFileInspection:
 
     ``has_nested_audio`` reports whether any audio files were found below the
     root directory. Callers should reject nested layouts early: the
-    preimport gates (validate_audio / analyze_album / repair_mp3_headers)
-    recurse, but the downstream beets harness (``harness/import_one.py``)
-    still uses ``os.listdir`` for bitrate measurement and conversion, so a
-    nested force/manual import would pass gates and then produce a
-    misclassified/empty measurement in the harness.
+    preimport gates (validate_audio / analyze_album) recurse, but the
+    downstream beets harness (``harness/import_one.py``) still uses
+    ``os.listdir`` for bitrate measurement and conversion, so a nested
+    force/manual import would pass gates and then produce a misclassified/
+    empty measurement in the harness.
 
     ``avg_bitrate_bps`` is the mean bitrate across all readable MP3 files —
     used by the VBR spectral-gate threshold (issue #93). Genuine V0 averages
@@ -416,17 +416,13 @@ def measure_preimport_state(
         PreimportMeasurement with all gate facts populated. Audio-corrupt and
         bad-hash matches short-circuit the spectral steps to avoid wasting
         cycles, but the returned Struct still has the corresponding flag set.
-    """
-    # --- MP3 header repair (unconditional) ---
-    # mp3val runs regardless of audio_check_mode: deployments with
-    # audio_check=off still want fixable MP3 header issues cleaned up before
-    # spectral analysis and the import subprocess. Matches the auto path's
-    # original behavior pre-refactor.
-    try:
-        repair_mp3_headers(path)
-    except Exception:
-        logger.debug("repair_mp3_headers failed", exc_info=True)
 
+    Note: ``repair_mp3_headers`` is **not** called here. Callers must run
+    mp3val on the source before measurement (and before snapshotting, in
+    the preview worker) so that header fixes are visible in the evidence
+    snapshot and never mutate the source after the importer's freshness
+    check.
+    """
     filetype_band = _filetype_band(download_filetype)
 
     # --- Audio integrity gate ---
