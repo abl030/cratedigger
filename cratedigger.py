@@ -275,7 +275,7 @@ def _select_active_plan_item_for_album(album, db):
 
     The returned query is taken straight from the plan-item -- the
     generator already produced a runnable, normalized, repeat-aware
-    string. We do NOT call ``build_query`` here.
+    string.
     """
     from lib.search import PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID
     from lib.pipeline_db import PLAN_STATUS_ACTIVE
