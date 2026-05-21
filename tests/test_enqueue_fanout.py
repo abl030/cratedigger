@@ -1707,11 +1707,11 @@ class TestAlbumBrowseLogContract(unittest.TestCase):
 
 class TestClaimDownloadingTOCTOU(unittest.TestCase):
     """#2: ``claim_downloading`` must reject a stale plan even when a
-    regenerate lands between the in-memory currentness check and the
-    UPDATE. The fix is a single atomic UPDATE whose WHERE clause encodes
-    the plan_id / ordinal / cycle constraints. We simulate the TOCTOU
-    race by stubbing ``is_request_plan_current`` to always return True
-    while the request row's actual plan state has moved on."""
+    regenerate lands between plan selection and the UPDATE. The fix is a
+    single atomic UPDATE (``set_downloading_if_plan_current``) whose WHERE
+    clause encodes the plan_id / ordinal / cycle constraints. We simulate
+    the TOCTOU race by regenerating the plan after the executor has
+    captured its PlanExecutionContext."""
 
     def _build_plan_execution(self, db: FakePipelineDB, request_id: int):
         from lib.pipeline_db import SearchPlanItemInput
@@ -1739,36 +1739,30 @@ class TestClaimDownloadingTOCTOU(unittest.TestCase):
         )
 
     def test_atomic_check_rejects_stale_claim_when_plan_moves_after_check(self):
-        """TOCTOU: a regenerate lands AFTER ``is_request_plan_current`` returned
-        True but BEFORE the UPDATE. The atomic claim must still refuse the
-        stale write — the WHERE clause must re-validate plan currentness."""
+        """TOCTOU: a regenerate lands AFTER the executor captured its
+        PlanExecutionContext but BEFORE the claim UPDATE. The atomic
+        ``set_downloading_if_plan_current`` must refuse the stale write —
+        its WHERE clause re-validates plan currentness."""
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
         plan_exec = self._build_plan_execution(db, 1)
 
-        # Force is_request_plan_current to lie (always say current) so we
-        # exercise the path past the in-memory check. The atomic UPDATE
-        # is what must catch the race.
-        original = db.is_request_plan_current
-        db.is_request_plan_current = lambda *a, **k: True
-        try:
-            # Simulate the regenerate that landed mid-flight: cycle bump,
-            # cursor reset to a new plan.
-            db.supersede_search_plan_with_replacement(
-                request_id=1, generator_id=SEARCH_PLAN_GENERATOR_ID,
-                items=[SearchPlanItemInput(
-                    ordinal=0, strategy="default", query="N",
-                    canonical_query_key="n")],
-            )
+        # Simulate the regenerate that landed mid-flight: cycle bump,
+        # cursor reset to a new plan. plan_exec still points at the old
+        # plan; the atomic UPDATE must reject the claim.
+        db.supersede_search_plan_with_replacement(
+            request_id=1, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="N",
+                canonical_query_key="n")],
+        )
 
-            writer = DownloadOwnershipWriter(db_factory=lambda: db)
-            ok = writer.claim_downloading(
-                1, '{"state":"planned"}', plan_execution=plan_exec,
-            )
-        finally:
-            db.is_request_plan_current = original
+        writer = DownloadOwnershipWriter(db_factory=lambda: db)
+        ok = writer.claim_downloading(
+            1, '{"state":"planned"}', plan_execution=plan_exec,
+        )
 
         self.assertFalse(ok, "stale claim must be rejected by the atomic UPDATE")
         self.assertEqual(db.request(1)["status"], "wanted")

@@ -4831,35 +4831,6 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(db.request(rid)["status"], "downloading")
 
-    def test_stale_request_transition_blocked_via_finalize_request_if_plan_current(self):
-        """``finalize_request_if_plan_current`` rejects stale transitions."""
-        from typing import cast
-        from tests.fakes import FakePipelineDB
-        from lib.pipeline_db import PipelineDB, SearchPlanItemInput
-        from lib.transitions import (
-            RequestTransition, finalize_request_if_plan_current,
-        )
-
-        db = FakePipelineDB()
-        rid = db.add_request(
-            artist_name="X", album_title="A", source="request",
-            mb_release_id="mbid")
-        old_plan_id = self._seed_two_item_plan(db, rid)
-        # Regenerate.
-        db.supersede_search_plan_with_replacement(
-            request_id=rid, generator_id="g", items=[
-                SearchPlanItemInput(ordinal=0, strategy="default", query="N")
-            ],
-        )
-        ok = finalize_request_if_plan_current(
-            cast(PipelineDB, db), rid,
-            RequestTransition.to_downloading(
-                from_status="wanted", state_json='{"x":1}'),
-            plan_id=old_plan_id, plan_ordinal=0, cycle_count_snapshot=0,
-        )
-        self.assertFalse(ok)
-        self.assertEqual(db.request(rid)["status"], "wanted")
-
     def test_stale_enqueue_does_not_move_request_to_downloading(self):
         """Owner-thread plumbing: when ``ctx.active_plan_execution`` is
         stale, ``_claim_initial_download_ownership`` returns a non-claimed
