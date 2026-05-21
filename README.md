@@ -374,7 +374,7 @@ WHERE id = <id>;
 ```
 
 All types are fully typed dataclasses with pyright enforcement and JSON round-trip serialization:
-`ImportResult`, `ValidationResult`, `CandidateSummary`, `HarnessItem`, `HarnessTrackInfo`, `TrackMapping`, `DownloadInfo`, `SpectralContext`, `AlbumInfo`, `ActiveDownloadState`, `ActiveDownloadFileState`, `CooldownConfig`.
+`ImportResult`, `ValidationResult`, `CandidateSummary`, `HarnessItem`, `HarnessTrackInfo`, `TrackMapping`, `DownloadInfo`, `AlbumInfo`, `ActiveDownloadState`, `ActiveDownloadFileState`, `CooldownConfig`.
 
 ## Pipeline CLI diagnostics
 

@@ -25,7 +25,6 @@ from lib.quality import (
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
-    SpectralContext,
     DownloadInfo,
     rejected_download_tier,
     narrow_override_on_downgrade,
@@ -50,8 +49,6 @@ from lib.quality import (
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     DECISION_LOSSLESS_SOURCE_LOCKED,
-    is_opus_copy_safe_for_lossless_delete,
-    OPUS_DELETE_SKIP_REASON_SPECTRAL,
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
 )
@@ -851,90 +848,6 @@ class TestIsVerifiedLossless(unittest.TestCase):
                     ),
                     expected,
                 )
-
-
-class TestIsOpusCopySafeForLosslessDelete(unittest.TestCase):
-    """Spectral-grade gate for the Delete Lossless Opus bulk action.
-
-    NULL / genuine / marginal are safe (the on-disk Opus copy is trustworthy
-    or has no spectral evidence either way); suspect / likely_transcode are
-    blockers per docs/quality-verification.md. Any unrecognised string fails
-    closed (returns False) so a future grade cannot accidentally be treated
-    as safe without an explicit allowlist edit.
-    """
-
-    CASES = [
-        ("null grade is safe", None, True),
-        ("genuine is safe", "genuine", True),
-        ("marginal is safe", "marginal", True),
-        ("suspect blocks delete", "suspect", False),
-        ("likely_transcode blocks delete", "likely_transcode", False),
-        ("empty string fails closed", "", False),
-        ("unknown future grade fails closed", "future_grade_x", False),
-        ("uppercase mismatch fails closed", "GENUINE", False),
-        ("uppercase suspect mismatch fails closed", "SUSPECT", False),
-    ]
-
-    def test_safety_decision(self):
-        for desc, grade, expected in self.CASES:
-            with self.subTest(desc=desc):
-                self.assertEqual(
-                    is_opus_copy_safe_for_lossless_delete(grade),
-                    expected,
-                )
-
-    def test_skip_reason_constant(self):
-        """The shared skip-reason string is non-empty and disjoint from
-        the existing `delete_failed` reason used by both this endpoint
-        and post_wrong_match_delete_transparent_non_flac."""
-        self.assertIsInstance(OPUS_DELETE_SKIP_REASON_SPECTRAL, str)
-        self.assertTrue(OPUS_DELETE_SKIP_REASON_SPECTRAL)
-        self.assertNotEqual(OPUS_DELETE_SKIP_REASON_SPECTRAL, "delete_failed")
-
-
-# ============================================================================
-# SpectralContext
-# ============================================================================
-
-class TestSpectralContext(unittest.TestCase):
-    """Test SpectralContext dataclass."""
-
-    def test_defaults(self):
-        ctx = SpectralContext()
-        self.assertFalse(ctx.needs_check)
-        self.assertIsNone(ctx.grade)
-        self.assertIsNone(ctx.bitrate)
-        self.assertEqual(ctx.suspect_pct, 0.0)
-        self.assertIsNone(ctx.existing_min_bitrate)
-        self.assertIsNone(ctx.existing_spectral_bitrate)
-
-    def test_full_construction(self):
-        ctx = SpectralContext(
-            needs_check=True,
-            grade="suspect",
-            bitrate=128,
-            suspect_pct=75.0,
-            existing_min_bitrate=320,
-            existing_spectral_bitrate=160,
-        )
-        self.assertTrue(ctx.needs_check)
-        self.assertEqual(ctx.grade, "suspect")
-        self.assertEqual(ctx.bitrate, 128)
-
-    def test_feeds_spectral_import_decision(self):
-        """SpectralContext fields map directly to spectral_import_decision args."""
-        ctx = SpectralContext(
-            grade="suspect", bitrate=192,
-            existing_spectral_bitrate=128)
-        result = spectral_import_decision(
-            ctx.grade, ctx.bitrate, ctx.existing_spectral_bitrate or 0)
-        self.assertEqual(result, "import_upgrade")
-
-    def test_no_check_needed(self):
-        """VBR MP3 — no spectral check needed."""
-        ctx = SpectralContext(needs_check=False)
-        self.assertFalse(ctx.needs_check)
-        self.assertIsNone(ctx.grade)
 
 
 # ============================================================================

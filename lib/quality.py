@@ -517,22 +517,6 @@ def top_candidates_with_skip_split(
     )
 
 
-@dataclass
-class SpectralContext:
-    """Gathered spectral analysis data for both new and existing files.
-
-    Returned by the spectral gathering function, consumed by the
-    spectral_import_decision() pure function.
-    """
-    needs_check: bool = False
-    grade: Optional[str] = None
-    bitrate: Optional[int] = None
-    suspect_pct: float = 0.0
-    existing_min_bitrate: Optional[int] = None
-    existing_spectral_bitrate: Optional[int] = None
-    existing_spectral_grade: Optional[str] = None
-
-
 IMPORT_RESULT_SENTINEL = "__IMPORT_RESULT__"
 
 
@@ -2674,25 +2658,6 @@ def determine_verified_lossless(
     return False
 
 
-OPUS_DELETE_SKIP_REASON_SPECTRAL = "spectral_suspect"
-
-
-_OPUS_DELETE_SAFE_GRADES = frozenset({None, "genuine", "marginal"})
-
-
-def is_opus_copy_safe_for_lossless_delete(grade: Optional[str]) -> bool:
-    """Spectral-grade gate for the Delete Lossless Opus bulk action.
-
-    Returns True iff the on-disk Opus copy's ``current_spectral_grade`` is
-    trustworthy enough to delete sibling wrong-match candidates: ``None``,
-    ``"genuine"``, or ``"marginal"`` (see docs/quality-verification.md).
-    ``"suspect"`` and ``"likely_transcode"`` block deletion. Any
-    unrecognised string fails closed — a future grade addition must be
-    explicitly allowlisted here, never silently treated as safe.
-    """
-    return grade in _OPUS_DELETE_SAFE_GRADES
-
-
 def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
                          spectral_grade: Optional[str]) -> bool:
     """Legacy derivation for album_source.py fallback path.
@@ -3254,21 +3219,6 @@ def search_cache_keys_for_identity(
     if identity.lossless and QUALITY_LOSSLESS not in keys:
         keys.append(QUALITY_LOSSLESS)
     return tuple(keys)
-
-
-# ---------------------------------------------------------------------------
-# Filetype verification — legacy bridge
-# ---------------------------------------------------------------------------
-
-
-def verify_filetype(file: dict[str, Any] | Any, allowed_filetype: str) -> bool:
-    """Check whether a slskd file dict matches an allowed filetype specification.
-
-    Legacy bridge — delegates to filetype_matches(file_identity(), parse_filetype_config()).
-    """
-    identity = file_identity(file)
-    filter_spec = parse_filetype_config(allowed_filetype)
-    return filetype_matches(identity, filter_spec)
 
 
 # ---------------------------------------------------------------------------

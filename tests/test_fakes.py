@@ -9,14 +9,13 @@ from zoneinfo import ZoneInfo
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
-from lib.quality import SpectralContext, SpectralMeasurement, ValidationResult
+from lib.quality import SpectralMeasurement, ValidationResult
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
     make_album_quality_evidence,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
-    make_spectral_context,
     make_validation_result,
 )
 
@@ -1385,19 +1384,6 @@ class TestBuilders(unittest.TestCase):
         self.assertFalse(vr.valid)
         self.assertEqual(vr.distance, 0.5)
         self.assertEqual(vr.failed_path, "/tmp/failed")
-
-    def test_make_spectral_context_defaults(self):
-        sc = make_spectral_context()
-        self.assertIsInstance(sc, SpectralContext)
-        self.assertFalse(sc.needs_check)
-        self.assertIsNone(sc.grade)
-
-    def test_make_spectral_context_overrides(self):
-        sc = make_spectral_context(needs_check=True, grade="suspect", bitrate=192)
-        self.assertTrue(sc.needs_check)
-        self.assertEqual(sc.grade, "suspect")
-        self.assertEqual(sc.bitrate, 192)
-
 
 class TestFakePipelineDBDiscogs(unittest.TestCase):
     """Tests for Discogs-related FakePipelineDB methods."""
