@@ -46,7 +46,6 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
 )
-from lib.measurement import measure_preimport_state
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -57,7 +56,6 @@ from lib.util import (
     move_abandoned_auto_import,
     move_failed_import,
     log_validation_result,
-    repair_mp3_headers,
 )
 
 if TYPE_CHECKING:
@@ -1090,7 +1088,7 @@ def process_completed_album(
     failed_grab: list[Any],
     ctx: CratediggerContext,
     *,
-    import_job_id: int | None = None,
+    import_job_id: int,
     validate_fn: "Callable[..., DispatchOutcome | None] | None" = None,
     handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
     dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
@@ -1146,31 +1144,18 @@ def _process_beets_validation(
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
     *,
-    import_job_id: int | None = None,
+    import_job_id: int,
     handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
     dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
-    After beets validation passes, the queue-backed caller (``import_job_id``
-    + ``db`` set) relies on the preview/importer evidence pipeline:
-    ``ensure_candidate_evidence_for_action`` has already persisted candidate
-    evidence, and the importer runs ``full_pipeline_decision_from_evidence``
-    downstream. The legacy non-queue fallback (CLI / test callers with no
-    ``import_job_id`` or no DB) instead measures inline via
-    ``lib.measurement.measure_preimport_state`` and surfaces only the two
-    folder/audio-integrity facts (``audio_corrupt`` and ``bad_audio_hash``)
-    — quality decisions belong to the unified importer decider in U11.
-
-    Denylist on reject: this caller does NOT denylist peers directly from the
-    measurement. When the measurement flips ``bv_result.valid=False``, the
-    function returns into ``_handle_rejected_result``, which calls
-    ``reject_and_requeue(usernames=...)`` — that path writes the denylist
-    with the standard "beets validation rejected" reason. Per-fact denylist
-    differentiation (audio_corrupt → "audio decode failures", bad_audio_hash →
-    "matched curated bad audio hash") is the importer's concern via the
-    unified reject path (U11); the legacy fallback inherits whatever the
-    reject_and_requeue helper does, which is intentionally coarser.
+    After beets validation passes, ``ensure_candidate_evidence_for_action``
+    confirms the preview worker has persisted candidate evidence keyed to
+    this import_job. Missing evidence requeues the job to preview rather
+    than measuring inline — the importer never measures, the preview
+    worker owns evidence production, and the full pipeline decider
+    (``full_pipeline_decision_from_evidence``) runs downstream of evidence.
 
     Returns the dispatch outcome when the auto-import path fires,
     ``None`` when beets validation rejects (``_handle_rejected_result``
@@ -1187,96 +1172,27 @@ def _process_beets_validation(
     bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
     bv_result.download_folder = current_path
     bv_result.source_dirs = _source_dirs_for_album(album_data)
-    candidate_evidence_result: CandidateEvidenceActionResult | None = None
-
     if bv_result.valid:
-        dl_pre = _build_download_info(album_data)
-        db = (ctx.pipeline_db_source._get_db()
-              if ctx.pipeline_db_source is not None else None)
-        candidate_evidence_available = False
-        if import_job_id is not None and db is not None:
-            candidate_result = ensure_candidate_evidence_for_action(
+        db = ctx.pipeline_db_source._get_db()
+        candidate_result = ensure_candidate_evidence_for_action(
+            db,
+            source_path=current_path,
+            import_job_id=import_job_id,
+        )
+        if not candidate_result.available:
+            reason = (
+                candidate_result.provenance.fallback_reason
+                or candidate_result.provenance.candidate_status
+                or "missing"
+            )
+            # Preview owns candidate-evidence production; the importer
+            # never measures. Requeue rather than fail; the dispatch-side
+            # requeue keeps the advisory-lock atomicity intact.
+            return _requeue_import_job_to_preview(
                 db,
-                source_path=current_path,
                 import_job_id=import_job_id,
+                reason=reason,
             )
-            candidate_evidence_result = candidate_result
-            candidate_evidence_available = candidate_result.available
-            if not candidate_evidence_available:
-                reason = (
-                    candidate_result.provenance.fallback_reason
-                    or candidate_result.provenance.candidate_status
-                    or "missing"
-                )
-                # U2: requeue the import_job to preview rather than failing.
-                # Preview owns candidate-evidence production; the importer
-                # never measures. The dispatch-side requeue keeps the
-                # advisory-lock atomicity intact.
-                return _requeue_import_job_to_preview(
-                    db,
-                    import_job_id=import_job_id,
-                    reason=reason,
-                )
-
-        if not candidate_evidence_available:
-            # U7: legacy non-queue fallback. Measure only; never decide. The
-            # importer's full pipeline decider owns spectral / codec rank /
-            # quality-gate outcomes. We inline only the two folder/audio-
-            # integrity facts (``audio_corrupt`` and ``bad_audio_hash``) —
-            # ``nested_layout`` and ``empty_fileset`` are intentionally NOT
-            # checked here, matching the historical scope of this fallback.
-            # Denylist on reject is handled downstream by
-            # ``_handle_rejected_result`` → ``reject_and_requeue`` (which
-            # writes the standard "beets validation rejected" denylist
-            # entry). This caller does not issue per-fact denylist writes.
-            try:
-                repair_mp3_headers(current_path)
-            except Exception:
-                pass
-            measurement = measure_preimport_state(
-                path=current_path,
-                mb_release_id=album_data.mb_release_id or "",
-                label=f"{album_data.artist} - {album_data.title}",
-                download_filetype=dl_pre.filetype or "",
-                download_min_bitrate_bps=dl_pre.bitrate,
-                download_is_vbr=dl_pre.is_vbr,
-                cfg=ctx.cfg,
-                db=db,
-                request_id=album_data.db_request_id,
-                propagate_download_to_existing=True,
-            )
-            album_data.download_spectral = measurement.download_spectral
-            album_data.current_spectral = measurement.existing_spectral
-            album_data.current_min_bitrate = measurement.existing_min_bitrate
-            audio_corrupt = measurement.audio_corrupt
-            bad_audio_hash = measurement.matched_bad_hash_id is not None
-            if audio_corrupt or bad_audio_hash:
-                scenario = "audio_corrupt" if audio_corrupt else "bad_audio_hash"
-                if audio_corrupt and measurement.corrupt_files:
-                    detail = (
-                        f"{len(measurement.corrupt_files)} files failed "
-                        "ffmpeg decode"
-                    )
-                elif bad_audio_hash and measurement.matched_bad_track_path:
-                    detail = (
-                        f"matched bad_audio_hash id="
-                        f"{measurement.matched_bad_hash_id} on track "
-                        f"{measurement.matched_bad_track_path}"
-                    )
-                else:
-                    detail = scenario
-                bv_result.valid = False
-                bv_result.scenario = scenario
-                bv_result.detail = detail
-                if audio_corrupt and measurement.corrupt_files:
-                    bv_result.corrupt_files = measurement.corrupt_files
-                # Carry bad-audio-hash gate match through to download_log via
-                # ValidationResult JSONB (plan 2026-04-29-005 / U5).
-                if bad_audio_hash:
-                    bv_result.matched_bad_hash_id = measurement.matched_bad_hash_id
-                    bv_result.matched_bad_track_path = measurement.matched_bad_track_path
-
-    if bv_result.valid:
         _handle_valid = (
             handle_valid_fn if handle_valid_fn is not None else _handle_valid_result
         )
@@ -1286,7 +1202,7 @@ def _process_beets_validation(
             staged_album,
             ctx,
             import_job_id=import_job_id,
-            prevalidated_candidate_result=candidate_evidence_result,
+            prevalidated_candidate_result=candidate_result,
             dispatch_fn=dispatch_fn,
         )
     return _handle_rejected_result(
@@ -2109,7 +2025,7 @@ def _run_completed_processing(
     db: Any,
     ctx: CratediggerContext,
     *,
-    import_job_id: int | None = None,
+    import_job_id: int,
     process_album_fn: "Callable[..., bool | DispatchOutcome | None] | None" = None,
 ) -> bool | DispatchOutcome | None:
     """Run or resume local post-download processing for a completed album.

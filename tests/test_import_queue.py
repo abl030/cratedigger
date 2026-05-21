@@ -151,11 +151,6 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 scenario="strong_match",
             )), \
                  patch(
-                     "lib.download.measure_preimport_state",
-                     side_effect=AssertionError(
-                         "valid preview evidence must skip preimport gates"),
-                 ) as gates, \
-                 patch(
                      "lib.download._handle_valid_result",
                      return_value=DispatchOutcome(True, "imported"),
                  ) as handle_valid:
@@ -168,7 +163,6 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
 
         assert result is not None
         self.assertTrue(result.success)
-        gates.assert_not_called()
         handle_valid.assert_called_once()
         self.assertEqual(handle_valid.call_args.kwargs["import_job_id"], job.id)
 
@@ -238,8 +232,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 valid=True,
                 distance=0.05,
                 scenario="strong_match",
-            )), \
-                 patch("lib.download.measure_preimport_state") as gates:
+            )):
                 result = _process_beets_validation(
                     album_data,
                     staged_album,
@@ -251,7 +244,6 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         assert result is not None
         self.assertFalse(result.success)
         self.assertIn("Candidate quality evidence unavailable", result.message)
-        gates.assert_not_called()
         self.assertEqual(handle_valid_calls, [])
 
 

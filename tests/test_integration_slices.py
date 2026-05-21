@@ -2561,6 +2561,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             current_spectral_bitrate=245))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
+            import_job_id=1,
             process_album_fn=lambda *_a, **_kw: None,
         )
         self.assertEqual(db.request(42)["status"], "downloading")
@@ -2579,6 +2580,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
+            import_job_id=1,
             process_album_fn=lambda *_a, **_kw: True,
         )
         self.assertEqual(db.request(42)["status"], "imported")
@@ -2592,6 +2594,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
+            import_job_id=1,
             process_album_fn=lambda *_a, **_kw: False,
         )
         self.assertEqual(db.request(42)["status"], "wanted")
@@ -2622,6 +2625,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             self._state(),
             db,
             self._ctx(db),
+            import_job_id=1,
             process_album_fn=reject_inside_process,
         )
 
@@ -2651,94 +2655,12 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
                 self._state(),
                 db,
                 self._ctx(db),
+                import_job_id=1,
             )
 
         self.assertIs(outcome, dispatch_outcome)
         self.assertEqual(db.request(42)["status"], "downloading")
         self.assertEqual(db.status_history, [])
-
-    def test_real_missing_request_id_rejection_transitions_once(self):
-        """The real missing-request-id reject path must transition exactly once."""
-        from lib import download as dl_mod
-        from lib.quality import ValidationResult
-        from tests.helpers import (
-            make_ctx_with_fake_db,
-            make_download_file,
-            make_grab_list_entry,
-        )
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            artist_name="Artist",
-            album_title="Album",
-            year=2024,
-            mb_release_id="test-mbid",
-        ))
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloads_root = os.path.join(tmpdir, "downloads")
-            source_dir = os.path.join(downloads_root, "Music")
-            os.makedirs(source_dir)
-            with open(os.path.join(source_dir, "01 - Track.mp3"), "w") as fp:
-                fp.write("fake audio")
-
-            cfg = CratediggerConfig(
-                beets_harness_path=_HARNESS,
-                pipeline_db_enabled=True,
-                beets_validation_enabled=True,
-                beets_distance_threshold=0.15,
-                beets_staging_dir=os.path.join(tmpdir, "staging"),
-                slskd_download_dir=downloads_root,
-                beets_tracking_file=os.path.join(tmpdir, "beets-tracking.jsonl"),
-            )
-            ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            entry = make_grab_list_entry(
-                album_id=42,
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="test-mbid",
-                db_source="request",
-                db_request_id=None,
-            )
-
-            from lib.measurement import PreimportMeasurement
-            with patch("lib.beets.beets_validate", return_value=ValidationResult(
-                     valid=True,
-                     distance=0.05,
-                     scenario="strong_match",
-                 )), \
-                 patch(
-                     "lib.download.measure_preimport_state",
-                     return_value=PreimportMeasurement(
-                         folder_layout="flat",
-                         audio_file_count=1,
-                         filetype_band="mp3",
-                     ),
-                 ):
-                dl_mod._run_completed_processing(
-                    entry,
-                    42,
-                    self._state(),
-                    db,
-                    ctx,
-                )
-
-        self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertEqual(db.status_history, [(42, "wanted")])
-        self.assertEqual(db.recorded_attempts, [(42, "validation")])
-        self.assertEqual(len(db.download_logs), 1)
-        self.assertEqual(
-            db.download_logs[0].beets_scenario,
-            "request_missing_request_id",
-        )
-
 
 class TestBadAudioHashSlice(unittest.TestCase):
     """Integration slice: bad-audio-hash gate inside ``measure_preimport_state``.
