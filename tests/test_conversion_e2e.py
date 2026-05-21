@@ -414,23 +414,6 @@ class TestLosslessTierMatching(unittest.TestCase):
         aac = file_identity({"filename": "track.m4a", "bitRate": 256})
         self.assertFalse(filetype_matches(aac, lossless))
 
-    def test_verify_filetype_lossless_flac(self):
-        """verify_filetype with 'lossless' spec matches FLAC."""
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype(
-            {"filename": "track.flac", "bitRate": 900}, "lossless"))
-
-    def test_verify_filetype_lossless_wav(self):
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype(
-            {"filename": "track.wav", "bitRate": 1411}, "lossless"))
-
-    def test_verify_filetype_lossless_rejects_mp3(self):
-        from lib.quality import verify_filetype
-        self.assertFalse(verify_filetype(
-            {"filename": "track.mp3", "bitRate": 320}, "lossless"))
-
-
 # ============================================================================
 # FLAC_SPEC and conversion_target with "lossless"
 # ============================================================================

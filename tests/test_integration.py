@@ -311,31 +311,6 @@ class TestRawDictBoundary(unittest.TestCase):
     """Verify that functions receiving raw slskd dicts work with plain dicts,
     not DownloadFile instances."""
 
-    def test_verify_filetype_with_raw_dict(self):
-        """verify_filetype receives raw slskd file dicts, not DownloadFile."""
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype(SEARCH_FILE_FLAC, "flac"))
-
-    def test_verify_filetype_mp3_v0(self):
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype(SEARCH_FILE_MP3_V0, "mp3 v0"))
-
-    def test_verify_filetype_mp3_320(self):
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype(SEARCH_FILE_MP3_320, "mp3 320"))
-
-    def test_verify_filetype_rejects_wrong_type(self):
-        from lib.quality import verify_filetype
-        self.assertFalse(verify_filetype(SEARCH_FILE_FLAC, "mp3"))
-
-    def test_verify_filetype_bitdepth_samplerate(self):
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype(SEARCH_FILE_FLAC, "flac 16/44.1"))
-
-    def test_verify_filetype_rejects_wrong_bitdepth(self):
-        from lib.quality import verify_filetype
-        self.assertFalse(verify_filetype(SEARCH_FILE_FLAC, "flac 24/96"))
-
     def test_album_track_num_with_raw_dicts(self):
         """album_track_num receives raw directory dicts."""
         orig_cfg = cratedigger.cfg

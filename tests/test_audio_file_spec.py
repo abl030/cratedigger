@@ -448,44 +448,6 @@ class TestConfigString(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# verify_filetype bridge — backward compat
-# ---------------------------------------------------------------------------
-
-
-class TestVerifyFiletypeBridge(unittest.TestCase):
-    """verify_filetype() still works after rewrite as bridge."""
-
-    def test_alac_m4a_now_matches(self):
-        """THE ALAC BUG FIX via bridge."""
-        from lib.quality import verify_filetype
-        file = {"filename": "track.m4a", "bitRate": 900}
-        self.assertTrue(verify_filetype(file, "alac"))
-
-    def test_aac_m4a_matches_aac_config(self):
-        from lib.quality import verify_filetype
-        file = {"filename": "track.m4a", "bitRate": 256}
-        self.assertTrue(verify_filetype(file, "aac 256+"))
-
-    def test_existing_mp3_v0_still_works(self):
-        from lib.quality import verify_filetype
-        file = {"filename": "track.mp3", "bitRate": 245}
-        self.assertTrue(verify_filetype(file, "mp3 v0"))
-
-    def test_existing_flac_still_works(self):
-        from lib.quality import verify_filetype
-        file = {"filename": "track.flac", "bitRate": 800}
-        self.assertTrue(verify_filetype(file, "flac"))
-
-    def test_catch_all_matches_any(self):
-        """verify_filetype with '*' matches anything."""
-        from lib.quality import verify_filetype
-        self.assertTrue(verify_filetype({"filename": "track.mp3", "bitRate": 128}, "*"))
-        self.assertTrue(verify_filetype({"filename": "track.flac"}, "*"))
-        self.assertTrue(verify_filetype({"filename": "track.m4a", "bitRate": 900}, "*"))
-        self.assertTrue(verify_filetype({"filename": "track.ogg", "bitRate": 256}, "*"))
-
-
-# ---------------------------------------------------------------------------
 # Catch-all mode
 # ---------------------------------------------------------------------------
 

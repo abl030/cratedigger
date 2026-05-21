@@ -320,7 +320,7 @@ by design; no backfill. See
 Pure decision helpers in `lib/quality.py`: `spectral_import_decision`,
 `import_quality_decision`, `transcode_detection`, `quality_gate_decision`,
 `determine_verified_lossless`, `dispatch_action`,
-`compute_effective_override_bitrate`, `verify_filetype`, `should_cooldown`,
+`compute_effective_override_bitrate`, `should_cooldown`,
 `provisional_lossless_decision`, `measured_import_decision`, and
 `get_decision_tree` (feeds the web UI Decisions tab).
 

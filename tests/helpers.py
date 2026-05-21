@@ -27,7 +27,6 @@ from lib.quality import (
     QualityRank,
     QualityRankConfig,
     RankBitrateMetric,
-    SpectralContext,
     SpectralMeasurement,
     V0ProbeEvidence,
     ValidationResult,
@@ -359,27 +358,6 @@ def make_validation_result(**overrides: Any) -> ValidationResult:
     }
     defaults.update(overrides)
     return ValidationResult(**defaults)
-
-
-def make_spectral_context(
-    needs_check: bool = False,
-    grade: str | None = None,
-    bitrate: int | None = None,
-    suspect_pct: float = 0.0,
-    existing_min_bitrate: int | None = None,
-    existing_spectral_bitrate: int | None = None,
-    existing_spectral_grade: str | None = None,
-) -> SpectralContext:
-    """Build a SpectralContext with sensible defaults."""
-    return SpectralContext(
-        needs_check=needs_check,
-        grade=grade,
-        bitrate=bitrate,
-        suspect_pct=suspect_pct,
-        existing_min_bitrate=existing_min_bitrate,
-        existing_spectral_bitrate=existing_spectral_bitrate,
-        existing_spectral_grade=existing_spectral_grade,
-    )
 
 
 # ---------------------------------------------------------------------------
