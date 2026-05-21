@@ -67,48 +67,33 @@ Call the full pipeline.
 
 ## HTTP request bodies — use `pydantic.BaseModel`
 
-Inbound HTTP request bodies in `web/routes/*.py` are an external, untrusted boundary. They get validated with `pydantic.BaseModel` (Pydantic v2) at the handler entry. Pydantic stops at the route layer; everything internal stays `msgspec.Struct` / `@dataclass` per the next section.
+Inbound HTTP request bodies in `web/routes/*.py` go through `pydantic.BaseModel` (v2) at the handler entry. Pydantic stops at the route layer; internal types stay `msgspec.Struct` / `@dataclass` per the next section. Enforced by `tests/test_pydantic_route_audit.py` — any `post_*` handler that reads the raw `body` dict instead of going through `parse_body` fails the audit (small allowlist with a rationale per entry).
 
-Why Pydantic and not msgspec at this seam:
-- `ValidationError.errors()` gives structured field-path errors, which the route returns as JSON so the frontend can show real messages.
-- The `*Request` model declared above the handler is the operator-facing contract — the request shape is visible without reading the parsing code.
+Why Pydantic at this seam: `ValidationError.errors()` gives structured field-path errors the frontend renders directly, and the `*Request` model declared above the handler is the operator-facing contract.
 
-Pattern (canonical: `post_pipeline_add` in `web/routes/pipeline.py`):
+Pattern (canonical: `PipelineAddRequest` + `post_pipeline_add` in `web/routes/pipeline.py`):
 
 ```python
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, model_validator
+from web.routes._pydantic import parse_body
 
-class PipelineAddRequest(BaseModel):
-    mb_release_id: str | None = None
-    discogs_release_id: str | None = None
-    source: str = "request"
+class MyRouteRequest(BaseModel):
+    foo: str
+    bar: int | None = None
 
-    @model_validator(mode="after")
-    def _at_least_one_id(self):
-        if not self.mb_release_id and not self.discogs_release_id:
-            raise ValueError("Missing mb_release_id or discogs_release_id")
-        return self
-
-def post_pipeline_add(h, body: dict) -> None:
-    payload = _parse_body(h, body, PipelineAddRequest)
-    if payload is None:
+def post_my_route(h, body: dict) -> None:
+    req = parse_body(h, body, MyRouteRequest)
+    if req is None:
         return
-    # payload.mb_release_id is typed; route logic uses it directly
+    # req.foo / req.bar are typed; use them directly
 ```
 
-`_parse_body` (defined in `web/routes/_pydantic.py`) is the single adapter that converts `ValidationError → 400` with `{"error": ..., "errors": [...]}`. Use it; do not catch `ValidationError` inline.
+`parse_body` (in `web/routes/_pydantic.py`) is the single adapter that turns `ValidationError → 400` with `{"error": "<field>: <msg>", "errors": [...]}`. Use it; do not catch `ValidationError` inline.
 
 Scope:
-- HTTP request bodies → Pydantic. That's it.
-- Internal types (msgspec wire boundaries, route response dicts, service-layer dataclasses) → unchanged.
-- Pydantic is NOT for query-string parsing yet — query strings stay hand-parsed for now (smaller surface, less win).
-- No response models — frontend depends on the existing JSON shape; routes still emit dicts via `h._json(...)`.
-
-When migrating an existing route:
-1. Declare the `*Request` model above the handler with the fields the existing code reads from `body`.
-2. Wrap entry with `payload = _parse_body(h, body, MyRequest); if payload is None: return`.
-3. Replace `body.get("x")` with `payload.x`.
-4. Existing tests should pass unchanged — preserve response shape and the 400-on-bad-input contract.
+- HTTP request bodies → Pydantic.
+- Query strings, response shapes, internal types → unchanged.
+- Pydantic v2's lax mode coerces `"true"`/`"false"` strings to bool; use `Field(strict=True)` when the route's contract is JSON-bool only.
 
 ## Wire-boundary types — use `msgspec.Struct`, not `@dataclass`
 Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blob written to or read from the DB, a subprocess's stdout — is a `msgspec.Struct`. **Same policy both directions:** encode via `msgspec.json.encode` (or `msgspec.to_builtins` when a dict is needed), decode via `msgspec.convert`. The declared Struct is the single contract that validates type drift at the boundary. Pyright does not see inside `dict.get()` — only runtime validation catches int-vs-str drift, mis-typed fields, or missing required data. This is the lesson of issue #99 / PR #98 (every Discogs validation silently logged `mbid_not_found` because a dataclass said `str` but the wire carried `int`) and the pre-#141 asymmetry (the old "dataclass if re-encoded, Struct if decoded only" split let docstrings lie about which side was strict).
