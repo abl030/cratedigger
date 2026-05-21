@@ -376,6 +376,7 @@ _PREIMPORT_FACT_REJECT_DECISIONS: frozenset[str] = frozenset({
     "bad_audio_hash",
     "nested_layout",
     "empty_fileset",
+    "mixed_source",
 })
 
 
@@ -796,6 +797,8 @@ def _reject_import_from_evidence_decision(
             if decision == "bad_audio_hash"
             else "spectral analysis rejected the source"
             if decision == "spectral_reject"
+            else "mixed lossless+lossy source"
+            if decision == "mixed_source"
             else f"rejected: {decision}"
         )
         for username in usernames:

@@ -185,10 +185,10 @@ class TestSpectralImportDecision(unittest.TestCase):
 
 # ============================================================================
 # U11: ``preimport_decide`` was folded into ``full_pipeline_decision_from_evidence``.
-# Its four folder/audio-integrity reject branches (audio_corrupt,
-# bad_audio_hash, nested_layout, empty_fileset) are now early-exit rejects
+# Its folder/audio-integrity reject branches (audio_corrupt, bad_audio_hash,
+# nested_layout, empty_fileset, mixed_source) are now early-exit rejects
 # at the top of the unified decider. The pure-branch coverage lives in
-# ``tests/test_quality_classification.py::TestFourFactPreimportRejects`` and
+# ``tests/test_quality_classification.py::TestPreimportFactRejects`` and
 # the parity contract in
 # ``TestLiveBugReproductionsThroughEvidencePipeline``.
 # ============================================================================
@@ -866,7 +866,9 @@ EXPECTED_RESULT_KEYS = {
     "preimport_audio", "preimport_nested",
     # U11: bad_audio_hash + empty_fileset early branches read from evidence;
     # the flat-kwargs simulator leaves them None.
+    # mixed_source (lossless+lossy in one folder) is also evidence-only.
     "preimport_bad_hash", "preimport_empty_fileset",
+    "preimport_mixed_source",
     "stage0_spectral_gate",
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",

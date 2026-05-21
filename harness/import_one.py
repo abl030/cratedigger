@@ -1715,13 +1715,36 @@ def main():
     if new_avg_br is not None:
         _log(f"  new_avg_bitrate={new_avg_br}")
 
+    # Mixed-source guard: a folder bundling lossless + lossy audio (e.g.
+    # 15 FLAC + 2 MP3 bonus tracks) is rejected at the evidence layer via
+    # ``preimport_mixed_source``. The lossy files would otherwise pass
+    # through to the library untouched and the album would falsely stamp
+    # verified-lossless. Look at the original source directory (``args.path``)
+    # — ``work_path`` has already been mutated by conversion so it contains
+    # the V0 outputs alongside the kept FLAC originals.
+    try:
+        _source_audio_files = [
+            f for f in os.listdir(args.path)
+            if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
+        ]
+        has_lossy_passthrough = (
+            any(_is_lossless_file(f, args.path) for f in _source_audio_files)
+            and any(
+                not _is_lossless_file(f, args.path)
+                for f in _source_audio_files
+            )
+        )
+    except OSError:
+        has_lossy_passthrough = False
+
     # Verified lossless: single source of truth in quality.py. r.v0_probe is
     # populated above (lossless source path) and lets the V0-avg trust
     # override flip a spectral suspect/likely_transcode sparse-HF lossless
     # source to verified when the V0 evidence corroborates a genuine master.
     will_be_verified_lossless = determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode,
-        v0_probe=r.v0_probe)
+        v0_probe=r.v0_probe,
+        has_lossy_passthrough=has_lossy_passthrough)
     v0_verified_lossless_override = (
         will_be_verified_lossless
         and spectral_grade in SPECTRAL_TRANSCODE_GRADES

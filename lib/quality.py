@@ -2631,6 +2631,8 @@ def determine_verified_lossless(
     converted_count: int,
     is_transcode: bool,
     v0_probe: "V0ProbeEvidence | None" = None,
+    *,
+    has_lossy_passthrough: bool = False,
 ) -> bool:
     """Single source of truth for verified lossless status (pure).
 
@@ -2646,7 +2648,18 @@ def determine_verified_lossless(
     ``lossless_source_v0`` probe at avg≥230kbps AND min≥200kbps), trust
     the V0 probe and certify as verified. The override is monotonic — it
     only flips False→True, never True→False.
+
+    Mixed-source guard (``has_lossy_passthrough``): when the source folder
+    contains lossless audio AND audio that will pass through unconverted
+    (e.g. 15 FLAC + 2 MP3 bonus tracks), the album can never be
+    verified-lossless regardless of converted_count / spectral / V0. The
+    decision layer rejects these sources outright via
+    ``preimport_mixed_source`` in ``full_pipeline_decision_from_evidence``;
+    this argument is the harness-side defense in depth so the persisted
+    candidate measurement field is honest even on the never-imported row.
     """
+    if has_lossy_passthrough:
+        return False
     if target_format in ("flac", "lossless"):
         if spectral_grade in ("genuine", "marginal", None):
             return True
@@ -2803,6 +2816,14 @@ def dispatch_action(decision: str) -> DispatchAction:
         # U11: folder-shape reject (no audio files). Not a peer quality
         # problem — no denylist. Clean the staged dir; caller forces requeue.
         return DispatchAction(record_rejection=True, denylist=False, cleanup=True)
+    elif decision == "mixed_source":
+        # Mixed lossless + lossy in one folder. Peer chose to bundle lossy
+        # bonus tracks alongside lossless audio — denylist them so the same
+        # source doesn't burn another cycle on the same mixed bag. Clean
+        # the staged dir; caller forces requeue via
+        # ``_PREIMPORT_FACT_REJECT_DECISIONS`` so the album stays searchable
+        # for a fully-lossless source. See ``has_mixed_lossless_and_lossy``.
+        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "duplicate_remove_guard_failed":
         return DispatchAction(record_rejection=True, denylist=True, requeue=False,
                               cleanup=False)
@@ -3013,6 +3034,42 @@ AUDIO_EXTENSIONS_DOTTED: frozenset[str] = frozenset(f".{e}" for e in AUDIO_EXTEN
 
 # Codecs that are lossless by definition
 LOSSLESS_CODECS: frozenset[str] = frozenset({"flac", "alac", "wav"})
+
+# Container-level lossless/lossy sets used by the mixed-source preimport
+# reject in ``full_pipeline_decision_from_evidence``. Container is the
+# discriminator (codec is too noisy: ``.m4a`` can hold ALAC or AAC). We
+# duplicate the sets from ``lib.quality_evidence`` deliberately —
+# importing them would invert the existing one-way dependency
+# (``quality_evidence -> quality``). The mixed-source check has no other
+# need for the broader filetype-band machinery.
+_MIXED_REJECT_LOSSLESS_CONTAINERS: frozenset[str] = frozenset(
+    {"flac", "alac", "wav", "aiff", "ape"}
+)
+_MIXED_REJECT_LOSSY_CONTAINERS: frozenset[str] = frozenset(
+    {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
+)
+
+
+def has_mixed_lossless_and_lossy(
+    files: "Sequence[AlbumQualityEvidenceFile]",
+) -> bool:
+    """True when the snapshot contains both lossless and lossy containers.
+
+    Cratedigger stays release-based: a folder that ships 15 FLACs + 2 MP3
+    bonus tracks must be rejected outright, not partially imported. The
+    historical bug (request 4445 Fast Times at Barrington High) was that
+    ``determine_verified_lossless`` saw ``converted_count=15`` and stamped
+    the whole album as verified-lossless, which then poisoned wrong-match
+    cleanup against future fully-FLAC candidates. See
+    ``TestPreimportFactRejects::test_mixed_source_routes_through_full_pipeline``.
+    """
+    if not files:
+        return False
+    containers = {f.container.lower() for f in files if f.container}
+    return bool(
+        containers & _MIXED_REJECT_LOSSLESS_CONTAINERS
+        and containers & _MIXED_REJECT_LOSSY_CONTAINERS
+    )
 
 # Sentinel: matches any audio file (used for catch-all "download anything" mode)
 # Assigned after AudioFileSpec class definition below
@@ -3722,6 +3779,7 @@ def full_pipeline_decision(
         # dict shapes identical.
         "preimport_bad_hash": None,
         "preimport_empty_fileset": None,
+        "preimport_mixed_source": None,
         "stage0_spectral_gate": None,
         "stage1_spectral": None,
         "stage2_import": None,
@@ -4203,6 +4261,8 @@ def evidence_decision_name(
         return "nested_layout"
     if result.get("preimport_empty_fileset") == "reject_empty":
         return "empty_fileset"
+    if result.get("preimport_mixed_source") == "reject_mixed_source":
+        return "mixed_source"
     for key in ("stage2_import", "stage3_quality_gate"):
         value = result.get(key)
         if isinstance(value, str) and value:
@@ -4282,6 +4342,8 @@ def classify_full_pipeline_decision(
         return "confident_reject", True, "bad_audio_hash"
     if decision.get("preimport_empty_fileset") == "reject_empty":
         return "confident_reject", True, "empty_fileset"
+    if decision.get("preimport_mixed_source") == "reject_mixed_source":
+        return "confident_reject", True, "mixed_source"
     if (
         decision.get("stage1_spectral") == "reject"
         and not decision.get("stage2_import")
@@ -4421,6 +4483,7 @@ def full_pipeline_decision_from_evidence(
             "preimport_nested": str | None,
             "preimport_bad_hash": str | None,       # U11
             "preimport_empty_fileset": str | None,  # U11
+            "preimport_mixed_source": str | None,   # mixed-source reject
             "stage0_spectral_gate": str | None,
             "stage1_spectral": str | None,
             "stage2_import": str | None,
@@ -4433,20 +4496,24 @@ def full_pipeline_decision_from_evidence(
             "verified_lossless": bool,
         }
 
-    U11: four folder/audio-integrity facts are read directly off
-    ``candidate`` as early-exit rejects (in the same order the deleted
-    ``preimport_decide`` evaluated them):
+    Folder/audio-integrity facts are read directly off ``candidate`` as
+    early-exit rejects (in priority order):
 
       1. ``audio_corrupt``  — sets ``preimport_audio='reject_corrupt'``
       2. ``bad_audio_hash`` — sets ``preimport_bad_hash='reject_bad_hash'``
       3. ``nested_layout``  — sets ``preimport_nested='reject_nested'``
       4. ``empty_fileset``  — sets ``preimport_empty_fileset='reject_empty'``
+      5. ``mixed_source``   — sets
+         ``preimport_mixed_source='reject_mixed_source'`` when the
+         snapshot contains both lossless and lossy containers (e.g.
+         15 FLAC + 2 MP3). Keeps Cratedigger release-based — never
+         partially-imports an album.
 
     The accompanying ``evidence_decision_name`` maps these dict shapes to
     ``audio_corrupt`` / ``bad_audio_hash`` / ``nested_layout`` /
-    ``empty_fileset`` decision strings, which the importer feeds to
-    ``dispatch_action`` and the unified ``_reject_import_from_evidence_decision``
-    helper.
+    ``empty_fileset`` / ``mixed_source`` decision strings, which the
+    importer feeds to ``dispatch_action`` and the unified
+    ``_reject_import_from_evidence_decision`` helper.
     """
 
     if facts is None:
@@ -4473,9 +4540,10 @@ def full_pipeline_decision_from_evidence(
         preimport_nested: str | None = None,
         preimport_bad_hash: str | None = None,
         preimport_empty_fileset: str | None = None,
+        preimport_mixed_source: str | None = None,
         denylisted: bool,
     ) -> dict[str, Any]:
-        # Mirror the live four-fact reject side effects: auto-import
+        # Mirror the live preimport-fact reject side effects: auto-import
         # rejects re-queue to ``wanted``; force/manual leaves the
         # request alone (the unified reject helper forces ``requeue=True``
         # for these decisions regardless, but the dict's ``final_status``
@@ -4489,6 +4557,7 @@ def full_pipeline_decision_from_evidence(
             "preimport_nested": preimport_nested,
             "preimport_bad_hash": preimport_bad_hash,
             "preimport_empty_fileset": preimport_empty_fileset,
+            "preimport_mixed_source": preimport_mixed_source,
             "stage0_spectral_gate": None,
             "stage1_spectral": None,
             "stage2_import": None,
@@ -4530,6 +4599,16 @@ def full_pipeline_decision_from_evidence(
         return _early_reject_result(
             preimport_empty_fileset="reject_empty",
             denylisted=False,
+        )
+
+    # Mixed-source reject: lossless + lossy containers in the same folder.
+    # Cratedigger stays release-based — a partial FLAC+MP3 source must
+    # never get partially-imported and stamped verified-lossless. See
+    # ``has_mixed_lossless_and_lossy`` and the Fast Times reproduction.
+    if has_mixed_lossless_and_lossy(candidate.files):
+        return _early_reject_result(
+            preimport_mixed_source="reject_mixed_source",
+            denylisted=True,
         )
 
     candidate_measurement = candidate.measurement
