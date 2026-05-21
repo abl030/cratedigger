@@ -12,6 +12,11 @@
 [run]
 parallel = True
 branch = True
+# Long-running services (web, importer, preview worker) only write coverage
+# data on graceful exit. systemd sends SIGTERM on stop/restart; this hook
+# turns SIGTERM into a normal flush so we don't lose every collection cycle.
+# The oneshot timer doesn't need this — atexit already covers it.
+sigterm = True
 # `source = .` means "everything under cwd is in scope" — covers all of lib/,
 # web/, harness/, scripts/, plus the top-level entry points (cratedigger.py,
 # album_source.py). Listing individual files in `source =` makes coverage
