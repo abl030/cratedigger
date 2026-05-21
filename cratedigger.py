@@ -253,92 +253,6 @@ def _build_search_cache(
     return cache_entries, upload_speeds, dir_audio_counts
 
 
-def _select_variant_for_album(album, search_cfg, db):
-    """Legacy helper — NOT used by the search executor after the plan cutover.
-
-    Persisted plan-item execution replaced runtime variant recomputation;
-    the executor now calls ``_select_active_plan_item_for_album``. This
-    wrapper is preserved only so legacy tests that exercise the variant
-    ladder semantics directly can still call it. Production
-    Phase 2 paths must not call into here.
-
-    Reads `album_requests` + `album_tracks` (no slskd), feeds the typed
-    inputs into ``lib.search.select_variant``. Returns the ``SearchVariant``
-    and the deterministic base query.
-    """
-    from lib.search import build_query, select_variant, SearchVariant
-
-    base_query = build_query(
-        album.artist_name, album.title,
-        prepend_artist=search_cfg.album_prepend_artist,
-    )
-    base_query_unwild = build_query(
-        album.artist_name, album.title,
-        prepend_artist=search_cfg.album_prepend_artist,
-        wildcard_artist=False,
-    )
-
-    request_id = getattr(album, "db_request_id", None)
-    search_attempts = 0
-    year: str | None = None
-    track_titles: list[str] = []
-    if request_id:
-        try:
-            row = db.get_request(request_id)
-            if row is not None:
-                attempts_val = row.get("search_attempts")
-                if isinstance(attempts_val, int):
-                    search_attempts = attempts_val
-                year_val = row.get("year")
-                # PostgreSQL returns int for INTEGER columns; coerce to str.
-                if year_val is not None:
-                    year = str(year_val)
-            tracks = db.get_tracks(request_id)
-            track_titles = [
-                str(t["title"]) for t in tracks if t.get("title")
-            ]
-        except Exception:
-            # Stable-greppable prefix: operators can count silent
-            # escalation-ladder bypasses via
-            # `journalctl -u cratedigger | grep VARIANT_SELECT_FALLBACK`.
-            # The fallback itself is intentional for DB resilience —
-            # this is the observability hook for it.
-            logger.warning(
-                "VARIANT_SELECT_FALLBACK request_id=%s artist=%s album=%s",
-                request_id, album.artist_name, album.title,
-                exc_info=True,
-            )
-            return SearchVariant(
-                kind="default", query=base_query or "",
-                tag="default", slice_index=None,
-            ), base_query
-
-    # AlbumRecord falls back to year="0000" — select_variant treats that as
-    # unknown so V1 will be skipped.
-    if year is None:
-        rd = getattr(album, "release_date", None)
-        if isinstance(rd, str) and rd:
-            year = rd[:4]
-
-    if not base_query:
-        # Caller still needs a SearchVariant so the code path stays uniform.
-        return SearchVariant(
-            kind="default", query=None,
-            tag="default", slice_index=None,
-        ), base_query
-
-    variant = select_variant(
-        search_attempts=search_attempts,
-        threshold=search_cfg.search_escalation_threshold,
-        base_query=base_query,
-        base_query_unwild=base_query_unwild or base_query,
-        year=year,
-        track_titles=track_titles,
-        artist_name=album.artist_name,
-    )
-    return variant, base_query
-
-
 def _select_active_plan_item_for_album(album, db):
     """Return ``(query, PlanExecutionContext)`` for the next plan-item to run.
 
@@ -552,20 +466,6 @@ def search_for_album(album, ctx):
     # Reuse the same merge path as the parallel pipeline
     _merge_search_result(result, ctx)
     return result
-
-
-def _submit_search(album, variant, search_cfg, slskd_client):
-    """Submit a search to slskd and return the search ID (no waiting).
-
-    Legacy entry point: takes a ``SearchVariant``. Used by tests and by the
-    legacy serial path. After U5, production parallel execution submits
-    with a query+strategy pair derived from the active plan-item via
-    ``_submit_plan_search``; this wrapper delegates so the wire-level
-    behavior stays identical.
-    """
-    return _submit_plan_search(
-        album, variant.query, variant.tag, search_cfg, slskd_client,
-    )
 
 
 def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
