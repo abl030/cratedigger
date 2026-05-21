@@ -225,20 +225,12 @@ def _snapshot_match_key(
 ) -> tuple[str, int, str, str, str | None]:
     """Stable identity tuple for snapshot equality.
 
-    Excludes ``mtime_ns`` because:
-    * ``process_completed_album`` writes ID3 tags to source files via
-      ``music_tag.save()`` AFTER preview snapshots them. Tagging bumps
-      mtime even when the audio bytes are unchanged. With strict mtime
-      equality the importer requeues every job to preview as
-      ``"candidate source changed since evidence capture"`` and the
-      queue never drains — see issue audit-2026-05-15.
-    * virtiofs has been observed to return slightly different
-      ``st_mtime_ns`` between back-to-back ``stat`` calls on the same
-      file. Strict equality is fragile under that flake.
-
-    Size + path + extension/container/codec is sufficient to detect any
-    content change that matters here. ``mtime_ns`` stays in the
-    persisted struct as a forensic field but does not gate freshness.
+    Excludes ``mtime_ns`` because virtiofs has been observed to return
+    slightly different ``st_mtime_ns`` between back-to-back ``stat``
+    calls on the same file. Size + path + extension/container/codec is
+    sufficient to detect any content change that matters here.
+    ``mtime_ns`` stays in the persisted struct as a forensic field but
+    does not gate freshness.
     """
     return (
         file.relative_path,

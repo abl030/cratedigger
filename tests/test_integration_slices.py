@@ -2709,8 +2709,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             )
 
             from lib.measurement import PreimportMeasurement
-            with patch("lib.download.music_tag.load_file", return_value=MagicMock()), \
-                 patch("lib.beets.beets_validate", return_value=ValidationResult(
+            with patch("lib.beets.beets_validate", return_value=ValidationResult(
                      valid=True,
                      distance=0.05,
                      scenario="strong_match",

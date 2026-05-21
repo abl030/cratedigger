@@ -369,21 +369,11 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 class TestAudioSnapshotMatches(unittest.TestCase):
     """Snapshot equality must ignore mtime_ns.
 
-    Real failure: ``process_completed_album`` writes ID3 tags to the
-    source files via ``music_tag.save()`` AFTER the preview worker has
-    already snapshotted them. The ``save()`` rewrites mtimes by
-    nanoseconds, the strict struct equality fails, the importer
-    requeues the job to preview as ``"candidate source changed since
-    evidence capture"``, preview re-runs, importer re-tags, infinite
-    loop. The queue grows but never drains.
-
-    virtiofs adds a second source of mtime jitter — the same file's
-    ``stat().st_mtime_ns`` can flicker by a few ns between reads. Any
-    fix must also make the snapshot resilient to that.
-
-    Comparison key is (relative_path, size_bytes, extension, container,
-    codec). mtime_ns stays in the struct as a forensic field but does
-    not participate in equality.
+    virtiofs has been observed to return slightly different
+    ``st_mtime_ns`` between back-to-back ``stat`` calls on the same
+    file. The comparison key is (relative_path, size_bytes, extension,
+    container, codec); mtime_ns stays in the struct as a forensic
+    field but does not participate in equality.
     """
 
     def setUp(self) -> None:
@@ -399,8 +389,6 @@ class TestAudioSnapshotMatches(unittest.TestCase):
     def test_snapshot_matches_after_mtime_only_change(self):
         """Touching a file (size unchanged) must not invalidate the snapshot."""
         captured = snapshot_audio_files(self.root)
-        # Simulate music_tag.save() rewriting the file in place: mtime
-        # advances even if the byte content (and so size) is identical.
         for entry in os.listdir(self.root):
             full = os.path.join(self.root, entry)
             stat = os.stat(full)
