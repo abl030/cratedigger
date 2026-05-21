@@ -677,14 +677,14 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertTrue(cleanup_eligible)
 
 
-class TestFourFactPreimportRejects(unittest.TestCase):
-    """U11: the four folder/audio-integrity facts that used to live in
-    ``preimport_decide`` are now early-exit rejects at the top of
-    ``full_pipeline_decision_from_evidence``. Each test covers one fact:
-    asserts the decision dict carries the right ``preimport_*`` key AND
-    that ``evidence_decision_name`` maps it to the expected decision string.
+class TestPreimportFactRejects(unittest.TestCase):
+    """U11+: folder/audio-integrity facts that fire as early-exit rejects at
+    the top of ``full_pipeline_decision_from_evidence`` before any quality
+    stage runs. Each test covers one fact: asserts the decision dict carries
+    the right ``preimport_*`` key AND that ``evidence_decision_name`` maps
+    it to the expected decision string.
 
-    Parity with the (deleted) ``preimport_decide``:
+    Facts (in reject-priority order):
       * ``audio_corrupt``  → ``preimport_audio='reject_corrupt'``,
         ``evidence_decision_name='audio_corrupt'``,
         ``classify_full_pipeline_decision`` → confident_reject
@@ -694,9 +694,12 @@ class TestFourFactPreimportRejects(unittest.TestCase):
         ``evidence_decision_name='nested_layout'``
       * ``empty_fileset`` → ``preimport_empty_fileset='reject_empty'``,
         ``evidence_decision_name='empty_fileset'``
-
-    The reject order matches the deleted ``preimport_decide``: corrupt >
-    bad-hash > nested > empty.
+      * ``mixed_source`` (lossless+lossy in one folder) →
+        ``preimport_mixed_source='reject_mixed_source'``,
+        ``evidence_decision_name='mixed_source'``. Lives here so a partial
+        FLAC+MP3 source never stamps the parent album as verified-lossless
+        — Cratedigger stays release-based, not song-based. See the Fast
+        Times at Barrington High reproduction (request 4445, evidence 5888).
     """
 
     # Reuse the parity helpers so the new tests share the exact shape used
@@ -831,6 +834,146 @@ class TestFourFactPreimportRejects(unittest.TestCase):
         self.assertTrue(cleanup_eligible)
         self.assertEqual(reason, "empty_fileset")
 
+    def test_mixed_source_routes_through_full_pipeline(self):
+        """Fast Times at Barrington High reproduction (request 4445).
+
+        Source folder had 15 .flac + 2 .mp3 (bonus tracks). Previously
+        ``determine_verified_lossless(converted_count=15, is_transcode=False)``
+        returned True with no knowledge that 2 untouched lossy files would
+        be copied into the library, producing a ``verified_lossless=true``
+        stamp on a ``mixed_lossy`` album that then poisoned the wrong-match
+        cleanup short-circuit (parent_album_verified_lossless → auto-delete
+        future fully-FLAC candidates against the same MBID).
+
+        The fix: detect lossless+lossy containers in the candidate snapshot
+        files and reject before any conversion or import runs. Self-heals
+        back to ``wanted`` like the other preimport-fact rejects.
+        """
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityEvidenceFile,
+            AudioQualityMeasurement,
+            classify_full_pipeline_decision,
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+        from datetime import datetime, timezone
+
+        # 15 FLAC + 2 MP3, mirroring the live download 17772 source folder.
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path=f"{i:02d}.flac",
+                size_bytes=1, mtime_ns=1,
+                extension="flac", container="flac", codec="flac",
+            )
+            for i in range(1, 16)
+        ] + [
+            AlbumQualityEvidenceFile(
+                relative_path="16.mp3",
+                size_bytes=1, mtime_ns=1,
+                extension="mp3", container="mp3", codec="mp3",
+            ),
+            AlbumQualityEvidenceFile(
+                relative_path="17.mp3",
+                size_bytes=1, mtime_ns=1,
+                extension="mp3", container="mp3", codec="mp3",
+            ),
+        ]
+        candidate = AlbumQualityEvidence(
+            mb_release_id="mbid-fast-times",
+            snapshot_fingerprint="sha256:fast-times-mixed",
+            source_path="/Incoming/auto-import/candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=900,
+                format="FLAC",
+                is_cbr=False,
+                spectral_grade="genuine",
+            ),
+            measured_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            files=files,
+            codec="flac",
+            container="flac",
+            storage_format="flac",
+            audio_file_count=len(files),
+            # The slskd-string filetype_band that produced the live row 5887.
+            filetype_band="flac, mp3",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["preimport_mixed_source"], "reject_mixed_source")
+        self.assertFalse(r["imported"])
+        # Mixed source is a peer-quality problem (peer chose to bundle lossy
+        # bonus tracks). Denylist them so the same person serving the same
+        # mixed bag doesn't burn another cycle.
+        self.assertTrue(r["denylisted"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        self.assertFalse(r["verified_lossless"])
+        self.assertEqual(evidence_decision_name(r), "mixed_source")
+        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
+        self.assertEqual(reason, "mixed_source")
+
+    def test_mixed_source_all_lossless_multi_codec_does_not_trip(self):
+        """FLAC + WAV in the same folder is all-lossless — must NOT trip
+        the mixed_source reject. The check is specifically "lossless +
+        lossy in the same folder", not "multiple containers"."""
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityEvidenceFile,
+            AudioQualityMeasurement,
+            full_pipeline_decision_from_evidence,
+        )
+        from datetime import datetime, timezone
+
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="01.flac",
+                size_bytes=1, mtime_ns=1,
+                extension="flac", container="flac", codec="flac",
+            ),
+            AlbumQualityEvidenceFile(
+                relative_path="02.wav",
+                size_bytes=1, mtime_ns=1,
+                extension="wav", container="wav", codec="wav",
+            ),
+        ]
+        candidate = AlbumQualityEvidence(
+            mb_release_id="mbid-multi-lossless",
+            snapshot_fingerprint="sha256:multi-lossless",
+            source_path="/Incoming/auto-import/candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=900,
+                format="FLAC",
+                is_cbr=False,
+            ),
+            measured_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            files=files,
+            codec="flac",
+            container="flac",
+            storage_format="flac",
+            audio_file_count=len(files),
+            filetype_band="flac, wav",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertIsNone(r["preimport_mixed_source"])
+
     def test_decision_order_corrupt_takes_priority_over_other_facts(self):
         """When multiple facts are present, ``audio_corrupt`` wins
         (matches the deleted ``preimport_decide`` evaluation order)."""
@@ -859,7 +1002,7 @@ class TestFourFactPreimportRejects(unittest.TestCase):
         self.assertEqual(evidence_decision_name(r), "audio_corrupt")
 
     def test_force_mode_does_not_set_keep_searching(self):
-        """The four-fact reject dict reflects the auto-path requeue
+        """The preimport-fact reject dict reflects the auto-path requeue
         invariant; force/manual leaves the parent request alone
         (the unified reject helper independently forces requeue=True via
         ``_PREIMPORT_FACT_REJECT_DECISIONS`` — that's tested in

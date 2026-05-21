@@ -262,8 +262,10 @@ fallback — spectral compares to spectral evidence only (invariant of #257).
 
 **The album test set is what defines behavior.** Live-bug scenarios go in
 `tests/test_quality_classification.py::TestLiveBugReproductions` (Bride,
-Flux, Taboo, Tyler Lambert, BoC, Heretic Pride, etc.) and the four-fact
-scenarios go in `TestFourFactPreimportRejects` (same file). Every scenario
+Flux, Taboo, Tyler Lambert, BoC, Heretic Pride, etc.) and the
+preimport-fact scenarios (audio_corrupt, bad_audio_hash, nested_layout,
+empty_fileset, mixed_source) go in `TestPreimportFactRejects` (same file).
+Every scenario
 MUST also be exercised through the production decider via
 `TestLiveBugReproductionsThroughEvidencePipeline` — the parity contract is
 that the simulator and the evidence pipeline reach the same outcome on the
