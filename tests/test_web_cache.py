@@ -275,7 +275,9 @@ class TestMemoizeMetaFresh(_CacheTestBase):
 
 class TestRedisMetrics(_CacheTestBase):
     def test_redis_metrics_returns_memory_and_key_counts(self) -> None:
-        self.cache.cache_set("web:/api/search?q=x", {"ok": True}, ttl=60)
+        # Any writer works — we just need a key in Redis so redis_metrics
+        # has something to count. meta_set is the real production writer.
+        self.cache.meta_set("mb:release:abc", {"ok": True}, ttl=60)
 
         metrics = self.cache.redis_metrics()
 

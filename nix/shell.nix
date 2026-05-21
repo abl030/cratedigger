@@ -28,6 +28,8 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    echo "cratedigger dev shell — run: python3 -m unittest discover tests -v"
+    # Echo to stderr so the banner doesn't pollute stdout when callers do
+    # ``nix-shell --run "cmd" > out`` (e.g. regenerating the vulture whitelist).
+    echo "cratedigger dev shell — run: python3 -m unittest discover tests -v" >&2
   '';
 }

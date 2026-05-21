@@ -26,14 +26,42 @@ import music_tag
 from lib.beets_distance import (
     BeetsDistanceCache,
     BeetsDistanceResult,
-    DictCache,
-    OUTCOMES,
     compute_beets_distance,
 )
 
 
 FIXTURE_FLAC = os.path.join(
     os.path.dirname(__file__), "fixtures", "audio_hash", "sine_440.flac")
+
+
+# Canonical outcome strings emitted by compute_beets_distance. Pinned here
+# because they're wire contract (CLI exit codes, HTTP status, web UI) —
+# any change requires coordinated updates downstream. ``ok`` is exercised
+# by the integration slice further down; the rest by TestComputeBeetsDistanceOutcomes.
+OUTCOMES = (
+    "ok",
+    "download_log_not_found",
+    "request_not_found",
+    "folder_missing",
+    "no_audio",
+    "mb_lookup_failed",
+    "mb_no_release_group",
+    "wrong_release_group",
+    "distance_failed",
+)
+
+
+class DictCache:
+    """In-memory BeetsDistanceCache implementation, test-only."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, bytes] = {}
+
+    def get(self, key: str) -> Optional[bytes]:
+        return self._store.get(key)
+
+    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
+        self._store[key] = value
 
 
 class _StubPDB:

@@ -368,7 +368,7 @@ class SearchTextCall:
 class FakeSlskdSearches:
     """Stateful fake for the slskd searches API.
 
-    Drives orchestration tests over `search_for_album` / `_submit_search`:
+    Drives orchestration tests over `search_for_album` / `_submit_plan_search`:
     pre-seed canned ``state``, ``responses`` for known search ids; record
     every ``search_text`` kwargs (especially ``responseLimit``) for later
     assertion.

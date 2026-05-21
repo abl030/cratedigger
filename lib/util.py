@@ -18,8 +18,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence, TYPE_CHECKING
 
-from lib.processing_paths import sanitize_processing_folder_name
-
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.grab_list import GrabListEntry
@@ -103,10 +101,6 @@ def beets_subprocess_env() -> dict[str, str]:
 
 
 # === Filesystem utilities ===
-
-def sanitize_folder_name(folder_name: str) -> str:
-    return sanitize_processing_folder_name(folder_name)
-
 
 _BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})
 FAILED_IMPORT_SEARCH_DIRS = ("/mnt/virtio/music/slskd",)
@@ -647,51 +641,3 @@ def setup_logging(config: Any) -> None:
     logging.basicConfig(**log_config)  # type: ignore
 
 
-# === Search denylist ===
-
-def load_search_denylist(file_path: str) -> dict:
-    if not os.path.exists(file_path):
-        return {}
-    try:
-        with open(file_path, "r") as file:
-            return json.load(file)
-    except (json.JSONDecodeError, IOError) as ex:
-        logger.warning(f"Error loading search denylist: {ex}. Starting with empty denylist.")
-        return {}
-
-
-def save_search_denylist(file_path: str, denylist: dict) -> None:
-    try:
-        with open(file_path, "w") as file:
-            json.dump(denylist, file, indent=2)
-    except IOError as ex:
-        logger.error(f"Error saving search denylist: {ex}")
-
-
-def is_search_denylisted(denylist: dict, album_id: int, max_failures: int) -> bool:
-    album_key = str(album_id)
-    if album_key in denylist:
-        return denylist[album_key]["failures"] >= max_failures
-    return False
-
-
-def update_search_denylist(denylist: dict, album_id: int, success: bool) -> None:
-    album_key = str(album_id)
-    current_datetime = datetime.now()
-    current_datetime_str = current_datetime.strftime("%Y-%m-%dT%H:%M:%S")
-
-    if success:
-        if album_key in denylist:
-            logger.info("Removing album from denylist: %s", denylist[album_key]["album_id"])
-            del denylist[album_key]
-    else:
-        logger.info("Adding album to denylist: " + album_key)
-        if album_key in denylist:
-            denylist[album_key]["failures"] += 1
-            denylist[album_key]["last_attempt"] = current_datetime_str
-        else:
-            denylist[album_key] = {
-                "failures": 1,
-                "last_attempt": current_datetime_str,
-                "album_id": album_id,
-            }

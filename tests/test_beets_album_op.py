@@ -2,17 +2,19 @@
 
 Two groups:
 
-1. **Behavior tests** on ``remove_album`` / ``move_album`` /
-   ``remove_by_selector``: subprocess clean exit, timeout, OSError,
-   non-zero rc, and the ``fix_library_modes`` side effect for moves.
+1. **Behavior tests** on ``remove_album`` / ``remove_by_selector``:
+   subprocess clean exit, timeout, OSError, non-zero rc.
    Subprocess mocked via ``patch('lib.beets_album_op.sp.run', ...)``
    following the pattern from ``tests/test_release_cleanup.py``.
 
 2. **Contract guard** (``TestBeetOpArgvIsCentralised``): greps every
    ``.py`` file in the repo for ``"beet", "remove"`` / ``"beet", "move"``
    argv fragments. The only hits allowed are this module and tests.
-   The acceptance criterion from issue #133: "No callsite constructs
-   its own ``beet remove -a -d id:<N>`` argv."
+   (``move`` is retained in the pattern for defence-in-depth even
+   though ``move_album`` was retired; future ``beet move`` callers must
+   still route through this module.) The acceptance criterion from
+   issue #133: "No callsite constructs its own
+   ``beet remove -a -d id:<N>`` argv."
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from unittest.mock import MagicMock, patch
 
 from tests.fakes import FakeBeetsDB
 from lib.beets_album_op import (BeetsAlbumHandle, BeetsOpFailure,
-                                BeetsOpResult, move_album, remove_album,
+                                BeetsOpResult, remove_album,
                                 remove_by_selector)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -78,17 +80,15 @@ class TestTypedReturnContract(unittest.TestCase):
         self.assertEqual(h.album_id, 42)
 
     def test_result_ok(self) -> None:
-        r = BeetsOpResult(success=True, new_path="/Beets/Artist/Album")
+        r = BeetsOpResult(success=True)
         self.assertTrue(r.success)
         self.assertIsNone(r.failure)
-        self.assertEqual(r.new_path, "/Beets/Artist/Album")
 
     def test_result_failure(self) -> None:
         f = BeetsOpFailure(reason="timeout", detail="x", selector="id:1")
         r = BeetsOpResult(success=False, failure=f)
         self.assertFalse(r.success)
         self.assertIs(r.failure, f)
-        self.assertIsNone(r.new_path)
 
 
 # ---------------------------------------------------------------------------
@@ -168,88 +168,6 @@ class TestRemoveAlbum(unittest.TestCase):
         self.assertEqual(r.failure.reason, "nonzero_rc")
         self.assertIn("rc=1", r.failure.detail)
         self.assertEqual(r.failure.selector, "id:42")
-
-
-# ---------------------------------------------------------------------------
-# move_album
-# ---------------------------------------------------------------------------
-
-
-class TestMoveAlbum(unittest.TestCase):
-
-    def _beets(self, new_path: str | None = "/Beets/Artist/Album [2007]"
-               ) -> FakeBeetsDB:
-        beets = FakeBeetsDB()
-        # The default ``new_path`` covers album_id 42 (the only album_id
-        # exercised by these tests); use the default-path field so any
-        # album_id query returns it without per-test seeding.
-        beets._album_path_by_id_default = new_path
-        return beets
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_clean_exit_reads_new_path_and_repairs_perms(
-            self, mock_run: MagicMock) -> None:
-        # ``fix_library_modes`` is imported lazily inside ``move_album``;
-        # patch the source module so the deferred lookup resolves to the mock.
-        mock_run.return_value = _ok()
-        with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, self._beets()))
-        self.assertTrue(r.success)
-        self.assertEqual(r.new_path, "/Beets/Artist/Album [2007]")
-        mock_fix.assert_called_once_with("/Beets/Artist/Album [2007]")
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_argv_uses_album_mode_pk_selector(
-            self, mock_run: MagicMock) -> None:
-        mock_run.return_value = _ok()
-        beets = self._beets()
-        with patch("lib.permissions.fix_library_modes"):
-            move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
-        argv = mock_run.call_args.args[0]
-        self.assertEqual(argv[1:], ["move", "-a", "id:42"])
-        # -d must NEVER appear on a move
-        self.assertNotIn("-d", argv)
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_timeout_skips_perm_repair_and_returns_failure(
-            self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = sp.TimeoutExpired(
-            cmd=["beet", "move"], timeout=120)
-        beets = self._beets()
-        with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
-        self.assertFalse(r.success)
-        assert r.failure is not None
-        self.assertEqual(r.failure.reason, "timeout")
-        self.assertIsNone(r.new_path)
-        self.assertEqual(beets.get_album_path_by_id_calls, [])
-        mock_fix.assert_not_called()
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_nonzero_rc_skips_perm_repair(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = _rc(2, stderr="no matching albums\n")
-        beets = self._beets()
-        with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
-        self.assertFalse(r.success)
-        assert r.failure is not None
-        self.assertEqual(r.failure.reason, "nonzero_rc")
-        self.assertEqual(beets.get_album_path_by_id_calls, [])
-        mock_fix.assert_not_called()
-
-    @patch("lib.beets_album_op.sp.run")
-    def test_missing_path_after_move_returns_none_but_success(
-            self, mock_run: MagicMock) -> None:
-        """If the album row vanished between move and lookup (should not
-        happen in normal operation) the move still reports success; the
-        caller loses the new path but we don't synthesize a failure."""
-        mock_run.return_value = _ok()
-        beets = self._beets(new_path=None)
-        with patch("lib.permissions.fix_library_modes") as mock_fix:
-            r = move_album(BeetsAlbumHandle(album_id=42), cast(Any, beets))
-        self.assertTrue(r.success)
-        self.assertIsNone(r.new_path)
-        mock_fix.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +295,7 @@ class TestBeetOpArgvIsCentralised(unittest.TestCase):
             self.fail(
                 "The following files construct raw `beet remove` / "
                 "`beet move` argv outside the allowlist. Route them "
-                "through lib.beets_album_op (remove_album / move_album / "
+                "through lib.beets_album_op (remove_album / "
                 "remove_by_selector) or, if the grep is a false positive, "
                 "add the file to ALLOWED_FILES with a comment.\n"
                 + "\n".join(lines))
