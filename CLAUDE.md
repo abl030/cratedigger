@@ -471,6 +471,27 @@ nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigge
 
 **Caveat:** coverage.py traces only Python; the `beet` subprocess is third-party and unmeasured. Anything reachable only via `beet` plugins won't appear in either side of the diff.
 
+### Cascading orphans — regen the whitelist after every deletion
+
+Deleting a vulture-flagged helper frequently exposes a **deeper orphan** that was kept alive solely by the thing you just deleted. The pattern has now bitten this audit four times:
+
+- **PR #358** — deleting `finalize_request_if_plan_current` orphaned `PipelineDB.is_request_plan_current` (its only reader)
+- **PR #360** — deleting `move_album` orphaned `BeetsOpResult.new_path` (only set by `move_album`)
+- **PR #363 → #364** — deleting `_select_variant_for_album` (in #356) exposed `build_query` and `select_variant`; deleting those exposed `strip_short_tokens`
+- **PR #355** — deleting all three public exports of `lib/import_service.py` left `_apply_request_spectral_fields` as a cascading orphan that justified deleting the whole module
+
+The mechanic is simple but easy to miss: vulture's whitelist contains an entry per known orphan, keyed by name. When a helper goes away, its callees lose their last reference but aren't in the whitelist yet (they were "used" before). The next `vulture --make-whitelist` run will surface them, and `bash scripts/find_dead_code.sh` will go red until you either delete them or accept them as new whitelist entries.
+
+**Workflow per deletion PR:**
+1. Make the deletion + delete the tests that exercised it.
+2. Regenerate the whitelist: `nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py" 2>/dev/null > tools/vulture/whitelist.py` (then prepend the 22-line header back from the previous version).
+3. Diff the whitelist (`git diff tools/vulture/whitelist.py`). New entries are cascading orphans you exposed.
+4. For each new entry, decide:
+   - **Fold into this PR** if the orphan is small, contained, and the test cleanup is bounded (~50 LOC). Best when the orphan is structurally tied to the deletion (`strip_short_tokens` was the canonical example — its body matched what only the deleted callers needed).
+   - **Park in the whitelist** if it'd double the PR. Document the cascade in the PR description and the umbrella issue so the next pass picks it up.
+
+**Anti-pattern:** deleting a helper, leaving the cascading orphans in the whitelist, and forgetting about them. The whitelist grows silently and the audit goes stale.
+
 ## Critical rules
 
 1. **NEVER use `beet remove -d`** — deletes files permanently (exceptions: ban-source endpoint and Replace action, both explicit user actions composed via `lib/release_cleanup.py::remove_and_reset_release`).
