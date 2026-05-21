@@ -19,7 +19,6 @@ from lib.quality import AlbumQualityEvidenceFile
 from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
-    snapshot_fingerprint_for_path,
 )
 
 
@@ -147,37 +146,6 @@ class TestSnapshotFingerprintFormula(unittest.TestCase):
 
         expected = hashlib.sha256(b"[]").hexdigest()
         self.assertEqual(snapshot_fingerprint([]), expected)
-
-
-class TestSnapshotFingerprintForPath(unittest.TestCase):
-    """Disk-path wrapper agrees with the in-memory helper."""
-
-    def test_wrapper_agrees_with_list_form(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Two fake FLAC files. Real audio bytes don't matter — sizes do.
-            paths = [
-                (os.path.join(tmpdir, "track01.flac"), b"a" * 1024),
-                (os.path.join(tmpdir, "track02.flac"), b"b" * 2048),
-            ]
-            for path, payload in paths:
-                with open(path, "wb") as fh:
-                    fh.write(payload)
-
-            from_path = snapshot_fingerprint_for_path(tmpdir)
-            from_files = snapshot_fingerprint(snapshot_audio_files(tmpdir))
-            self.assertEqual(from_path, from_files)
-            self.assertEqual(len(from_path), 64)
-
-    def test_wrapper_changes_with_file_size(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "track01.flac")
-            with open(path, "wb") as fh:
-                fh.write(b"a" * 100)
-            small = snapshot_fingerprint_for_path(tmpdir)
-            with open(path, "wb") as fh:
-                fh.write(b"a" * 200)
-            big = snapshot_fingerprint_for_path(tmpdir)
-            self.assertNotEqual(small, big)
 
 
 if __name__ == "__main__":

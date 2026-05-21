@@ -5,7 +5,6 @@ from lib.artist_releases import (
     TrackInfo,
     PressingInfo,
     ReleaseGroupInfo,
-    ArtistDisambiguation,
     filter_non_live,
     analyse_artist_releases,
 )
@@ -439,18 +438,6 @@ class TestAnalyseArtistReleases(unittest.TestCase):
         self.assertEqual(len(titles), 2)
         self.assertIn("Song A", titles)
         self.assertIn("Bonus Track", titles)
-
-
-class TestArtistDisambiguation(unittest.TestCase):
-    def test_dataclass_fields(self) -> None:
-        d = ArtistDisambiguation(
-            artist_id="a1",
-            artist_name="The National",
-            release_groups=[],
-        )
-        self.assertEqual(d.artist_id, "a1")
-        self.assertEqual(d.artist_name, "The National")
-        self.assertEqual(d.release_groups, [])
 
 
 if __name__ == "__main__":
