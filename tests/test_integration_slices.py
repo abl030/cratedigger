@@ -3285,37 +3285,25 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0]["matched_tracks"], 1)
 
     def test_parallel_submit_search_forwards_response_limit(self):
-        """Parallel path (_submit_search) wires search_response_limit too.
+        """Parallel path (_submit_plan_search) wires search_response_limit.
 
         The serial path test above asserts the responseLimit kwarg on the
-        slskd call. The parallel path is a separate function and was missing
-        the same coverage; if a future refactor regressed the kwarg only on
-        the parallel path, the existing test would not catch it.
-
-        Post-#9/#18 refactor: variant selection is hoisted to the caller, so
-        this test selects the variant via the same helper the parallel loop
-        uses, then passes it into ``_submit_search``.
+        slskd call. The parallel path is a separate function and needs the
+        same coverage; if a future refactor regressed the kwarg only on the
+        parallel path, the existing serial test would not catch it.
         """
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakeSlskdAPI
 
         cfg = self._make_cfg(search_response_limit=2500)
         slskd = FakeSlskdAPI()
         slskd.searches.search_text_id_sequence = [501]
         slskd.searches.add_search(search_id=501, state="Completed", responses=[])
 
-        db = FakePipelineDB()
-        rid = db.add_request(
-            artist_name="Wiggles", album_title="Album",
-            source="request", mb_release_id="mbid-p", year=1991,
-        )
-        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
-        album = self._make_album(request_id=rid, mb_release_id="mbid-p")
-        self._wire(cfg, slskd, db, album)
+        album = self._make_album(request_id=1, mb_release_id="mbid-p")
 
-        variant, _base_query = self._cratedigger._select_variant_for_album(
-            album, cfg, db,
+        submit = self._cratedigger._submit_plan_search(
+            album, "Wiggles Album", "default", cfg, slskd,
         )
-        submit = self._cratedigger._submit_search(album, variant, cfg, slskd)
         self.assertIsNotNone(submit)
         # responseLimit was forwarded to slskd at the wire boundary on the
         # parallel path (no _collect_search_results call needed for this
@@ -3451,67 +3439,6 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(row.cursor_update_status, "wrapped")
         self.assertEqual(row.final_state, "collection_crash")
         self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
-
-
-class TestVariantSelectFallbackObservability(unittest.TestCase):
-    """Finding #14: VARIANT_SELECT_FALLBACK log line is the observability hook
-    for silent escalation-ladder bypasses.
-
-    The fallback itself is intentional for DB resilience — when ``get_request``
-    or ``get_tracks`` raises (transient DB outage, etc.), the helper falls back
-    to a default variant and the next cycle retries. Without the stable log
-    prefix operators have no way to count silent fallbacks; they show up as
-    "requests grinding on default forever". The prefix
-    ``VARIANT_SELECT_FALLBACK`` lets operators run
-    ``journalctl -u cratedigger | grep VARIANT_SELECT_FALLBACK | wc -l``.
-    """
-
-    def test_db_exception_logs_stable_prefix_and_falls_back(self):
-        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
-        from cratedigger import _select_variant_for_album
-        from lib.config import CratediggerConfig
-
-        ini_cfg = CratediggerConfig.from_ini(__import__("configparser").ConfigParser())
-
-        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
-        release = ReleaseRecord(
-            id=-1, foreign_release_id="mbid-x", title="Album",
-            track_count=1, medium_count=1, format="CD", media=media,
-            monitored=True, country=["US"], status="Official",
-        )
-        album = AlbumRecord(
-            id=-1, title="Album", release_date="1990-01-01T00:00:00Z",
-            artist_id=0, artist_name="Artist", foreign_artist_id="",
-            releases=[release], db_request_id=42, db_source="request",
-            db_mb_release_id="mbid-x", db_search_filetype_override=None,
-            db_target_format=None,
-        )
-
-        # Mock DB that raises on get_request — simulates transient DB outage.
-        class _BoomDB:
-            def get_request(self, _rid):
-                raise RuntimeError("transient connection error")
-            def get_tracks(self, _rid):
-                return []
-
-        # Capture warnings logged on the cratedigger logger.
-        with self.assertLogs("cratedigger", level="WARNING") as captured:
-            variant, base_query = _select_variant_for_album(album, ini_cfg, _BoomDB())
-
-        # Existing fallback behaviour preserved: kind='default'.
-        self.assertEqual(variant.kind, "default")
-        self.assertEqual(variant.tag, "default")
-        # base_query computed from album info, independent of the DB call.
-        self.assertTrue(base_query)
-
-        # Stable greppable prefix is the observability hook.
-        joined = "\n".join(captured.output)
-        self.assertIn("VARIANT_SELECT_FALLBACK", joined)
-        # Includes the request_id and album metadata for triage.
-        self.assertIn("request_id=42", joined)
-        self.assertIn("artist=Artist", joined)
-        # exc_info=True => traceback is included.
-        self.assertIn("RuntimeError", joined)
 
 
 class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):

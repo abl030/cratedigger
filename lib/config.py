@@ -96,7 +96,7 @@ class CratediggerConfig:
     browse_global_max_workers: int = 32
     # Pipeline depth for _search_and_queue_parallel — number of in-flight
     # search-collect futures. Submission stays sequential through the existing
-    # 429-retry loop in _submit_search (slskd's SearchRequestLimiter is on POST
+    # 429-retry loop in _submit_plan_search (slskd's SearchRequestLimiter is on POST
     # only). Raised from the legacy hard-coded 2 to keep the search-collection
     # thread fed once browse stops being the dominant cost.
     search_max_inflight: int = 4
