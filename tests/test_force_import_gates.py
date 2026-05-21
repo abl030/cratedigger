@@ -446,43 +446,6 @@ class TestPreimportFallsBackToPersistedSpectral(unittest.TestCase):
         self.assertFalse(measurement.audio_corrupt)
 
 
-class TestPreimportRepairsEvenWhenAudioCheckOff(unittest.TestCase):
-    """MP3 header repair must run regardless of audio_check_mode — installs
-    that disable ffmpeg validation still rely on mp3val to fix fixable
-    header issues before spectral analysis and the import subprocess.
-    Matches the pre-refactor auto-path behavior.
-    """
-
-    def test_repair_runs_with_audio_check_off(self):
-        import os
-        from unittest.mock import patch
-        from lib.measurement import measure_preimport_state
-
-        cfg = CratediggerConfig(audio_check_mode="off")
-        tmpdir = tempfile.mkdtemp()
-        try:
-            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
-                f.write(b"x")
-            with patch("lib.measurement.repair_mp3_headers") as mock_repair, \
-                 patch("lib.measurement.spectral_analyze",
-                       return_value=_analyze_result("genuine", None)):
-                measure_preimport_state(
-                    path=tmpdir,
-                    mb_release_id="",  # skip existing lookup
-                    label="Test",
-                    download_filetype="mp3",
-                    download_min_bitrate_bps=None,
-                    download_is_vbr=None,
-                    cfg=cfg,
-                )
-            self.assertEqual(
-                mock_repair.call_count, 1,
-                "repair_mp3_headers must run even with audio_check_mode=off")
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
     """When the caller passes ``is_vbr=None`` (auto-path resumed download
     or force-path mutagen failure), the gate must attempt to resolve VBR

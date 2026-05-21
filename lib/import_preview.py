@@ -448,6 +448,17 @@ def _preview_import_from_path_worker_mode(
             source_path=path,
         )
 
+    # --- Source cleanup BEFORE snapshot ---
+    # mp3val runs once on the source so the snapshot captures the
+    # post-cleanup state. Source is then immutable until beets consumes
+    # it: the importer's freshness check, the harness's
+    # ``_validate_quality_evidence_action_snapshot``, and any later
+    # wrong-match triage all see the same bytes the preview measured.
+    try:
+        repair_mp3_headers(path)
+    except Exception:
+        pass
+
     # --- Snapshot for freshness guard + evidence files column ---
     try:
         source_snapshot = snapshot_audio_files(path)
@@ -887,6 +898,16 @@ def preview_import_from_path(
     from lib.config import read_runtime_config
 
     cfg = read_runtime_config()
+
+    # --- Source cleanup BEFORE snapshot ---
+    # mp3val runs once on the source so the snapshot captures the
+    # post-cleanup state and the source stays stable through the
+    # importer + harness lifecycle.
+    try:
+        repair_mp3_headers(path)
+    except Exception:
+        pass
+
     source_snapshot = None
     if persist_candidate_evidence:
         try:
@@ -947,10 +968,6 @@ def preview_import_from_path(
             os.path.basename(os.path.abspath(path)) or "album",
         )
         shutil.copytree(path, preview_path)
-        try:
-            repair_mp3_headers(preview_path)
-        except Exception:
-            pass
         inspection = inspect_local_files(preview_path)
         if inspection.has_nested_audio:
             detail = (

@@ -201,8 +201,7 @@ class TestMeasurePreimportState(unittest.TestCase):
             valid=False, error="decode failed",
             failed_files=[("track01.mp3", "decode error")],
         )
-        with patch("lib.measurement.validate_audio", return_value=bad_result), \
-             patch("lib.measurement.repair_mp3_headers"):
+        with patch("lib.measurement.validate_audio", return_value=bad_result):
             m = measure_preimport_state(
                 path="/tmp/does-not-exist",
                 mb_release_id="mbid-corrupt",
@@ -225,8 +224,7 @@ class TestMeasurePreimportState(unittest.TestCase):
         from lib.measurement import measure_preimport_state
 
         cfg = CratediggerConfig(audio_check_mode="off")
-        with patch("lib.measurement.repair_mp3_headers"), \
-             patch("lib.measurement._iter_audio_files", return_value=[]), \
+        with patch("lib.measurement._iter_audio_files", return_value=[]), \
              patch("lib.measurement._needs_spectral_check", return_value=False):
             m = measure_preimport_state(
                 path="/tmp/empty",
@@ -254,8 +252,7 @@ class TestMeasurePreimportState(unittest.TestCase):
             filetype="mp3", min_bitrate_bps=320_000,
             avg_bitrate_bps=320_000, is_vbr=False, has_nested_audio=True,
         )
-        with patch("lib.measurement.repair_mp3_headers"), \
-             patch(
+        with patch(
                  "lib.measurement._iter_audio_files",
                  return_value=[Path("/tmp/album/CD1/01.mp3"),
                                Path("/tmp/album/CD2/01.mp3")],
@@ -280,8 +277,7 @@ class TestMeasurePreimportState(unittest.TestCase):
         from lib.measurement import measure_preimport_state
 
         cfg = CratediggerConfig(audio_check_mode="off")
-        with patch("lib.measurement.repair_mp3_headers"), \
-             patch("lib.measurement._iter_audio_files", return_value=[]), \
+        with patch("lib.measurement._iter_audio_files", return_value=[]), \
              patch("lib.measurement._needs_spectral_check", return_value=False):
             m = measure_preimport_state(
                 path="/tmp/album",

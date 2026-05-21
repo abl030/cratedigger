@@ -50,7 +50,7 @@ _bootstrap_import_paths()
 from lib.beets_db import AlbumInfo, BeetsDB
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
-from lib.util import beets_subprocess_env, repair_mp3_headers
+from lib.util import beets_subprocess_env
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
@@ -1322,9 +1322,6 @@ def _run_quality_evidence_authorized_import(
             _emit_and_exit(r)
 
         _validate_quality_evidence_action_snapshot(args.path, payload)
-        stage_start = time.monotonic()
-        repair_mp3_headers(args.path)
-        _log_timing("evidence_mp3_repair", stage_start)
         quality_is_transcode = _materialize_quality_evidence_action(
             work_path=args.path,
             payload=payload,
