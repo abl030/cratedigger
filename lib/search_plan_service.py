@@ -400,6 +400,8 @@ class SearchPlanService:
         source: str = "request",
         prepend_artist: bool | None = None,
         release_group_year: object = None,
+        is_va_compilation: bool = False,
+        catalog_number: object = None,
     ) -> ServiceResult:
         """Generate a plan for a freshly-added request.
 
@@ -408,6 +410,21 @@ class SearchPlanService:
         or transient failure here records a failed plan but does not
         roll back the request — startup reconciliation or explicit
         regeneration can repair it later.
+
+        PR2 Apply #2: ``is_va_compilation`` and ``catalog_number`` are
+        threaded so the add-path snapshot sees the resolver's verdict
+        immediately. Without these, the first generation runs against
+        ``is_va_compilation=False`` / ``catalog_number=None`` (the
+        ``snapshot_from_add_payload`` defaults) and the VA branch is
+        only entered when a later regeneration re-reads the persisted
+        row — which today only happens on operator-driven regeneration.
+
+        Per-track ``track_artist`` values flow through ``tracks`` (the
+        list passed in must carry ``track_artist`` on each dict — see
+        ``release_snapshot._tracks_titles_and_artists``). Callers that
+        run after ``apply_resolve_all_result`` already see the resolved
+        values via ``get_tracks``; callers that run before resolution
+        legitimately see ``None`` and the VA branch degrades cleanly.
         """
         prepend = self._resolve_prepend_artist(prepend_artist)
         with self.db.advisory_lock(
@@ -424,6 +441,8 @@ class SearchPlanService:
                 source=source,
                 prepend_artist=prepend,
                 release_group_year=release_group_year,
+                is_va_compilation=is_va_compilation,
+                catalog_number=catalog_number,
             )
             return self._persist(request_id, snapshot, regenerate=False)
 

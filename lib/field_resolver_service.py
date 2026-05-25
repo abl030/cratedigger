@@ -1600,6 +1600,10 @@ class _ApplyResolveAllRecipient(Protocol):
         self, request_id: int, **fields: Any,
     ) -> None: ...
 
+    def update_track_artists(
+        self, request_id: int, track_artists: list[str | None],
+    ) -> None: ...
+
 
 def apply_resolve_all_result(
     db: _ApplyResolveAllRecipient,
@@ -1636,3 +1640,17 @@ def apply_resolve_all_result(
     if result.catalog_number is not None:
         update_fields["catalog_number"] = result.catalog_number
     db.update_request_fields(req_id, **update_fields)
+    # Per-track artists land in album_tracks (one column per track),
+    # not album_requests. Done after the request-row update so a
+    # failure here doesn't roll back the resolved scalar fields —
+    # mirrors the resolver's proceed-with-NULL discipline (best-effort
+    # log + continue).
+    if result.track_artists:
+        try:
+            db.update_track_artists(req_id, list(result.track_artists))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "apply_resolve_all_result: update_track_artists failed "
+                "for request %s; per-track artists not persisted",
+                req_id,
+            )

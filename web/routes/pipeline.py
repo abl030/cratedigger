@@ -128,7 +128,9 @@ def _resolve_and_update_after_add(
 
 
 def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
-                              tracks, source, release_group_year=None):
+                              tracks, source, release_group_year=None,
+                              is_va_compilation=False,
+                              catalog_number=None):
     """Run shared plan generation after `set_tracks()` on the add path.
 
     Failures are recorded but never bubble up — the request is repairable
@@ -139,6 +141,14 @@ def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
     ``release_group_year`` (U5 of search-plan-entropy) feeds the
     generator's conditional ``unwild_rg_year`` slot for reissues. Pass
     ``None`` when unknown — the generator handles it gracefully.
+
+    PR2 Apply #2: ``is_va_compilation`` and ``catalog_number`` are
+    forwarded so the initial plan respects the resolver's verdict — the
+    add path runs resolver → apply → generate, so by the time this is
+    called the caller has both values. Per-track ``track_artist`` flows
+    through ``tracks`` (already persisted by ``apply_resolve_all_result``
+    → ``update_track_artists`` upstream, then re-read via ``get_tracks``
+    in the caller).
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import SearchPlanService
@@ -153,6 +163,8 @@ def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
             tracks=tracks or [],
             source=source,
             release_group_year=release_group_year,
+            is_va_compilation=is_va_compilation,
+            catalog_number=catalog_number,
         )
     except Exception as exc:  # noqa: BLE001
         # Never fail the HTTP request because plan generation hiccupped.
@@ -1467,14 +1479,21 @@ def post_pipeline_add(h, body: dict) -> None:
             discogs_release_payload=release,
         )
 
+        # Re-read tracks from the DB so the per-track ``track_artist``
+        # column the resolver just wrote (PR2 Apply #1) flows into the
+        # snapshot. The in-memory ``release["tracks"]`` is the raw
+        # upstream payload and does NOT carry the resolver's output.
+        post_resolve_tracks = s._db().get_tracks(req_id)
         _generate_plan_after_add(
             req_id,
             artist_name=release["artist_name"],
             album_title=release["title"],
             year=release.get("year"),
-            tracks=release.get("tracks") or [],
+            tracks=post_resolve_tracks,
             source=source,
             release_group_year=resolved.release_group_year,
+            is_va_compilation=resolved.is_va_compilation,
+            catalog_number=resolved.catalog_number,
         )
 
         h._json({
@@ -1551,14 +1570,21 @@ def post_pipeline_add(h, body: dict) -> None:
         mb_release_payload=release_raw,
     )
 
+    # Re-read tracks from the DB so the per-track ``track_artist``
+    # column the resolver just wrote (PR2 Apply #1) flows into the
+    # snapshot. The in-memory ``release["tracks"]`` is the raw upstream
+    # payload and does NOT carry the resolver's output.
+    post_resolve_tracks = s._db().get_tracks(req_id)
     _generate_plan_after_add(
         req_id,
         artist_name=release["artist_name"],
         album_title=release["title"],
         year=release.get("year"),
-        tracks=release.get("tracks") or [],
+        tracks=post_resolve_tracks,
         source=source,
         release_group_year=resolved.release_group_year,
+        is_va_compilation=resolved.is_va_compilation,
+        catalog_number=resolved.catalog_number,
     )
 
     h._json({

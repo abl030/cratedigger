@@ -8946,5 +8946,113 @@ class TestEnqueueFieldResolutionSlice(unittest.TestCase):
         self.assertGreater(len(result.timed_out_fields), 0)
 
 
+class TestVaPlanRoundTripsThroughDB(unittest.TestCase):
+    """PR2 Apply #1 integration slice: per-track artist must round-trip
+    through the DB into the generator.
+
+    Pre-fix, ``PipelineDB.set_tracks`` and ``get_tracks`` did not touch
+    the ``album_tracks.track_artist`` column even though migration 029
+    had added it. ``apply_resolve_all_result`` only wrote
+    ``album_requests`` columns — never touched per-track artists. The
+    end result was that ``_generate_va_plan`` always saw
+    ``track_artists`` as an all-NULL tuple and degraded to the
+    ``no_track_artists_resolved`` omission path — so the VA strategy
+    mix never actually fired its discriminating
+    ``va_track_artist_<idx>`` slots.
+
+    This slice locks the wiring end-to-end: set_tracks → resolve_all
+    output → apply_resolve_all_result → get_tracks → snapshot_from_*
+    → generate_search_plan → va_track_artist_* slots in the plan.
+
+    Pre-fix, the final assertion (≥1 va_track_artist_* slot) RED'd
+    because the snapshot's track_artists tuple was empty.
+    """
+
+    def test_per_track_artist_flows_to_generator(self):
+        from lib.field_resolver_service import (
+            ResolveAllResult,
+            apply_resolve_all_result,
+        )
+        from lib.release_snapshot import snapshot_from_request_row
+        from lib.search import SearchPlanConfig, generate_search_plan
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        req_id = db.add_request(
+            mb_release_id="va-mbid",
+            artist_name="Various Artists",
+            album_title="Tarantino Presents",
+            year=2008,
+            source="request",
+        )
+        # set_tracks runs FIRST (mirroring the add path): upstream
+        # payload lacks per-track artists, so track_artist is NULL.
+        db.set_tracks(req_id, [
+            {"disc_number": 1, "track_number": 1, "title": "Track One"},
+            {"disc_number": 1, "track_number": 2, "title": "Track Two"},
+            {"disc_number": 1, "track_number": 3, "title": "Track Three"},
+        ])
+        # Sanity: pre-resolve, all NULL.
+        rows = db.get_tracks(req_id)
+        self.assertEqual(
+            [r["track_artist"] for r in rows], [None, None, None],
+        )
+
+        # Simulate ``resolve_all`` producing per-track artists (the
+        # resolver service's actual output shape — ordered by source
+        # index, which mirrors disc/track order via
+        # ``_tracks_titles_and_artists``).
+        result = ResolveAllResult(
+            is_va_compilation=True,
+            track_artists=["Artist A", "Artist B", "Artist C"],
+        )
+        apply_resolve_all_result(db, req_id, result)
+
+        # Verify track_artist landed in the DB (Finding #1d wired this).
+        rows = db.get_tracks(req_id)
+        self.assertEqual(
+            [r["track_artist"] for r in rows],
+            ["Artist A", "Artist B", "Artist C"],
+            "apply_resolve_all_result must persist per-track artists",
+        )
+
+        # Verify is_va_compilation landed too.
+        row = db.get_request(req_id)
+        assert row is not None
+        self.assertTrue(row["is_va_compilation"])
+
+        # Now exercise the snapshot → generator path.
+        snapshot = snapshot_from_request_row(row, rows)
+        self.assertTrue(snapshot.is_va_compilation)
+        self.assertEqual(
+            snapshot.track_artists,
+            ("Artist A", "Artist B", "Artist C"),
+            "snapshot must read track_artist off get_tracks rows",
+        )
+
+        plan = generate_search_plan(snapshot, SearchPlanConfig())
+        va_slots = [
+            item for item in plan.items
+            if item.strategy.startswith("va_track_artist_")
+        ]
+        self.assertGreaterEqual(
+            len(va_slots), 1,
+            f"VA branch must emit at least one va_track_artist_<idx> "
+            f"slot when track_artists is populated; got strategies="
+            f"{[i.strategy for i in plan.items]}",
+        )
+        # And the degradation omission ("no_track_artists_resolved")
+        # must NOT appear — that's the pre-fix symptom.
+        bad_omissions = [
+            o for o in plan.provenance.get("omitted_candidates", [])
+            if o.get("reason") == "no_track_artists_resolved"
+        ]
+        self.assertEqual(
+            bad_omissions, [],
+            "with per-track artists populated, the VA branch must not "
+            "fall back to the no_track_artists_resolved omission path",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
