@@ -6,7 +6,6 @@ import os
 import sys
 import tempfile
 import unittest
-import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -61,8 +60,12 @@ class TestCmdAdd(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
+    @patch("web.mb.get_release", return_value={
+        "release_group_id": "rg-uuid", "tracks": [], "labels": [],
+    })
+    @patch("web.mb.get_release_group_year", return_value=2014)
     @patch("scripts.pipeline_cli.fetch_mb_release")
-    def test_add_with_mbid(self, mock_fetch):
+    def test_add_with_mbid(self, mock_fetch, _mock_rgy, _mock_get_release):
         mock_fetch.return_value = SAMPLE_MB_RELEASE
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
         pipeline_cli.cmd_add(self.db, args)
@@ -77,8 +80,14 @@ class TestCmdAdd(unittest.TestCase):
         tracks = self.db.get_tracks(req["id"])
         self.assertEqual(len(tracks), 3)
 
+    @patch("web.mb.get_release", return_value={
+        "release_group_id": "rg-uuid", "tracks": [], "labels": [],
+    })
+    @patch("web.mb.get_release_group_year", return_value=2014)
     @patch("scripts.pipeline_cli.fetch_mb_release")
-    def test_add_with_mbid_creates_active_search_plan(self, mock_fetch):
+    def test_add_with_mbid_creates_active_search_plan(
+        self, mock_fetch, _mock_rgy, _mock_get_release,
+    ):
         """Plan generation runs after `set_tracks()` on the CLI add path."""
         mock_fetch.return_value = SAMPLE_MB_RELEASE
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
@@ -103,15 +112,23 @@ class TestCmdAdd(unittest.TestCase):
         pipeline_cli.cmd_add(self.db, args)
         mock_fetch.assert_not_called()
 
-    @patch("scripts.pipeline_cli.fetch_mb_release_group_year")
+    @patch("web.mb.get_release")
+    @patch("web.mb.get_release_group_year")
     @patch("scripts.pipeline_cli.fetch_mb_release")
     def test_add_with_mbid_persists_release_group_year_reissue(
-        self, mock_fetch, mock_fetch_rgy,
+        self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
         """U4: reissue MB release → release_group_year populated and
-        differs from the per-release year."""
+        differs from the per-release year. The CLI add path now routes
+        through ``field_resolver_service.resolve_all``, which by default
+        dispatches to ``web.mb.get_release_group_year`` for MB UUIDs."""
         mock_fetch.return_value = SAMPLE_MB_RELEASE  # date=2014, rg=rg-uuid
-        mock_fetch_rgy.return_value = 2008
+        mock_get_rgy.return_value = 2008
+        mock_get_release.return_value = {
+            "release_group_id": "rg-uuid",
+            "tracks": [],
+            "labels": [],
+        }
         args = MagicMock(
             mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
         )
@@ -122,17 +139,23 @@ class TestCmdAdd(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["year"], 2014)
         self.assertEqual(req["release_group_year"], 2008)
-        mock_fetch_rgy.assert_called_once_with("rg-uuid")
+        mock_get_rgy.assert_called_once_with("rg-uuid")
 
-    @patch("scripts.pipeline_cli.fetch_mb_release_group_year")
+    @patch("web.mb.get_release")
+    @patch("web.mb.get_release_group_year")
     @patch("scripts.pipeline_cli.fetch_mb_release")
     def test_add_with_mbid_persists_release_group_year_original(
-        self, mock_fetch, mock_fetch_rgy,
+        self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
         """U4: original release MB release → release_group_year matches
         the per-release year."""
         mock_fetch.return_value = SAMPLE_MB_RELEASE  # date=2014
-        mock_fetch_rgy.return_value = 2014
+        mock_get_rgy.return_value = 2014
+        mock_get_release.return_value = {
+            "release_group_id": "rg-uuid",
+            "tracks": [],
+            "labels": [],
+        }
         args = MagicMock(
             mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
         )
@@ -144,15 +167,23 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(req["year"], 2014)
         self.assertEqual(req["release_group_year"], 2014)
 
-    @patch("scripts.pipeline_cli.fetch_mb_release_group_year")
+    @patch("web.mb.get_release")
+    @patch("web.mb.get_release_group_year")
     @patch("scripts.pipeline_cli.fetch_mb_release")
     def test_add_with_mbid_release_group_404_leaves_column_null(
-        self, mock_fetch, mock_fetch_rgy,
+        self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
         """U4: 404 / missing release-group → ``release_group_year`` is
-        NULL on the new row, no error raised."""
+        NULL on the new row, no error raised. ``web.mb.get_release_group_year``
+        returns None for both 404 and unparseable dates; the resolver
+        maps that to ``unresolved_field_missing_upstream``."""
         mock_fetch.return_value = SAMPLE_MB_RELEASE
-        mock_fetch_rgy.return_value = None
+        mock_get_rgy.return_value = None
+        mock_get_release.return_value = {
+            "release_group_id": "rg-uuid",
+            "tracks": [],
+            "labels": [],
+        }
         args = MagicMock(
             mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
         )
@@ -164,6 +195,34 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(req["year"], 2014)
         self.assertIsNone(req["release_group_year"])
 
+    @patch("web.mb.get_release", return_value={
+        "release_group_id": "rg-uuid",
+        "tracks": [], "labels": [],
+        # Rule 2: release-group is typed as Compilation.
+        "release-group": {"primary-type": "Compilation"},
+    })
+    @patch("web.mb.get_release_group_year", return_value=2010)
+    @patch("scripts.pipeline_cli.fetch_mb_release")
+    def test_add_with_mbid_va_compilation_flag_set(
+        self, mock_fetch, _mock_rgy, _mock_release,
+    ):
+        """U4 CLI happy path for VA: a release-group typed as
+        Compilation flips ``is_va_compilation=True`` once at enqueue."""
+        sample = dict(SAMPLE_MB_RELEASE)
+        sample["release-group"] = {
+            "id": "rg-uuid", "primary-type": "Compilation",
+        }
+        mock_fetch.return_value = sample
+        args = MagicMock(
+            mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
+        )
+        pipeline_cli.cmd_add(self.db, args)
+
+        req = self.db.get_request_by_mb_release_id(
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1")
+        assert req is not None
+        self.assertTrue(req["is_va_compilation"])
+
 
 class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
     """Fake-backed tests for the plan-generation seam on the CLI add path.
@@ -172,8 +231,14 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
     enforced even on environments where the ephemeral PG isn't bootstrapped.
     """
 
+    @patch("web.mb.get_release", return_value={
+        "release_group_id": "rg-uuid", "tracks": [], "labels": [],
+    })
+    @patch("web.mb.get_release_group_year", return_value=2014)
     @patch("scripts.pipeline_cli.fetch_mb_release")
-    def test_cli_add_calls_search_plan_service(self, mock_fetch):
+    def test_cli_add_calls_search_plan_service(
+        self, mock_fetch, _mock_rgy, _mock_get_release,
+    ):
         from tests.fakes import FakePipelineDB
         mock_fetch.return_value = SAMPLE_MB_RELEASE
 
@@ -2679,78 +2744,6 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
         self.assertIn("request_id", payload)
         self.assertIn("rows", payload)
         self.assertIn("next_before_id", payload)
-
-
-class TestFetchMbReleaseGroupYear(unittest.TestCase):
-    """U4 pure-function coverage of the MB release-group-year client.
-
-    Mirrors the contract of ``web/mb.py::get_release_group_year``: 404
-    → None, unparseable / missing date → None, otherwise the 4-digit
-    year prefix as an int.
-    """
-
-    def _fake_urlopen(self, payload: dict):
-        """Build a context-manager fake whose ``read()`` returns
-        ``json.dumps(payload).encode()``."""
-
-        class _Resp:
-            def __init__(self, body: bytes) -> None:
-                self._body = body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def read(self):
-                return self._body
-
-        return lambda req, timeout=15: _Resp(json.dumps(payload).encode())
-
-    @patch("scripts.pipeline_cli.urllib.request.urlopen")
-    def test_returns_year_from_first_release_date(self, mock_urlopen):
-        mock_urlopen.side_effect = self._fake_urlopen(
-            {"first-release-date": "2000-10-02"})
-        self.assertEqual(
-            pipeline_cli.fetch_mb_release_group_year("rg-x"), 2000)
-
-    @patch("scripts.pipeline_cli.urllib.request.urlopen")
-    def test_returns_none_when_date_missing(self, mock_urlopen):
-        mock_urlopen.side_effect = self._fake_urlopen({})
-        self.assertIsNone(
-            pipeline_cli.fetch_mb_release_group_year("rg-x"))
-
-    @patch("scripts.pipeline_cli.urllib.request.urlopen")
-    def test_returns_none_when_date_short(self, mock_urlopen):
-        mock_urlopen.side_effect = self._fake_urlopen(
-            {"first-release-date": "200"})
-        self.assertIsNone(
-            pipeline_cli.fetch_mb_release_group_year("rg-x"))
-
-    @patch("scripts.pipeline_cli.urllib.request.urlopen")
-    def test_returns_none_on_404(self, mock_urlopen):
-        mock_urlopen.side_effect = urllib.error.HTTPError(
-            "http://mb/x", 404, "Not Found", {}, None,  # type: ignore[arg-type]
-        )
-        self.assertIsNone(
-            pipeline_cli.fetch_mb_release_group_year("rg-x"))
-
-    @patch("scripts.pipeline_cli.urllib.request.urlopen")
-    def test_returns_none_on_other_http_error(self, mock_urlopen):
-        """500/503/etc. also fall back to None — caller persists NULL
-        rather than blocking the add."""
-        mock_urlopen.side_effect = urllib.error.HTTPError(
-            "http://mb/x", 503, "Service Unavailable", {}, None,  # type: ignore[arg-type]
-        )
-        self.assertIsNone(
-            pipeline_cli.fetch_mb_release_group_year("rg-x"))
-
-    @patch("scripts.pipeline_cli.urllib.request.urlopen")
-    def test_returns_none_on_url_error(self, mock_urlopen):
-        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
-        self.assertIsNone(
-            pipeline_cli.fetch_mb_release_group_year("rg-x"))
 
 
 if __name__ == "__main__":

@@ -2170,7 +2170,8 @@ class FakePipelineDB:
                     source_path: str | None = None,
                     reasoning: str | None = None,
                     status: str = "wanted",
-                    release_group_year: int | None = None) -> int:
+                    release_group_year: int | None = None,
+                    is_va_compilation: bool = False) -> int:
         """Insert an album_requests row.
 
         Seeds the full ``album_requests`` column set (matching
@@ -2194,6 +2195,9 @@ class FakePipelineDB:
             # U3 / R9 — release-group's first-release year. Populated by
             # the deploy-time backfill or U4's enqueue path; nullable.
             "release_group_year": release_group_year,
+            # Migration 028 / U4 — VA detection flag, set at enqueue or by
+            # the U3 backfill. NOT NULL DEFAULT FALSE matches the schema.
+            "is_va_compilation": bool(is_va_compilation),
             "country": country,
             "format": format,
             "source": source,

@@ -26,9 +26,12 @@ backfill script (U3) are thin adapters on top of these resolvers.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import socket
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Literal, Protocol
@@ -1102,3 +1105,321 @@ def detect_va_compilation(
             return True
 
     return False
+
+
+# === Inline-at-enqueue orchestrator (U4) ================================
+#
+# ``resolve_all`` is the single entry point the web add path
+# (``web/routes/pipeline.py::post_pipeline_add``) and the CLI add path
+# (``scripts/pipeline_cli.py::cmd_add``) call after they have a freshly
+# inserted ``album_requests`` row id and the upstream release payload(s)
+# in hand. It:
+#
+#   * runs the four field resolvers in parallel via a
+#     ``ThreadPoolExecutor`` with a 3-second wall-clock budget total
+#     (so a single slow Discogs call cannot freeze the web UI on a
+#     20-track album add — Discogs HTTP client has a 60s timeout);
+#   * marks any resolver still running at budget exhaustion as
+#     ``unresolved_timeout`` (the value lands NULL on the row, the
+#     side-table records the timeout for triage);
+#   * runs ``detect_va_compilation`` once with the already-fetched
+#     payloads — synchronous, fast, no I/O.
+#
+# Side-table writes happen from the main thread only. Worker threads
+# accumulate write attempts in a ``_DeferredRecorder``; the main thread
+# flushes them to ``pdb`` after the budget loop. This keeps the real
+# psycopg2 connection safe (single connection, not thread-safe per
+# upstream docs) without modifying U2's resolvers.
+
+
+_DEFAULT_BUDGET_SECONDS = 3.0
+
+
+class ResolveAllResult(msgspec.Struct, kw_only=True):
+    """Typed return shape of ``resolve_all``.
+
+    Wire-boundary Struct so callers that re-encode the resolved values
+    (audit, debug endpoints) get strict shape checking. ``track_artists``
+    is a list of per-track-artist strings (or ``None`` for unresolved
+    tracks); the caller decides how to surface partial resolution.
+    """
+
+    release_group_year: int | None = None
+    release_group_id: str | None = None
+    catalog_number: str | None = None
+    track_artists: list[str | None] = msgspec.field(default_factory=list)
+    is_va_compilation: bool = False
+    # Total wall-clock seconds the orchestrator spent. Useful for the
+    # operator triage surface and the latency-budget regression test.
+    elapsed_seconds: float = 0.0
+    # Names (the FIELD_* constants) of resolvers that hit the budget
+    # ceiling and were marked as unresolved_timeout. Empty in the happy
+    # path. The test guard reads this directly.
+    timed_out_fields: list[str] = msgspec.field(default_factory=list)
+
+
+class _DeferredRecorder:
+    """Thread-safe queue of pending ``record_field_resolution`` calls.
+
+    Workers route their inline ``_record()`` calls through here; the
+    main thread flushes after ``resolve_all`` finishes. Required because
+    psycopg2 connections are not thread-safe (the resolvers are called
+    from worker threads). The lock guards the in-process list, not
+    pdb — pdb is only touched from the main thread.
+    """
+
+    def __init__(self) -> None:
+        self._records: list[tuple[int, str, str, str | None]] = []
+        self._lock = threading.Lock()
+
+    def record_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+        status: str,
+        reason_code: str | None,
+    ) -> None:
+        with self._lock:
+            self._records.append(
+                (int(request_id), field_name, status, reason_code),
+            )
+
+    def already_recorded(self, field_name: str) -> bool:
+        """Has a row been queued for ``field_name`` already?
+
+        Used by the main-thread timeout writer to avoid double-recording
+        when a resolver completed *before* its future was cancelled (the
+        completion still races the timeout writer in tight tests).
+        """
+        with self._lock:
+            return any(fn == field_name for _rid, fn, _s, _rc in self._records)
+
+    def flush_to(self, pdb: _PdbRecorder) -> None:
+        """Write every queued record to the real pdb (main-thread only).
+
+        Each call is wrapped in try/except so a single failed UPSERT
+        does not lose the rest of the batch — same best-effort discipline
+        as U2's ``_record()`` helper.
+        """
+        with self._lock:
+            pending = list(self._records)
+            self._records.clear()
+        for request_id, field_name, status, reason_code in pending:
+            try:
+                pdb.record_field_resolution(
+                    request_id=request_id,
+                    field_name=field_name,
+                    status=status,
+                    reason_code=reason_code,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "deferred record_field_resolution failed for "
+                    "request=%d field=%s status=%s; dropping",
+                    request_id, field_name, status,
+                )
+
+
+def resolve_all(
+    request: dict[str, Any],
+    pdb: _PdbRecorder,
+    *,
+    mb_release_payload: dict[str, Any] | None = None,
+    discogs_release_payload: dict[str, Any] | None = None,
+    mb_release_group_payload: dict[str, Any] | None = None,
+    budget_seconds: float = _DEFAULT_BUDGET_SECONDS,
+    mb_get_release_group_year: MBReleaseGroupYearFn | None = None,
+    discogs_get_master_year: DiscogsMasterYearFn | None = None,
+    mb_get_release: MBReleaseFn | None = None,
+    discogs_get_release: DiscogsReleaseFn | None = None,
+) -> ResolveAllResult:
+    """Run all field resolvers inline at enqueue with a wall-clock budget.
+
+    Called from ``web/routes/pipeline.py::post_pipeline_add`` and from
+    ``scripts/pipeline_cli.py::cmd_add`` after the new ``album_requests``
+    row has been inserted (so ``request["id"]`` is real and the FK in
+    ``album_request_field_resolutions`` is satisfiable). The caller then
+    updates the row with the returned values (proceed-with-NULL where
+    unresolved) and sets ``is_va_compilation`` once at enqueue.
+
+    Wall-clock budget (default 3 seconds) applies to ALL resolvers
+    combined. Each runs in its own worker thread. Any resolver still
+    pending at the budget cutoff is left to settle in the background
+    (no graceful cancellation in stdlib), but its slot in the result
+    structure is filled with NULL + ``unresolved_timeout`` in the side
+    table. This prevents a single slow upstream call (e.g. the 60s
+    Discogs HTTP timeout) from freezing the add endpoint.
+
+    Per the plan's key technical decision: VA detection is set ONCE at
+    enqueue (or by the U3 backfill for legacy rows). The caller passes
+    the already-fetched release/release-group payloads through; the
+    detector runs synchronously and never touches the network.
+    """
+    request_id = int(request["id"])
+    deferred = _DeferredRecorder()
+    deadline = time.monotonic() + max(0.0, budget_seconds)
+    start = time.monotonic()
+
+    def _run_rg_year() -> ResolverResult:
+        return resolve_release_group_year(
+            request, deferred,
+            mb_get_release_group_year=mb_get_release_group_year,
+            discogs_get_master_year=discogs_get_master_year,
+        )
+
+    def _run_rg_id() -> ResolverResult:
+        return resolve_release_group_id(
+            request, deferred,
+            mb_get_release=mb_get_release,
+            discogs_get_release=discogs_get_release,
+        )
+
+    def _run_catno() -> ResolverResult:
+        return resolve_catalog_number(
+            request, deferred,
+            mb_get_release=mb_get_release,
+            discogs_get_release=discogs_get_release,
+        )
+
+    def _run_track_artists() -> list[ResolverResult]:
+        return resolve_track_artists(
+            request, deferred,
+            mb_get_release=mb_get_release,
+            discogs_get_release=discogs_get_release,
+        )
+
+    jobs: dict[str, tuple[str, Callable[[], Any]]] = {
+        "rg_year": (FIELD_RELEASE_GROUP_YEAR, _run_rg_year),
+        "rg_id": (FIELD_RELEASE_GROUP_ID, _run_rg_id),
+        "catno": (FIELD_CATALOG_NUMBER, _run_catno),
+        "track_artists": (FIELD_TRACK_ARTIST, _run_track_artists),
+    }
+
+    futures: dict[str, concurrent.futures.Future[Any]] = {}
+    outputs: dict[str, Any] = {}
+    timed_out: list[str] = []
+
+    # Manage the pool by hand so we can return at budget exhaustion
+    # without waiting on stuck workers (the default
+    # ``ThreadPoolExecutor.__exit__`` blocks on ``shutdown(wait=True)``,
+    # which defeats the wall-clock budget). ``wait=False`` +
+    # ``cancel_futures=True`` releases the orchestrator immediately;
+    # the long-running future is left to settle in the background
+    # thread and its result is discarded.
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(jobs)),
+        thread_name_prefix="resolve_all",
+    )
+    try:
+        for key, (_field_name, fn) in jobs.items():
+            futures[key] = pool.submit(fn)
+        for key, fut in futures.items():
+            field_name, _fn = jobs[key]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Budget already exhausted before we even waited; the
+                # worker may still be running but its slot is timed-out.
+                outputs[key] = None
+                if not deferred.already_recorded(field_name):
+                    deferred.record_field_resolution(
+                        request_id=request_id,
+                        field_name=field_name,
+                        status="unresolved_timeout",
+                        reason_code="budget_exhausted",
+                    )
+                    timed_out.append(field_name)
+                continue
+            try:
+                outputs[key] = fut.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                outputs[key] = None
+                if not deferred.already_recorded(field_name):
+                    deferred.record_field_resolution(
+                        request_id=request_id,
+                        field_name=field_name,
+                        status="unresolved_timeout",
+                        reason_code="budget_exhausted",
+                    )
+                    timed_out.append(field_name)
+            except Exception as exc:  # noqa: BLE001
+                # The four resolvers handle their own exception
+                # classification internally — anything escaping here is
+                # a programmer error (an invariant the resolvers don't
+                # check). Surface it as unresolved_mirror_unavailable
+                # so the row still lands; log the traceback for triage.
+                logger.exception(
+                    "resolve_all: %s raised unexpectedly for request=%d: %s",
+                    field_name, request_id, exc,
+                )
+                outputs[key] = None
+                if not deferred.already_recorded(field_name):
+                    deferred.record_field_resolution(
+                        request_id=request_id,
+                        field_name=field_name,
+                        status="unresolved_mirror_unavailable",
+                        reason_code=type(exc).__name__,
+                    )
+    finally:
+        # Don't block on stuck workers — the budget is the point.
+        # ``cancel_futures=True`` (Python 3.9+) cancels anything still
+        # queued; running futures finish in the background and their
+        # results are discarded.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    # Pull primitive values out of the ResolverResult shapes.
+    rg_year_result = outputs.get("rg_year")
+    release_group_year: int | None = None
+    if isinstance(rg_year_result, ResolverResult) and rg_year_result.status == "resolved":
+        v = rg_year_result.value
+        if isinstance(v, int):
+            release_group_year = v
+        else:
+            try:
+                release_group_year = int(v) if v is not None else None
+            except (TypeError, ValueError):
+                release_group_year = None
+
+    rg_id_result = outputs.get("rg_id")
+    release_group_id: str | None = None
+    if isinstance(rg_id_result, ResolverResult) and rg_id_result.status == "resolved":
+        v = rg_id_result.value
+        release_group_id = str(v) if v is not None else None
+
+    catno_result = outputs.get("catno")
+    catalog_number: str | None = None
+    if isinstance(catno_result, ResolverResult) and catno_result.status == "resolved":
+        v = catno_result.value
+        catalog_number = str(v) if v is not None else None
+
+    track_artist_results = outputs.get("track_artists")
+    track_artists: list[str | None] = []
+    if isinstance(track_artist_results, list):
+        for entry in track_artist_results:
+            if isinstance(entry, ResolverResult) and entry.status == "resolved":
+                v = entry.value
+                track_artists.append(str(v) if v is not None else None)
+            else:
+                track_artists.append(None)
+
+    # VA detection — synchronous, payload-driven, no I/O.
+    is_va = detect_va_compilation(
+        request,
+        mb_release_payload=mb_release_payload,
+        discogs_release_payload=discogs_release_payload,
+        mb_release_group_payload=mb_release_group_payload,
+    )
+
+    # Flush the deferred side-table writes once the budget loop has
+    # settled. Main-thread only; safe against psycopg2's per-connection
+    # threading constraint.
+    deferred.flush_to(pdb)
+
+    return ResolveAllResult(
+        release_group_year=release_group_year,
+        release_group_id=release_group_id,
+        catalog_number=catalog_number,
+        track_artists=track_artists,
+        is_va_compilation=is_va,
+        elapsed_seconds=time.monotonic() - start,
+        timed_out_fields=timed_out,
+    )

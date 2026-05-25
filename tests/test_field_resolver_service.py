@@ -598,5 +598,261 @@ class TestResolverResultRoundTrip(unittest.TestCase):
             msgspec.json.decode(raw, type=ResolverResult)
 
 
+# --------------------------------------------------------------------- #
+# resolve_all — inline-at-enqueue orchestrator (U4)
+# --------------------------------------------------------------------- #
+
+
+class TestResolveAll(unittest.TestCase):
+    """Coverage for ``resolve_all`` — parallel resolver fanout with budget."""
+
+    def test_mb_happy_path_returns_populated_result(self):
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=10, mb_release_group_id="rg-uuid")
+
+        # Each collaborator is a fast in-process callable; total elapsed
+        # well under the budget.
+        result = resolve_all(
+            req, db,
+            mb_get_release_group_year=lambda _id: 1997,
+            mb_get_release=lambda mbid, *, fresh=True: {
+                "release_group_id": "rg-uuid",
+                "media": [{"position": 1, "tracks": [
+                    {"position": 1, "title": "T1",
+                     "artist-credit": [{"name": "A1", "joinphrase": ""}]},
+                ]}],
+                "label-info": [{"catalog-number": "CAT-1234"}],
+            },
+        )
+        self.assertEqual(result.release_group_year, 1997)
+        self.assertEqual(result.release_group_id, "rg-uuid")
+        self.assertEqual(result.catalog_number, "CAT-1234")
+        self.assertEqual(result.track_artists, ["A1"])
+        self.assertFalse(result.is_va_compilation)
+        self.assertEqual(result.timed_out_fields, [])
+        # Side-table rows recorded for every resolver.
+        self.assertIsNotNone(
+            db.get_field_resolution(10, FIELD_RELEASE_GROUP_YEAR))
+        self.assertIsNotNone(
+            db.get_field_resolution(10, FIELD_RELEASE_GROUP_ID))
+        self.assertIsNotNone(
+            db.get_field_resolution(10, FIELD_CATALOG_NUMBER))
+        self.assertIsNotNone(
+            db.get_field_resolution(10, FIELD_TRACK_ARTIST))
+
+    def test_va_detection_via_canonical_mbid(self):
+        """Rule 1: primary-artist MBID matches the canonical VA id."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=11, mb_artist_id=MB_VA_ARTIST_MBID)
+
+        result = resolve_all(
+            req, db,
+            mb_get_release_group_year=lambda _id: None,
+            mb_get_release=lambda mbid, *, fresh=True: {
+                "release_group_id": "rg-uuid",
+                "media": [], "label-info": [],
+            },
+        )
+        self.assertTrue(result.is_va_compilation)
+
+    def test_va_detection_via_release_group_compilation_type(self):
+        """Rule 2: MB release-group primary-type 'Compilation' fires."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=12, mb_artist_id="non-va-artist")
+        mb_release = {
+            "release_group_id": "rg-uuid",
+            "release-group": {"primary-type": "Compilation"},
+            "media": [], "label-info": [],
+        }
+
+        result = resolve_all(
+            req, db,
+            mb_release_payload=mb_release,
+            mb_get_release_group_year=lambda _id: 2010,
+            mb_get_release=lambda mbid, *, fresh=True: mb_release,
+        )
+        self.assertTrue(result.is_va_compilation)
+
+    def test_va_negative_for_artist_named_various_without_canonical_id(self):
+        """Regression guard: name string 'Various' alone does NOT trigger VA."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=13,
+            artist_name="Various",
+            mb_artist_id="something-else-not-canonical",
+        )
+
+        result = resolve_all(
+            req, db,
+            mb_get_release_group_year=lambda _id: 2010,
+            mb_get_release=lambda mbid, *, fresh=True: {
+                "release_group_id": "rg-uuid",
+                "media": [], "label-info": [],
+            },
+        )
+        self.assertFalse(result.is_va_compilation)
+
+    def test_discogs_va_detection_via_payload(self):
+        """Rule 1 for Discogs: primary artist id 194 fires via payload."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=14,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            discogs_release_id="83182",
+        )
+        discogs_payload = {
+            "id": "83182",
+            "artists": [{"id": DISCOGS_VA_ARTIST_ID, "name": "Various"}],
+            "tracks": [], "labels": [],
+        }
+
+        result = resolve_all(
+            req, db,
+            discogs_release_payload=discogs_payload,
+            discogs_get_master_year=lambda _id: 2000,
+            discogs_get_release=lambda rid, *, fresh=True: discogs_payload,
+        )
+        self.assertTrue(result.is_va_compilation)
+
+    def test_budget_enforcement_marks_slow_resolver_as_timeout(self):
+        """A resolver that exceeds the wall-clock budget lands NULL +
+        ``unresolved_timeout`` in the side table. Others that completed
+        fast keep their values."""
+        import threading
+        import time
+
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=15, mb_release_group_id="rg-uuid")
+
+        slow_called = threading.Event()
+
+        def _slow_get_release(mbid, *, fresh=True):
+            slow_called.set()
+            # Hold past the 0.3s budget; the orchestrator returns
+            # while we're still sleeping, marks our slot as timeout,
+            # and we get GC'd later. The future is left to run.
+            time.sleep(1.5)
+            return {
+                "release_group_id": "rg-uuid",
+                "media": [], "label-info": [],
+            }
+
+        start = time.monotonic()
+        result = resolve_all(
+            req, db,
+            budget_seconds=0.3,
+            mb_get_release_group_year=lambda _id: 1997,
+            mb_get_release=_slow_get_release,
+        )
+        elapsed = time.monotonic() - start
+
+        # Budget enforcement: orchestrator returned in under ~0.7s
+        # (some slack for thread scheduling). MUST be well below the
+        # 1.5s sleep duration.
+        self.assertLess(elapsed, 1.2,
+                        f"budget not enforced: elapsed={elapsed:.3f}s")
+        # The fast resolver landed cleanly.
+        self.assertEqual(result.release_group_year, 1997)
+        # The slow resolvers timed out → NULL values.
+        self.assertIsNone(result.release_group_id)
+        self.assertIsNone(result.catalog_number)
+        # Side-table records timed-out fields.
+        self.assertGreater(len(result.timed_out_fields), 0)
+        for field in result.timed_out_fields:
+            row = db.get_field_resolution(15, field)
+            assert row is not None
+            self.assertEqual(row["status"], "unresolved_timeout")
+            self.assertEqual(row["reason_code"], "budget_exhausted")
+        # Sanity: the slow resolver was actually entered (not skipped).
+        self.assertTrue(slow_called.is_set())
+
+    def test_mirror_unavailable_does_not_block_add(self):
+        """Network error on a resolver → that field lands NULL with
+        ``unresolved_mirror_unavailable`` in the side table; ``resolve_all``
+        returns normally so the add flow can proceed."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=16, mb_release_group_id="rg-uuid")
+
+        def _boom(_rg_id):
+            raise URLError("connection refused")
+
+        result = resolve_all(
+            req, db,
+            mb_get_release_group_year=_boom,
+            mb_get_release=lambda mbid, *, fresh=True: {
+                "release_group_id": "rg-uuid",
+                "media": [], "label-info": [],
+            },
+        )
+        self.assertIsNone(result.release_group_year)
+        rg_year_row = db.get_field_resolution(
+            16, FIELD_RELEASE_GROUP_YEAR)
+        assert rg_year_row is not None
+        self.assertEqual(
+            rg_year_row["status"], "unresolved_mirror_unavailable")
+        # The orchestrator does NOT raise.
+        self.assertFalse(result.is_va_compilation)
+
+    def test_malformed_request_lands_with_nulls(self):
+        """Missing release ids → resolvers return ``unresolved_malformed``;
+        the orchestrator collects them, the request is created with
+        NULL fields, no mirror calls attempted."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=17,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            discogs_release_id=None,
+        )
+
+        called = {"mb_rgy": False, "mb_release": False}
+
+        def _mb_rgy(_rg_id):
+            called["mb_rgy"] = True
+            return 2000
+
+        def _mb_release(_mbid, *, fresh=True):
+            called["mb_release"] = True
+            return {}
+
+        result = resolve_all(
+            req, db,
+            mb_get_release_group_year=_mb_rgy,
+            mb_get_release=_mb_release,
+        )
+        self.assertIsNone(result.release_group_year)
+        self.assertIsNone(result.release_group_id)
+        self.assertIsNone(result.catalog_number)
+        # Resolvers short-circuit on missing ids — no mirror touched.
+        self.assertFalse(called["mb_rgy"])
+        self.assertFalse(called["mb_release"])
+        # All four side-table rows recorded as unresolved_malformed.
+        for field in (FIELD_RELEASE_GROUP_YEAR, FIELD_RELEASE_GROUP_ID,
+                      FIELD_CATALOG_NUMBER, FIELD_TRACK_ARTIST):
+            row = db.get_field_resolution(17, field)
+            assert row is not None, f"{field} side-table row missing"
+            self.assertEqual(
+                row["status"], "unresolved_malformed",
+                f"{field} status: {row['status']}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

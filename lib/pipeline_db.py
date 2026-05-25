@@ -1662,7 +1662,11 @@ class PipelineDB:
                     year=None, country=None, format=None,
                     source_path=None, reasoning=None,
                     status="wanted",
-                    release_group_year=None):
+                    release_group_year=None,
+                    is_va_compilation=False):
+        # ``is_va_compilation`` (migration 028) is the VA detection flag set
+        # once at enqueue (U4) or by the U3 backfill for legacy rows.
+        # Defaults FALSE; never re-resolved by automated paths.
         now = datetime.now(timezone.utc)
         cur = self._execute("""
             INSERT INTO album_requests (
@@ -1670,9 +1674,10 @@ class PipelineDB:
                 artist_name, album_title, year, release_group_year,
                 country, format,
                 source, source_path, reasoning, status,
+                is_va_compilation,
                 created_at, updated_at
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             RETURNING id
         """, (
@@ -1680,6 +1685,7 @@ class PipelineDB:
             artist_name, album_title, year, release_group_year,
             country, format,
             source, source_path, reasoning, status,
+            bool(is_va_compilation),
             now, now,
         ))
         row = cur.fetchone()

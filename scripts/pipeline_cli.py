@@ -66,7 +66,6 @@ from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.import_preview import ImportPreviewValues
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import (
-    parse_mb_first_release_year,
     resolve_failed_path as _shared_resolve_failed_path,
 )
 
@@ -137,33 +136,6 @@ def fetch_mb_release(mb_release_id):
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         print(f"  [ERROR] MB API: {e}", file=sys.stderr)
         return None
-
-
-def fetch_mb_release_group_year(rg_mbid):
-    """Return the release-group's first-release year as an int, or None.
-
-    U4 enqueue-time companion to ``fetch_mb_release``. Returns ``None``
-    on 404 / unparseable date / network blip — callers persist NULL on
-    the new ``release_group_year`` column rather than failing the add.
-    Mirrors ``web/mb.py::get_release_group_year`` but goes through
-    ``urllib`` directly so the CLI stays decoupled from the Redis-backed
-    web client.
-    """
-    url = f"{MB_API}/release-group/{rg_mbid}?fmt=json"
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "pipeline-cli/1.0")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
-        return None
-    except urllib.error.URLError as e:
-        print(f"  [WARN] MB release-group fetch: {e}", file=sys.stderr)
-        return None
-    return parse_mb_first_release_year(data)
 
 
 def tracks_from_mb_release(release_data):
@@ -312,6 +284,75 @@ def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
         print(f"  Plan: TRANSIENT FAIL ({result.failure_class}); will retry")
 
 
+def _resolve_and_update_after_add(
+    db,
+    req_id: int,
+    *,
+    mb_release_id: str | None,
+    discogs_release_id: str | None,
+    mb_release_group_id: str | None,
+    mb_artist_id: str | None,
+    mb_release_payload: dict | None = None,
+    discogs_release_payload: dict | None = None,
+):
+    """U4 helper for the CLI add path — mirrors the web helper.
+
+    Both surfaces wrap ``field_resolver_service.resolve_all`` after the
+    new request row is inserted, so the CLI and HTTP add stay symmetric
+    (CLAUDE.md § "CLI ⇄ API surface symmetry"). The CLI prints a one-
+    liner on resolver outcomes so the operator running the script
+    knows whether a field landed NULL.
+    """
+    from lib.field_resolver_service import ResolveAllResult, resolve_all
+
+    skeleton = {
+        "id": req_id,
+        "mb_release_id": mb_release_id,
+        "discogs_release_id": discogs_release_id,
+        "mb_release_group_id": mb_release_group_id,
+        "mb_artist_id": mb_artist_id,
+    }
+    try:
+        result = resolve_all(
+            skeleton,
+            db,
+            mb_release_payload=mb_release_payload,
+            discogs_release_payload=discogs_release_payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Field resolution crashed: {exc}", file=sys.stderr)
+        return ResolveAllResult()
+
+    update_fields: dict[str, object] = {
+        "is_va_compilation": result.is_va_compilation,
+    }
+    if result.release_group_year is not None:
+        update_fields["release_group_year"] = result.release_group_year
+    if result.release_group_id is not None and mb_release_group_id is None:
+        update_fields["mb_release_group_id"] = result.release_group_id
+    try:
+        db.update_request_fields(req_id, **update_fields)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"  Failed to persist resolved fields: {exc}",
+            file=sys.stderr,
+        )
+
+    rg_year_str = (
+        str(result.release_group_year)
+        if result.release_group_year is not None else "NULL"
+    )
+    va_str = "yes" if result.is_va_compilation else "no"
+    timed_out = (
+        f" timed_out={','.join(result.timed_out_fields)}"
+        if result.timed_out_fields else ""
+    )
+    print(
+        f"  Resolved: rg_year={rg_year_str} is_va={va_str}{timed_out}"
+    )
+    return result
+
+
 def _cmd_add_mb(db, mbid, source):
     """Add a MusicBrainz release to the pipeline."""
     existing = db.get_request_by_release_id(mbid)
@@ -334,12 +375,6 @@ def _cmd_add_mb(db, mbid, source):
     if release.get("date"):
         year = int(release["date"][:4]) if len(release["date"]) >= 4 else None
 
-    # Persist release-group year so the generator can emit a
-    # year-anchored slot matching how users on Soulseek file reissues.
-    # ``fetch_mb_release_group_year`` is 404/error tolerant; column
-    # accepts NULL.
-    rg_year = fetch_mb_release_group_year(rg_id) if rg_id else None
-
     req_id = db.add_request(
         mb_release_id=mbid,
         mb_release_group_id=rg_id,
@@ -347,7 +382,6 @@ def _cmd_add_mb(db, mbid, source):
         artist_name=artist_name,
         album_title=release.get("title", "Unknown"),
         year=year,
-        release_group_year=rg_year,
         country=release.get("country"),
         source=source,
     )
@@ -357,6 +391,16 @@ def _cmd_add_mb(db, mbid, source):
         db.set_tracks(req_id, tracks)
 
     print(f"  Added: id={req_id} {artist_name} - {release.get('title')} ({len(tracks)} tracks)")
+    # U4: inline field resolution + VA detection. Single resolver-service
+    # invocation shared with the web add path (CLI ⇄ API symmetry).
+    resolved = _resolve_and_update_after_add(
+        db, req_id,
+        mb_release_id=mbid,
+        discogs_release_id=None,
+        mb_release_group_id=rg_id,
+        mb_artist_id=artist_id,
+        mb_release_payload=release,
+    )
     _generate_plan_after_add(
         db, req_id,
         artist_name=artist_name,
@@ -364,7 +408,7 @@ def _cmd_add_mb(db, mbid, source):
         year=year,
         tracks=tracks,
         source=source,
-        release_group_year=rg_year,
+        release_group_year=resolved.release_group_year,
     )
 
 
@@ -399,6 +443,18 @@ def _cmd_add_discogs(db, discogs_id, source):
         db.set_tracks(req_id, tracks)
 
     print(f"  Added: id={req_id} {release['artist_name']} - {release['title']} ({len(tracks)} tracks)")
+    # U4: inline field resolution + VA detection. Discogs add path has
+    # no MB release/release-group payload available so the resolver only
+    # sees the discogs release (Rule 1 of VA detection still fires on
+    # canonical-ID match; rules 2 + 3 are MB-only).
+    _resolve_and_update_after_add(
+        db, req_id,
+        mb_release_id=None,
+        discogs_release_id=discogs_id,
+        mb_release_group_id=None,
+        mb_artist_id=str(release.get("artist_id") or "") or None,
+        discogs_release_payload=release,
+    )
     _generate_plan_after_add(
         db, req_id,
         artist_name=release["artist_name"],

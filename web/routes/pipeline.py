@@ -55,6 +55,83 @@ DEFAULT_PIPELINE_LOG_LIMIT = 50
 MAX_PIPELINE_LOG_LIMIT = 500
 
 
+def _resolve_and_update_after_add(
+    db,
+    req_id: int,
+    *,
+    mb_release_id: str | None,
+    discogs_release_id: str | None,
+    mb_release_group_id: str | None,
+    mb_artist_id: str | None,
+    mb_release_payload: dict | None = None,
+    discogs_release_payload: dict | None = None,
+):
+    """U4 helper: run ``resolve_all`` against a freshly inserted request
+    and persist the resolved fields plus the VA flag.
+
+    ``resolve_all`` is best-effort by design (proceed-with-NULL on any
+    upstream failure); we never raise back up to the HTTP handler. The
+    side-table rows recorded by the resolver service are the operator
+    visibility into unresolved fields. ``is_va_compilation`` is set ONCE
+    at enqueue per the immutability invariant — the row reads back
+    ``FALSE`` from the schema's default until this call lands the
+    resolved value.
+
+    Returns the ``ResolveAllResult`` so the caller can forward the
+    resolved ``release_group_year`` into plan generation. The resolved
+    values are also persisted via ``update_request_fields`` here, so the
+    caller does not need to know which columns the resolver touches.
+    """
+    from lib.field_resolver_service import ResolveAllResult, resolve_all
+
+    skeleton = {
+        "id": req_id,
+        "mb_release_id": mb_release_id,
+        "discogs_release_id": discogs_release_id,
+        "mb_release_group_id": mb_release_group_id,
+        "mb_artist_id": mb_artist_id,
+    }
+    try:
+        result = resolve_all(
+            skeleton,
+            db,
+            mb_release_payload=mb_release_payload,
+            discogs_release_payload=discogs_release_payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # ``resolve_all`` already catches every per-resolver failure
+        # internally; the only thing that can escape is a programmer
+        # error in the orchestrator itself. Log + proceed with defaults
+        # so the add request still lands.
+        logger.exception(
+            "post_pipeline_add: resolve_all crashed for request %s: %s",
+            req_id, exc,
+        )
+        return ResolveAllResult()
+
+    update_fields: dict[str, object] = {}
+    # ``is_va_compilation`` is always written so the immutability
+    # invariant holds even when the detector returns False (the schema
+    # default is False, so writing it is a no-op in that case but
+    # matches the U3 backfill's idempotent shape).
+    update_fields["is_va_compilation"] = result.is_va_compilation
+    if result.release_group_year is not None:
+        update_fields["release_group_year"] = result.release_group_year
+    if result.release_group_id is not None and mb_release_group_id is None:
+        # Only fill the column when the row didn't already have an RG
+        # id from the upstream release fetch; never clobber a known
+        # value with a resolver-derived alternative.
+        update_fields["mb_release_group_id"] = result.release_group_id
+    try:
+        db.update_request_fields(req_id, **update_fields)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "post_pipeline_add: update_request_fields failed for "
+            "request %s: %s", req_id, exc,
+        )
+    return result
+
+
 def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
                               tracks, source, release_group_year=None):
     """Run shared plan generation after `set_tracks()` on the add path.
@@ -1380,6 +1457,21 @@ def post_pipeline_add(h, body: dict) -> None:
         if release.get("tracks"):
             s._db().set_tracks(req_id, release["tracks"])
 
+        # U4: inline field resolution + VA detection. Discogs branch
+        # never has an MB release/release-group payload, so the
+        # resolver only sees the discogs release payload (Rule 1 of
+        # VA detection covers the canonical ID match; rules 2 + 3 are
+        # MB-only).
+        _resolve_and_update_after_add(
+            s._db(),
+            req_id,
+            mb_release_id=None,
+            discogs_release_id=discogs_id,
+            mb_release_group_id=None,
+            mb_artist_id=str(release.get("artist_id") or "") or None,
+            discogs_release_payload=release,
+        )
+
         _generate_plan_after_add(
             req_id,
             artist_name=release["artist_name"],
@@ -1398,7 +1490,7 @@ def post_pipeline_add(h, body: dict) -> None:
         })
         return
 
-    # MusicBrainz flow (unchanged)
+    # MusicBrainz flow
     existing = s._db().get_request_by_release_id(mbid)
     if existing:
         payload: dict[str, object] = {
@@ -1425,12 +1517,7 @@ def post_pipeline_add(h, body: dict) -> None:
     # an extra MB mirror round trip on add.
     release = mb_api.get_release(mbid, fresh=True)
 
-    # Persist release-group year alongside release year so the generator
-    # can emit a year-anchored slot matching how users on Soulseek file
-    # reissues. ``get_release_group_year`` returns None on 404 /
-    # unparseable date; column accepts NULL.
     rg_id = release.get("release_group_id")
-    rg_year = mb_api.get_release_group_year(rg_id) if rg_id else None
 
     req_id = s._db().add_request(
         mb_release_id=mbid,
@@ -1439,13 +1526,27 @@ def post_pipeline_add(h, body: dict) -> None:
         artist_name=release["artist_name"],
         album_title=release["title"],
         year=release.get("year"),
-        release_group_year=rg_year,
         country=release.get("country"),
         source=source,
     )
 
     if release.get("tracks"):
         s._db().set_tracks(req_id, release["tracks"])
+
+    # U4: inline field resolution + VA detection. The resolver service
+    # is the single source of truth for ``release_group_year`` (and
+    # other R15 fields); proceed-with-NULL when the mirror is unreachable
+    # or the field is missing upstream. ``is_va_compilation`` is set
+    # ONCE at enqueue per the immutability invariant.
+    resolved = _resolve_and_update_after_add(
+        s._db(),
+        req_id,
+        mb_release_id=mbid,
+        discogs_release_id=None,
+        mb_release_group_id=rg_id,
+        mb_artist_id=release.get("artist_id"),
+        mb_release_payload=release,
+    )
 
     _generate_plan_after_add(
         req_id,
@@ -1454,7 +1555,7 @@ def post_pipeline_add(h, body: dict) -> None:
         year=release.get("year"),
         tracks=release.get("tracks") or [],
         source=source,
-        release_group_year=rg_year,
+        release_group_year=resolved.release_group_year,
     )
 
     h._json({
