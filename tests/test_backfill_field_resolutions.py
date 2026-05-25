@@ -19,6 +19,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1090,6 +1091,106 @@ class TestCounters(unittest.TestCase):
     def test_batch_size_constant_is_100(self):
         # The plan pins "Progress: prints ... every 100 rows".
         self.assertEqual(BATCH_SIZE, 100)
+
+
+class TestAdvisoryLock(unittest.TestCase):
+    """The backfill script must take the BFIL advisory lock for its run.
+
+    The deploy runbook stops cratedigger/cratedigger-importer/cratedigger-web
+    before running the script — this lock is belt-and-braces against any
+    stray writer outside that procedure.
+    """
+
+    def test_advisory_lock_namespace_constant_pinned(self):
+        # Pin both the value and the fact that lib.pipeline_db is the
+        # canonical declaration site (per the existing namespace
+        # convention).
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_BACKFILL
+        self.assertEqual(ADVISORY_LOCK_NAMESPACE_BACKFILL, 0x4246494C)
+
+    def test_main_acquires_backfill_lock_around_run_backfill(self):
+        """main() takes ADVISORY_LOCK_NAMESPACE_BACKFILL before invoking
+        run_backfill and releases on exit."""
+        import importlib
+        import scripts.backfill_field_resolutions as script_mod
+        importlib.reload(script_mod)
+
+        from tests.fakes import FakePipelineDB
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_BACKFILL
+
+        # Spy: record advisory_lock acquisition + release ordering
+        # against the underlying mechanism.
+        fake_db = FakePipelineDB()
+        events = []
+        original_lock = fake_db.advisory_lock
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def spy_lock(namespace, key):
+            events.append(("acquire", namespace, key))
+            with original_lock(namespace, key) as acquired:
+                yield acquired
+            events.append(("release", namespace, key))
+
+        fake_db.advisory_lock = spy_lock  # type: ignore[method-assign]
+
+        # PipelineDB is imported inside main(); patch at the source so
+        # the lazy import returns the fake.
+        with mock.patch(
+            "lib.pipeline_db.PipelineDB", return_value=fake_db,
+        ):
+            with mock.patch.object(
+                script_mod, "run_backfill",
+            ) as mock_run:
+                mock_run.return_value = script_mod.BackfillSummary()
+                rc = script_mod.main(
+                    ["--field=release_group_year", "--dry-run"],
+                )
+
+        self.assertEqual(rc, 0)
+        # Lock acquired BEFORE run_backfill, released AFTER.
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(
+            events[0], ("acquire", ADVISORY_LOCK_NAMESPACE_BACKFILL, 0),
+        )
+        self.assertEqual(
+            events[-1], ("release", ADVISORY_LOCK_NAMESPACE_BACKFILL, 0),
+        )
+        # Acquisition happened before run_backfill was called.
+        mock_run.assert_called_once()
+
+    def test_main_returns_5_when_lock_already_held(self):
+        """Concurrent backfill protection: if the lock can't be acquired,
+        main() exits 5 (the transient/retry convention) and does NOT
+        invoke run_backfill."""
+        import importlib
+        import scripts.backfill_field_resolutions as script_mod
+        importlib.reload(script_mod)
+
+        from tests.fakes import FakePipelineDB
+        from contextlib import contextmanager
+
+        fake_db = FakePipelineDB()
+
+        @contextmanager
+        def lock_busy(namespace, key):
+            yield False  # advisory_lock returns False when already held
+
+        fake_db.advisory_lock = lock_busy  # type: ignore[method-assign]
+
+        with mock.patch(
+            "lib.pipeline_db.PipelineDB", return_value=fake_db,
+        ):
+            with mock.patch.object(
+                script_mod, "run_backfill",
+            ) as mock_run:
+                rc = script_mod.main(
+                    ["--field=release_group_year", "--dry-run"],
+                )
+
+        self.assertEqual(rc, 5)
+        mock_run.assert_not_called()
 
 
 if __name__ == "__main__":

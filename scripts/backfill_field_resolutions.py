@@ -868,7 +868,10 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    from lib.pipeline_db import PipelineDB
+    from lib.pipeline_db import (
+        ADVISORY_LOCK_NAMESPACE_BACKFILL,
+        PipelineDB,
+    )
     from web import mb as _mb
     from web import discogs as _discogs
 
@@ -918,15 +921,30 @@ def main(argv: list[str] | None = None) -> int:
 
     db = PipelineDB(args.dsn)
     try:
-        summary = run_backfill(
-            db=db,
-            field_name=args.field,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            mb_release_payload_fn=_mb_release_payload,
-            mb_release_group_payload_fn=_mb_release_group_payload,
-            discogs_release_payload_fn=_discogs_release_payload,
-        )
+        # Belt-and-braces against accidental concurrent writers to
+        # album_requests during the backfill window. The deploy runbook
+        # also stops cratedigger.service / cratedigger-importer.service /
+        # cratedigger-web.service; this lock catches anything outside
+        # that procedure (an operator-run pipeline-cli command, a stray
+        # connection from another host, etc.). Singleton — key = 0.
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_BACKFILL, 0,
+        ) as acquired:
+            if not acquired:
+                logger.error(
+                    "Could not acquire backfill advisory lock — another "
+                    "backfill process appears to be running. Aborting.",
+                )
+                return 5
+            summary = run_backfill(
+                db=db,
+                field_name=args.field,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                mb_release_payload_fn=_mb_release_payload,
+                mb_release_group_payload_fn=_mb_release_group_payload,
+                discogs_release_payload_fn=_discogs_release_payload,
+            )
     finally:
         db.close()
 

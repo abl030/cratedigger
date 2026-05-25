@@ -142,6 +142,15 @@ ADVISORY_LOCK_NAMESPACE_PLAN = 0x504C414E
 # ``0x574D434C`` = ASCII "WMCL", recognisable in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP = 0x574D434C
 
+# Singleton lock for the dual-source field-resolution backfill script
+# (scripts/backfill_field_resolutions.py). Acquired for the duration
+# of the operator-driven backfill window so any accidental concurrent
+# writer to ``album_requests`` fails fast on the lock instead of
+# racing the row-by-row enumeration. The deploy runbook also stops
+# the three DB-mutating services — this is belt-and-braces. Key = 0.
+# ``0x4246494C`` = ASCII "BFIL", recognisable in ``pg_locks``.
+ADVISORY_LOCK_NAMESPACE_BACKFILL = 0x4246494C
+
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
     """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.
