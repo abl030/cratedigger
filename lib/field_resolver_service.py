@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 ResolverStatus = Literal[
     "resolved",
     "unresolved_404",
+    "unresolved_4xx_client",
     "unresolved_malformed",
     "unresolved_mirror_unavailable",
     "unresolved_timeout",
@@ -192,15 +193,35 @@ def _classify_lookup_exception(
     """Map an exception from a mirror call to a status + reason_code.
 
     Centralised so the four resolvers share the same retry-window
-    semantics. ``urllib.error.HTTPError`` with ``code=404`` becomes
-    ``unresolved_404`` (sticky 30d); ``TimeoutError`` becomes
-    ``unresolved_timeout`` (retry 1d); other URL/socket/JSON errors
-    become ``unresolved_mirror_unavailable`` (retry 1d). Anything else
-    re-raises -- callers are responsible for catching programmer
-    errors.
+    semantics:
+
+    - ``HTTPError(404)`` → ``unresolved_404`` (sticky 30d). Treated
+      as its own bucket because "release doesn't exist" is the
+      most common upstream cause and operators triage it
+      differently from other client errors.
+    - ``HTTPError(4xx)`` other than 404 / 408 → ``unresolved_4xx_client``
+      (sticky). Permanent client-error semantics — retrying the same
+      input gives the same answer (400 Bad Request, 410 Gone, 422
+      Unprocessable Entity, etc.). 408 Request Timeout stays in the
+      transient bucket. Fix #3 from the 2026-05-25 deploy: 74 wanted
+      rows hit MB 400 Bad Request and were retried-forever as
+      ``unresolved_mirror_unavailable`` instead of being surfaced.
+    - ``HTTPError(5xx)`` → ``unresolved_mirror_unavailable`` (retry 1d).
+      Server-side, legitimate to retry.
+    - ``TimeoutError`` / ``socket.timeout`` / ``HTTPError(408)`` →
+      ``unresolved_timeout`` (retry 1d).
+    - Other URL/socket/JSON errors → ``unresolved_mirror_unavailable``
+      (retry 1d).
+
+    Anything else re-raises — callers are responsible for catching
+    programmer errors.
     """
-    if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
-        return ("unresolved_404", "http_404")
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 404:
+            return ("unresolved_404", "http_404")
+        if 400 <= exc.code < 500 and exc.code != 408:
+            return ("unresolved_4xx_client", f"http_{exc.code}")
+        # 408 falls through to timeout, 5xx falls through to mirror_unavailable.
     if _is_timeout_exception(exc):
         return ("unresolved_timeout", type(exc).__name__)
     if isinstance(exc, _MIRROR_UNAVAILABLE_EXCEPTIONS):
@@ -235,8 +256,16 @@ def _default_discogs_get_master_year(master_id: str) -> int | None:
 def _default_mb_get_release(
     mbid: str, *, fresh: bool = False,
 ) -> dict[str, Any]:
-    from web.mb import get_release
-    return get_release(mbid, fresh=fresh)
+    # The resolvers need the *raw* MB JSON shape — they extract
+    # ``label-info`` (for catalog_number), ``media[].tracks[].artist-
+    # credit`` (for track_artist), and ``release-group`` nested fields
+    # (for VA Rule 2). The slimmed shape returned by
+    # ``web.mb.get_release`` drops all three. Pre-2026-05-25 deploy
+    # the resolver service silently downgraded those fields to
+    # ``unresolved_field_missing_upstream`` for every MB request
+    # because the wrong fetcher was wired in here.
+    from web.mb import get_release_raw
+    return get_release_raw(mbid, fresh=fresh)
 
 
 def _default_discogs_get_release(
@@ -1083,7 +1112,18 @@ def detect_va_compilation(
     out.
     """
     discogs_release_id = request.get("discogs_release_id")
-    is_discogs = bool(discogs_release_id) and not request.get("mb_release_id")
+    mb_release_id = request.get("mb_release_id")
+    # Discogs-sourced rows store the discogs id in BOTH columns for
+    # pipeline-compat (the web/CLI Discogs add path stuffs the discogs
+    # id into ``mb_release_id`` so existing pipeline code that keys on
+    # ``mb_release_id`` keeps working). A numeric ``mb_release_id`` is
+    # therefore a Discogs signal — MB MBIDs are always hyphenated UUIDs.
+    # Without this, the 18 wanted Discogs-VA rows from the 2026-05-25
+    # backfill weren't VA-flagged because Rule 1 compared the canonical
+    # Discogs id ``"194"`` against the MB UUID and never matched.
+    is_discogs = bool(discogs_release_id) and (
+        not mb_release_id or _looks_numeric(mb_release_id)
+    )
 
     # Rule 1.
     artist_id = request.get("mb_artist_id")

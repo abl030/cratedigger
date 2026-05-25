@@ -1512,6 +1512,13 @@ def post_pipeline_add(h, body: dict) -> None:
     # above. Writing stale metadata into the pipeline DB is worse than
     # an extra MB mirror round trip on add.
     release = mb_api.get_release(mbid, fresh=True)
+    # The resolver service needs the full raw MB JSON (``label-info``
+    # for catalog_number, per-track ``artist-credit`` for track_artist,
+    # nested ``release-group`` primary-type for VA Rule 2 — none of
+    # which survive ``get_release`` stripping). ``get_release`` calls
+    # ``get_release_raw`` internally so this is a single network round
+    # trip; the second call is a cache hit.
+    release_raw = mb_api.get_release_raw(mbid, fresh=True)
 
     rg_id = release.get("release_group_id")
 
@@ -1541,7 +1548,7 @@ def post_pipeline_add(h, body: dict) -> None:
         discogs_release_id=None,
         mb_release_group_id=rg_id,
         mb_artist_id=release.get("artist_id"),
-        mb_release_payload=release,
+        mb_release_payload=release_raw,
     )
 
     _generate_plan_after_add(
