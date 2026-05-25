@@ -126,8 +126,20 @@ def _load_beets_album_info(mb_release_id, rank_cfg):
 
 
 def fetch_mb_release(mb_release_id):
-    """Fetch release metadata + tracks from MusicBrainz API."""
-    url = f"{MB_API}/release/{mb_release_id}?inc=recordings+artist-credits&fmt=json"
+    """Fetch release metadata + tracks from MusicBrainz API.
+
+    Returns raw MB JSON. The ``media+release-groups+labels`` inc params
+    are required so the field resolver service can extract
+    ``label-info`` (catalog_number), per-track ``artist-credit``
+    (track_artist), and the nested ``release-group`` primary-type/
+    secondary-types (VA Rule 2). Without them, every MB request adds
+    its rows to the side table as ``unresolved_field_missing_upstream``
+    even though MB has the data.
+    """
+    url = (
+        f"{MB_API}/release/{mb_release_id}"
+        f"?inc=recordings+artist-credits+media+release-groups+labels&fmt=json"
+    )
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "pipeline-cli/1.0")
     try:

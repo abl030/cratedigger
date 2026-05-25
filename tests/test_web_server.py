@@ -3766,6 +3766,20 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.mock_db.get_request_by_discogs_release_id.return_value = None
         self.mock_db.add_request.return_value = 501
         self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
+        # MB add path also calls ``get_release_raw`` (for the resolver's
+        # raw payload) alongside the existing ``get_release`` (for slim
+        # add_request fields). Class-wide stub so individual tests only
+        # need to mock ``get_release``; the resolver receives an empty
+        # dict and records ``unresolved_field_missing_upstream`` for
+        # catalog/track_artist as before. Tests that care about
+        # catalog_number / track_artist / VA Rule 2 resolution mock
+        # ``get_release_raw`` themselves.
+        _patch_raw = patch(
+            "web.routes.pipeline.mb_api.get_release_raw",
+            return_value={},
+        )
+        _patch_raw.start()
+        self.addCleanup(_patch_raw.stop)
 
     @patch("web.routes.pipeline.mb_api.get_release_group_year",
            return_value=2024)
@@ -3988,14 +4002,22 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(rg_year_writes, [],
                          "unresolved rg_year must NOT be written")
 
+    @patch("web.routes.pipeline.mb_api.get_release_raw")
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
     @patch("web.routes.pipeline.mb_api.get_release")
     def test_pipeline_add_mb_va_compilation_flag_set(
-        self, mock_get_release, mock_rgy,
+        self, mock_get_release, mock_rgy, mock_get_raw,
     ):
         """U4 web happy path for VA: a release-group typed as
         Compilation flips ``is_va_compilation=True`` once at enqueue,
-        via the resolver service detecting the type on rule 2."""
+        via the resolver service detecting the type on rule 2.
+
+        VA Rule 2 reads ``release-group.primary-type`` from the raw MB
+        payload — so the test mocks ``get_release_raw`` (the new
+        primary fetcher) with a shape that has the rg nested. The
+        slim ``get_release`` mock supplies the fields ``add_request``
+        / ``set_tracks`` need.
+        """
         mock_get_release.return_value = {
             "release_group_id": "rg-va",
             "artist_id": "a-1",
@@ -4004,9 +4026,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "year": 2008,
             "country": "US",
             "tracks": [{"title": "T1"}],
-            # The resolver's track_artist / release_group_id resolvers
-            # also fetch via the same mock; surface the Compilation
-            # primary-type so rule 2 fires.
+        }
+        mock_get_raw.return_value = {
+            "id": "va-mbid",
             "release-group": {"primary-type": "Compilation"},
         }
         mock_rgy.return_value = 2008
@@ -4021,6 +4043,52 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         ]
         self.assertGreaterEqual(len(va_writes), 1,
                                 "is_va_compilation=True must be written")
+
+    @patch("web.routes.pipeline.mb_api.get_release_raw")
+    @patch("web.routes.pipeline.mb_api.get_release_group_year",
+           return_value=2010)
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_resolves_catalog_number_from_raw_payload(
+        self, mock_get_release, _mock_rgy, mock_get_raw,
+    ):
+        """Fix #2 regression guard: when the raw MB payload carries
+        ``label-info``, the resolver service extracts the catno and
+        the helper writes it to ``album_requests.catalog_number``.
+
+        Pre-fix, ``post_pipeline_add`` passed the slim ``get_release``
+        shape to the resolver — which doesn't include ``label-info`` —
+        and the catno landed as ``unresolved_field_missing_upstream``
+        every single time. Post-fix the inline path also fetches
+        ``get_release_raw`` and passes that as ``mb_release_payload``,
+        so the catno reaches the resolver.
+        """
+        mock_get_release.return_value = {
+            "release_group_id": "rg-1",
+            "artist_id": "a-1",
+            "artist_name": "Artist",
+            "title": "Album",
+            "year": 2010,
+            "country": "GB",
+            "tracks": [{"title": "T1"}],
+        }
+        # Raw MB JSON shape with label-info present.
+        mock_get_raw.return_value = {
+            "id": "abc-mbid",
+            "label-info": [{"catalog-number": "STRMRT-001"}],
+        }
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-mbid"})
+        self.assertEqual(status, 200)
+
+        catno_writes = [
+            c for c in self.mock_db.update_request_fields.call_args_list
+            if c.kwargs.get("catalog_number") == "STRMRT-001"
+        ]
+        self.assertGreaterEqual(
+            len(catno_writes), 1,
+            "resolver-extracted catalog_number must be persisted",
+        )
 
     def test_pipeline_add_mb_integration_persists_release_group_year(self):
         """U4 integration: full add-from-web flow against ``FakePipelineDB``

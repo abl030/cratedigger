@@ -253,67 +253,96 @@ def get_release_group_releases(rg_mbid):
     return _cache.memoize_meta(f"mb:release-group:{rg_mbid}:releases", _fetch)
 
 
+def get_release_raw(release_mbid, *, fresh: bool = False) -> dict:
+    """Raw MB release JSON with the full inc clause preserved.
+
+    Returned shape is the literal MB API response — `media[]`,
+    `artist-credit[]` (album and per-track), `release-group`,
+    `label-info`, etc. Cached at its own key so multiple consumers
+    (resolver service + frontend stripping) share a single
+    cache+network round trip.
+
+    `fresh=True` bypasses the cache.
+
+    Consumers that need a slimmed shape (frontend rendering, pipeline
+    DB inserts) call `get_release` which strips this via
+    `_strip_release`. Consumers that need raw fields (the field
+    resolver service for label-info / per-track artist-credit /
+    release-group primary-type) call this directly.
+    """
+    def _fetch() -> dict:
+        return _get(
+            f"{MB_API_BASE}/release/{release_mbid}"
+            f"?inc=recordings+artist-credits+media+release-groups+labels&fmt=json"
+        )
+    return _cache.memoize_meta(
+        f"mb:release_raw:{release_mbid}", _fetch, fresh=fresh)
+
+
+def _strip_release(data: dict) -> dict:
+    """Slim a raw MB release JSON down to the shape the frontend +
+    pipeline DB inserts want. Pure function over `data`."""
+    artist_credit = data.get("artist-credit", [{}])
+    artist_name = artist_credit[0].get("name", "Unknown") if artist_credit else "Unknown"
+    artist_id = (artist_credit[0].get("artist", {}).get("id") if artist_credit else None)
+    rg_id = (data.get("release-group") or {}).get("id")
+
+    tracks = []
+    for medium in data.get("media", []):
+        disc = medium.get("position", 1)
+        if "pregap" in medium:
+            pg = medium["pregap"]
+            length_ms = pg.get("length") or (pg.get("recording") or {}).get("length")
+            tracks.append({
+                "disc_number": disc,
+                "track_number": 0,
+                "title": pg.get("title", ""),
+                "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
+            })
+        for track in medium.get("tracks", []):
+            length_ms = track.get("length") or (track.get("recording") or {}).get("length")
+            tracks.append({
+                "disc_number": disc,
+                "track_number": track.get("position", track.get("number", 0)),
+                "title": track.get("title", ""),
+                "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
+            })
+
+    year = None
+    if data.get("date"):
+        try:
+            year = int(data["date"][:4])
+        except (ValueError, IndexError):
+            pass
+
+    return {
+        "id": data["id"],
+        "title": data.get("title", ""),
+        "artist_name": artist_name,
+        "artist_id": artist_id,
+        "release_group_id": rg_id,
+        "date": data.get("date", ""),
+        "year": year,
+        "country": data.get("country", ""),
+        "status": data.get("status", ""),
+        "tracks": tracks,
+    }
+
+
 def get_release(release_mbid, *, fresh: bool = False):
-    """Get full release details with tracks.
+    """Get full release details with tracks (slimmed shape).
 
     `fresh=True` bypasses the cache. Used by POST handlers in
     `web/routes/pipeline.py` that persist this metadata into the
     pipeline DB — a 24h cache hit would silently write stale
     artist/title/track data into `album_requests` / `request_tracks`.
+
+    Built on top of `get_release_raw` so the raw MB JSON is the single
+    cached truth; this just re-derives the slim shape per call. The
+    re-derivation is a pure traversal, ~microseconds.
     """
-    def _fetch() -> dict:
-        data = _get(
-            f"{MB_API_BASE}/release/{release_mbid}"
-            f"?inc=recordings+artist-credits+media+release-groups&fmt=json"
-        )
-        artist_credit = data.get("artist-credit", [{}])
-        artist_name = artist_credit[0].get("name", "Unknown") if artist_credit else "Unknown"
-        artist_id = (artist_credit[0].get("artist", {}).get("id") if artist_credit else None)
-        rg_id = (data.get("release-group") or {}).get("id")
-
-        tracks = []
-        for medium in data.get("media", []):
-            disc = medium.get("position", 1)
-            if "pregap" in medium:
-                pg = medium["pregap"]
-                length_ms = pg.get("length") or (pg.get("recording") or {}).get("length")
-                tracks.append({
-                    "disc_number": disc,
-                    "track_number": 0,
-                    "title": pg.get("title", ""),
-                    "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
-                })
-            for track in medium.get("tracks", []):
-                length_ms = track.get("length") or (track.get("recording") or {}).get("length")
-                tracks.append({
-                    "disc_number": disc,
-                    "track_number": track.get("position", track.get("number", 0)),
-                    "title": track.get("title", ""),
-                    "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
-                })
-
-        year = None
-        if data.get("date"):
-            try:
-                year = int(data["date"][:4])
-            except (ValueError, IndexError):
-                pass
-
-        return {
-            "id": data["id"],
-            "title": data.get("title", ""),
-            "artist_name": artist_name,
-            "artist_id": artist_id,
-            "release_group_id": rg_id,
-            "date": data.get("date", ""),
-            "year": year,
-            "country": data.get("country", ""),
-            "status": data.get("status", ""),
-            "tracks": tracks,
-        }
-
-    return _cache.memoize_meta(
-        f"mb:release:{release_mbid}", _fetch, fresh=fresh)
+    raw = get_release_raw(release_mbid, fresh=fresh)
+    return _strip_release(raw)
 
 
 def get_artist_name(artist_mbid):

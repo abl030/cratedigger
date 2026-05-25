@@ -110,6 +110,68 @@ class TestResolveReleaseGroupYear(unittest.TestCase):
         assert row is not None
         self.assertEqual(row["status"], "unresolved_404")
 
+    def test_mb_4xx_other_than_404_records_sticky_4xx_client(self):
+        """Fix #3: HTTP 4xx responses from the mirror (other than 404
+        and 408) are permanent client-error semantics — retrying the
+        same request gives the same answer. Classify as sticky
+        ``unresolved_4xx_client`` instead of the 1d-retry
+        ``unresolved_mirror_unavailable``.
+
+        Live evidence from the 2026-05-25 deploy backfill: 74 wanted
+        rows hit MB ``HTTP 400 Bad Request`` (likely deprecated /
+        malformed-stored MBIDs) and got marked transient — they'd
+        retry forever instead of being surfaced for operator
+        attention.
+        """
+        # Subtests for the codes seen in the deploy backfill + a few
+        # canonical 4xx (410 Gone, 422 Unprocessable Entity).
+        for code, expected_reason in [
+            (400, "http_400"),
+            (410, "http_410"),
+            (422, "http_422"),
+        ]:
+            with self.subTest(http_code=code):
+                db = FakePipelineDB()
+                req = _request(id=44, mb_release_group_id="abc-uuid")
+
+                def _raise(_: str, c: int = code) -> int | None:
+                    raise urllib.error.HTTPError(
+                        url="x", code=c, msg="Client Error",
+                        hdrs=None,  # type: ignore[arg-type]
+                        fp=None,
+                    )
+
+                result = resolve_release_group_year(
+                    req, db, mb_get_release_group_year=_raise,
+                )
+                self.assertEqual(result.status, "unresolved_4xx_client")
+                self.assertEqual(result.reason_code, expected_reason)
+                self.assertIsNone(result.value)
+                row = db.get_field_resolution(44, FIELD_RELEASE_GROUP_YEAR)
+                assert row is not None
+                self.assertEqual(row["status"], "unresolved_4xx_client")
+
+    def test_mb_5xx_stays_mirror_unavailable(self):
+        """5xx is server-side — retry is legitimate. Stays in the 1d
+        retry bucket (``unresolved_mirror_unavailable``)."""
+        for code in [500, 502, 503]:
+            with self.subTest(http_code=code):
+                db = FakePipelineDB()
+                req = _request(id=44, mb_release_group_id="abc-uuid")
+
+                def _raise(_: str, c: int = code) -> int | None:
+                    raise urllib.error.HTTPError(
+                        url="x", code=c, msg="Server Error",
+                        hdrs=None,  # type: ignore[arg-type]
+                        fp=None,
+                    )
+
+                result = resolve_release_group_year(
+                    req, db, mb_get_release_group_year=_raise,
+                )
+                self.assertEqual(
+                    result.status, "unresolved_mirror_unavailable")
+
     def test_mirror_network_error_records_unresolved_mirror_unavailable(self):
         db = FakePipelineDB()
         req = _request(id=45, mb_release_group_id="abc-uuid")
@@ -561,6 +623,30 @@ class TestDetectVaCompilation(unittest.TestCase):
         self.assertTrue(detect_va_compilation(
             req, mb_release_payload=release_payload,
         ))
+
+    def test_rule1_discogs_va_when_mb_release_id_is_numeric(self):
+        """Live-bug repro from the 2026-05-25 deploy backfill: 18 wanted
+        rows had ``mb_release_id`` holding a numeric Discogs id (the
+        web/CLI Discogs add stuffs the Discogs id into both
+        ``mb_release_id`` and ``discogs_release_id`` for pipeline
+        compat). With ``mb_release_id`` non-null, the detector treated
+        them as MB-sourced, then compared the canonical Discogs VA id
+        ``"194"`` against the MB UUID ``"89ad4ac3-..."`` — never
+        matched.
+
+        Fix: a numeric ``mb_release_id`` is a Discogs-source signal
+        (UUIDs always contain ``-``); switch the detector's branch
+        accordingly so Rule 1 compares against ``DISCOGS_VA_ARTIST_ID``.
+        """
+        req = _request(
+            id=2522,
+            mb_release_id="32457180",          # numeric → Discogs id
+            discogs_release_id="32457180",
+            mb_release_group_id=None,
+            mb_artist_id="194",                 # canonical Discogs VA id
+            artist_name="Various",
+        )
+        self.assertTrue(detect_va_compilation(req))
 
     def test_negative_artist_named_various_without_canonical_mbid(self):
         """Regression guard: name == "Various" with non-canonical MBID != VA."""
