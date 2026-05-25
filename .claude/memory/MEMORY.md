@@ -8,6 +8,7 @@
 - [Prose over picker](feedback_prose_over_picker.md) — User dislikes the AskUserQuestion picker; default to plain prose questions in chat
 - [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
+- [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
 - [Pyright on the full repo](feedback_pyright_full_repo.md) — Always `nix-shell --run "pyright"` on the whole repo, never a subset; fix pre-existing errors in the same pass
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
 - [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
