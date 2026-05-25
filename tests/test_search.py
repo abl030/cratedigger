@@ -17,6 +17,8 @@ from lib.search import (
     SEARCH_PLAN_GENERATOR_ID,
     PLAN_STATUS_SUCCESS, PLAN_STATUS_GENERATION_FAILED,
     MAX_TRACK_SLOTS_PER_PLAN,
+    score_track_distinctiveness, pick_distinctive_tracks,
+    GENERIC_TITLE_TOKENS,
 )
 
 
@@ -707,11 +709,15 @@ class TestGenerateSearchPlan(unittest.TestCase):
         self.assertEqual(len(excess), 1)
         self.assertEqual(excess[0]["source_track_index"], 3)
 
-    def test_track_ranking_orders_by_useful_tokens_then_chars(self):
-        # Ranking is computed on the post-prepend query (artist tokens
-        # consume slots equally for every track, so cap drops happen on
-        # the title side). Among queries tied on token count, the
-        # longest char count wins; ties break by source order.
+    def test_track_ranking_orders_by_distinctiveness_then_chars(self):
+        # U7: ranking is now driven by raw-title distinctiveness
+        # (longest non-generic token * non-generic token count). The
+        # rendered-query char count survives only as a tiebreaker.
+        # Previously this test encoded the rendered-query token-count
+        # ranker; under that ranker the top pick was idx=2 ("Aaaaa
+        # Bbbbbbbbbbb") on char-count alone. Under U7 it's idx=1
+        # ("One Two Three Four Tokens") because more non-generic tokens
+        # beat a single long token.
         plan = generate_search_plan(
             self._snapshot(
                 artist="Some Artist",
@@ -719,10 +725,10 @@ class TestGenerateSearchPlan(unittest.TestCase):
                 year=None,
                 release_group_year=None,
                 track_titles=(
-                    "Aaaaa Bbbbbbb",                # 2 title tokens → 4 after prepend
-                    "One Two Three Four Tokens",    # 5 cleaned title tokens
-                    "Aaaaa Bbbbbbbbbbb",            # 2 title tokens, longest body
-                    "Six Seven",                    # 2 title tokens, shortest body
+                    "Aaaaa Bbbbbbb",                # 2 tokens, longest 7 → 14
+                    "One Two Three Four Tokens",    # 5 tokens, longest 6 → 30
+                    "Aaaaa Bbbbbbbbbbb",            # 2 tokens, longest 11 → 22
+                    "Six Seven",                    # 2 tokens, longest 5 → 10
                 ),
             ),
             self._cfg(max_track_slots=3),
@@ -731,15 +737,10 @@ class TestGenerateSearchPlan(unittest.TestCase):
             it for it in plan.items if it.strategy.startswith("track_")
         ]
         self.assertEqual(len(track_items), 3)
-        # All four post-prepend queries cap to 4 tokens (artist prepend
-        # consumes 2 slots). Char-count tiebreaker picks longest first.
-        # "*ome *rtist Aaaaa Bbbbbbbbbbb" is the longest (idx=2).
-        self.assertEqual(track_items[0].provenance["source_track_index"], 2)
-        # idx=0 "*ome *rtist Aaaaa Bbbbbbb" is next-longest.
-        self.assertEqual(track_items[1].provenance["source_track_index"], 0)
-        # Among remaining, idx=1 ("One Two Three Four Tokens") with
-        # artist prepend caps to 4 tokens with non-trivial body.
-        self.assertEqual(track_items[2].provenance["source_track_index"], 1)
+        # Distinctiveness ordering: idx=1 (30), idx=2 (22), idx=0 (14).
+        self.assertEqual(track_items[0].provenance["source_track_index"], 1)
+        self.assertEqual(track_items[1].provenance["source_track_index"], 2)
+        self.assertEqual(track_items[2].provenance["source_track_index"], 0)
 
     # --- generation failure: no runnable query ---------------------------
 
@@ -837,10 +838,19 @@ class TestGenerateSearchPlan(unittest.TestCase):
                 ("literal_lossless", "Radiohead Kid A lossless"),
                 ("unwild_year", "Radiohead Kid A 2008"),
                 ("unwild_rg_year", "Radiohead Kid A 2000"),
+                # U7 distinctiveness scoring re-orders the top-3 tracks
+                # by raw-title score (longest_non_generic_token *
+                # num_non_generic_tokens). For Kid A's fixture:
+                #   Everything in Its Right Place → 10 * 5 = 50
+                #   How to Disappear Completely   → 10 * 4 = 40
+                #   The National Anthem           →  8 * 3 = 24
+                # Previously the ranker used rendered-query token count,
+                # which put "How to Disappear Completely" first because
+                # the rendered query had more tokens than "Everything"'s.
                 ("track_0_artist",
-                 "*adiohead How Disappear Completely"),
-                ("track_1_artist",
                  "*adiohead Everything Right Place"),
+                ("track_1_artist",
+                 "*adiohead How Disappear Completely"),
                 ("track_2_artist", "*adiohead National Anthem"),
             ],
         )
@@ -864,6 +874,202 @@ class TestGenerateSearchPlan(unittest.TestCase):
         # Sanity guard so we don't accidentally drift the public default.
         self.assertEqual(MAX_TRACK_SLOTS_PER_PLAN, 3)
         self.assertEqual(SearchPlanConfig().max_track_slots, 3)
+
+
+class TestScoreTrackDistinctiveness(unittest.TestCase):
+    """Pure scorer for U7 distinctiveness ranking.
+
+    Score = ``len(longest_non_generic_token) * num_non_generic_tokens``.
+    Generic tokens (``GENERIC_TITLE_TOKENS``) and ``Track \\d+`` style
+    placeholders are excluded from both factors. Stopwords are NOT
+    specially demoted.
+    """
+
+    # (description, title, expected_score)
+    CASES = [
+        ("empty", "", 0.0),
+        ("whitespace_only_collapses_to_empty_tokens", "   ", 0.0),
+        ("generic_track_n", "Track 7", 0.0),
+        ("generic_track_n_lowercase", "track 12", 0.0),
+        ("generic_track_n_no_space", "Track7", 0.0),
+        ("all_generic_single", "Theme", 0.0),
+        ("all_generic_motion_picture_soundtrack",
+         "Motion Picture Soundtrack", 0.0),
+        ("untitled_alone", "Untitled", 0.0),
+        # "Untitled 4" — "Untitled" is generic, "4" survives as a
+        # non-generic 1-char token.
+        ("untitled_with_number", "Untitled 4", 1.0),
+        # Single distinctive token — score = len(token) * 1.
+        ("single_word_aerial", "Aerial", 6.0),
+        ("single_word_treefingers", "Treefingers", 11.0),
+        # Kid A canonical: longest non-generic = "Everything" (10),
+        # count = 5 (Everything/in/Its/Right/Place; "in"/"Its" are
+        # stopword-ish but not in GENERIC_TITLE_TOKENS, so they count).
+        ("kid_a_everything", "Everything in Its Right Place", 50.0),
+        # How to Disappear Completely: longest = "Completely" (10),
+        # count = 4 (How/to/Disappear/Completely).
+        ("kid_a_disappear", "How to Disappear Completely", 40.0),
+        # The National Anthem: longest = "National" (8), count = 3.
+        ("kid_a_national_anthem", "The National Anthem", 24.0),
+        # Mixed generic + distinctive: "Intro Song" → "intro" drops,
+        # "Song" survives (4 * 1).
+        ("mixed_generic_intro_song", "Intro Song", 4.0),
+    ]
+
+    def test_scores(self):
+        for desc, title, expected in self.CASES:
+            with self.subTest(desc=desc, title=title):
+                self.assertEqual(
+                    score_track_distinctiveness(title), expected,
+                )
+
+    def test_motion_picture_soundtrack_lower_than_distinctive(self):
+        """Canonical bad case from the plan: 'Motion Picture Soundtrack'
+        must score strictly lower than a distinctive title."""
+        self.assertLess(
+            score_track_distinctiveness("Motion Picture Soundtrack"),
+            score_track_distinctiveness("Everything in Its Right Place"),
+        )
+
+    def test_generic_token_set_pinned(self):
+        """Sanity guard: changing GENERIC_TITLE_TOKENS is a generator-
+        affecting change. Bump SEARCH_PLAN_GENERATOR_ID at the same time."""
+        self.assertEqual(GENERIC_TITLE_TOKENS, frozenset({
+            "intro", "outro", "interlude", "untitled", "overture", "theme",
+            "motion", "picture", "soundtrack", "prelude", "reprise",
+        }))
+
+
+class TestPickDistinctiveTracks(unittest.TestCase):
+    """U7 picker — top-N source-index/title pairs by distinctiveness.
+
+    Stable on source index for ties. Falls back to source order on
+    all-zero-score albums so the picker stays deterministic.
+    """
+
+    KID_A = [
+        "Everything in Its Right Place",
+        "Kid A",
+        "The National Anthem",
+        "How to Disappear Completely",
+        "Treefingers",
+        "Optimistic",
+        "In Limbo",
+        "Idioteque",
+        "Morning Bell",
+        "Motion Picture Soundtrack",
+    ]
+
+    def test_kid_a_picks_distinctive_over_generic(self):
+        """Canonical bad case from the plan: Kid A's track list.
+
+        ``Motion Picture Soundtrack`` (score 0) must NOT appear in the
+        top-3, and the two longest-distinctive titles MUST."""
+        picks = pick_distinctive_tracks(self.KID_A, 3)
+        titles = [t for _, t in picks]
+        self.assertNotIn(
+            "Motion Picture Soundtrack", titles,
+            f"generic title must not be in top-3: {titles!r}",
+        )
+        self.assertIn("Everything in Its Right Place", titles)
+        self.assertIn("How to Disappear Completely", titles)
+
+    def test_returns_pairs_with_source_index(self):
+        picks = pick_distinctive_tracks(self.KID_A, 3)
+        for src_idx, title in picks:
+            self.assertEqual(self.KID_A[src_idx], title)
+
+    def test_single_track_returns_verbatim(self):
+        picks = pick_distinctive_tracks(["Solo Track"], 3)
+        self.assertEqual(picks, [(0, "Solo Track")])
+
+    def test_empty_list_returns_empty(self):
+        self.assertEqual(pick_distinctive_tracks([], 3), [])
+
+    def test_n_zero_returns_empty(self):
+        self.assertEqual(pick_distinctive_tracks(self.KID_A, 0), [])
+
+    def test_n_negative_returns_empty(self):
+        self.assertEqual(pick_distinctive_tracks(self.KID_A, -1), [])
+
+    def test_n_larger_than_titles_returns_all(self):
+        picks = pick_distinctive_tracks(["A Song", "B Song"], 10)
+        self.assertEqual(len(picks), 2)
+
+    def test_all_generic_titles_falls_back_to_source_order(self):
+        """All titles score 0 → ordering is deterministic on source index."""
+        titles = ["Untitled 1", "Untitled 2", "Untitled 3"]
+        # Each has score 1.0 ("1"/"2"/"3" survives as the only
+        # non-generic token of length 1). Tied scores break on src idx.
+        picks = pick_distinctive_tracks(titles, 3)
+        self.assertEqual(
+            picks,
+            [(0, "Untitled 1"), (1, "Untitled 2"), (2, "Untitled 3")],
+        )
+
+    def test_all_zero_score_titles_falls_back_to_source_order(self):
+        """All titles literally score 0 → source-index order, no panic."""
+        titles = ["Theme", "Intro", "Outro", "Untitled"]
+        picks = pick_distinctive_tracks(titles, 2)
+        self.assertEqual(picks, [(0, "Theme"), (1, "Intro")])
+
+    def test_tie_break_on_source_index(self):
+        """Two equal-score titles preserve source order."""
+        # Both are 1-token, length 5 → score 5 each.
+        titles = ["AlphX", "BetaY"]
+        picks = pick_distinctive_tracks(titles, 2)
+        self.assertEqual(picks, [(0, "AlphX"), (1, "BetaY")])
+
+
+class TestGeneratorUsesDistinctivenessScoring(unittest.TestCase):
+    """Integration: generate_search_plan honours U7 distinctiveness.
+
+    AE1-partial coverage from the plan: a Kid A snapshot's emitted
+    ``track_*_artist`` slots must NOT include the 'Motion Picture
+    Soundtrack' rendering.
+    """
+
+    KID_A_FULL = (
+        "Everything in Its Right Place",
+        "Kid A",
+        "The National Anthem",
+        "How to Disappear Completely",
+        "Treefingers",
+        "Optimistic",
+        "In Limbo",
+        "Idioteque",
+        "Morning Bell",
+        "Motion Picture Soundtrack",
+    )
+
+    def test_kid_a_full_tracklist_excludes_motion_picture_soundtrack(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Radiohead",
+                title="Kid A",
+                year="2000",
+                track_titles=self.KID_A_FULL,
+                prepend_artist=True,
+                release_group_year=2000,
+            ),
+            SearchPlanConfig(),
+        )
+        self.assertEqual(plan.status, PLAN_STATUS_SUCCESS)
+        track_items = [
+            it for it in plan.items if it.strategy.startswith("track_")
+        ]
+        self.assertEqual(len(track_items), 3)
+        track_queries = [it.query for it in track_items]
+        for q in track_queries:
+            self.assertNotIn(
+                "Motion", q,
+                f"'Motion Picture Soundtrack' leaked into track slot: {q!r}",
+            )
+            self.assertNotIn("Soundtrack", q, q)
+        # And the two highest-scoring distinctive titles MUST be present.
+        joined = " | ".join(track_queries)
+        self.assertIn("Everything", joined)
+        self.assertIn("Disappear", joined)
 
 
 if __name__ == "__main__":

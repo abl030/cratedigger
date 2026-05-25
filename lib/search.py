@@ -974,6 +974,82 @@ def _generate_selftitled_plan(
     return candidates, track_omissions
 
 
+# Title fragments / patterns that signal a generic / non-distinctive track
+# title. Used by `score_track_distinctiveness` to penalise tracks that
+# would make poor fallback queries (every soundtrack has a "Motion Picture
+# Soundtrack" or "Theme"; every album-without-track-titles has "Untitled").
+# Set is intentionally small — distinctiveness scoring is deliberately
+# dumb (no IDF, no corpus statistics, no ML). Bump
+# `SEARCH_PLAN_GENERATOR_ID` whenever this set changes — track ordering
+# is generator output.
+GENERIC_TITLE_TOKENS: frozenset[str] = frozenset({
+    "intro", "outro", "interlude", "untitled", "overture", "theme",
+    "motion", "picture", "soundtrack", "prelude", "reprise",
+})
+# "Track N" is a separate pattern (regex), handled by
+# `score_track_distinctiveness` directly.
+_GENERIC_TRACK_NUMBER_RE = re.compile(r"^track\s*\d+$", re.IGNORECASE)
+
+
+def score_track_distinctiveness(title: str) -> float:
+    """Score how distinctive ``title`` is as a fallback-query token source.
+
+    Higher = more distinctive (longer non-generic tokens score best).
+    Pure function — no DB, no corpus stats. Tuned empirically against
+    Kid A's track list (canonical bad case: "Motion Picture Soundtrack"
+    must score lower than "Everything in Its Right Place").
+
+    Formula: ``len(longest_non_generic_token) * num_non_generic_tokens``.
+    Tokens in ``GENERIC_TITLE_TOKENS`` AND tokens that match the
+    ``Track \\d+`` regex are excluded from both factors. Stopwords (the,
+    you, from, and) are NOT specially demoted — they're not distinctive
+    themselves but they don't poison a title's score either.
+
+    Returns ``0.0`` for empty titles, all-generic titles, and "Track 7"
+    style placeholders. Score is ``float`` (not ``int``) so future
+    fractional tiebreaks don't require re-typing the signature.
+    """
+    if not title:
+        return 0.0
+    if _GENERIC_TRACK_NUMBER_RE.match(title.strip()):
+        return 0.0
+    tokens = title.split()
+    non_generic = [
+        t for t in tokens
+        if t.lower() not in GENERIC_TITLE_TOKENS
+    ]
+    if not non_generic:
+        return 0.0
+    longest = max(len(t) for t in non_generic)
+    return float(longest * len(non_generic))
+
+
+def pick_distinctive_tracks(
+    track_titles: list[str], n: int,
+) -> list[tuple[int, str]]:
+    """Return the top-``n`` (source_index, title) pairs by distinctiveness.
+
+    Stable tiebreak on source index (MB ordinal). Returns fewer than
+    ``n`` only when ``len(track_titles) < n``. Single-track albums
+    return that one pair verbatim — they're handled separately upstream;
+    this helper just stays well-defined on the edge case.
+
+    For all-generic-titles albums (every title scores 0 — e.g. every
+    title is "Untitled 1", "Untitled 2"), falls back to source-index
+    order so the picker stays deterministic.
+    """
+    if not track_titles or n <= 0:
+        return []
+    pairs = list(enumerate(track_titles))
+    if len(pairs) == 1:
+        return pairs
+    ranked = sorted(
+        pairs,
+        key=lambda p: (-score_track_distinctiveness(p[1]), p[0]),
+    )
+    return ranked[:n]
+
+
 def _build_track_candidates(
     track_titles: list[str],
     per_track_pairs: list[tuple[int, str]],
@@ -984,9 +1060,13 @@ def _build_track_candidates(
 ) -> list["_Candidate"]:
     """Rank per-track pairs and emit up to ``max_track_slots`` candidates.
 
-    Ranking: useful-token count desc, char count desc, source-track
-    index asc. Mirrors the legacy ordering so search-log forensics
-    stay comparable across the U5 transition.
+    Ranking is driven by ``score_track_distinctiveness`` on the RAW
+    source-track title (looked up via the pair's source index). Raw
+    titles, not the rendered queries, so a title like "Motion Picture
+    Soundtrack" is penalised even when the rendered query
+    ("*adiohead Motion Picture Soundtrack") happens to be long.
+    Tiebreaks fall back to rendered char-count desc and source-track
+    index asc so the order stays deterministic.
 
     ``slot_label_suffix`` is appended to the ``track_<idx>`` strategy
     label (e.g. ``"_artist"`` → ``track_0_artist``) so the new
@@ -1010,7 +1090,7 @@ def _build_track_candidates(
     ranked = sorted(
         per_track_pairs,
         key=lambda pair: (
-            -len(pair[1].split()),
+            -score_track_distinctiveness(track_titles[pair[0]]),
             -len(pair[1]),
             pair[0],
         ),
