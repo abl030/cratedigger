@@ -142,15 +142,6 @@ ADVISORY_LOCK_NAMESPACE_PLAN = 0x504C414E
 # ``0x574D434C`` = ASCII "WMCL", recognisable in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP = 0x574D434C
 
-# Singleton lock for the dual-source field-resolution backfill script
-# (scripts/backfill_field_resolutions.py). Acquired for the duration
-# of the operator-driven backfill window so any accidental concurrent
-# writer to ``album_requests`` fails fast on the lock instead of
-# racing the row-by-row enumeration. The deploy runbook also stops
-# the three DB-mutating services — this is belt-and-braces. Key = 0.
-# ``0x4246494C`` = ASCII "BFIL", recognisable in ``pg_locks``.
-ADVISORY_LOCK_NAMESPACE_BACKFILL = 0x4246494C
-
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
     """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.
@@ -2038,53 +2029,6 @@ class PipelineDB:
         """Write spectral state pairs together, including explicit NULLs."""
         self.update_request_fields(request_id, **update.as_update_fields())
 
-    def get_requests_missing_release_group_year(
-        self,
-        *,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """List requests that need ``release_group_year`` populated.
-
-        Returns the rows where ``mb_release_group_id IS NOT NULL`` and
-        ``release_group_year IS NULL``. Used by the U3 deploy backfill
-        script (``scripts/backfill_release_group_year.py``); the WHERE
-        clause is what makes the backfill idempotent — re-running skips
-        rows that already have a value.
-
-        ``limit`` is honoured so the backfill can process in deterministic
-        chunks and test setups can constrain the result set.
-        """
-        sql = (
-            "SELECT id, mb_release_group_id, artist_name, album_title "
-            "FROM album_requests "
-            "WHERE mb_release_group_id IS NOT NULL "
-            "  AND release_group_year IS NULL "
-            "ORDER BY id"
-        )
-        params: tuple[object, ...] = ()
-        if limit is not None:
-            sql += " LIMIT %s"
-            params = (limit,)
-        cur = self._execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
-
-    def set_release_group_year(
-        self,
-        request_id: int,
-        year: int | None,
-    ) -> None:
-        """Set ``album_requests.release_group_year`` (U3 / R9).
-
-        ``year`` may be ``None`` (column reset to NULL) or an int (the
-        release-group's first-release year as returned by the MB mirror).
-        Used by the U3 deploy backfill and by U4's enqueue path. Thin
-        wrapper around ``update_request_fields`` — exists so call sites
-        carry the column name as part of the method, which makes the
-        backfill / enqueue intent grep-able.
-        """
-        self.update_request_fields(
-            request_id, release_group_year=year,
-        )
 
     def update_v0_probe_state(
         self,

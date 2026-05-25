@@ -2118,39 +2118,6 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
-    def set_release_group_year(
-        self,
-        request_id: int,
-        year: int | None,
-    ) -> None:
-        """In-memory mirror of ``PipelineDB.set_release_group_year``."""
-        self.update_request_fields(request_id, release_group_year=year)
-
-    def get_requests_missing_release_group_year(
-        self,
-        *,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """In-memory mirror of
-        ``PipelineDB.get_requests_missing_release_group_year``.
-        """
-        out: list[dict[str, Any]] = []
-        for rid in sorted(self._requests.keys()):
-            row = self._requests[rid]
-            if not row.get("mb_release_group_id"):
-                continue
-            if row.get("release_group_year") is not None:
-                continue
-            out.append({
-                "id": row["id"],
-                "mb_release_group_id": row["mb_release_group_id"],
-                "artist_name": row["artist_name"],
-                "album_title": row["album_title"],
-            })
-            if limit is not None and len(out) >= limit:
-                break
-        return out
-
     # --- Session lifecycle ---
 
     def close(self) -> None:

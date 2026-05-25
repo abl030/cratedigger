@@ -2357,6 +2357,153 @@ class TestAlbumRequestsReleaseGroupYearSchema(unittest.TestCase):
         )
         self.assertEqual(len(rows), 1)
 
+    # --- 033 seed VA + one-track-structural data ---
+
+    def test_033_mb_va_seed_flips_canonical_mbid_rows(self):
+        # Two rows: one with the canonical VA MBID, one without. After
+        # 033, only the canonical row is flipped — string-match alone
+        # does NOT trigger (R12 identity-not-string invariant).
+        canonical_rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, mb_artist_id, artist_name, album_title, source)
+            VALUES ('033-va-canonical', '89ad4ac3-39f7-470e-963a-56509c546377',
+                    'Various Artists', 'Comp', 'request')
+            RETURNING id
+        """)[0][0]
+        named_rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, mb_artist_id, artist_name, album_title, source)
+            VALUES ('033-va-string-only', 'some-other-mbid-not-canonical',
+                    'Various Artists', 'Comp', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            # Migration 033 has already run once at conftest setup, so
+            # to test its effect we manually re-run the seed UPDATE:
+            self._exec("""
+                UPDATE album_requests
+                SET is_va_compilation = TRUE
+                WHERE mb_artist_id = '89ad4ac3-39f7-470e-963a-56509c546377'
+                  AND is_va_compilation = FALSE
+            """)
+            canonical_flag = self._query(
+                "SELECT is_va_compilation FROM album_requests WHERE id = %s",
+                (canonical_rid,),
+            )[0][0]
+            named_flag = self._query(
+                "SELECT is_va_compilation FROM album_requests WHERE id = %s",
+                (named_rid,),
+            )[0][0]
+            self.assertTrue(canonical_flag,
+                            "canonical-MBID row should flip to TRUE")
+            self.assertFalse(named_flag,
+                             "string-match-only row must stay FALSE — "
+                             "identity-not-string invariant (R12)")
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id IN (%s, %s)",
+                (canonical_rid, named_rid),
+            )
+
+    def test_033_one_track_structural_categorises_single_track_requests(self):
+        # Seed: one request with 1 track, one with 3 tracks.
+        rid_1 = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('033-one-track', 'A', 'Single', 'request')
+            RETURNING id
+        """)[0][0]
+        rid_3 = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('033-three-tracks', 'B', 'EP', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec("""
+                INSERT INTO album_tracks (request_id, disc_number, track_number, title)
+                VALUES (%s, 1, 1, 'The Track')
+            """, (rid_1,))
+            for n in (1, 2, 3):
+                self._exec("""
+                    INSERT INTO album_tracks (request_id, disc_number, track_number, title)
+                    VALUES (%s, 1, %s, %s)
+                """, (rid_3, n, f"Track {n}"))
+            # Re-run the seed UPDATE to test the WHERE-clause semantics
+            # against these fresh rows.
+            self._exec("""
+                UPDATE album_requests
+                SET unfindable_category = 'one_track_structural',
+                    unfindable_categorised_at = NOW()
+                WHERE unfindable_category IS NULL
+                  AND id IN (
+                      SELECT request_id
+                      FROM album_tracks
+                      GROUP BY request_id
+                      HAVING COUNT(*) = 1
+                  )
+            """)
+            single = self._query(
+                "SELECT unfindable_category FROM album_requests WHERE id = %s",
+                (rid_1,),
+            )[0][0]
+            multi = self._query(
+                "SELECT unfindable_category FROM album_requests WHERE id = %s",
+                (rid_3,),
+            )[0][0]
+            self.assertEqual(single, "one_track_structural")
+            self.assertIsNone(multi,
+                              "multi-track request must NOT be categorised "
+                              "one_track_structural")
+        finally:
+            self._exec(
+                "DELETE FROM album_requests WHERE id IN (%s, %s)",
+                (rid_1, rid_3),
+            )
+
+    def test_033_does_not_clobber_operator_set_unfindable_category(self):
+        # If an operator (or a future detection path) set a different
+        # category, 033's seed must NOT overwrite it.
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source,
+                 unfindable_category, unfindable_categorised_at)
+            VALUES ('033-preset-category', 'C', 'Single', 'request',
+                    'artist_absent', NOW())
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec("""
+                INSERT INTO album_tracks (request_id, disc_number, track_number, title)
+                VALUES (%s, 1, 1, 'Track')
+            """, (rid,))
+            self._exec("""
+                UPDATE album_requests
+                SET unfindable_category = 'one_track_structural',
+                    unfindable_categorised_at = NOW()
+                WHERE unfindable_category IS NULL
+                  AND id IN (
+                      SELECT request_id
+                      FROM album_tracks
+                      GROUP BY request_id
+                      HAVING COUNT(*) = 1
+                  )
+            """)
+            current = self._query(
+                "SELECT unfindable_category FROM album_requests WHERE id = %s",
+                (rid,),
+            )[0][0]
+            self.assertEqual(current, "artist_absent",
+                             "033 must not clobber an existing category")
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_records_applied_version_033(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 33"
+        )
+        self.assertEqual(len(rows), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,31 +2,34 @@
 
 Operator runbook for the search-plan iteration 2 PR series (issue
 [#369](https://github.com/abl030/cratedigger/issues/369)). One section
-per PR. PR1 has the only non-trivial deploy procedure — the others are
-standard flake bumps and migration runs.
+per PR. PR1 has a non-trivial deploy procedure (controlled window for a
+transient agent-run one-shot); the others are standard flake bumps and
+migration runs.
 
 Origin: `docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md`.
 Plan: `docs/plans/2026-05-25-001-feat-search-plan-iteration-2-plan.md`.
+
+**Note on backfills.** The single-operator invariant says backfills are
+operator/agent-driven one-shots, not committed product code. PR1's
+schema migrations include 033, which seeds the data work that's
+expressible in pure SQL (the MB-canonical-MBID VA rows + the
+1-track-structural categorisation). The network-dependent data work
+(release_group_year / release_group_id / track_artist /
+catalog_number for the cohort of NULL rows that need MB or Discogs
+lookups) is run by the agent during the deploy window as a transient
+heredoc — not as a committed script.
 
 ---
 
 ## PR1 — Foundations (controlled backfill window)
 
-PR1 lands schema migrations 027–031, the dual-source field resolver
-service, an inline enqueue resolution path, and a backfill script that
-populates every existing wanted request's new columns from MB and
-Discogs.
-
-The backfill runs **outside** `cratedigger-db-migrate.service` (per the
-user's call-out resolution during brainstorm): the deploy unit's job
-is schema only; data fill is operator-driven during a controlled
-window with all DB-mutating services stopped. This decouples migrate
-runtime from backfill runtime and gives the operator full visibility
-into the data population.
+PR1 lands schema migrations 027–033, the dual-source field resolver
+service, and an inline enqueue resolution path. Migration 033 seeds
+the pure-SQL data work; the agent runs the network-dependent half.
 
 Estimated total window: **15–25 minutes** wall clock, dominated by the
-backfill loop (~10–15 min against ~830 wanted requests × ~12 tracks
-each × MB or Discogs round-trip).
+network-resolution loop (~10–15 min against ~830 wanted requests × MB
+or Discogs round-trip).
 
 ### 1. Pre-deploy
 
@@ -37,8 +40,8 @@ ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
   > /tmp/cratedigger_backup_pr1_$(date +%Y%m%d_%H%M%S).sql
 ```
 
-The backfill is idempotent and retryable, but the schema changes are
-forward-only. Backup before pulling the trigger.
+Schema changes 027–033 are forward-only. Backup before pulling the
+trigger.
 
 #### 1.2 Capture baseline counts
 
@@ -48,16 +51,19 @@ For later verification:
 ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
 SELECT
   COUNT(*) FILTER (WHERE status = '\''wanted'\'') AS wanted,
-  COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND artist_name IN ('\''Various Artists'\'', '\''Various'\'')) AS wanted_va,
+  COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND artist_name IN ('\''Various Artists'\'', '\''Various'\'')) AS wanted_va_string,
+  COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND mb_artist_id = '\''89ad4ac3-39f7-470e-963a-56509c546377'\'') AS wanted_va_canonical,
   COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND release_group_year IS NULL) AS wanted_rgy_null
 FROM album_requests"'
 ```
 
-Save the output. The VA count should match the post-backfill
-`is_va_compilation=TRUE` count. The rgy_null count should drop
-substantially after the backfill.
+Save the output. After PR1 the `is_va_compilation=TRUE` count should
+match `wanted_va_string` (all string-matched rows reach the right
+identity, either via 033's canonical-MBID seed or the agent's
+post-deploy MB re-resolution). The `release_group_year` NULL count
+should drop substantially.
 
-### 2. Deploy schema (migrations land automatically)
+### 2. Deploy schema (all 7 migrations land automatically via cratedigger-db-migrate)
 
 ```bash
 # 1. On the dev machine: push code that landed PR1
@@ -69,7 +75,7 @@ ssh doc1 'cd ~/nixosconfig && nix flake update cratedigger-src \
   && git commit -m "cratedigger: PR1 — iteration 2 foundations" \
   && git push'
 
-# 3. On doc2: rebuild — runs cratedigger-db-migrate (migrations 027-031
+# 3. On doc2: rebuild — runs cratedigger-db-migrate (migrations 027-033
 #    apply) and restarts cratedigger-web + cratedigger-importer.
 ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
 ```
@@ -81,14 +87,22 @@ ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpas
 SELECT version FROM schema_migrations WHERE version >= 27 ORDER BY version"'
 ```
 
-Expect 5 rows (27, 28, 29, 30, 31).
+Expect 7 rows (27, 28, 29, 30, 31, 32, 33). Migration 033 has already
+seeded `is_va_compilation=TRUE` for the 7 rows whose `mb_artist_id`
+matches the canonical VA MBID, and `unfindable_category='one_track_structural'`
+for every 1-track request with a NULL category.
 
-### 3. Controlled backfill window
+### 3. Controlled window for network-dependent backfill
+
+The remaining data work — `release_group_year`, `release_group_id`,
+`track_artist`, `catalog_number` for rows still missing them, plus
+the VA-string-matched rows whose `mb_artist_id` wasn't canonical
+(needs MB re-resolution to confirm and flip the flag) — requires
+HTTP calls to the MB and Discogs mirrors. The agent (Claude Code, or
+equivalent) runs this as a transient one-shot during a window when
+all three DB-mutating services are stopped.
 
 #### 3.1 Stop all three DB-mutating services
-
-Web returns 503 until restart. Stopping in this order prevents the
-restart-on-fail loop from interfering with the backfill.
 
 ```bash
 ssh doc2 'sudo systemctl stop cratedigger.service \
@@ -96,7 +110,7 @@ ssh doc2 'sudo systemctl stop cratedigger.service \
                             cratedigger-web.service'
 ```
 
-Confirm all are inactive:
+Web returns 503 until restart. Confirm all inactive:
 
 ```bash
 ssh doc2 'sudo systemctl is-active cratedigger.service \
@@ -104,30 +118,76 @@ ssh doc2 'sudo systemctl is-active cratedigger.service \
                                    cratedigger-web.service'
 ```
 
-All three should report `inactive`.
+#### 3.2 Agent runs the transient one-shot
 
-#### 3.2 Take the backfill advisory lock + run the script
+The exact shape, for reproducibility — the agent generates this from
+the canonical resolver service's surface; it doesn't live in
+`scripts/` (per the single-operator invariant):
 
-The script takes `pg_advisory_lock(0x4246494C)` (ASCII "BFIL") for its
-duration. Belt-and-braces — if anything else managed to start writing
-to `album_requests` mid-flight, the lock holder would observe the
-conflict immediately.
+```python
+# Run on doc2 inside the cratedigger nix env so PYTHONPATH +
+# psycopg2 + msgspec + web.mb / web.discogs all resolve correctly.
+# The agent generates this from the resolver service's surface at
+# deploy time — function names below should be verified against the
+# current lib/field_resolver_service.py and lib/pipeline_db.py:
+#
+# ssh doc2 'sudo -u cratedigger /nix/var/cratedigger/bin/python3 -' <<'PY'
+import os
+from lib.pipeline_db import PipelineDB
+from lib.field_resolver_service import resolve_all
 
-```bash
-# Run inside cratedigger's nix env on doc2 — same PYTHONPATH /
-# psycopg2 / msgspec as production.
-ssh doc2 'sudo -u cratedigger PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) \
-  /run/current-system/sw/bin/python3 /nix/var/cratedigger/scripts/backfill_field_resolutions.py --field=all'
+dsn = os.environ["PIPELINE_DB_DSN"]
+db = PipelineDB(dsn)
+
+# Walk every wanted request via raw SQL — the side-table writes
+# coming out of resolve_all are the durable record.
+cur = db._execute(
+    "SELECT id, mb_release_id, mb_release_group_id, mb_artist_id, "
+    "discogs_release_id, artist_name, year, source "
+    "FROM album_requests WHERE status = 'wanted' ORDER BY id"
+)
+rows = [dict(r) for r in cur.fetchall()]
+total = len(rows)
+print(f"backfill: walking {total} wanted requests")
+
+for i, row in enumerate(rows, start=1):
+    try:
+        result = resolve_all(row, db, budget_seconds=10.0)
+        updates = {"is_va_compilation": result.is_va_compilation}
+        if result.release_group_year is not None:
+            updates["release_group_year"] = result.release_group_year
+        if result.release_group_id is not None and row.get("mb_release_group_id") is None:
+            updates["mb_release_group_id"] = result.release_group_id
+        if result.catalog_number is not None:
+            updates["catalog_number"] = result.catalog_number
+        db.update_request_fields(int(row["id"]), **updates)
+    except Exception as exc:
+        print(f"  request={row['id']} FAILED: {type(exc).__name__}: {exc}")
+    if i % 50 == 0:
+        print(f"  {i}/{total} processed")
+
+print("backfill: done")
+PY
 ```
 
-The script prints progress every 100 rows: `N / total processed,
-R resolved, U unresolved`. Total runtime is dominated by per-track
-MB/Discogs round-trips; expect 10–15 minutes.
+(Once the #8 follow-up extracts `apply_resolve_all_result` to
+`lib/field_resolver_service.py`, the per-row `updates` dict-building
+collapses to a one-line call. Until then, the loop above duplicates
+what `_resolve_and_update_after_add` already does inline at enqueue.)
 
-A failure midway is non-fatal: the script is idempotent. Side-table
-rows record the resolution attempt; re-running picks up where the
-window left off (skips already-resolved fields per the retry-policy
-windows in `lib/field_resolver_service.py`).
+Total runtime is dominated by per-track MB/Discogs round-trips;
+expect 10–15 minutes wall clock against ~830 requests. The script is
+transient — the agent throws it away after the window closes.
+
+If the script crashes midway, the agent inspects the partial state
+(`SELECT field_name, status, COUNT(*) FROM album_request_field_resolutions
+GROUP BY field_name, status`), narrows the WHERE clause to the
+unresolved cohort, and re-runs. No retry-window machinery needed —
+the agent owns the orchestration.
+
+The 10-second `budget_seconds` is generous compared to the inline
+enqueue budget (3s) because this isn't user-facing latency — it's
+batch resolution where a slower mirror call is fine.
 
 #### 3.3 Restart services in reverse dependency order
 
@@ -158,19 +218,22 @@ ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpas
 SELECT
   COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND release_group_year IS NULL) AS still_null_rgy,
   COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND is_va_compilation = TRUE) AS va_flagged,
-  COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND unfindable_category = '\''one_track_structural'\'') AS one_track
+  COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND unfindable_category = '\''one_track_structural'\'') AS one_track,
+  COUNT(*) FILTER (WHERE status = '\''wanted'\'' AND catalog_number IS NOT NULL) AS with_catno
 FROM album_requests"'
 ```
 
-Expectations (relative to the §1.2 baseline):
-
-- `still_null_rgy`: should drop substantially — the remaining residual
-  is the cohort that legitimately can't be resolved (broken Discogs
-  master entries, MB releases without a release-group, etc.).
-- `va_flagged`: should match the §1.2 `wanted_va` count (the 25 known
-  rows credited to "Various Artists" by MBID identity).
-- `one_track`: equals the count of wanted requests with exactly 1 row
-  in `album_tracks`.
+Expectations vs §1.2 baseline:
+- `still_null_rgy` drops substantially. The remaining residual is the
+  cohort where MB and Discogs both genuinely lack the year.
+- `va_flagged` matches the §1.2 `wanted_va_string` count (033 covered
+  the canonical-MBID rows; the agent's one-shot re-resolved the
+  string-matched-but-not-canonical rows by re-fetching MB and applying
+  `detect_va_compilation`).
+- `one_track` equals the count of wanted requests with exactly one
+  `album_tracks` row (033 covered this entirely).
+- `with_catno` is non-zero (some rows have catalog numbers in MB or
+  Discogs metadata).
 
 #### 4.2 Side-table state
 
@@ -182,15 +245,10 @@ GROUP BY field_name, status
 ORDER BY field_name, status"'
 ```
 
-Distribution should show:
-
-- `release_group_year` / `release_group_id` / `catalog_number` /
-  `track_artist` field_names present.
-- Mostly `resolved` rows, with `unresolved_*` rows accounting for the
-  upstream-data gaps (404s for retired MB releases, Discogs masters
-  with no `year`, etc.).
-- No `unresolved_malformed` rows in the wanted cohort (those would
-  indicate stored IDs that don't parse — investigate if present).
+Distribution should show `release_group_year` / `release_group_id` /
+`catalog_number` / `track_artist` field_names with mostly `resolved`
+rows. The `unresolved_*` rows account for upstream-data gaps (404s
+for retired MB releases, Discogs masters with no `year`, etc.).
 
 #### 4.3 Smoke-test inline enqueue
 
@@ -198,9 +256,9 @@ Add a known new request via the web UI and confirm it lands with
 populated fields:
 
 ```bash
-# After adding a request via the web, query its row:
 ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
-SELECT id, artist_name, album_title, release_group_year, is_va_compilation
+SELECT id, artist_name, album_title, release_group_year,
+       is_va_compilation, catalog_number
 FROM album_requests
 WHERE status = '\''wanted'\''
 ORDER BY created_at DESC
@@ -209,18 +267,17 @@ LIMIT 5"'
 
 A new MB-sourced reissue request should land with `release_group_year`
 populated (or NULL with a side-table `unresolved_*` row recording the
-reason — both are valid post-resolver states).
+reason). VA compilations land with `is_va_compilation=TRUE`.
 
 ### 5. Rollback
 
-Schema changes are forward-only — they cannot be unwound by re-deploy.
-If a critical issue surfaces:
+Schema changes are forward-only. If a critical issue surfaces:
 
-1. **Side-table data**: re-running the backfill is idempotent. If the
-   data looks wrong, debug via the side-table state queries above, fix
-   the resolver, ship a patch PR.
-2. **Schema**: only forward fixes. Add a new migration that reverts or
-   corrects whatever needs unwinding. Do not edit migrations 027–031;
+1. **Side-table data**: re-run the agent's one-shot — idempotent
+   because the parent column is NULL until written and `apply_resolve_all_result`
+   never overwrites a non-NULL value with NULL.
+2. **Schema**: forward fixes only. Add a new migration that reverts or
+   corrects whatever needs unwinding. Do not edit migrations 027–033;
    they are frozen history.
 3. **Service health**: if `cratedigger-web` or `cratedigger-importer`
    fails to start after the deploy, check `journalctl -u <service>`
@@ -230,20 +287,19 @@ If a critical issue surfaces:
 
 ### 6. Known limitations
 
-- The backfill walks ~830 requests × ~12 tracks each. If the MB or
-  Discogs mirror is slow or unavailable mid-run, individual fields
-  land NULL with `unresolved_mirror_unavailable` or
-  `unresolved_timeout` in the side table. Re-running the backfill 24h
-  later picks them up automatically (per the 1d retry window for
-  transient failures).
-- The `is_va_compilation` boolean is set once per row and never
-  re-resolved by automated paths (R12 invariant). Operator-driven
-  re-resolution lives in a follow-up plan.
-- `release_group_year` and `release_group_id` resolution for Discogs
-  master entries with a missing `year` field will record
-  `unresolved_field_missing_upstream` (30d retry window) — these are
-  permanent data gaps upstream, the retry is a courtesy in case the
-  upstream data is later corrected.
+- The agent's one-shot walks ~830 requests × ~12 tracks each. If the
+  MB or Discogs mirror is slow or unavailable mid-run, individual
+  fields land NULL with `unresolved_mirror_unavailable` or
+  `unresolved_timeout` in the side table. Re-running the one-shot
+  picks them up.
+- `is_va_compilation` is set once at enqueue (and by 033/the
+  one-shot for existing rows) and not re-resolved by automated
+  product code. Operator-driven re-resolution is its own decision.
+- `release_group_year` / `release_group_id` / `catalog_number` /
+  `track_artist` resolution for rows whose MB or Discogs records
+  genuinely lack the data records `unresolved_field_missing_upstream`.
+  These are permanent data gaps upstream; the side table preserves
+  the audit trail.
 
 ---
 
