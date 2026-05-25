@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.search import (
     strip_special_chars,
+    strip_stopwords,
+    STOPWORDS,
     wildcard_artist_tokens, cap_tokens,
     _normalize_query_tokens,
     generate_search_plan, ReleaseSnapshot, SearchPlanConfig,
@@ -104,6 +106,44 @@ class TestCapTokens(unittest.TestCase):
         tokens = ["The", "Mountain", "Goats", "Tallahassee", "Extra"]
         result = cap_tokens(tokens, 4)
         self.assertEqual(result, ["Mountain", "Goats", "Tallahassee", "Extra"])
+
+
+class TestStripStopwords(unittest.TestCase):
+    """Behavior regression for the single canonical stopword helper.
+
+    Live observed strings, not synthetic edge cases. See U6 of the
+    search-plan iter2 plan: any future change to the stopword set or
+    the strip helper MUST keep these passing or call out the change
+    explicitly in the PR.
+    """
+
+    CASES = [
+        ("drops_the", ["the", "beatles"], ["beatles"]),
+        ("case_insensitive", ["The", "Beatles"], ["Beatles"]),
+        # "to" and "a" are NOT in STOPWORDS — verifies the set stays narrow.
+        (
+            "preserves_non_stopwords",
+            ["how", "to", "disappear", "completely"],
+            ["how", "to", "disappear", "completely"],
+        ),
+        (
+            "preserves_a_and_yourself",
+            ["have", "yourself", "a", "merry", "little", "christmas"],
+            ["have", "yourself", "a", "merry", "little", "christmas"],
+        ),
+        ("empty", [], []),
+        ("all_stopwords", ["the", "and"], []),
+        ("mixed", ["The", "Love", "from", "Above"], ["Love", "Above"]),
+    ]
+
+    def test_strip_cases(self):
+        for name, tokens, expected in self.CASES:
+            with self.subTest(name=name):
+                self.assertEqual(strip_stopwords(tokens), expected)
+
+    def test_stopwords_set_is_narrow(self):
+        """Locks the live shape: 4 entries, no surprise additions."""
+        self.assertEqual(STOPWORDS, frozenset({"the", "you", "from", "and"}))
 
 
 class TestNormalizeQueryTokens(unittest.TestCase):

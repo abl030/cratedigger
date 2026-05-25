@@ -112,7 +112,28 @@ class PlanExecutionContext:
 MAX_SEARCH_TOKENS = 4
 # Empirical from search_log peer-dir fanout: keep this list narrow and add
 # only words that repeatedly dominate expensive broad searches.
-LOW_ENTROPY_QUERY_TOKENS = {"the", "you", "from", "and"}
+#
+# Single canonical stopword set for the whole pipeline. Callers MUST go
+# through `strip_stopwords()` rather than reading this constant directly —
+# `tests/test_stopwords_audit.py` walks `lib/` to enforce that and also
+# fails the suite if anyone re-introduces an inline `{"the", "and", ...}`
+# stopword literal anywhere in `lib/`.
+STOPWORDS: frozenset[str] = frozenset({"the", "you", "from", "and"})
+
+
+def strip_stopwords(tokens: list[str]) -> list[str]:
+    """Drop case-insensitive stopword matches from `tokens`.
+
+    Order-preserving. Does not dedupe — `_normalize_query_tokens` composes
+    this with case-insensitive dedupe and the all-stopword fallback.
+
+    This is the only public reader of `STOPWORDS`. Callers outside this
+    module MUST go through this helper (enforced by
+    `tests/test_stopwords_audit.py`) so the set's contents can change in
+    exactly one place.
+    """
+    return [t for t in tokens if t.lower() not in STOPWORDS]
+
 
 def strip_special_chars(text):
     """Remove punctuation that poisons Soulseek searches.
@@ -132,13 +153,11 @@ def _normalize_query_tokens(
     *,
     preserve_all_low_entropy: bool = False,
 ) -> list[str]:
-    """Drop low-entropy tokens and case-insensitive repeats."""
+    """Drop stopwords and case-insensitive repeats."""
     normalized: list[str] = []
     seen: set[str] = set()
-    for token in tokens:
+    for token in strip_stopwords(tokens):
         key = token.lower()
-        if key in LOW_ENTROPY_QUERY_TOKENS:
-            continue
         if key in seen:
             continue
         seen.add(key)
@@ -425,18 +444,21 @@ def _canonical_query_key(query: str) -> str:
 
 
 def _has_dropped_low_entropy(*token_lists: list[str]) -> set[str]:
-    """Return the lowercased low-entropy tokens that appear in any source list.
+    """Return the lowercased stopword tokens that appear in any source list.
 
     Used purely for plan-level provenance: we want to record that the
     generator dropped (e.g.) `the` from a candidate, even though the
     drop happens inside `_normalize_query_tokens`. The presence check is
     case-insensitive.
+
+    Routes through `strip_stopwords` to keep `STOPWORDS` as a private read.
     """
     dropped: set[str] = set()
     for tokens in token_lists:
+        kept = {t.lower() for t in strip_stopwords(tokens)}
         for tok in tokens:
             key = tok.lower()
-            if key in LOW_ENTROPY_QUERY_TOKENS:
+            if key not in kept:
                 dropped.add(key)
     return dropped
 
