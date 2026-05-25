@@ -207,6 +207,23 @@ class UserCooldownRow:
 
 
 @dataclass
+class FieldResolutionRow:
+    """One row in album_request_field_resolutions (migration 030).
+
+    Captured by ``FakePipelineDB.record_field_resolution``. Mirrors the
+    production schema field-for-field so tests can assert against the
+    same row shape PipelineDB returns from ``get_field_resolution``.
+    """
+    request_id: int
+    field_name: str
+    status: str
+    reason_code: str | None
+    attempts: int = 1
+    resolved_at: datetime = field(default_factory=_utcnow)
+    id: int = 0
+
+
+@dataclass
 class EnqueueCall:
     """One slskd enqueue call captured by FakeSlskdAPI."""
     username: str
@@ -696,6 +713,13 @@ class FakePipelineDB:
         self._next_evidence_id = 0
         self._next_bad_audio_hash_id = 0
         self.cooldowns_applied: list[str] = []
+        # Migration 030 — album_request_field_resolutions. Keyed by
+        # (request_id, field_name); on conflict, attempts increments
+        # and resolved_at updates, mirroring the production UPSERT.
+        self.field_resolutions: dict[
+            tuple[int, str], FieldResolutionRow,
+        ] = {}
+        self._next_field_resolution_id = 0
         self.recorded_attempts: list[tuple[int, str]] = []
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
@@ -1899,6 +1923,57 @@ class FakePipelineDB:
             )
             row["next_retry_after"] = now + timedelta(minutes=backoff_minutes)
 
+    def record_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+        status: str,
+        reason_code: str | None,
+    ) -> None:
+        """UPSERT a row into ``field_resolutions`` mirroring migration 030.
+
+        On conflict: increment ``attempts``, replace status / reason,
+        bump ``resolved_at``. Tests assert directly against the dict.
+        """
+        key = (int(request_id), field_name)
+        now = _utcnow()
+        existing = self.field_resolutions.get(key)
+        if existing is None:
+            self._next_field_resolution_id += 1
+            self.field_resolutions[key] = FieldResolutionRow(
+                request_id=int(request_id),
+                field_name=field_name,
+                status=status,
+                reason_code=reason_code,
+                attempts=1,
+                resolved_at=now,
+                id=self._next_field_resolution_id,
+            )
+            return
+        existing.status = status
+        existing.reason_code = reason_code
+        existing.attempts += 1
+        existing.resolved_at = now
+
+    def get_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+    ) -> dict[str, Any] | None:
+        """Return the side-table row for ``(request_id, field_name)`` as a dict."""
+        row = self.field_resolutions.get((int(request_id), field_name))
+        if row is None:
+            return None
+        return {
+            "id": row.id,
+            "request_id": row.request_id,
+            "field_name": row.field_name,
+            "resolved_at": row.resolved_at,
+            "status": row.status,
+            "reason_code": row.reason_code,
+            "attempts": row.attempts,
+        }
+
     def update_spectral_state(self, request_id: int,
                               update: RequestSpectralStateUpdate) -> None:
         row = self._requests.get(request_id)
@@ -2043,39 +2118,6 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
-    def set_release_group_year(
-        self,
-        request_id: int,
-        year: int | None,
-    ) -> None:
-        """In-memory mirror of ``PipelineDB.set_release_group_year``."""
-        self.update_request_fields(request_id, release_group_year=year)
-
-    def get_requests_missing_release_group_year(
-        self,
-        *,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """In-memory mirror of
-        ``PipelineDB.get_requests_missing_release_group_year``.
-        """
-        out: list[dict[str, Any]] = []
-        for rid in sorted(self._requests.keys()):
-            row = self._requests[rid]
-            if not row.get("mb_release_group_id"):
-                continue
-            if row.get("release_group_year") is not None:
-                continue
-            out.append({
-                "id": row["id"],
-                "mb_release_group_id": row["mb_release_group_id"],
-                "artist_name": row["artist_name"],
-                "album_title": row["album_title"],
-            })
-            if limit is not None and len(out) >= limit:
-                break
-        return out
-
     # --- Session lifecycle ---
 
     def close(self) -> None:
@@ -2095,7 +2137,8 @@ class FakePipelineDB:
                     source_path: str | None = None,
                     reasoning: str | None = None,
                     status: str = "wanted",
-                    release_group_year: int | None = None) -> int:
+                    release_group_year: int | None = None,
+                    is_va_compilation: bool = False) -> int:
         """Insert an album_requests row.
 
         Seeds the full ``album_requests`` column set (matching
@@ -2119,6 +2162,9 @@ class FakePipelineDB:
             # U3 / R9 — release-group's first-release year. Populated by
             # the deploy-time backfill or U4's enqueue path; nullable.
             "release_group_year": release_group_year,
+            # Migration 028 / U4 — VA detection flag, set at enqueue or by
+            # the U3 backfill. NOT NULL DEFAULT FALSE matches the schema.
+            "is_va_compilation": bool(is_va_compilation),
             "country": country,
             "format": format,
             "source": source,

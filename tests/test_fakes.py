@@ -673,6 +673,76 @@ class TestFakePipelineDB(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Field resolutions (migration 030) — fake parity
+# ---------------------------------------------------------------------------
+
+
+class TestFakePipelineDBFieldResolutions(unittest.TestCase):
+    """FakePipelineDB mirrors the ``album_request_field_resolutions`` UPSERT
+    semantics. Tests asserting on side-table state use this fake; the real
+    PipelineDB integration is exercised in ``tests/test_pipeline_db.py``.
+    """
+
+    def test_first_call_creates_row_with_attempts_one(self):
+        db = FakePipelineDB()
+        db.record_field_resolution(
+            request_id=42,
+            field_name="release_group_year",
+            status="resolved",
+            reason_code=None,
+        )
+        row = db.get_field_resolution(42, "release_group_year")
+        assert row is not None
+        self.assertEqual(row["status"], "resolved")
+        self.assertIsNone(row["reason_code"])
+        self.assertEqual(row["attempts"], 1)
+        self.assertEqual(row["request_id"], 42)
+        self.assertEqual(row["field_name"], "release_group_year")
+
+    def test_re_upsert_increments_attempts_and_updates_status(self):
+        db = FakePipelineDB()
+        db.record_field_resolution(
+            request_id=42, field_name="release_group_year",
+            status="unresolved_mirror_unavailable", reason_code="URLError",
+        )
+        db.record_field_resolution(
+            request_id=42, field_name="release_group_year",
+            status="resolved", reason_code=None,
+        )
+        row = db.get_field_resolution(42, "release_group_year")
+        assert row is not None
+        self.assertEqual(row["status"], "resolved")
+        self.assertIsNone(row["reason_code"])
+        self.assertEqual(row["attempts"], 2)
+        # Only one row -- not duplicated.
+        self.assertEqual(len(db.field_resolutions), 1)
+
+    def test_different_fields_get_distinct_rows(self):
+        db = FakePipelineDB()
+        db.record_field_resolution(
+            request_id=42, field_name="release_group_year",
+            status="resolved", reason_code=None,
+        )
+        db.record_field_resolution(
+            request_id=42, field_name="catalog_number",
+            status="unresolved_404", reason_code="http_404",
+        )
+        self.assertEqual(len(db.field_resolutions), 2)
+        self.assertEqual(
+            db.get_field_resolution(42, "release_group_year")["status"],  # type: ignore[index]
+            "resolved",
+        )
+        self.assertEqual(
+            db.get_field_resolution(42, "catalog_number")["status"],  # type: ignore[index]
+            "unresolved_404",
+        )
+
+    def test_get_field_resolution_returns_none_when_absent(self):
+        db = FakePipelineDB()
+        self.assertIsNone(db.get_field_resolution(42, "release_group_year"))
+
+
+# ---------------------------------------------------------------------------
 # Persisted search plans (U1) — fake parity
 # ---------------------------------------------------------------------------
 

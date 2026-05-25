@@ -3757,6 +3757,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
     DELETE_REQUIRED_FIELDS = {"status", "id"}
 
     def setUp(self) -> None:
+        # ``mock_db`` is class-scoped; reset call history so U4's
+        # assertions on ``update_request_fields.call_args_list`` see only
+        # the calls from the current test, not the previous one.
+        self.mock_db.reset_mock()
         self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
         self.mock_db.get_request_by_mb_release_id.return_value = None
         self.mock_db.get_request_by_discogs_release_id.return_value = None
@@ -3842,7 +3846,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self, mock_get_release, mock_rgy,
     ):
         """U4: reissue MB release → ``release_group_year`` is fetched
-        from the mirror and passed through to ``add_request``."""
+        from the mirror via the resolver service and written via
+        ``update_request_fields`` after the row is inserted (the resolver
+        needs a real request_id for the FK in
+        ``album_request_field_resolutions``)."""
         mock_get_release.return_value = {
             "release_group_id": "rg-kid-a",
             "artist_id": "rh-1",
@@ -3861,7 +3868,21 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         mock_rgy.assert_called_once_with("rg-kid-a")
         add_kwargs = self.mock_db.add_request.call_args.kwargs
         self.assertEqual(add_kwargs["year"], 2008)
-        self.assertEqual(add_kwargs["release_group_year"], 2000)
+        # add_request no longer carries release_group_year directly; the
+        # resolver service writes it via update_request_fields once the
+        # FK in album_request_field_resolutions is satisfiable.
+        update_calls = self.mock_db.update_request_fields.call_args_list
+        rg_year_writes = [
+            c for c in update_calls
+            if "release_group_year" in c.kwargs
+        ]
+        self.assertEqual(len(rg_year_writes), 1)
+        self.assertEqual(
+            rg_year_writes[0].kwargs["release_group_year"], 2000,
+        )
+        self.assertEqual(
+            rg_year_writes[0].kwargs.get("is_va_compilation"), False,
+        )
 
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
     @patch("web.routes.pipeline.mb_api.get_release")
@@ -3887,7 +3908,15 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         add_kwargs = self.mock_db.add_request.call_args.kwargs
         self.assertEqual(add_kwargs["year"], 2007)
-        self.assertEqual(add_kwargs["release_group_year"], 2007)
+        update_calls = self.mock_db.update_request_fields.call_args_list
+        rg_year_writes = [
+            c for c in update_calls
+            if "release_group_year" in c.kwargs
+        ]
+        self.assertEqual(len(rg_year_writes), 1)
+        self.assertEqual(
+            rg_year_writes[0].kwargs["release_group_year"], 2007,
+        )
 
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
     @patch("web.routes.pipeline.mb_api.get_release")
@@ -3895,7 +3924,11 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self, mock_get_release, mock_rgy,
     ):
         """U4: 404 from the release-group fetch → ``release_group_year``
-        is NULL on the new row, no error raised, request still added."""
+        is NULL on the new row, no error raised, request still added.
+        The resolver service surfaces 404 / unparseable as
+        ``unresolved_field_missing_upstream``; the helper writes
+        ``is_va_compilation`` but never writes a NULL
+        ``release_group_year`` (only resolved values land on the row)."""
         mock_get_release.return_value = {
             "release_group_id": "rg-missing",
             "artist_id": "a-1",
@@ -3915,7 +3948,13 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                 "pipeline add response (rg 404)")
         add_kwargs = self.mock_db.add_request.call_args.kwargs
         self.assertEqual(add_kwargs["year"], 2020)
-        self.assertIsNone(add_kwargs["release_group_year"])
+        update_calls = self.mock_db.update_request_fields.call_args_list
+        rg_year_writes = [
+            c for c in update_calls
+            if "release_group_year" in c.kwargs
+        ]
+        self.assertEqual(rg_year_writes, [],
+                         "unresolved rg_year must NOT be written")
 
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
     @patch("web.routes.pipeline.mb_api.get_release")
@@ -3923,8 +3962,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self, mock_get_release, mock_rgy,
     ):
         """U4: when MB doesn't return a ``release_group_id`` (e.g. very
-        old data), the helper isn't called and ``release_group_year`` is
-        left NULL."""
+        old data), the resolver's release-group-year branch sees no
+        rg_id and returns ``unresolved_malformed`` without touching the
+        mirror; ``release_group_year`` is left NULL on the row."""
         mock_get_release.return_value = {
             # No release_group_id key — get() returns None.
             "artist_id": "a-1",
@@ -3940,8 +3980,47 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_rgy.assert_not_called()
-        add_kwargs = self.mock_db.add_request.call_args.kwargs
-        self.assertIsNone(add_kwargs["release_group_year"])
+        update_calls = self.mock_db.update_request_fields.call_args_list
+        rg_year_writes = [
+            c for c in update_calls
+            if "release_group_year" in c.kwargs
+        ]
+        self.assertEqual(rg_year_writes, [],
+                         "unresolved rg_year must NOT be written")
+
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_va_compilation_flag_set(
+        self, mock_get_release, mock_rgy,
+    ):
+        """U4 web happy path for VA: a release-group typed as
+        Compilation flips ``is_va_compilation=True`` once at enqueue,
+        via the resolver service detecting the type on rule 2."""
+        mock_get_release.return_value = {
+            "release_group_id": "rg-va",
+            "artist_id": "a-1",
+            "artist_name": "Various Artists",
+            "title": "Tarantino Presents",
+            "year": 2008,
+            "country": "US",
+            "tracks": [{"title": "T1"}],
+            # The resolver's track_artist / release_group_id resolvers
+            # also fetch via the same mock; surface the Compilation
+            # primary-type so rule 2 fires.
+            "release-group": {"primary-type": "Compilation"},
+        }
+        mock_rgy.return_value = 2008
+
+        status, _data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "va-mbid"})
+        self.assertEqual(status, 200)
+        update_calls = self.mock_db.update_request_fields.call_args_list
+        va_writes = [
+            c for c in update_calls
+            if c.kwargs.get("is_va_compilation") is True
+        ]
+        self.assertGreaterEqual(len(va_writes), 1,
+                                "is_va_compilation=True must be written")
 
     def test_pipeline_add_mb_integration_persists_release_group_year(self):
         """U4 integration: full add-from-web flow against ``FakePipelineDB``
@@ -4266,7 +4345,15 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                    {"mb_release_id": "abc-123"})
 
         self.assertEqual(status, 200)
-        mock_get_release.assert_called_once_with("abc-123", fresh=True)
+        # ``get_release`` is now called multiple times — once by the
+        # add handler and again by the U4 resolver service's release_group_id /
+        # track_artist / catalog_number resolvers. Every call MUST go
+        # through ``fresh=True`` so the pipeline DB never persists a
+        # stale cache snapshot.
+        self.assertGreaterEqual(mock_get_release.call_count, 1)
+        for call in mock_get_release.call_args_list:
+            self.assertEqual(call.args, ("abc-123",))
+            self.assertEqual(call.kwargs, {"fresh": True})
 
     @patch("routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_fetches_release_fresh(self, mock_get_release):
@@ -4285,7 +4372,13 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
                                    {"discogs_release_id": "83182"})
 
         self.assertEqual(status, 200)
-        mock_get_release.assert_called_once_with(83182, fresh=True)
+        # Same as the MB branch: post-U4 the resolver service also goes
+        # through ``get_release(fresh=True)``. Every call must bypass
+        # the cache.
+        self.assertGreaterEqual(mock_get_release.call_count, 1)
+        for call in mock_get_release.call_args_list:
+            self.assertEqual(call.args, (83182,))
+            self.assertEqual(call.kwargs, {"fresh": True})
 
     @patch("web.routes.pipeline.finalize_request")
     @patch("routes.pipeline.mb_api.get_release")

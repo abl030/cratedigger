@@ -50,6 +50,7 @@ def make_db():
         "source_denylist",
         "search_log",
         "download_log",
+        "album_request_field_resolutions",  # migration 030
         "album_tracks",
         "album_requests",
     ]:
@@ -2543,86 +2544,6 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertFalse(req["verified_lossless"])
         self.assertIsNone(req["current_spectral_grade"])
         self.assertIsNone(req["current_spectral_bitrate"])
-
-
-@requires_postgres
-class TestReleaseGroupYearColumn(unittest.TestCase):
-    """U3 / R9 — ``album_requests.release_group_year`` column wiring.
-
-    The migration is verified in ``tests/test_migrator.py``. These tests
-    cover ``PipelineDB.set_release_group_year`` and
-    ``get_requests_missing_release_group_year`` against real PostgreSQL.
-    """
-
-    def setUp(self):
-        self.db = make_db()
-
-    def tearDown(self):
-        self.db.close()
-
-    def test_get_request_round_trips_release_group_year(self):
-        rid = self.db.add_request(
-            mb_release_id="rg-year-roundtrip",
-            mb_release_group_id="rg-uuid-1",
-            artist_name="A", album_title="B", source="request",
-        )
-        req = self.db.get_request(rid)
-        assert req is not None
-        # Default is NULL — the column has no default in the migration.
-        self.assertIsNone(req["release_group_year"])
-
-        self.db.set_release_group_year(rid, 2000)
-        req2 = self.db.get_request(rid)
-        assert req2 is not None
-        self.assertEqual(req2["release_group_year"], 2000)
-
-    def test_set_to_none_clears_the_column(self):
-        rid = self.db.add_request(
-            mb_release_id="rg-year-clear",
-            mb_release_group_id="rg-uuid-clear",
-            artist_name="A", album_title="B", source="request",
-        )
-        self.db.set_release_group_year(rid, 1980)
-        self.db.set_release_group_year(rid, None)
-        req = self.db.get_request(rid)
-        assert req is not None
-        self.assertIsNone(req["release_group_year"])
-
-    def test_get_requests_missing_release_group_year_filters_correctly(self):
-        # Has RG, no year → returned.
-        needs = self.db.add_request(
-            mb_release_id="needs-year",
-            mb_release_group_id="rg-needs",
-            artist_name="A", album_title="B", source="request",
-        )
-        # Has RG and year → excluded.
-        has = self.db.add_request(
-            mb_release_id="has-year",
-            mb_release_group_id="rg-has",
-            artist_name="A", album_title="B", source="request",
-        )
-        self.db.set_release_group_year(has, 1999)
-        # No RG → excluded (the generator's RG slot wouldn't fire either).
-        no_rg = self.db.add_request(
-            discogs_release_id="555",
-            artist_name="A", album_title="B", source="request",
-        )
-
-        rows = self.db.get_requests_missing_release_group_year()
-        ids = {r["id"] for r in rows}
-        self.assertIn(needs, ids)
-        self.assertNotIn(has, ids)
-        self.assertNotIn(no_rg, ids)
-
-    def test_missing_year_query_respects_limit(self):
-        for i in range(5):
-            self.db.add_request(
-                mb_release_id=f"rg-limit-{i}",
-                mb_release_group_id=f"rg-limit-uuid-{i}",
-                artist_name="A", album_title="B", source="request",
-            )
-        rows = self.db.get_requests_missing_release_group_year(limit=2)
-        self.assertEqual(len(rows), 2)
 
 
 @requires_postgres
@@ -6449,6 +6370,120 @@ class TestPipelineDBReconnectOnDeadConn(unittest.TestCase):
         # Only the original conn was used; no reconnect.
         self.assertEqual(db.conn, live_but_failing_conn)
         self.assertEqual(len(live_but_failing_conn.cursors), 1)
+
+
+@requires_postgres
+class TestFieldResolutionRecording(unittest.TestCase):
+    """``record_field_resolution`` UPSERT contract against real PG.
+
+    Side table: ``album_request_field_resolutions`` (migration 030).
+    Tests pin the UPSERT semantics: fresh row carries ``attempts=1``;
+    conflict increments ``attempts`` and updates status/reason/timestamp.
+    """
+
+    def _seed_request(self, db):
+        req_id = db.add_request(
+            mb_release_id="rec-mbid-0001",
+            mb_release_group_id=None,
+            mb_artist_id=None,
+            discogs_release_id=None,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            year=2026,
+            country="US",
+            source="request",
+        )
+        return req_id
+
+    def test_first_call_inserts_row_with_attempts_one(self):
+        db = make_db()
+        req_id = self._seed_request(db)
+
+        db.record_field_resolution(
+            request_id=req_id,
+            field_name="release_group_year",
+            status="resolved",
+            reason_code=None,
+        )
+
+        row = db.get_field_resolution(req_id, "release_group_year")
+        assert row is not None
+        self.assertEqual(row["status"], "resolved")
+        self.assertIsNone(row["reason_code"])
+        self.assertEqual(row["attempts"], 1)
+        self.assertIsNotNone(row["resolved_at"])
+
+    def test_conflict_increments_attempts_and_updates_fields(self):
+        db = make_db()
+        req_id = self._seed_request(db)
+
+        db.record_field_resolution(
+            req_id, "release_group_year",
+            "unresolved_mirror_unavailable", "URLError",
+        )
+        # Capture the first row's resolved_at to assert it advances.
+        first = db.get_field_resolution(req_id, "release_group_year")
+        assert first is not None
+        first_resolved_at = first["resolved_at"]
+
+        # Sleep enough to ensure NOW() advances (microsecond resolution
+        # may be the same on very fast machines; use a small delay).
+        import time
+        time.sleep(0.05)
+
+        db.record_field_resolution(
+            req_id, "release_group_year",
+            "resolved", None,
+        )
+
+        row = db.get_field_resolution(req_id, "release_group_year")
+        assert row is not None
+        self.assertEqual(row["status"], "resolved")
+        self.assertIsNone(row["reason_code"])
+        self.assertEqual(row["attempts"], 2)
+        self.assertGreater(row["resolved_at"], first_resolved_at)
+
+    def test_unique_constraint_one_row_per_field(self):
+        """UNIQUE(request_id, field_name) — distinct field_name gives a 2nd row."""
+        db = make_db()
+        req_id = self._seed_request(db)
+
+        db.record_field_resolution(
+            req_id, "release_group_year", "resolved", None,
+        )
+        db.record_field_resolution(
+            req_id, "catalog_number", "unresolved_404", "http_404",
+        )
+
+        cur = db._execute(
+            "SELECT COUNT(*)::int AS n FROM album_request_field_resolutions "
+            "WHERE request_id = %s",
+            (req_id,),
+        )
+        row = cur.fetchone() or {}
+        self.assertEqual(row.get("n"), 2)
+
+    def test_fk_cascade_on_request_delete(self):
+        db = make_db()
+        req_id = self._seed_request(db)
+        db.record_field_resolution(
+            req_id, "release_group_year", "resolved", None,
+        )
+        # Sanity check.
+        self.assertIsNotNone(
+            db.get_field_resolution(req_id, "release_group_year"),
+        )
+        # Delete the parent.
+        db._execute("DELETE FROM album_requests WHERE id = %s", (req_id,))
+        # Migration 030's FK is ON DELETE CASCADE.
+        self.assertIsNone(
+            db.get_field_resolution(req_id, "release_group_year"),
+        )
+
+    def test_get_field_resolution_returns_none_when_absent(self):
+        db = make_db()
+        req_id = self._seed_request(db)
+        self.assertIsNone(db.get_field_resolution(req_id, "track_artist"))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,21 @@ A quality-obsessed music acquisition pipeline. Searches Soulseek via slskd, vali
 
 Originally inspired by [mrusse/soularr](https://github.com/mrusse/soularr) ([Ko-Fi](https://ko-fi.com/mrusse)). Has since diverged into its own project — the pipeline DB is the sole source of truth, and the web UI is the album picker.
 
+## Why this exists — the archivist frame
+
+Cratedigger is a **music archival tool first, an acquisition pipeline second**. The operator is an archivist who has been on Soulseek for 20+ years and treats this work as preservation: most of the long-tail music here is genuinely vanishing — niche pressings, Australian indie, 7" singles, BBC PlaySchool records from 1972, demos that lived on one peer who logged off years ago. A real workflow loop is *buy out-of-print release on Discogs → rip → share back via slskd → catch the moments other archivists drop in with their own copies before they vanish again*. This is the inverse of a piracy tool — it's for the autistic-archivist subset of P2P users who file-share to save music before it drops off the radar.
+
+**This frame is load-bearing. Every architectural invariant below flows from it:**
+
+- **Strict pressing identity.** A request points at a specific MB release MBID or Discogs release ID. The matcher NEVER substitutes a sibling pressing automatically, even when the network has the same album in a slightly different track count. Different pressings ARE different releases — the operator's curation depends on the distinction. The 14-track 2008 Kid A reissue is not the 10-track 2000 original.
+- **The system never stops searching.** Cadence is constant forever; never auto-throttled based on apparent unfindability. A request that's "unfindable" today might be findable tomorrow when a fresh peer arrives — that's the entire reason the watch loop exists. Surfacing the unfindable cohort to the operator is the right move; throttling search on it is a product violation.
+- **The system never auto-decides anything irreversible.** Surfacing is fine ("we couldn't find this exact pressing but a sibling is available in FLAC"). Replace, remove-request, accept-different-pressing — those decisions belong to the operator. Cratedigger does not get to be "smart" on the operator's behalf.
+- **No adapter code between MB and Discogs.** Both feed the same columns in the same shape. Curation is data-source-agnostic — a Discogs-sourced Kid A request gets the same strict-pressing treatment as an MB-sourced one.
+- **Long-tail-rescue is a celebrated event.** When a request that's been categorised unfindable for weeks transitions to `imported` because a peer finally appeared with it, that's first-class audit data (`rescued_at` + `prior_unfindable_category` on `album_requests`). The product narrative justifies the watch-loop's existence; the audit trail proves it works.
+- **Single-operator, no backwards-compat for the rest of the world.** Cratedigger has exactly one user: the operator who runs this fork. There is no "other people's installs" to worry about. Backfills aren't product code — they're one-shots the agent (or operator) runs during a deploy window and then throws away. Schema migrations are forward-only; once applied, the code assumes the new state with no defensive fallback for "what if the migration didn't run." No retry-window machinery in long-lived scripts for re-running operations that happen exactly once. No `if old_shape_exists: …` compatibility shims. If a follow-up PR makes the previous one's helper obsolete, **delete the helper**, don't leave it behind as deprecated code for a phantom audience. The pattern of accumulating one-shot operational machinery is itself a product bug.
+
+If a future design decision drifts toward "good enough" matches, "smart" defaults, auto-throttling apparently-dead requests, or carrying around dead one-shot infrastructure for "what if we need to rerun it," that drift is a bug. Push back.
+
 ## Critical invariants (read first — these will bite you)
 
 1. **Run `hostname` at the start of every chat.** `proxmox-vm` = doc1, `doc2` = doc2, `framework` = Framework laptop. `DESKTOP-*` = Windows laptop. You are likely already on doc1 — do NOT ssh to doc1 from doc1.

@@ -52,6 +52,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "year": 2024,
         # Migration 026 — release-group's first-release year (U3 / R9).
         "release_group_year": None,
+        # Migration 028 — VA detection flag (U4). NOT NULL DEFAULT FALSE.
+        "is_va_compilation": False,
         "country": "US",
         "format": None,
         "source": "request",

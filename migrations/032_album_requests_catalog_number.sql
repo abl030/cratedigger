@@ -1,0 +1,32 @@
+-- 032_album_requests_catalog_number.sql
+--
+-- PR1 of search-plan iteration 2 (post-review patch): add the
+-- ``catalog_number`` column to ``album_requests`` so the resolver-
+-- produced value actually has a home.
+--
+-- This was a gap caught by ce-code-review on PR #370. The U2 resolver
+-- (``resolve_catalog_number`` in ``lib/field_resolver_service.py``)
+-- fetches the catalog number from MB ``labels[*].catalog-number`` or
+-- Discogs ``labels[*].catno``. The U3 backfill and U4 inline-enqueue
+-- paths both invoke it. Before this migration there was no parent
+-- column for the resolved value -- the side table recorded the
+-- resolution status only, and a misleading comment in the backfill
+-- claimed ``reason_code`` carried the value (it does not; reason_code
+-- is for failure metadata).
+--
+-- The Phase 2 generator (PR2) reads ``request.catalog_number`` from
+-- this column when emitting the ``catalog_number`` strategy slot --
+-- without this column, that slot would always be omitted because the
+-- resolved value was being silently discarded.
+--
+-- See:
+--   docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md (R2)
+--   docs/plans/2026-05-25-001-feat-search-plan-iteration-2-plan.md (U2, U3, U4)
+--
+-- Nullable: most requests will not have a populated ``catalog_number``
+-- (no MB catalog-number metadata, no Discogs catno, or upstream data
+-- thinner than expected). The generator skips the catalog_number slot
+-- when this column is NULL.
+
+ALTER TABLE album_requests
+    ADD COLUMN catalog_number TEXT;
