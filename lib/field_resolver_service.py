@@ -63,11 +63,14 @@ FIELD_TRACK_ARTIST = "track_artist"
 FIELD_CATALOG_NUMBER = "catalog_number"
 
 
-# VA-detection identity constants. Mirror the existing constants in
-# ``web/mb.py::VA_ARTIST_MBID`` and ``web/discogs.py::VA_ARTIST_ID`` so
-# the detection logic doesn't have to reach into route modules.
-MB_VA_ARTIST_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
-DISCOGS_VA_ARTIST_ID = "194"
+# Canonical VA identity constants — single declaration site at
+# ``lib/va_identity.py``. Re-exported here so the existing import paths
+# (``from lib.field_resolver_service import MB_VA_ARTIST_MBID``) keep
+# working without forcing every caller to learn the new module.
+from lib.va_identity import (  # noqa: E402
+    DISCOGS_VA_ARTIST_ID,
+    MB_VA_ARTIST_MBID,
+)
 
 
 # Network-style exceptions we treat as transient mirror failures
@@ -84,17 +87,23 @@ _MIRROR_UNAVAILABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
 class ResolverResult(msgspec.Struct, kw_only=True):
     """Typed result of a single field resolution attempt.
 
-    Crosses the wire — encoded into the side-table row and may surface
-    in operator triage payloads — so it is a ``msgspec.Struct`` per
-    the wire-boundary rule. ``value`` is intentionally typed ``Any``
-    because each resolver returns a different value shape (int year,
-    str rg_id, str catno, str track_artist). The status is a tagged
-    enum; consumers branch on ``status == "resolved"`` rather than
-    truthiness of ``value``.
+    In-process container — the resolver service produces it, the
+    backfill/enqueue paths consume it, and the side-table row is built
+    from ``status`` + ``reason_code`` separately. ``msgspec.Struct``
+    purely for fast attribute access and clear field types; not a
+    wire-boundary type. The ``status`` is a tagged enum; consumers
+    branch on ``status == "resolved"`` rather than truthiness of
+    ``value``.
+
+    ``value`` is narrowed to ``int | str | None`` — the union of every
+    concrete resolver's output: ``int`` for release_group_year, ``str``
+    for release_group_id, catalog_number, and track_artist. Listing
+    the concrete types lets static analysis catch a future resolver
+    that returns a wider shape without an explicit Union widening.
     """
 
     field_name: str
-    value: Any | None = None
+    value: int | str | None = None
     status: ResolverStatus
     reason_code: str | None = None
 
@@ -131,10 +140,6 @@ release_group_id resolver and the track-artist resolver."""
 DiscogsReleaseFn = Callable[..., dict[str, Any]]
 """``discogs_get_release(release_id, *, fresh: bool=False) -> dict``.
 Used by the release_group_id resolver and the track-artist resolver."""
-
-DiscogsMasterReleasesFn = Callable[[str], dict[str, Any]]
-"""``discogs_get_master_releases(master_id) -> dict``. Used by the
-catalog-number resolver for Discogs requests."""
 
 
 def _looks_numeric(value: Any) -> bool:
@@ -232,11 +237,6 @@ def _default_discogs_get_release(
 ) -> dict[str, Any]:
     from web.discogs import get_release
     return get_release(int(release_id), fresh=fresh)
-
-
-def _default_discogs_get_master_releases(master_id: str) -> dict[str, Any]:
-    from web.discogs import get_master_releases
-    return get_master_releases(int(master_id))
 
 
 # === Helpers for record-keeping =========================================
@@ -533,32 +533,10 @@ def resolve_track_artists(
     discogs_release_id = request.get("discogs_release_id")
 
     def _record_summary(per_track: list[ResolverResult]) -> None:
-        if not per_track:
-            summary = ResolverResult(
-                field_name=FIELD_TRACK_ARTIST,
-                status="unresolved_field_missing_upstream",
-                reason_code="no_tracks_returned",
-            )
-            _record(pdb, request_id, FIELD_TRACK_ARTIST, summary)
-            return
-        any_resolved = any(r.status == "resolved" for r in per_track)
-        if any_resolved:
-            summary = ResolverResult(
-                field_name=FIELD_TRACK_ARTIST,
-                status="resolved",
-            )
-        else:
-            # Surface the first failure -- they're all the same shape
-            # when the parent release call itself failed (the per-track
-            # rows mirror the parent's status), so picking [0] is
-            # representative.
-            first = per_track[0]
-            summary = ResolverResult(
-                field_name=FIELD_TRACK_ARTIST,
-                status=first.status,
-                reason_code=first.reason_code,
-            )
-        _record(pdb, request_id, FIELD_TRACK_ARTIST, summary)
+        _record(
+            pdb, request_id, FIELD_TRACK_ARTIST,
+            _build_track_artist_summary(per_track),
+        )
 
     if not mb_release_id and not discogs_release_id:
         result = ResolverResult(
@@ -684,29 +662,42 @@ def _resolve_mb_track_artists(
                     reason_code="mb_payload_lacks_per_track_artist",
                 ))
 
-    # Summary row.
-    if per_track:
-        any_resolved = any(r.status == "resolved" for r in per_track)
-        if any_resolved:
-            summary = ResolverResult(
-                field_name=FIELD_TRACK_ARTIST,
-                status="resolved",
-            )
-        else:
-            first = per_track[0]
-            summary = ResolverResult(
-                field_name=FIELD_TRACK_ARTIST,
-                status=first.status,
-                reason_code=first.reason_code,
-            )
-    else:
-        summary = ResolverResult(
+    summary = _build_track_artist_summary(per_track)
+    _record(pdb, request_id, FIELD_TRACK_ARTIST, summary)
+    return per_track or [summary]
+
+
+def _build_track_artist_summary(
+    per_track: list[ResolverResult],
+) -> ResolverResult:
+    """Collapse a list of per-track ResolverResults into the summary
+    row that lands in the side table for ``FIELD_TRACK_ARTIST``.
+
+    Single canonical place for the "any resolved → resolved; otherwise
+    surface the first failure" rule. Used by ``resolve_track_artists``,
+    ``_resolve_mb_track_artists``, and ``_resolve_discogs_track_artists``;
+    previously each had its own near-identical copy of the logic.
+    """
+    if not per_track:
+        return ResolverResult(
             field_name=FIELD_TRACK_ARTIST,
             status="unresolved_field_missing_upstream",
             reason_code="no_tracks_returned",
         )
-    _record(pdb, request_id, FIELD_TRACK_ARTIST, summary)
-    return per_track or [summary]
+    if any(r.status == "resolved" for r in per_track):
+        return ResolverResult(
+            field_name=FIELD_TRACK_ARTIST,
+            status="resolved",
+        )
+    # All per-track entries failed; the first row is representative
+    # (the parent-call failure path mirrors its status across every
+    # synthesised track, so [0] is canonical).
+    first = per_track[0]
+    return ResolverResult(
+        field_name=FIELD_TRACK_ARTIST,
+        status=first.status,
+        reason_code=first.reason_code,
+    )
 
 
 def _format_mb_artist_credit(ac: list[Any]) -> str:
@@ -786,19 +777,7 @@ def _resolve_discogs_track_artists(
             reason_code="discogs_track_no_artist",
         ))
 
-    any_resolved = any(r.status == "resolved" for r in per_track)
-    if any_resolved:
-        summary = ResolverResult(
-            field_name=FIELD_TRACK_ARTIST,
-            status="resolved",
-        )
-    else:
-        first = per_track[0]
-        summary = ResolverResult(
-            field_name=FIELD_TRACK_ARTIST,
-            status=first.status,
-            reason_code=first.reason_code,
-        )
+    summary = _build_track_artist_summary(per_track)
     _record(pdb, request_id, FIELD_TRACK_ARTIST, summary)
     return per_track
 

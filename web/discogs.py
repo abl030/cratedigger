@@ -37,7 +37,9 @@ LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS = 20
 # The resolver short-circuits to a single-release / single-master fallback
 # card when a release credits this ID. Stored as a string for consistent
 # comparison against `artist_id` fields, which are always normalised to str.
-VA_ARTIST_ID = "194"
+# Single declaration site at ``lib/va_identity.py`` — re-exported here so
+# the existing ``from web.discogs import VA_ARTIST_ID`` imports keep working.
+from lib.va_identity import DISCOGS_VA_ARTIST_ID as VA_ARTIST_ID  # noqa: E402
 
 
 def _get(url: str, *, timeout: int = DEFAULT_HTTP_TIMEOUT_SECONDS) -> dict:

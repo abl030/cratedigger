@@ -449,7 +449,7 @@ def _cmd_add_discogs(db, discogs_id, source):
     # no MB release/release-group payload available so the resolver only
     # sees the discogs release (Rule 1 of VA detection still fires on
     # canonical-ID match; rules 2 + 3 are MB-only).
-    _resolve_and_update_after_add(
+    resolved = _resolve_and_update_after_add(
         db, req_id,
         mb_release_id=None,
         discogs_release_id=discogs_id,
@@ -464,6 +464,7 @@ def _cmd_add_discogs(db, discogs_id, source):
         year=release.get("year"),
         tracks=tracks,
         source=source,
+        release_group_year=resolved.release_group_year,
     )
 
 

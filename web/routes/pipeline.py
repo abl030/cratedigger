@@ -1464,7 +1464,7 @@ def post_pipeline_add(h, body: dict) -> None:
         # resolver only sees the discogs release payload (Rule 1 of
         # VA detection covers the canonical ID match; rules 2 + 3 are
         # MB-only).
-        _resolve_and_update_after_add(
+        resolved = _resolve_and_update_after_add(
             s._db(),
             req_id,
             mb_release_id=None,
@@ -1481,6 +1481,7 @@ def post_pipeline_add(h, body: dict) -> None:
             year=release.get("year"),
             tracks=release.get("tracks") or [],
             source=source,
+            release_group_year=resolved.release_group_year,
         )
 
         h._json({

@@ -167,6 +167,22 @@ class TestRetryWindow(unittest.TestCase):
             status="unresolved_malformed", resolved_at=resolved_at, now=now,
         ))
 
+    def test_unresolved_mirror_unavailable_blocks_within_1d(self):
+        now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+        resolved_at = now - timedelta(hours=23)
+        self.assertFalse(_is_retry_eligible(
+            status="unresolved_mirror_unavailable",
+            resolved_at=resolved_at, now=now,
+        ))
+
+    def test_unresolved_mirror_unavailable_releases_after_1d(self):
+        now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+        resolved_at = now - timedelta(hours=25)
+        self.assertTrue(_is_retry_eligible(
+            status="unresolved_mirror_unavailable",
+            resolved_at=resolved_at, now=now,
+        ))
+
     def test_resolved_is_permanently_sticky(self):
         now = datetime(2026, 5, 25, tzinfo=timezone.utc)
         resolved_at = now - timedelta(days=365 * 50)
@@ -205,17 +221,18 @@ class TestRetryWindow(unittest.TestCase):
         ))
 
     def test_retry_window_table_covers_all_resolver_statuses(self):
-        """Regression guard: any new status in the resolver must come
-        with a window entry here. Today's set is fixed."""
-        for status in (
-            "resolved",
-            "unresolved_404",
-            "unresolved_field_missing_upstream",
-            "unresolved_timeout",
-            "unresolved_mirror_unavailable",
-            "unresolved_malformed",
-        ):
-            self.assertIn(status, _RETRY_WINDOWS)
+        """Regression guard: any new status added to ResolverStatus must
+        come with a window entry here. Using ``typing.get_args`` so the
+        test self-maintains — pre-fix this was a hardcoded tuple that
+        wouldn't surface a missed window when a new variant landed."""
+        from typing import get_args
+        from lib.field_resolver_service import ResolverStatus
+        for status in get_args(ResolverStatus):
+            with self.subTest(status=status):
+                self.assertIn(
+                    status, _RETRY_WINDOWS,
+                    f"ResolverStatus {status!r} missing from _RETRY_WINDOWS",
+                )
 
 
 # --------------------------------------------------------------------- #

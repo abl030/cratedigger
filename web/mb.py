@@ -26,8 +26,10 @@ USER_AGENT = "cratedigger-web/1.0"
 
 # Canonical Various Artists MBID. Used by the resolver and the browse-tab
 # VA short-circuit (web/js/browse.js) to keep VA off the artist-view path
-# (the MB artist→release-group endpoint takes ~23s for VA).
-VA_ARTIST_MBID = "89ad4ac3-39f7-470e-963a-56509c546377"
+# (the MB artist→release-group endpoint takes ~23s for VA). Single
+# declaration site at ``lib/va_identity.py`` — re-exported here so the
+# existing ``from web.mb import VA_ARTIST_MBID`` imports keep working.
+from lib.va_identity import MB_VA_ARTIST_MBID as VA_ARTIST_MBID  # noqa: E402
 
 
 def _get(url):

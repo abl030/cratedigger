@@ -700,6 +700,38 @@ class TestResolveAll(unittest.TestCase):
         )
         self.assertFalse(result.is_va_compilation)
 
+    def test_va_negative_for_discogs_release_with_non_va_artist_id(self):
+        """Regression guard parallel to the MB-side negative test: a
+        Discogs release whose primary artist id is NOT the canonical
+        194 must NOT flip is_va_compilation, even if the artist name
+        happens to contain 'Various' or similar. Rule 1 is identity,
+        not string."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=141,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            discogs_release_id="999999",
+        )
+
+        # Construct a Discogs payload with a non-VA artist id. Rule 1
+        # MUST consult artist_id identity (not artist name).
+        discogs_payload = {
+            "id": "999999",
+            "artists": [{"id": 12345, "name": "Various Pulp"}],
+            "tracks": [],
+            "labels": [],
+        }
+
+        result = resolve_all(
+            req, db,
+            discogs_get_release=lambda _rid, *, fresh=True: discogs_payload,
+        )
+        self.assertFalse(result.is_va_compilation,
+                         "is_va_compilation must rely on identity, not name string")
+
     def test_discogs_va_detection_via_payload(self):
         """Rule 1 for Discogs: primary artist id 194 fires via payload."""
         from lib.field_resolver_service import resolve_all
