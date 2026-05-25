@@ -583,23 +583,99 @@ class TestDetectVaCompilation(unittest.TestCase):
             req, discogs_release_payload=discogs_payload,
         ))
 
-    def test_rule2_release_group_primary_type_compilation(self):
+    def test_rule2_release_group_primary_type_compilation_with_divergent_tracks(self):
+        """Rule 2 (TIGHTENED #373, 2026-05-25): Compilation rg + divergent
+        track artist-credits → True. The divergence requirement is what
+        distinguishes real VA from greatest-hits / single-artist comps.
+        """
         req = _request(mb_artist_id="some-other-artist-id")
         rg_payload = {"primary-type": "Compilation", "secondary-types": []}
+        release_payload = {
+            "artist-credit": [{"name": "Various", "joinphrase": ""}],
+            "media": [
+                {
+                    "tracks": [
+                        {"title": "Track 1",
+                         "artist-credit": [{"name": "Dick Dale"}]},
+                        {"title": "Track 2",
+                         "artist-credit": [{"name": "Surfaris"}]},
+                    ],
+                },
+            ],
+        }
         self.assertTrue(detect_va_compilation(
-            req, mb_release_group_payload=rg_payload,
+            req,
+            mb_release_payload=release_payload,
+            mb_release_group_payload=rg_payload,
         ))
 
-    def test_rule2_release_group_secondary_type_compilation(self):
+    def test_rule2_release_group_secondary_type_compilation_with_divergent_tracks(self):
+        """Secondary-type Compilation + divergent track credits → True."""
         req = _request(mb_artist_id="some-other-artist-id")
         release_payload = {
+            "artist-credit": [{"name": "Various", "joinphrase": ""}],
             "release-group": {
                 "primary-type": "Album",
                 "secondary-types": ["Compilation"],
             },
+            "media": [
+                {
+                    "tracks": [
+                        {"title": "Track 1",
+                         "artist-credit": [{"name": "Artist X"}]},
+                        {"title": "Track 2",
+                         "artist-credit": [{"name": "Artist Y"}]},
+                    ],
+                },
+            ],
         }
         self.assertTrue(detect_va_compilation(
             req, mb_release_payload=release_payload,
+        ))
+
+    def test_rule2_greatest_hits_single_artist_comp_is_not_va(self):
+        """Regression guard for #373: greatest-hits releases are MB-tagged
+        as Compilation primary-type, but every track shares the album
+        artist. Without the per-track-divergence requirement, Rule 2
+        false-flagged these as VA — the VA strategy mix is strictly
+        worse for single-artist comps (drops default/literal, the
+        natural query shape when every track is by the same artist).
+        """
+        req = _request(mb_artist_id="some-other-artist-id")
+        rg_payload = {"primary-type": "Compilation", "secondary-types": []}
+        release_payload = {
+            "artist-credit": [{"name": "The Beatles", "joinphrase": ""}],
+            "media": [
+                {
+                    "tracks": [
+                        {"title": "Track 1",
+                         "artist-credit": [{"name": "The Beatles"}]},
+                        {"title": "Track 2",
+                         "artist-credit": [{"name": "The Beatles"}]},
+                        {"title": "Track 3",
+                         "artist-credit": [{"name": "The Beatles"}]},
+                    ],
+                },
+            ],
+        }
+        self.assertFalse(detect_va_compilation(
+            req,
+            mb_release_payload=release_payload,
+            mb_release_group_payload=rg_payload,
+        ))
+
+    def test_rule2_compilation_rg_without_track_payload_does_not_fire(self):
+        """Compilation rg alone (no mb_release_payload tracks) → False.
+
+        Without per-track payload data we can't measure divergence, so
+        the tightened Rule 2 cannot fire. Rule 1 (canonical VA artist
+        id) still works without payload — and is the path the production
+        backfill takes for the 18 known Discogs VA rows.
+        """
+        req = _request(mb_artist_id="some-other-artist-id")
+        rg_payload = {"primary-type": "Compilation", "secondary-types": []}
+        self.assertFalse(detect_va_compilation(
+            req, mb_release_group_payload=rg_payload,
         ))
 
     def test_rule3_split_artist_joinphrase_with_divergent_track_credits(self):
@@ -666,6 +742,77 @@ class TestDetectVaCompilation(unittest.TestCase):
             artist_name="Various Artists",
         )
         self.assertFalse(detect_va_compilation(req))
+
+    # --- #373 tighten regression guards ------------------------------- #
+
+    def test_373_greatest_hits_compilation_is_not_va(self):
+        """#373 regression guard: a greatest-hits release tagged as MB
+        Compilation primary-type, with every track credited to the
+        album artist, must NOT be flagged as VA.
+
+        Pre-tightening, Rule 2 fired on Compilation rg alone and the
+        Beatles' "1962-1966" / "1967-1970" greatest-hits comps got
+        the VA strategy mix — dropping ``default``/``literal`` (the
+        natural query shapes for "Beatles 1962-1966") and substituting
+        ``va_track_artist_*`` queries that all use the same artist
+        (because every track is "The Beatles"). Strictly worse search
+        outcomes for that cohort.
+        """
+        req = _request(mb_artist_id="some-other-artist-id")
+        rg_payload = {"primary-type": "Compilation", "secondary-types": []}
+        release_payload = {
+            "artist-credit": [{"name": "The Beatles", "joinphrase": ""}],
+            "media": [
+                {
+                    "tracks": [
+                        {"title": "Love Me Do",
+                         "artist-credit": [{"name": "The Beatles"}]},
+                        {"title": "Please Please Me",
+                         "artist-credit": [{"name": "The Beatles"}]},
+                        {"title": "From Me to You",
+                         "artist-credit": [{"name": "The Beatles"}]},
+                    ],
+                },
+            ],
+        }
+        self.assertFalse(detect_va_compilation(
+            req,
+            mb_release_payload=release_payload,
+            mb_release_group_payload=rg_payload,
+        ))
+
+    def test_373_real_va_with_non_canonical_artist_is_va(self):
+        """#373 positive: a real VA compilation whose album artist
+        credit doesn't carry the canonical VA MBID (e.g. an album
+        credited to "Various" without the canonical id, or a niche
+        label sampler) but whose per-track artists genuinely diverge
+        must still be flagged as VA via the tightened Rule 2.
+
+        This is the inverse of the greatest-hits regression — Rule 2
+        SHOULD fire when divergence is real.
+        """
+        req = _request(mb_artist_id="some-other-artist-id")
+        rg_payload = {"primary-type": "Compilation", "secondary-types": []}
+        release_payload = {
+            "artist-credit": [{"name": "Various", "joinphrase": ""}],
+            "media": [
+                {
+                    "tracks": [
+                        {"title": "Misirlou",
+                         "artist-credit": [{"name": "Dick Dale"}]},
+                        {"title": "Wipe Out",
+                         "artist-credit": [{"name": "Surfaris"}]},
+                        {"title": "Pipeline",
+                         "artist-credit": [{"name": "Chantays"}]},
+                    ],
+                },
+            ],
+        }
+        self.assertTrue(detect_va_compilation(
+            req,
+            mb_release_payload=release_payload,
+            mb_release_group_payload=rg_payload,
+        ))
 
 
 # --------------------------------------------------------------------- #
@@ -907,15 +1054,28 @@ class TestResolveAll(unittest.TestCase):
         self.assertTrue(result.is_va_compilation)
 
     def test_va_detection_via_release_group_compilation_type(self):
-        """Rule 2: MB release-group primary-type 'Compilation' fires."""
+        """Rule 2 (TIGHTENED #373): MB release-group Compilation +
+        divergent per-track artist credits fires.
+        """
         from lib.field_resolver_service import resolve_all
 
         db = FakePipelineDB()
         req = _request(id=12, mb_artist_id="non-va-artist")
         mb_release = {
             "release_group_id": "rg-uuid",
+            "artist-credit": [{"name": "Various", "joinphrase": ""}],
             "release-group": {"primary-type": "Compilation"},
-            "media": [], "label-info": [],
+            "media": [
+                {
+                    "tracks": [
+                        {"title": "Track 1",
+                         "artist-credit": [{"name": "Dick Dale"}]},
+                        {"title": "Track 2",
+                         "artist-credit": [{"name": "Surfaris"}]},
+                    ],
+                },
+            ],
+            "label-info": [],
         }
 
         result = resolve_all(

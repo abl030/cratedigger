@@ -196,10 +196,12 @@ class TestGenerateSearchPlan(unittest.TestCase):
         "Optimistic",
     )
 
-    def _cfg(self, threshold: int = 5, max_track_slots: int = 3) -> SearchPlanConfig:
+    def _cfg(self, threshold: int = 5, max_track_slots: int = 4) -> SearchPlanConfig:
         # ``escalation_threshold`` is preserved on SearchPlanConfig for
         # backwards-compat but U5 collapsed default repetition to a single
         # slot; the threshold value no longer affects slot count.
+        # PR2 U8 (R3): max_track_slots default bumped from 3 to 4 so
+        # the non-VA mix emits track_0_artist through track_3_artist.
         return SearchPlanConfig(
             escalation_threshold=threshold,
             max_track_slots=max_track_slots,
@@ -236,19 +238,22 @@ class TestGenerateSearchPlan(unittest.TestCase):
         self.assertIsNone(plan.failure_reason)
         self.assertEqual(plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
 
-        # 1 default + 1 literal + 1 literal_flac + 1 literal_lossless
-        # + 1 unwild_year + 1 unwild_rg_year + 3 track = 9 slots
+        # PR2 U8: literal_lossless dropped (R1); catalog_number omitted
+        # here because the fixture has no catalog_number set; max track
+        # slots bumped from 3 to 4 (R3).
+        # 1 default + 1 literal + 1 literal_flac + 1 unwild_year
+        # + 1 unwild_rg_year + 4 track = 9 slots
         strategies = [it.strategy for it in plan.items]
         self.assertEqual(strategies, [
             "default",
             "literal",
             "literal_flac",
-            "literal_lossless",
             "unwild_year",
             "unwild_rg_year",
             "track_0_artist",
             "track_1_artist",
             "track_2_artist",
+            "track_3_artist",
         ])
 
         # Ordinals contiguous from 0
@@ -276,9 +281,7 @@ class TestGenerateSearchPlan(unittest.TestCase):
         self.assertEqual(by_strategy["default"], "*adiohead Kid A")
         self.assertEqual(by_strategy["literal"], "Radiohead Kid A")
         self.assertEqual(by_strategy["literal_flac"], "Radiohead Kid A FLAC")
-        self.assertEqual(
-            by_strategy["literal_lossless"], "Radiohead Kid A lossless",
-        )
+        self.assertNotIn("literal_lossless", by_strategy)
         self.assertEqual(by_strategy["unwild_year"], "Radiohead Kid A 2008")
         self.assertEqual(by_strategy["unwild_rg_year"], "Radiohead Kid A 2000")
         # Artist-prepended track slots — wildcarded artist token.
@@ -392,7 +395,8 @@ class TestGenerateSearchPlan(unittest.TestCase):
         )
         strategies = [it.strategy for it in plan.items]
         self.assertIn("literal_flac", strategies)
-        self.assertIn("literal_lossless", strategies)
+        # PR2 U8 (R1): literal_lossless retired — must not appear.
+        self.assertNotIn("literal_lossless", strategies)
         self.assertNotIn("unwild_rg_year", strategies)
 
     # --- short-token drop removed ----------------------------------------
@@ -567,7 +571,8 @@ class TestGenerateSearchPlan(unittest.TestCase):
         self.assertIn("default", strategies)
         self.assertIn("literal", strategies)
         self.assertIn("literal_flac", strategies)
-        self.assertIn("literal_lossless", strategies)
+        # PR2 U8 (R1): literal_lossless retired — must not appear.
+        self.assertNotIn("literal_lossless", strategies)
         self.assertIn("unwild_year", strategies)
         # No track slots and no track-tier omission record for empty.
         self.assertFalse(any(s.startswith("track_") for s in strategies))
@@ -824,34 +829,39 @@ class TestGenerateSearchPlan(unittest.TestCase):
         """
         # Snapshot output of a known release. Bumping any of these
         # expectations should require the id below to change too.
+        # PR2 U8 (2026-05-25): GENERATOR_ID bumped from
+        # "search-plan/2026-05-19-1" to "search-plan/2026-05-25-1"
+        # alongside the strategy mix overhaul.
         plan = generate_search_plan(self._snapshot(), self._cfg())
-        self.assertEqual(plan.generator_id, "search-plan/2026-05-19-1")
+        self.assertEqual(plan.generator_id, "search-plan/2026-05-25-1")
         self.assertEqual(plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
         # Pin the slot ladder shape and queries for Radiohead / Kid A /
-        # year=2008 / rg_year=2000.
+        # year=2008 / rg_year=2000. PR2 U8: literal_lossless dropped
+        # (R1); no catalog_number on the fixture so that slot is
+        # omitted; max_track_slots=4 (PR2 U8 R3) so the fixture's 6
+        # tracks now produce track_0..track_3.
         self.assertEqual(
             [(it.strategy, it.query) for it in plan.items],
             [
                 ("default", "*adiohead Kid A"),
                 ("literal", "Radiohead Kid A"),
                 ("literal_flac", "Radiohead Kid A FLAC"),
-                ("literal_lossless", "Radiohead Kid A lossless"),
                 ("unwild_year", "Radiohead Kid A 2008"),
                 ("unwild_rg_year", "Radiohead Kid A 2000"),
-                # U7 distinctiveness scoring re-orders the top-3 tracks
+                # U7 distinctiveness scoring re-orders the top-N tracks
                 # by raw-title score (longest_non_generic_token *
                 # num_non_generic_tokens). For Kid A's fixture:
                 #   Everything in Its Right Place → 10 * 5 = 50
                 #   How to Disappear Completely   → 10 * 4 = 40
                 #   The National Anthem           →  8 * 3 = 24
-                # Previously the ranker used rendered-query token count,
-                # which put "How to Disappear Completely" first because
-                # the rendered query had more tokens than "Everything"'s.
+                #   Treefingers                   → 11 * 1 = 11
+                #   Optimistic                    → 10 * 1 = 10
                 ("track_0_artist",
                  "*adiohead Everything Right Place"),
                 ("track_1_artist",
                  "*adiohead How Disappear Completely"),
                 ("track_2_artist", "*adiohead National Anthem"),
+                ("track_3_artist", "*adiohead Treefingers"),
             ],
         )
 
@@ -871,9 +881,11 @@ class TestGenerateSearchPlan(unittest.TestCase):
             )
 
     def test_max_track_slots_constant_default(self):
-        # Sanity guard so we don't accidentally drift the public default.
-        self.assertEqual(MAX_TRACK_SLOTS_PER_PLAN, 3)
-        self.assertEqual(SearchPlanConfig().max_track_slots, 3)
+        # Sanity guard so we don't accidentally drift the public
+        # default. PR2 U8 (R3) bumped from 3 to 4 so the non-VA mix
+        # emits track_0_artist through track_3_artist.
+        self.assertEqual(MAX_TRACK_SLOTS_PER_PLAN, 4)
+        self.assertEqual(SearchPlanConfig().max_track_slots, 4)
 
 
 class TestScoreTrackDistinctiveness(unittest.TestCase):
@@ -1058,7 +1070,8 @@ class TestGeneratorUsesDistinctivenessScoring(unittest.TestCase):
         track_items = [
             it for it in plan.items if it.strategy.startswith("track_")
         ]
-        self.assertEqual(len(track_items), 3)
+        # PR2 U8 (R3): MAX_TRACK_SLOTS_PER_PLAN bumped from 3 to 4.
+        self.assertEqual(len(track_items), 4)
         track_queries = [it.query for it in track_items]
         for q in track_queries:
             self.assertNotIn(
@@ -1070,6 +1083,342 @@ class TestGeneratorUsesDistinctivenessScoring(unittest.TestCase):
         joined = " | ".join(track_queries)
         self.assertIn("Everything", joined)
         self.assertIn("Disappear", joined)
+
+
+class TestGenerateSearchPlanSlotMix(unittest.TestCase):
+    """PR2 U8 — strategy mix overhaul.
+
+    SubTest matrix covering the new slot composition rules:
+    - non-VA × catno-present / catno-absent / catno-too-short
+    - non-VA × rg_year ↔ year combinations
+    - VA × volume-marker × track_artists present
+    - VA × no-volume-marker
+    - VA × no-track-artists (degradation)
+    - literal_lossless never appears (R1)
+    """
+
+    KID_A = (
+        "Everything in Its Right Place",
+        "Kid A",
+        "The National Anthem",
+        "How to Disappear Completely",
+        "Treefingers",
+        "Optimistic",
+    )
+
+    # Per-case spec: (description, snapshot kwargs, expected_present,
+    # expected_absent). Each scenario asserts the listed strategies
+    # are present (or all-present, by membership) and the listed
+    # strategies are absent. Slot ordering pinned separately in the
+    # GENERATOR_ID pin test.
+    CASES = [
+        (
+            "non_va_catno_present_rg_year_present",
+            {
+                "artist_name": "Radiohead",
+                "title": "Kid A",
+                "year": "2008",
+                "track_titles": KID_A,
+                "prepend_artist": True,
+                "release_group_year": 2000,
+                "catalog_number": "STRMRT-001",
+                "is_va_compilation": False,
+            },
+            ["default", "literal", "literal_flac",
+             "unwild_year", "unwild_rg_year", "catalog_number",
+             "track_0_artist", "track_1_artist",
+             "track_2_artist", "track_3_artist"],
+            ["literal_lossless", "va_track_artist_0",
+             "compilation_series"],
+        ),
+        (
+            "non_va_catno_absent",
+            {
+                "artist_name": "Radiohead",
+                "title": "Kid A",
+                "year": "2008",
+                "track_titles": KID_A,
+                "prepend_artist": True,
+                "release_group_year": 2000,
+                "catalog_number": None,
+                "is_va_compilation": False,
+            },
+            ["default", "literal", "literal_flac",
+             "unwild_year", "unwild_rg_year"],
+            ["catalog_number", "literal_lossless"],
+        ),
+        (
+            "non_va_catno_too_short",
+            {
+                "artist_name": "Radiohead",
+                "title": "Kid A",
+                "year": "2008",
+                "track_titles": KID_A,
+                "prepend_artist": True,
+                "release_group_year": 2000,
+                "catalog_number": "100",
+                "is_va_compilation": False,
+            },
+            ["default", "literal", "literal_flac",
+             "unwild_year", "unwild_rg_year"],
+            ["catalog_number", "literal_lossless"],
+        ),
+        (
+            "non_va_rg_year_matches_year",
+            {
+                "artist_name": "Radiohead",
+                "title": "Kid A",
+                "year": "2000",
+                "track_titles": KID_A,
+                "prepend_artist": True,
+                "release_group_year": 2000,
+                "catalog_number": "STRMRT-001",
+                "is_va_compilation": False,
+            },
+            ["default", "literal", "literal_flac",
+             "unwild_year", "catalog_number"],
+            ["unwild_rg_year", "literal_lossless"],
+        ),
+        (
+            "va_volume_marker_track_artists_present",
+            {
+                "artist_name": "Various Artists",
+                "title": "Now That's What I Call Music #100",
+                "year": "2018",
+                "track_titles": ("Sunshine", "Moonlight", "Starlight"),
+                "track_artists": ("Cat A", "Dog B", "Bird C"),
+                "prepend_artist": True,
+                "release_group_year": 2018,
+                "catalog_number": "NOW-100-01",
+                "is_va_compilation": True,
+            },
+            ["va_track_artist_0", "va_track_artist_1",
+             "va_track_artist_2",
+             "compilation_series",
+             "unwild_year", "catalog_number"],
+            ["default", "literal", "literal_flac",
+             "literal_lossless", "track_0_artist"],
+        ),
+        (
+            "va_no_volume_marker",
+            {
+                "artist_name": "Various Artists",
+                "title": "Surf Rock Compilation Disc",
+                "year": "1995",
+                "track_titles": ("Misirlou", "Wipe Out", "Pipeline"),
+                "track_artists": ("Dick Dale", "Surfaris", "Chantays"),
+                "prepend_artist": True,
+                "is_va_compilation": True,
+            },
+            ["va_track_artist_0",
+             "va_track_artist_1",
+             "va_track_artist_2",
+             "unwild_year"],
+            ["compilation_series", "default", "literal",
+             "literal_flac", "literal_lossless"],
+        ),
+        (
+            "va_no_track_artists_degrades_gracefully",
+            {
+                "artist_name": "Various Artists",
+                "title": "Niche Label Sampler",
+                "year": "2005",
+                "track_titles": ("Track One", "Track Two", "Track Three"),
+                "track_artists": (),
+                "prepend_artist": True,
+                "catalog_number": "LBL-SAMP-2005",
+                "is_va_compilation": True,
+            },
+            ["unwild_year", "catalog_number"],
+            ["va_track_artist_0", "default", "literal",
+             "literal_flac", "literal_lossless",
+             "compilation_series"],
+        ),
+        (
+            "va_all_null_track_artists_degrades_gracefully",
+            {
+                "artist_name": "Various Artists",
+                "title": "Another Sampler",
+                "year": "2010",
+                "track_titles": ("Track One", "Track Two", "Track Three"),
+                "track_artists": (None, None, None),
+                "prepend_artist": True,
+                "is_va_compilation": True,
+            },
+            ["unwild_year"],
+            ["va_track_artist_0", "default", "literal",
+             "literal_flac", "literal_lossless"],
+        ),
+    ]
+
+    def test_slot_mix_matrix(self):
+        for desc, kwargs, present, absent in self.CASES:
+            with self.subTest(desc=desc):
+                plan = generate_search_plan(
+                    ReleaseSnapshot(**kwargs),
+                    SearchPlanConfig(),
+                )
+                self.assertEqual(plan.status, PLAN_STATUS_SUCCESS,
+                                 f"{desc}: {plan.failure_reason!r}")
+                strategies = {it.strategy for it in plan.items}
+                for s in present:
+                    self.assertIn(
+                        s, strategies,
+                        f"{desc}: expected {s!r} in {strategies!r}",
+                    )
+                for s in absent:
+                    self.assertNotIn(
+                        s, strategies,
+                        f"{desc}: did not expect {s!r} in {strategies!r}",
+                    )
+
+    def test_va_branch_records_is_va_compilation_in_provenance(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Various Artists",
+                title="Some VA Comp",
+                year="2010",
+                track_titles=("Track A", "Track B"),
+                track_artists=("Artist X", "Artist Y"),
+                prepend_artist=True,
+                is_va_compilation=True,
+            ),
+            SearchPlanConfig(),
+        )
+        self.assertTrue(plan.provenance.get("is_va_compilation"))
+
+    def test_va_branch_omits_no_track_artists_resolved_when_all_null(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Various Artists",
+                title="Empty Comp",
+                year="2010",
+                track_titles=("Track A", "Track B"),
+                track_artists=(None, None),
+                prepend_artist=True,
+                is_va_compilation=True,
+            ),
+            SearchPlanConfig(),
+        )
+        omitted = plan.provenance["omitted_candidates"]
+        self.assertTrue(
+            any(o["strategy"] == "va_track_artist_*"
+                and o["reason"] == "no_track_artists_resolved"
+                for o in omitted),
+            f"missing no_track_artists_resolved omission: {omitted!r}",
+        )
+
+    def test_catalog_number_query_shape_non_va(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Some Artist",
+                title="Their Album",
+                year="2020",
+                track_titles=(),
+                prepend_artist=True,
+                catalog_number="STRMRT-001",
+                is_va_compilation=False,
+            ),
+            SearchPlanConfig(),
+        )
+        by_strategy = {it.strategy: it.query for it in plan.items}
+        self.assertIn("catalog_number", by_strategy)
+        # Artist tokens prepended, catno carried verbatim through
+        # _build_query cap (longest-first).
+        q = by_strategy["catalog_number"]
+        self.assertIn("STRMRT-001", q)
+
+    def test_catalog_number_too_short_omitted_with_reason(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Some Artist",
+                title="Their Album",
+                year="2020",
+                track_titles=(),
+                prepend_artist=True,
+                catalog_number="100",  # below CATALOG_NUMBER_MIN_LENGTH
+                is_va_compilation=False,
+            ),
+            SearchPlanConfig(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertNotIn("catalog_number", strategies)
+        omitted = plan.provenance["omitted_candidates"]
+        catno_omits = [
+            o for o in omitted if o["strategy"] == "catalog_number"
+        ]
+        self.assertEqual(len(catno_omits), 1)
+        self.assertEqual(catno_omits[0]["reason"], "catalog_number_too_short")
+
+    def test_catalog_number_empty_string_treated_as_unknown(self):
+        """Defensive: an empty-string catno (vs NULL) is treated as unknown."""
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Some Artist",
+                title="Their Album",
+                year="2020",
+                track_titles=(),
+                prepend_artist=True,
+                catalog_number="",
+                is_va_compilation=False,
+            ),
+            SearchPlanConfig(),
+        )
+        strategies = [it.strategy for it in plan.items]
+        self.assertNotIn("catalog_number", strategies)
+        omitted = plan.provenance["omitted_candidates"]
+        self.assertTrue(
+            any(o["strategy"] == "catalog_number"
+                and o["reason"] == "catalog_number_unknown"
+                for o in omitted),
+        )
+
+    def test_compilation_series_volume_markers_match(self):
+        """The compilation_series detector regex must match these
+        canonical anthology-series titles (Vol N, Volume N, #N)."""
+        for title in (
+            "Now That's What I Call Music #100",
+            "Greatest Surf Hits Vol 3",
+            "Surf Hits Volume 12",
+            "Surf Hits Vol. 12",
+            "Comp #1",
+        ):
+            with self.subTest(title=title):
+                plan = generate_search_plan(
+                    ReleaseSnapshot(
+                        artist_name="Various Artists",
+                        title=title,
+                        year="2010",
+                        track_titles=("A", "B"),
+                        track_artists=("X", "Y"),
+                        prepend_artist=True,
+                        is_va_compilation=True,
+                    ),
+                    SearchPlanConfig(),
+                )
+                strategies = [it.strategy for it in plan.items]
+                self.assertIn("compilation_series", strategies,
+                              f"expected match for {title!r}")
+
+    def test_compilation_series_no_volume_marker_omitted(self):
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Various Artists",
+                title="Compilation Album",
+                year="2010",
+                track_titles=("A", "B"),
+                track_artists=("X", "Y"),
+                prepend_artist=True,
+                is_va_compilation=True,
+            ),
+            SearchPlanConfig(),
+        )
+        omitted = plan.provenance["omitted_candidates"]
+        self.assertTrue(
+            any(o["strategy"] == "compilation_series"
+                and o["reason"] == "no_volume_marker"
+                for o in omitted),
+        )
 
 
 if __name__ == "__main__":

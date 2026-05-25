@@ -109,9 +109,28 @@ def _track_titles_from_tracks(tracks: list[dict[str, Any]]) -> tuple[str, ...]:
     Sort by (disc_number, track_number) so the snapshot ordering matches
     pressing order — the generator's tiebreaker depends on it.
     """
+    titles, _artists = _tracks_titles_and_artists(tracks)
+    return titles
+
+
+def _tracks_titles_and_artists(
+    tracks: list[dict[str, Any]],
+) -> tuple[tuple[str, ...], tuple[str | None, ...]]:
+    """Extract titles AND track_artists in matching order from `tracks`.
+
+    Single sort pass so the two tuples stay aligned by index — the VA
+    branch of ``generate_search_plan`` reads
+    ``track_titles[i] / track_artists[i]`` as a pair. Tracks without a
+    title are skipped (same rule as the title-only extractor).
+
+    The track_artist value is read from ``track["track_artist"]`` (the
+    column populated by U2's resolver). May be ``None`` when the
+    resolver couldn't determine it for that track — the VA branch
+    treats NULLs as "skip this slot" rather than crashing.
+    """
     if not tracks:
-        return ()
-    sortable: list[tuple[int, int, str]] = []
+        return (), ()
+    sortable: list[tuple[int, int, str, str | None]] = []
     for t in tracks:
         title = t.get("title") or ""
         if not isinstance(title, str):
@@ -129,9 +148,17 @@ def _track_titles_from_tracks(tracks: list[dict[str, Any]]) -> tuple[str, ...]:
             track_i = int(track_no)
         except (TypeError, ValueError):
             track_i = 0
-        sortable.append((disc_i, track_i, title))
+        ta_raw = t.get("track_artist")
+        ta: str | None = None
+        if isinstance(ta_raw, str):
+            stripped = ta_raw.strip()
+            ta = stripped if stripped else None
+        sortable.append((disc_i, track_i, title, ta))
     sortable.sort(key=lambda x: (x[0], x[1]))
-    return tuple(s[2] for s in sortable)
+    return (
+        tuple(s[2] for s in sortable),
+        tuple(s[3] for s in sortable),
+    )
 
 
 def _release_group_year_from_value(value: object) -> int | None:
@@ -161,6 +188,21 @@ def _release_group_year_from_value(value: object) -> int | None:
     return None
 
 
+def _catalog_number_from_value(value: object) -> str | None:
+    """Normalise an ``album_requests.catalog_number`` to ``str | None``.
+
+    The DB column is TEXT NULL; the U2 resolver writes a stripped
+    string when found. Defensive cast for in-tree tests that may pass
+    non-strings.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return s if s else None
+    return str(value)
+
+
 def snapshot_from_request_row(
     row: dict[str, Any],
     tracks: list[dict[str, Any]],
@@ -173,6 +215,11 @@ def snapshot_from_request_row(
     operate against persisted state — the service layer is responsible
     for calling a `TrackResolver` first if `tracks` is empty and the
     request's release_id can be resolved.
+
+    PR2 U8 additions: reads ``is_va_compilation`` (BOOLEAN NOT NULL
+    DEFAULT FALSE from migration 028) and ``catalog_number`` (TEXT NULL
+    from migration 028) off the row. Reads ``track_artist`` off each
+    entry in ``tracks`` (TEXT NULL from migration 029).
     """
     artist = row.get("artist_name") or ""
     title = row.get("album_title") or ""
@@ -183,14 +230,18 @@ def snapshot_from_request_row(
     year = year_from_value(row.get("year"))
     redownload = bool(row.get("source") == "redownload")
     rg_year = _release_group_year_from_value(row.get("release_group_year"))
+    titles, track_artists = _tracks_titles_and_artists(tracks)
     return ReleaseSnapshot(
         artist_name=artist,
         title=title,
         year=year,
-        track_titles=_track_titles_from_tracks(tracks),
+        track_titles=titles,
         redownload=redownload,
         prepend_artist=prepend_artist,
         release_group_year=rg_year,
+        is_va_compilation=bool(row.get("is_va_compilation", False)),
+        catalog_number=_catalog_number_from_value(row.get("catalog_number")),
+        track_artists=track_artists,
     )
 
 
@@ -203,6 +254,8 @@ def snapshot_from_add_payload(
     source: str,
     prepend_artist: bool = False,
     release_group_year: object = None,
+    is_va_compilation: bool = False,
+    catalog_number: object = None,
 ) -> ReleaseSnapshot:
     """Build a `ReleaseSnapshot` from add-time metadata.
 
@@ -215,13 +268,24 @@ def snapshot_from_add_payload(
     group (U5 R9). When known AND different from ``year``, the
     generator emits an extra ``unwild_rg_year`` slot so reissues find
     their original-pressing peers on Soulseek.
+
+    PR2 U8 additions: ``is_va_compilation`` drives the VA branch in
+    the generator (drops default/literal/literal_flac, substitutes
+    per-track-artist queries). ``catalog_number`` (when present and
+    >=4 chars) unlocks an extra ``catalog_number`` slot. Per-track
+    ``track_artist`` values are read off the tracks list — the VA
+    branch pairs them with track titles.
     """
+    titles, track_artists = _tracks_titles_and_artists(tracks)
     return ReleaseSnapshot(
         artist_name=artist_name or "",
         title=album_title or "",
         year=year_from_value(year),
-        track_titles=_track_titles_from_tracks(tracks),
+        track_titles=titles,
         redownload=(source == "redownload"),
         prepend_artist=prepend_artist,
         release_group_year=_release_group_year_from_value(release_group_year),
+        is_va_compilation=bool(is_va_compilation),
+        catalog_number=_catalog_number_from_value(catalog_number),
+        track_artists=track_artists,
     )
