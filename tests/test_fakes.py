@@ -2279,6 +2279,73 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         rows = db.get_tracks(1)
         self.assertEqual([t["track_number"] for t in rows], [1, 2])
         self.assertEqual(db.get_track_counts([1, 99]), {1: 2})
+        # Per-track artist defaults to None when set_tracks input omits it
+        # (matches real DB: track_artist column defaults to NULL).
+        self.assertEqual([r["track_artist"] for r in rows], [None, None])
+
+    def test_set_tracks_persists_inline_track_artist(self):
+        """``set_tracks`` should forward ``track_artist`` when present in
+        the upstream payload (e.g. discogs adapter passes per-track
+        artists directly)."""
+        db = FakePipelineDB()
+        db.set_tracks(1, [
+            {"track_number": 1, "title": "T1", "track_artist": "Artist X"},
+            {"track_number": 2, "title": "T2", "track_artist": None},
+        ])
+        rows = db.get_tracks(1)
+        self.assertEqual(
+            [r["track_artist"] for r in rows], ["Artist X", None],
+        )
+
+    def test_update_track_artists_aligns_by_disc_track_order(self):
+        """``update_track_artists`` mirrors real DB ordering: rows are
+        sorted by (disc, track) and the input list zips against that
+        order — so the resolver's per-track output, which sorts the
+        same way, lines up."""
+        db = FakePipelineDB()
+        db.set_tracks(1, [
+            {"track_number": 2, "title": "Second", "disc_number": 1},
+            {"track_number": 1, "title": "First", "disc_number": 1},
+            {"track_number": 1, "title": "Disc2-T1", "disc_number": 2},
+        ])
+        db.update_track_artists(1, ["A", "B", "C"])
+        rows = db.get_tracks(1)
+        # (disc=1, track=1)→A, (disc=1, track=2)→B, (disc=2, track=1)→C
+        self.assertEqual(
+            [r["track_artist"] for r in rows], ["A", "B", "C"],
+        )
+
+    def test_update_track_artists_tolerates_length_mismatch(self):
+        """Fewer entries: trailing rows keep existing value. More
+        entries: extras silently dropped. Same shape as real DB."""
+        db = FakePipelineDB()
+        db.set_tracks(1, [
+            {"track_number": 1, "title": "T1", "track_artist": "Pre"},
+            {"track_number": 2, "title": "T2", "track_artist": "Pre"},
+            {"track_number": 3, "title": "T3", "track_artist": "Pre"},
+        ])
+        # Fewer
+        db.update_track_artists(1, ["A"])
+        rows = db.get_tracks(1)
+        self.assertEqual(
+            [r["track_artist"] for r in rows], ["A", "Pre", "Pre"],
+        )
+        # More — extras silently dropped, others overwritten
+        db.update_track_artists(1, ["X", "Y", "Z", "EXTRA"])
+        rows = db.get_tracks(1)
+        self.assertEqual(
+            [r["track_artist"] for r in rows], ["X", "Y", "Z"],
+        )
+
+    def test_update_track_artists_empty_input_is_noop(self):
+        db = FakePipelineDB()
+        db.set_tracks(1, [
+            {"track_number": 1, "title": "T1", "track_artist": "Pre"},
+        ])
+        db.update_track_artists(1, [])
+        self.assertEqual(
+            db.get_tracks(1)[0]["track_artist"], "Pre",
+        )
 
     def test_download_log_history_and_lookup_by_id(self):
         db = FakePipelineDB()

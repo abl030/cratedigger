@@ -1044,6 +1044,41 @@ def _is_compilation_by_release_group_type(
     return False
 
 
+def _has_divergent_track_credits_only(
+    album_artist_credit: Any, tracks: Any,
+) -> bool:
+    """True when at least one track's artist credit differs from the
+    rendered album-level credit. No joinphrase precondition.
+
+    Used by Rule 2's tightened version (issue #373): any Compilation
+    release-group can be cross-checked against per-track divergence,
+    independent of whether the album-level credit happens to have a
+    "/"-joinphrase. Greatest-hits / B-sides / single-artist comps
+    were getting falsely flagged as VA under the pre-tightening Rule
+    2 (Compilation rg alone was sufficient). Without per-track
+    divergence the VA strategy mix is strictly worse for those
+    requests — it drops default/literal, which are the natural query
+    shapes when every track shares the album artist.
+    """
+    if not isinstance(album_artist_credit, list) or not album_artist_credit:
+        return False
+    album_credit_str = _format_mb_artist_credit(album_artist_credit)
+    if not album_credit_str:
+        return False
+    if not isinstance(tracks, list):
+        return False
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        ac = track.get("artist-credit")
+        if not isinstance(ac, list) or not ac:
+            continue
+        track_credit_str = _format_mb_artist_credit(ac)
+        if track_credit_str and track_credit_str != album_credit_str:
+            return True
+    return False
+
+
 def _has_divergent_track_credits(
     album_artist_credit: Any, tracks: Any,
 ) -> bool:
@@ -1069,18 +1104,28 @@ def _has_divergent_track_credits(
         return False
 
     # And at least one track credit must differ from the album credit.
-    if not isinstance(tracks, list):
-        return False
-    for track in tracks:
-        if not isinstance(track, dict):
+    return _has_divergent_track_credits_only(album_artist_credit, tracks)
+
+
+def _flatten_release_tracks(mb_release_payload: dict[str, Any]) -> list[Any]:
+    """Flatten ``media[].tracks[]`` into a single track list.
+
+    Used by VA detection Rules 2 (Compilation rg + divergent credits)
+    and 3 (split-artist joinphrase) — both need the per-track artist
+    credits in flat form. Defensive against malformed payloads: returns
+    ``[]`` for missing/non-list ``media`` or non-list ``tracks``.
+    """
+    media = mb_release_payload.get("media") or []
+    if not isinstance(media, list):
+        return []
+    flat: list[Any] = []
+    for m in media:
+        if not isinstance(m, dict):
             continue
-        ac = track.get("artist-credit")
-        if not isinstance(ac, list) or not ac:
-            continue
-        track_credit_str = _format_mb_artist_credit(ac)
-        if track_credit_str and track_credit_str != album_credit_str:
-            return True
-    return False
+        tr = m.get("tracks") or []
+        if isinstance(tr, list):
+            flat.extend(tr)
+    return flat
 
 
 def detect_va_compilation(
@@ -1102,7 +1147,11 @@ def detect_va_compilation(
     1. Primary-artist-credit identity matches the canonical VA id
        (MB: ``89ad4ac3-...``; Discogs: ``194``).
     2. MB release-group is typed as a Compilation (primary or
-       secondary type).
+       secondary type) AND per-track artist credits diverge from
+       the album-level credit. The divergence requirement is the
+       2026-05-25 tightening (#373) — Compilation rg alone falsely
+       flags greatest-hits / B-sides / single-artist comps where
+       every track shares the album artist.
     3. MB album artist-credit has a "/"-joinphrase AND per-track
        credits diverge from the album credit (split-artist comp).
 
@@ -1149,33 +1198,38 @@ def detect_va_compilation(
     if _is_canonical_va_credit(artist_id, source_is_discogs=is_discogs):
         return True
 
-    # Rule 2 (MB-only).
+    # Rule 2 (MB-only, TIGHTENED post-2026-05-25 deploy — issue #373):
+    # any Compilation-typed rg by itself is NOT enough; we also need
+    # per-track artist credits to actually diverge from the album
+    # credit. Greatest-hits / B-sides / single-artist comps were
+    # getting falsely flagged because MB tags them as Compilation
+    # primary-type. Without per-track divergence, the VA strategy mix
+    # is strictly worse for them (it drops default/literal, which are
+    # the natural query shapes for "Greatest Hits"-style requests
+    # where every track shares the album artist).
+    is_compilation_rg = False
     if isinstance(mb_release_group_payload, dict):
-        if _is_compilation_by_release_group_type(
+        is_compilation_rg = _is_compilation_by_release_group_type(
             mb_release_group_payload.get("primary-type"),
             mb_release_group_payload.get("secondary-types"),
-        ):
-            return True
-    if isinstance(mb_release_payload, dict):
+        )
+    if not is_compilation_rg and isinstance(mb_release_payload, dict):
         rg = mb_release_payload.get("release-group")
         if isinstance(rg, dict):
-            if _is_compilation_by_release_group_type(
+            is_compilation_rg = _is_compilation_by_release_group_type(
                 rg.get("primary-type"),
                 rg.get("secondary-types"),
-            ):
-                return True
+            )
+    if is_compilation_rg and isinstance(mb_release_payload, dict):
+        album_ac = mb_release_payload.get("artist-credit")
+        all_tracks_r2 = _flatten_release_tracks(mb_release_payload)
+        if _has_divergent_track_credits_only(album_ac, all_tracks_r2):
+            return True
 
     # Rule 3 (MB-only -- split-artist compilations).
     if isinstance(mb_release_payload, dict):
         album_ac = mb_release_payload.get("artist-credit")
-        media = mb_release_payload.get("media") or []
-        all_tracks: list[Any] = []
-        if isinstance(media, list):
-            for m in media:
-                if isinstance(m, dict):
-                    tr = m.get("tracks") or []
-                    if isinstance(tr, list):
-                        all_tracks.extend(tr)
+        all_tracks = _flatten_release_tracks(mb_release_payload)
         if _has_divergent_track_credits(album_ac, all_tracks):
             return True
 
@@ -1553,6 +1607,10 @@ class _ApplyResolveAllRecipient(Protocol):
         self, request_id: int, **fields: Any,
     ) -> None: ...
 
+    def update_track_artists(
+        self, request_id: int, track_artists: list[str | None],
+    ) -> None: ...
+
 
 def apply_resolve_all_result(
     db: _ApplyResolveAllRecipient,
@@ -1589,3 +1647,17 @@ def apply_resolve_all_result(
     if result.catalog_number is not None:
         update_fields["catalog_number"] = result.catalog_number
     db.update_request_fields(req_id, **update_fields)
+    # Per-track artists land in album_tracks (one column per track),
+    # not album_requests. Done after the request-row update so a
+    # failure here doesn't roll back the resolved scalar fields —
+    # mirrors the resolver's proceed-with-NULL discipline (best-effort
+    # log + continue).
+    if result.track_artists:
+        try:
+            db.update_track_artists(req_id, list(result.track_artists))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "apply_resolve_all_result: update_track_artists failed "
+                "for request %s; per-track artists not persisted",
+                req_id,
+            )

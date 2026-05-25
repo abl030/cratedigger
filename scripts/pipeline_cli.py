@@ -260,7 +260,9 @@ def _search_plan_exit_code(outcome: str) -> int:
 
 
 def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
-                              tracks, source, release_group_year=None):
+                              tracks, source, release_group_year=None,
+                              is_va_compilation=False,
+                              catalog_number=None):
     """Run plan generation for a freshly-added request.
 
     Failures are non-fatal: a deterministic / transient failure is
@@ -271,6 +273,10 @@ def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
     ``release_group_year`` (U5 of search-plan-entropy) feeds the
     generator's conditional ``unwild_rg_year`` slot. ``None`` is fine
     — the generator handles it gracefully.
+
+    PR2 Apply #2: ``is_va_compilation`` and ``catalog_number`` are
+    forwarded so the initial plan respects the resolver's verdict —
+    mirrors the web add helper for CLI ⇄ API symmetry.
     """
     from lib.search_plan_service import (
         RESULT_FAILED_DETERMINISTIC,
@@ -287,6 +293,8 @@ def _generate_plan_after_add(db, req_id, *, artist_name, album_title, year,
         tracks=tracks,
         source=source,
         release_group_year=release_group_year,
+        is_va_compilation=is_va_compilation,
+        catalog_number=catalog_number,
     )
     if result.outcome == RESULT_SUCCESS:
         print(f"  Plan: active id={result.plan_id}")
@@ -413,14 +421,21 @@ def _cmd_add_mb(db, mbid, source):
         mb_artist_id=artist_id,
         mb_release_payload=release,
     )
+    # Re-read tracks from the DB so the per-track ``track_artist``
+    # column the resolver just wrote (PR2 Apply #1) flows into the
+    # snapshot. The upstream ``tracks`` extracted from the MB payload
+    # does NOT carry the resolver's output.
+    post_resolve_tracks = db.get_tracks(req_id)
     _generate_plan_after_add(
         db, req_id,
         artist_name=artist_name,
         album_title=release.get("title", "Unknown"),
         year=year,
-        tracks=tracks,
+        tracks=post_resolve_tracks,
         source=source,
         release_group_year=resolved.release_group_year,
+        is_va_compilation=resolved.is_va_compilation,
+        catalog_number=resolved.catalog_number,
     )
 
 
@@ -467,14 +482,20 @@ def _cmd_add_discogs(db, discogs_id, source):
         mb_artist_id=str(release.get("artist_id") or "") or None,
         discogs_release_payload=release,
     )
+    # Re-read tracks from the DB so the per-track ``track_artist``
+    # column the resolver just wrote (PR2 Apply #1) flows into the
+    # snapshot.
+    post_resolve_tracks = db.get_tracks(req_id)
     _generate_plan_after_add(
         db, req_id,
         artist_name=release["artist_name"],
         album_title=release["title"],
         year=release.get("year"),
-        tracks=tracks,
+        tracks=post_resolve_tracks,
         source=source,
         release_group_year=resolved.release_group_year,
+        is_va_compilation=resolved.is_va_compilation,
+        catalog_number=resolved.catalog_number,
     )
 
 
@@ -846,8 +867,11 @@ def cmd_show(db, args):
     print(f"  MB Artist:    {req['mb_artist_id']}")
     print(f"  Discogs:      {req['discogs_release_id']}")
     print(f"  Year:         {req['year']}")
+    print(f"  RG Year:      {req.get('release_group_year') or '-'}")
     print(f"  Country:      {req['country']}")
     print(f"  Format:       {req['format']}")
+    print(f"  VA Comp:      {'yes' if req.get('is_va_compilation') else 'no'}")
+    print(f"  Catalog #:    {req.get('catalog_number') or '-'}")
     print(f"  Source Path:  {req['source_path']}")
     if req.get("reasoning"):
         print(f"  Reasoning:    {req['reasoning'][:120]}...")

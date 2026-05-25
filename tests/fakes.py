@@ -2276,6 +2276,7 @@ class FakePipelineDB:
                 "track_number": t["track_number"],
                 "title": t["title"],
                 "length_seconds": t.get("length_seconds"),
+                "track_artist": t.get("track_artist"),
             }
             for t in new_tracks
         ]
@@ -2497,6 +2498,11 @@ class FakePipelineDB:
                 "track_number": t["track_number"],
                 "title": t["title"],
                 "length_seconds": t.get("length_seconds"),
+                # PR2 U2 / R13: per-track artist from upstream payload.
+                # Real PipelineDB stores this in album_tracks.track_artist
+                # (migration 029). NULL is the legitimate default — the
+                # resolver fills it later via ``update_track_artists``.
+                "track_artist": t.get("track_artist"),
             }
             for t in tracks
         ]
@@ -2505,6 +2511,23 @@ class FakePipelineDB:
         rows = list(self._tracks.get(request_id, []))
         rows.sort(key=lambda t: (t["disc_number"], t["track_number"]))
         return [copy.deepcopy(t) for t in rows]
+
+    def update_track_artists(
+        self, request_id: int,
+        track_artists: list[str | None],
+    ) -> None:
+        """Mirror of ``PipelineDB.update_track_artists`` — apply per-track
+        artists in (disc, track) order. Length mismatches are tolerated
+        (fewer keeps existing, more drops extras) — same shape as real.
+        """
+        if not track_artists:
+            return
+        rows = self._tracks.get(request_id, [])
+        if not rows:
+            return
+        rows.sort(key=lambda t: (t["disc_number"], t["track_number"]))
+        for row, artist in zip(rows, track_artists):
+            row["track_artist"] = artist
 
     def get_track_counts(self,
                          request_ids: list[int]) -> dict[int, int]:

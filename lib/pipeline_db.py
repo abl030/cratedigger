@@ -281,7 +281,18 @@ class SearchPlanItemInput:
 class SearchPlanMetadataSnapshot(
     msgspec.Struct, frozen=True, omit_defaults=True,
 ):
-    """Typed JSONB boundary for ``search_plans.metadata_snapshot``."""
+    """Typed JSONB boundary for ``search_plans.metadata_snapshot``.
+
+    Mirrors the subset of ``ReleaseSnapshot`` an operator triaging an
+    active plan would want to see without joining back to
+    ``album_requests``. ``release_group_year``, ``is_va_compilation``,
+    and ``catalog_number`` were added in PR2 of search-plan iter2 to
+    close the asymmetry where the dict-builder wrote ``release_group_year``
+    but the Struct didn't declare it (silently dropped on decode).
+    ``track_artists`` is intentionally NOT mirrored — per-track lists
+    can run 50+ entries on box sets and bloat JSONB; operators read
+    ``album_tracks.track_artist`` directly.
+    """
 
     artist_name: str | None = None
     album_title: str | None = None
@@ -289,6 +300,9 @@ class SearchPlanMetadataSnapshot(
     track_count: int | None = None
     redownload: bool = False
     prepend_artist: bool = False
+    release_group_year: int | None = None
+    is_va_compilation: bool = False
+    catalog_number: str | None = None
 
 
 class SearchPlanProvenance(
@@ -2913,25 +2927,62 @@ class PipelineDB:
         self._execute("DELETE FROM album_tracks WHERE request_id = %s", (request_id,))
         for t in tracks:
             self._execute("""
-                INSERT INTO album_tracks (request_id, disc_number, track_number, title, length_seconds)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO album_tracks (request_id, disc_number, track_number, title, length_seconds, track_artist)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 request_id,
                 t.get("disc_number", 1),
                 t["track_number"],
                 t["title"],
                 t.get("length_seconds"),
+                t.get("track_artist"),
             ))
         self.conn.commit()
 
     def get_tracks(self, request_id):
         cur = self._execute("""
-            SELECT disc_number, track_number, title, length_seconds
+            SELECT disc_number, track_number, title, length_seconds, track_artist
             FROM album_tracks
             WHERE request_id = %s
             ORDER BY disc_number, track_number
         """, (request_id,))
         return [dict(r) for r in cur.fetchall()]
+
+    def update_track_artists(
+        self, request_id, track_artists,
+    ):
+        """Update ``album_tracks.track_artist`` for ``request_id`` row-by-row.
+
+        ``track_artists`` aligns with ``get_tracks`` ordering
+        (``disc_number, track_number ASC``). Pass the full list — entries
+        can be ``None`` for tracks the resolver couldn't extract.
+        Length mismatches are tolerated:
+
+          * fewer entries than rows: trailing rows keep their existing
+            ``track_artist`` value.
+          * more entries than rows: extra entries are silently dropped.
+
+        Called by ``lib/field_resolver_service.py::apply_resolve_all_result``
+        after ``set_tracks`` (which inserts ``track_artist=NULL`` for
+        every row when the upstream payload didn't carry per-track
+        artists) and after ``resolve_all`` (which produces the per-track
+        results). The ORDER BY here MUST match ``get_tracks`` so the
+        resolver's per-track output — sorted by ``(disc_number,
+        track_number)`` via ``_tracks_titles_and_artists`` — lines up.
+        """
+        if not track_artists:
+            return
+        cur = self._execute(
+            "SELECT id FROM album_tracks WHERE request_id = %s "
+            "ORDER BY disc_number, track_number",
+            (request_id,),
+        )
+        row_ids = [r["id"] for r in cur.fetchall()]
+        for row_id, artist in zip(row_ids, track_artists):
+            self._execute(
+                "UPDATE album_tracks SET track_artist = %s WHERE id = %s",
+                (artist, row_id),
+            )
 
     # --- Download logging ---
 

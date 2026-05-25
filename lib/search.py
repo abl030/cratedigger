@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 # strategy ladder, repeat-group identity, dedupe behavior, provenance shape)
 # MUST bump this string. The plan-generation service and startup
 # reconciliation read it to decide whether a stored plan is current.
-SEARCH_PLAN_GENERATOR_ID = "search-plan/2026-05-19-1"
+SEARCH_PLAN_GENERATOR_ID = "search-plan/2026-05-25-1"
 
 
 @dataclass
@@ -112,7 +112,28 @@ class PlanExecutionContext:
 MAX_SEARCH_TOKENS = 4
 # Empirical from search_log peer-dir fanout: keep this list narrow and add
 # only words that repeatedly dominate expensive broad searches.
-LOW_ENTROPY_QUERY_TOKENS = {"the", "you", "from", "and"}
+#
+# Single canonical stopword set for the whole pipeline. Callers MUST go
+# through `strip_stopwords()` rather than reading this constant directly —
+# `tests/test_stopwords_audit.py` walks `lib/` to enforce that and also
+# fails the suite if anyone re-introduces an inline `{"the", "and", ...}`
+# stopword literal anywhere in `lib/`.
+STOPWORDS: frozenset[str] = frozenset({"the", "you", "from", "and"})
+
+
+def strip_stopwords(tokens: list[str]) -> list[str]:
+    """Drop case-insensitive stopword matches from `tokens`.
+
+    Order-preserving. Does not dedupe — `_normalize_query_tokens` composes
+    this with case-insensitive dedupe and the all-stopword fallback.
+
+    This is the only public reader of `STOPWORDS`. Callers outside this
+    module MUST go through this helper (enforced by
+    `tests/test_stopwords_audit.py`) so the set's contents can change in
+    exactly one place.
+    """
+    return [t for t in tokens if t.lower() not in STOPWORDS]
+
 
 def strip_special_chars(text):
     """Remove punctuation that poisons Soulseek searches.
@@ -132,13 +153,11 @@ def _normalize_query_tokens(
     *,
     preserve_all_low_entropy: bool = False,
 ) -> list[str]:
-    """Drop low-entropy tokens and case-insensitive repeats."""
+    """Drop stopwords and case-insensitive repeats."""
     normalized: list[str] = []
     seen: set[str] = set()
-    for token in tokens:
+    for token in strip_stopwords(tokens):
         key = token.lower()
-        if key in LOW_ENTROPY_QUERY_TOKENS:
-            continue
         if key in seen:
             continue
         seen.add(key)
@@ -168,6 +187,16 @@ def wildcard_artist_tokens(artist_tokens):
     e.g. ["Mountain", "Goats"] → ["*ountain", "*oats"]
 
     Tokens that are already too short to wildcard (<=1 char) are dropped.
+
+    R6 rationale (kept unchanged by PR2): every token in the artist string
+    gets wildcarded, not just the first. Soulseek's server-side ban list is
+    keyed on exact strings; "Mountain Goats" might be banned while
+    "*ountain *oats" is not. Wildcarding every token is what bypasses bans
+    in the median case. Single-token wildcarding (just the first token)
+    would leave second-token bans unaddressed. The all-tokens behaviour is
+    deliberate and stays unchanged through PR2 — see the brainstorm
+    ``docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md``
+    for the full discussion and the trade-off against precision loss.
     """
     result = []
     for t in artist_tokens:
@@ -270,17 +299,23 @@ def _year_is_known(year: str | None) -> bool:
 # generator-output transitions. U5 of search-plan-entropy added:
 #   * literal           — un-wildcarded artist+title, no short-token drop
 #   * literal_flac      — literal + " FLAC" format hint
-#   * literal_lossless  — literal + " lossless" format hint
 #   * unwild_rg_year    — un-wildcarded + release-group year (reissue path)
 #   * track_<idx>_artist — artist prepended to per-track fallback query
 #   * selftitled_*      — dedicated mix for self-titled releases
+# PR2 U8 retired ``literal_lossless`` (R1) — 5.5 days post-deploy data
+# showed 2,093 runs / 1 successful match. The network doesn't tag for
+# "lossless" the way it does for "FLAC", so the slot was spending 13% of
+# search volume for a 0.05% match rate.
 _STRATEGY_DEFAULT = "default"
 _STRATEGY_LITERAL = "literal"
 _STRATEGY_LITERAL_FLAC = "literal_flac"
-_STRATEGY_LITERAL_LOSSLESS = "literal_lossless"
-_STRATEGY_UNWILD = "unwild"
 _STRATEGY_UNWILD_YEAR = "unwild_year"
 _STRATEGY_UNWILD_RG_YEAR = "unwild_rg_year"
+# PR2 U8 — new slots for the iteration-2 generator mix.
+_STRATEGY_CATALOG_NUMBER = "catalog_number"
+# VA mix per-track-artist slot prefix (va_track_artist_0, _1, _2).
+_STRATEGY_VA_TRACK_ARTIST_PREFIX = "va_track_artist_"
+_STRATEGY_COMPILATION_SERIES = "compilation_series"
 _STRATEGY_SELFTITLED_ARTIST_TRACK_PREFIX = "selftitled_artist_track_"
 _STRATEGY_SELFTITLED_ARTIST_TRACK_0 = (
     f"{_STRATEGY_SELFTITLED_ARTIST_TRACK_PREFIX}0"
@@ -291,14 +326,36 @@ _STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC = (
 _STRATEGY_SELFTITLED_ARTIST_YEAR = "selftitled_artist_year"
 
 
-MAX_TRACK_SLOTS_PER_PLAN = 3
+# PR2 U8 R3 — bumped from 3 to 4 so the non-VA mix emits
+# ``track_0_artist`` through ``track_3_artist``. Distinctiveness ranking
+# (U7) picks the top-4 distinctive tracks.
+MAX_TRACK_SLOTS_PER_PLAN = 4
+# PR2 U8 R13 — VA per-track-artist slots use a smaller cap (the per-track
+# artist query is the natural shape for VA where every track has a
+# different artist; cap at 3 to keep the plan bounded).
+MAX_VA_TRACK_ARTIST_SLOTS = 3
+# PR2 U8 R2 — catalog_number slot length cutoff. Numeric-only or very
+# short values (e.g. "100") match too broadly to be useful; require at
+# least 4 chars so values like "STRMRT-001" produce a high-precision
+# search and "100" does not. Working baseline from the plan's deferred
+# question.
+CATALOG_NUMBER_MIN_LENGTH = 4
+# Compilation-series detector regex (R13). Matches "Vol 1", "Vol. 1",
+# "Volume 100", "#100" anywhere in the title (case-insensitive). When
+# the album title contains a volume marker, the VA mix emits a
+# ``compilation_series`` slot so anthology series like "Now That's What
+# I Call Music #100" get a clean handle separate from generic title
+# queries.
+_COMPILATION_SERIES_RE = re.compile(
+    r"(?:vol(?:ume)?\.?\s*\d+|#\s*\d+)",
+    re.IGNORECASE,
+)
 # Format-hint tokens appended to the un-wildcarded literal query to bait
 # peers who file their lossless rips with the format tag in the directory
 # name. Tokens stay literal — no wildcarding, no short-token drop, no
 # low-entropy normalization. Soulseek's distributed search caps at 4
 # tokens, so we pre-cap the body to MAX_SEARCH_TOKENS-1 to make room.
 _FORMAT_HINT_FLAC = "FLAC"
-_FORMAT_HINT_LOSSLESS = "lossless"
 
 
 # Plan-status values. String literals so they round-trip cleanly through
@@ -323,6 +380,15 @@ class ReleaseSnapshot:
     `prepend_artist` is a generation-affecting config knob carried on the
     snapshot so the function stays pure (no implicit module/global config
     reads).
+
+    ``is_va_compilation`` and ``catalog_number`` are PR2 U8 additions
+    (R2/R13). They drive the VA branch in ``generate_search_plan`` and
+    the ``catalog_number`` slot. ``track_artists`` is the per-track
+    artist credit list resolved by U2's field resolver; non-empty only
+    for VA-detected requests where ``resolve_track_artists`` populated
+    rows in ``album_tracks.track_artist``. Defaults make these fields
+    backwards-compatible for in-tree tests that construct snapshots
+    directly.
     """
 
     artist_name: str
@@ -336,6 +402,24 @@ class ReleaseSnapshot:
     # ``unwild_rg_year`` slot so reissues find original-pressing peers
     # on Soulseek. NULL means no extra slot.
     release_group_year: int | None = None
+    # PR2 U8 (R13): true when the request was flagged as a Various
+    # Artists compilation at enqueue (or by U3 backfill). Routes the
+    # generator to ``_generate_va_plan`` which drops the artist-driven
+    # slots (default/literal/literal_flac collapse for VA — no
+    # discriminating artist axis) and substitutes per-track-artist
+    # queries.
+    is_va_compilation: bool = False
+    # PR2 U8 (R2): label catalog number resolved by U2's resolver.
+    # Drives the ``catalog_number`` slot when present and >= 4 chars.
+    catalog_number: str | None = None
+    # PR2 U8 (R13): per-track artist credits in the same order as
+    # ``track_titles``. ``None`` entries mean the resolver couldn't
+    # determine that track's artist (recorded as
+    # ``unresolved_field_missing_upstream`` by the resolver service).
+    # Empty tuple is the non-VA default. The VA plan generator uses the
+    # picker (U7) on this list to choose distinctive (artist, title)
+    # pairs for the per-track-artist slots.
+    track_artists: tuple[str | None, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -425,18 +509,24 @@ def _canonical_query_key(query: str) -> str:
 
 
 def _has_dropped_low_entropy(*token_lists: list[str]) -> set[str]:
-    """Return the lowercased low-entropy tokens that appear in any source list.
+    """Return the lowercased stopword tokens that appear in any source list.
 
     Used purely for plan-level provenance: we want to record that the
     generator dropped (e.g.) `the` from a candidate, even though the
     drop happens inside `_normalize_query_tokens`. The presence check is
     case-insensitive.
+
+    Reads ``STOPWORDS`` directly — this module is the canonical owner of
+    the constant, so the AST audit's external-readers rule does not
+    apply. Single-pass membership check (review #13): the earlier
+    two-pass via ``strip_stopwords`` existed only to keep ``STOPWORDS``
+    a private read for external modules.
     """
     dropped: set[str] = set()
     for tokens in token_lists:
         for tok in tokens:
             key = tok.lower()
-            if key in LOW_ENTROPY_QUERY_TOKENS:
+            if key in STOPWORDS:
                 dropped.add(key)
     return dropped
 
@@ -570,8 +660,8 @@ def _build_query(
 
     Shared pipeline for the ``default`` slot (wildcard=True), the
     ``literal`` slot, and the bodies of format-hint and year-anchored
-    slots (``literal_flac``, ``literal_lossless``, ``unwild_year``,
-    ``unwild_rg_year``) (wildcard=False):
+    slots (``literal_flac``, ``unwild_year``, ``unwild_rg_year``)
+    (wildcard=False):
 
       * Strip special chars.
       * Low-entropy normalization ("the/you/from/and" dropped) on both
@@ -698,8 +788,6 @@ def _generate_normal_plan(
     """
     artist = snapshot.artist_name
     title = snapshot.title
-    year = snapshot.year
-    rg_year = snapshot.release_group_year
     track_titles = list(snapshot.track_titles)
     prepend_artist = snapshot.prepend_artist
 
@@ -752,79 +840,49 @@ def _generate_normal_plan(
             omit_reason="empty_literal_query",
         ))
 
-    # 3 + 4. Format-hint slots — unconditional (R7).
-    for hint_strategy, hint_token in (
-        (_STRATEGY_LITERAL_FLAC, _FORMAT_HINT_FLAC),
-        (_STRATEGY_LITERAL_LOSSLESS, _FORMAT_HINT_LOSSLESS),
-    ):
-        hint_query = _append_format_hint(literal_body_for_hint, hint_token)
-        if hint_query:
-            candidates.append(_Candidate(
-                strategy=hint_strategy,
-                repeat_group=hint_strategy,
-                query=hint_query,
-                omit_reason=None,
-                extra_provenance={"format_hint": hint_token},
-            ))
-        else:
-            candidates.append(_Candidate(
-                strategy=hint_strategy,
-                repeat_group=hint_strategy,
-                query=None,
-                omit_reason="empty_literal_query",
-                extra_provenance={"format_hint": hint_token},
-            ))
+    # 3. literal_flac slot — unconditional (R7). PR2 U8 (R1) retired
+    #    ``literal_lossless`` here: post-deploy data showed it produced
+    #    1 successful match across 2,093 runs (13% of search volume).
+    flac_query = _append_format_hint(literal_body_for_hint, _FORMAT_HINT_FLAC)
+    if flac_query:
+        candidates.append(_Candidate(
+            strategy=_STRATEGY_LITERAL_FLAC,
+            repeat_group=_STRATEGY_LITERAL_FLAC,
+            query=flac_query,
+            omit_reason=None,
+            extra_provenance={"format_hint": _FORMAT_HINT_FLAC},
+        ))
+    else:
+        candidates.append(_Candidate(
+            strategy=_STRATEGY_LITERAL_FLAC,
+            repeat_group=_STRATEGY_LITERAL_FLAC,
+            query=None,
+            omit_reason="empty_literal_query",
+            extra_provenance={"format_hint": _FORMAT_HINT_FLAC},
+        ))
 
     # 5. unwild_year slot — when release `year` is known.
-    year_known = _year_is_known(year)
-    if year_known and literal_query:
-        assert year is not None
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_YEAR,
-            repeat_group=_STRATEGY_UNWILD_YEAR,
-            query=f"{literal_query} {year[:4]}",
-            omit_reason=None,
-            extra_provenance={"year": year[:4]},
-        ))
-    else:
-        reason = "year_unknown" if not year_known else "empty_literal_query"
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_YEAR,
-            repeat_group=_STRATEGY_UNWILD_YEAR,
-            query=None,
-            omit_reason=reason,
-        ))
-
-    # 6. unwild_rg_year slot — emit a query only when rg_year is known,
-    #    year is known, the two differ, and the literal body exists.
-    #    Otherwise emit one omission with a precise reason.
-    rg_query: str | None = None
-    rg_omit_reason: str | None = None
-    rg_provenance: dict[str, Any] = (
-        {"release_group_year": int(rg_year)}
-        if rg_year is not None else {}
+    candidates.append(
+        _unwild_year_candidate(snapshot, prepend_artist=prepend_artist),
     )
-    if rg_year is None:
-        rg_omit_reason = "release_group_year_unknown"
-    elif not year_known:
-        rg_omit_reason = "year_unknown"
-    elif str(rg_year) == (year[:4] if year else ""):
-        rg_omit_reason = "release_group_year_matches_year"
-    elif not literal_query:
-        rg_omit_reason = "empty_literal_query"
-    elif int(rg_year) <= 0:
-        rg_omit_reason = "release_group_year_unknown"
-    else:
-        rg_query = f"{literal_query} {int(rg_year):04d}"
-    candidates.append(_Candidate(
-        strategy=_STRATEGY_UNWILD_RG_YEAR,
-        repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-        query=rg_query,
-        omit_reason=rg_omit_reason,
-        extra_provenance=rg_provenance,
-    ))
 
-    # 7. Per-track slots — artist-prepended (R8). Multi-track only.
+    # 6. unwild_rg_year slot — emit when rg_year is known, year is
+    #    known, the two differ, and the literal body exists. Otherwise
+    #    emit one omission with a precise reason. Shared with VA via
+    #    the prepend_artist kwarg.
+    candidates.append(
+        _unwild_rg_year_candidate(snapshot, prepend_artist=prepend_artist),
+    )
+
+    # 7. catalog_number slot (PR2 U8 R2) — emit when the resolved
+    #    catalog number is non-empty and meets the length cutoff.
+    #    Catalog numbers like "STRMRT-001" produce high-precision
+    #    searches; very short / numeric-only values match too broadly.
+    candidates.append(
+        _catalog_number_candidate(snapshot, prepend_artist=prepend_artist),
+    )
+
+    # 8. Per-track slots — artist-prepended (R8). Multi-track only.
     per_track_pairs = _per_track_candidates(
         track_titles, artist, prepend_artist=True,
     )
@@ -836,6 +894,377 @@ def _generate_normal_plan(
     candidates.extend(track_candidates)
 
     return candidates, track_omissions
+
+
+def _catalog_number_candidate(
+    snapshot: ReleaseSnapshot,
+    *,
+    prepend_artist: bool,
+) -> _Candidate:
+    """Build the ``catalog_number`` slot candidate (PR2 U8 R2).
+
+    Shared by the non-VA and VA branches — both prefer high-precision
+    catalog-number queries when one is available. The slot is omitted
+    with an explicit reason in three cases:
+
+      * ``catalog_number_unknown`` — the resolver returned NULL.
+      * ``catalog_number_too_short`` — value present but below
+        ``CATALOG_NUMBER_MIN_LENGTH`` (e.g. "100").
+      * ``empty_catalog_number_query`` — body collapsed to nothing
+        after normalisation (defensive — would mean the artist is
+        also empty and the catno is whitespace-only).
+    """
+    raw = snapshot.catalog_number or ""
+    catno = raw.strip()
+    if not catno:
+        return _Candidate(
+            strategy=_STRATEGY_CATALOG_NUMBER,
+            repeat_group=_STRATEGY_CATALOG_NUMBER,
+            query=None,
+            omit_reason="catalog_number_unknown",
+        )
+    if len(catno) < CATALOG_NUMBER_MIN_LENGTH:
+        return _Candidate(
+            strategy=_STRATEGY_CATALOG_NUMBER,
+            repeat_group=_STRATEGY_CATALOG_NUMBER,
+            query=None,
+            omit_reason="catalog_number_too_short",
+            extra_provenance={"catalog_number": catno},
+        )
+    query = _build_query(
+        snapshot.artist_name, catno,
+        prepend_artist=prepend_artist, wildcard=False,
+    )
+    if not query:
+        return _Candidate(
+            strategy=_STRATEGY_CATALOG_NUMBER,
+            repeat_group=_STRATEGY_CATALOG_NUMBER,
+            query=None,
+            omit_reason="empty_catalog_number_query",
+            extra_provenance={"catalog_number": catno},
+        )
+    return _Candidate(
+        strategy=_STRATEGY_CATALOG_NUMBER,
+        repeat_group=_STRATEGY_CATALOG_NUMBER,
+        query=query,
+        omit_reason=None,
+        extra_provenance={"catalog_number": catno},
+    )
+
+
+def _unwild_year_candidate(
+    snapshot: ReleaseSnapshot,
+    *,
+    prepend_artist: bool = False,
+) -> _Candidate:
+    """Build the ``unwild_year`` slot — shared between non-VA and VA.
+
+    Year discriminates even when the artist axis is degenerate (every
+    track is by a different artist). VA mix wants the year slot, but
+    can't rely on the album-level literal body — for VA, the title is
+    often a generic word ("Compilation") that collapses post-dedupe.
+
+    ``prepend_artist`` defaults to False (VA-safe). Non-VA callers pass
+    ``snapshot.prepend_artist`` to get the artist+title body. When
+    ``title``/body is empty or year is unknown, returns the omission
+    shape with a precise reason.
+    """
+    year = snapshot.year
+    if not _year_is_known(year):
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_YEAR,
+            repeat_group=_STRATEGY_UNWILD_YEAR,
+            query=None,
+            omit_reason="year_unknown",
+        )
+    assert year is not None
+    body = _build_query(
+        snapshot.artist_name, snapshot.title,
+        prepend_artist=prepend_artist, wildcard=False,
+    )
+    if not body:
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_YEAR,
+            repeat_group=_STRATEGY_UNWILD_YEAR,
+            query=None,
+            omit_reason="empty_literal_query",
+            extra_provenance={"year": year[:4]},
+        )
+    return _Candidate(
+        strategy=_STRATEGY_UNWILD_YEAR,
+        repeat_group=_STRATEGY_UNWILD_YEAR,
+        query=f"{body} {year[:4]}",
+        omit_reason=None,
+        extra_provenance={"year": year[:4]},
+    )
+
+
+def _unwild_rg_year_candidate(
+    snapshot: ReleaseSnapshot,
+    *,
+    prepend_artist: bool = False,
+) -> _Candidate:
+    """Build the ``unwild_rg_year`` slot — shared between non-VA and VA.
+
+    Emit a query only when rg_year is known, year is known, the two
+    differ, and the body is non-empty. ``prepend_artist`` defaults to
+    False (VA-safe); non-VA callers pass ``snapshot.prepend_artist``.
+
+    The ``int(rg_year) <= 0`` branch is defensive only —
+    ``_release_group_year_from_value`` (lib/release_snapshot.py) already
+    normalises non-positive ints to None, so the path is unreachable in
+    production. Kept for the same reason both inline copies kept it.
+    """
+    rg_year = snapshot.release_group_year
+    year = snapshot.year
+    year_known = _year_is_known(year)
+    rg_provenance: dict[str, Any] = (
+        {"release_group_year": int(rg_year)}
+        if rg_year is not None else {}
+    )
+    if rg_year is None:
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_RG_YEAR,
+            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+            query=None,
+            omit_reason="release_group_year_unknown",
+        )
+    if not year_known:
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_RG_YEAR,
+            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+            query=None,
+            omit_reason="year_unknown",
+            extra_provenance=rg_provenance,
+        )
+    if str(rg_year) == (year[:4] if year else ""):
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_RG_YEAR,
+            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+            query=None,
+            omit_reason="release_group_year_matches_year",
+            extra_provenance=rg_provenance,
+        )
+    if int(rg_year) <= 0:
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_RG_YEAR,
+            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+            query=None,
+            omit_reason="release_group_year_unknown",
+            extra_provenance=rg_provenance,
+        )
+    body = _build_query(
+        snapshot.artist_name, snapshot.title,
+        prepend_artist=prepend_artist, wildcard=False,
+    )
+    if not body:
+        return _Candidate(
+            strategy=_STRATEGY_UNWILD_RG_YEAR,
+            repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+            query=None,
+            omit_reason="empty_literal_query",
+            extra_provenance=rg_provenance,
+        )
+    return _Candidate(
+        strategy=_STRATEGY_UNWILD_RG_YEAR,
+        repeat_group=_STRATEGY_UNWILD_RG_YEAR,
+        query=f"{body} {int(rg_year):04d}",
+        omit_reason=None,
+        extra_provenance=rg_provenance,
+    )
+
+
+def _generate_va_plan(
+    snapshot: ReleaseSnapshot,
+    config: SearchPlanConfig,
+) -> tuple[list["_Candidate"], list[dict[str, Any]]]:
+    """Build the candidate ladder for a Various Artists compilation (R13).
+
+    The VA mix replaces the artist+title-driven slots (default / literal /
+    literal_flac) with per-track-artist + per-track-title queries. For
+    real VA, those tracks have different artists, so the per-track query
+    is more discriminating than the album-level "Various Artists
+    {Title}" shape — which collapses to bare title after the resolver
+    strips the artist (see ``_per_track_candidates``).
+
+    Plus a ``compilation_series`` slot when the album title matches
+    ``Vol \\d+ | Volume \\d+ | #\\d+`` so anthology series like "Now
+    That's What I Call Music #100" get a clean handle.
+
+    Keeps ``unwild_year``, ``unwild_rg_year``, and ``catalog_number``
+    slots from the normal path because year + catno discriminate even
+    when the artist axis is degenerate.
+
+    Degradation case: when ``is_va_compilation=True`` but every entry
+    in ``track_artists`` is NULL or empty (the resolver couldn't
+    determine track-level artists — e.g. Discogs payload lacked
+    per-track ``artists`` entries), the VA branch emits whatever
+    year/catno slots are available and tags an omission
+    ``{"strategy": "va_track_artist_*", "reason":
+    "no_track_artists_resolved"}``. The plan stays useful instead of
+    crashing.
+    """
+    candidates: list[_Candidate] = []
+    track_omissions: list[dict[str, Any]] = []
+
+    # 1. Per-track-artist slots — the heart of the VA mix.
+    va_track_candidates = _build_va_track_artist_candidates(
+        snapshot, MAX_VA_TRACK_ARTIST_SLOTS, track_omissions,
+    )
+    candidates.extend(va_track_candidates)
+
+    # 2. compilation_series slot — when the title carries a volume
+    #    marker. Operator-readable handle for anthology series.
+    candidates.append(_compilation_series_candidate(snapshot))
+
+    # 3. unwild_year (title + year, no artist).
+    candidates.append(_unwild_year_candidate(snapshot))
+
+    # 4. unwild_rg_year (title + rg_year, no artist).
+    candidates.append(_unwild_rg_year_candidate(snapshot))
+
+    # 5. catalog_number — shared with the non-VA branch.
+    #    prepend_artist=False here: "Various Artists" gets dropped by
+    #    ``_build_query`` anyway, but being explicit makes the intent
+    #    clear (the catno alone IS the discriminator).
+    candidates.append(
+        _catalog_number_candidate(snapshot, prepend_artist=False),
+    )
+
+    return candidates, track_omissions
+
+
+def _build_va_track_artist_candidates(
+    snapshot: ReleaseSnapshot,
+    max_slots: int,
+    track_omissions: list[dict[str, Any]],
+) -> list["_Candidate"]:
+    """Build per-track-artist candidate slots for the VA branch (R13).
+
+    Pairs each ``track_title`` with its corresponding ``track_artist``
+    entry. Drops pairs where the track artist is NULL or empty (the
+    resolver couldn't determine it). Ranks the remaining pairs by
+    distinctiveness of the track title (U7) and emits up to
+    ``max_slots`` ``<track_artist> <track_title>`` queries.
+
+    When zero pairs have a resolved track artist, records a single
+    ``no_track_artists_resolved`` omission so the operator triage
+    surface can see the VA mix degraded.
+    """
+    titles = list(snapshot.track_titles)
+    artists = list(snapshot.track_artists)
+    # Pair each title with its resolved artist (or None when the
+    # resolver came up empty for that track). When ``track_artists``
+    # is shorter than ``track_titles`` (legacy snapshots, partial
+    # resolution edge), missing positions default to None.
+    paired: list[tuple[int, str, str]] = []
+    for idx, title in enumerate(titles):
+        ta = artists[idx] if idx < len(artists) else None
+        if ta is None:
+            continue
+        ta_clean = ta.strip() if isinstance(ta, str) else ""
+        if not ta_clean:
+            continue
+        if not title:
+            continue
+        paired.append((idx, ta_clean, title))
+
+    if not paired:
+        track_omissions.append({
+            "strategy": "va_track_artist_*",
+            "reason": "no_track_artists_resolved",
+        })
+        return []
+
+    # Rank by distinctiveness of the raw title (consistent with the
+    # non-VA per-track ranker — distinctiveness is the title's
+    # property; the artist just goes along).
+    ranked = sorted(
+        paired,
+        key=lambda p: (-score_track_distinctiveness(p[2]), p[0]),
+    )
+    chosen = ranked[:max_slots]
+    omitted = ranked[max_slots:]
+    for src_idx, _ta, title in omitted:
+        track_omissions.append({
+            "strategy": "va_track_artist_excess",
+            "reason": "exceeded_max_va_track_artist_slots",
+            "source_track_index": src_idx,
+            "title": title,
+        })
+
+    out: list[_Candidate] = []
+    for slot_idx, (src_idx, ta, title) in enumerate(chosen):
+        # Build the per-track query: literal track artist + literal
+        # track title, capped at MAX_SEARCH_TOKENS. The track artist
+        # tokens are NOT wildcarded — VA per-track artists are
+        # typically individually-named, so the discriminating value
+        # IS the literal artist name. Reuses ``_build_query`` for
+        # uniform normalisation (stopword drop, dedupe, cap).
+        query = _build_query(
+            ta, title, prepend_artist=True, wildcard=False,
+        )
+        label = f"{_STRATEGY_VA_TRACK_ARTIST_PREFIX}{slot_idx}"
+        if not query:
+            track_omissions.append({
+                "strategy": label,
+                "reason": "empty_va_track_artist_query",
+                "source_track_index": src_idx,
+                "track_artist": ta,
+                "title": title,
+            })
+            continue
+        out.append(_Candidate(
+            strategy=label,
+            repeat_group=label,
+            query=query,
+            omit_reason=None,
+            extra_provenance={
+                "source_track_index": src_idx,
+                "track_slot_index": slot_idx,
+                "track_artist": ta,
+            },
+        ))
+    return out
+
+
+def _compilation_series_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
+    """Build the VA ``compilation_series`` slot.
+
+    Triggers when the album title matches the volume-marker regex
+    (``Vol 1``, ``Vol. 1``, ``Volume 100``, ``#100``). Emits
+    ``<title>`` capped to MAX_SEARCH_TOKENS so the volume marker is
+    preserved; the marker is what makes the search discriminating for
+    anthology series.
+    """
+    title = snapshot.title or ""
+    if not _COMPILATION_SERIES_RE.search(title):
+        return _Candidate(
+            strategy=_STRATEGY_COMPILATION_SERIES,
+            repeat_group=_STRATEGY_COMPILATION_SERIES,
+            query=None,
+            omit_reason="no_volume_marker",
+        )
+    # Use a literal title-only query — the volume marker is in the
+    # title and the artist (Various Artists) collapses anyway.
+    body = _build_query(
+        snapshot.artist_name, title,
+        prepend_artist=False, wildcard=False,
+    )
+    if not body:
+        return _Candidate(
+            strategy=_STRATEGY_COMPILATION_SERIES,
+            repeat_group=_STRATEGY_COMPILATION_SERIES,
+            query=None,
+            omit_reason="empty_compilation_series_query",
+        )
+    return _Candidate(
+        strategy=_STRATEGY_COMPILATION_SERIES,
+        repeat_group=_STRATEGY_COMPILATION_SERIES,
+        query=body,
+        omit_reason=None,
+        extra_provenance={"compilation_series_match": True},
+    )
 
 
 def _generate_selftitled_plan(
@@ -952,6 +1381,56 @@ def _generate_selftitled_plan(
     return candidates, track_omissions
 
 
+# Title fragments / patterns that signal a generic / non-distinctive track
+# title. Used by `score_track_distinctiveness` to penalise tracks that
+# would make poor fallback queries (every soundtrack has a "Motion Picture
+# Soundtrack" or "Theme"; every album-without-track-titles has "Untitled").
+# Set is intentionally small — distinctiveness scoring is deliberately
+# dumb (no IDF, no corpus statistics, no ML). Bump
+# `SEARCH_PLAN_GENERATOR_ID` whenever this set changes — track ordering
+# is generator output.
+GENERIC_TITLE_TOKENS: frozenset[str] = frozenset({
+    "intro", "outro", "interlude", "untitled", "overture", "theme",
+    "motion", "picture", "soundtrack", "prelude", "reprise",
+})
+# "Track N" is a separate pattern (regex), handled by
+# `score_track_distinctiveness` directly.
+_GENERIC_TRACK_NUMBER_RE = re.compile(r"^track\s*\d+$", re.IGNORECASE)
+
+
+def score_track_distinctiveness(title: str) -> float:
+    """Score how distinctive ``title`` is as a fallback-query token source.
+
+    Higher = more distinctive (longer non-generic tokens score best).
+    Pure function — no DB, no corpus stats. Tuned empirically against
+    Kid A's track list (canonical bad case: "Motion Picture Soundtrack"
+    must score lower than "Everything in Its Right Place").
+
+    Formula: ``len(longest_non_generic_token) * num_non_generic_tokens``.
+    Tokens in ``GENERIC_TITLE_TOKENS`` AND tokens that match the
+    ``Track \\d+`` regex are excluded from both factors. Stopwords (the,
+    you, from, and) are NOT specially demoted — they're not distinctive
+    themselves but they don't poison a title's score either.
+
+    Returns ``0.0`` for empty titles, all-generic titles, and "Track 7"
+    style placeholders. Score is ``float`` (not ``int``) so future
+    fractional tiebreaks don't require re-typing the signature.
+    """
+    if not title:
+        return 0.0
+    if _GENERIC_TRACK_NUMBER_RE.match(title.strip()):
+        return 0.0
+    tokens = title.split()
+    non_generic = [
+        t for t in tokens
+        if t.lower() not in GENERIC_TITLE_TOKENS
+    ]
+    if not non_generic:
+        return 0.0
+    longest = max(len(t) for t in non_generic)
+    return float(longest * len(non_generic))
+
+
 def _build_track_candidates(
     track_titles: list[str],
     per_track_pairs: list[tuple[int, str]],
@@ -962,9 +1441,13 @@ def _build_track_candidates(
 ) -> list["_Candidate"]:
     """Rank per-track pairs and emit up to ``max_track_slots`` candidates.
 
-    Ranking: useful-token count desc, char count desc, source-track
-    index asc. Mirrors the legacy ordering so search-log forensics
-    stay comparable across the U5 transition.
+    Ranking is driven by ``score_track_distinctiveness`` on the RAW
+    source-track title (looked up via the pair's source index). Raw
+    titles, not the rendered queries, so a title like "Motion Picture
+    Soundtrack" is penalised even when the rendered query
+    ("*adiohead Motion Picture Soundtrack") happens to be long.
+    Tiebreaks fall back to rendered char-count desc and source-track
+    index asc so the order stays deterministic.
 
     ``slot_label_suffix`` is appended to the ``track_<idx>`` strategy
     label (e.g. ``"_artist"`` → ``track_0_artist``) so the new
@@ -988,7 +1471,7 @@ def _build_track_candidates(
     ranked = sorted(
         per_track_pairs,
         key=lambda pair: (
-            -len(pair[1].split()),
+            -score_track_distinctiveness(track_titles[pair[0]]),
             -len(pair[1]),
             pair[0],
         ),
@@ -1029,17 +1512,28 @@ def generate_search_plan(
     Pure function: same input → same output. No I/O. The result is the
     materialized executor schedule for the release, in slot order.
 
-    U5 of search-plan-entropy (2026-05-19) restructured the slot mix.
-    Normal request (year known, release_group_year populated and
-    differs from year, multi-track):
+    PR2 U8 (2026-05-25) restructured the slot mix again. Normal
+    request (year known, release_group_year populated and differs from
+    year, multi-track, non-VA):
 
       1. default              wildcarded artist+title, no short-drop
       2. literal              un-wildcarded artist+title, no year
       3. literal_flac         literal + " FLAC"
-      4. literal_lossless     literal + " lossless"
-      5. unwild_year          literal + " <year>"
-      6. unwild_rg_year       literal + " <rg_year>" (conditional)
-      7-9. track_<idx>_artist artist-prepended per-track fallback
+         (``literal_lossless`` retired — 1 match in 2,093 runs)
+      4. unwild_year          literal + " <year>"
+      5. unwild_rg_year       literal + " <rg_year>" (conditional)
+      6. catalog_number       artist + " <catno>" (conditional, R2)
+      7-10. track_<idx>_artist artist-prepended per-track fallback
+         (max 4 — R3 bumped from 3)
+
+    VA-detected requests (``is_va_compilation=True``, R13) skip the
+    artist-driven slots and substitute per-track-artist queries:
+
+      1-3. va_track_artist_<idx> <track_artist> <track_title>
+      4. compilation_series   title (conditional — volume marker)
+      5. unwild_year          title + " <year>" (conditional)
+      6. unwild_rg_year       title + " <rg_year>" (conditional)
+      7. catalog_number       title + " <catno>" (conditional)
 
     Self-titled requests (R10/R11) skip the album-level default/literal
     slots — they collapse to bare artist name and waste slskd cycles
@@ -1085,7 +1579,15 @@ def generate_search_plan(
         all_input_tokens.append(strip_special_chars(t).split())
     dropped_low_entropy = _has_dropped_low_entropy(*all_input_tokens)
 
-    if selftitled:
+    # PR2 U8 (R13): VA detection runs before self-titled because a
+    # request flagged as VA shouldn't get the self-titled mix even if
+    # the artist == title (e.g. an unlikely "Various Artists / Various
+    # Artists" payload). VA is the strongest dispatch signal.
+    if snapshot.is_va_compilation:
+        candidates, track_omissions = _generate_va_plan(
+            snapshot, config,
+        )
+    elif selftitled:
         candidates, track_omissions = _generate_selftitled_plan(
             snapshot, config,
         )
@@ -1155,6 +1657,8 @@ def generate_search_plan(
     }
     if selftitled:
         base_provenance["selftitled"] = True
+    if snapshot.is_va_compilation:
+        base_provenance["is_va_compilation"] = True
     if rg_year is not None:
         base_provenance["release_group_year"] = int(rg_year)
 

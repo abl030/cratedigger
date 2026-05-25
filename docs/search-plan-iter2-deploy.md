@@ -298,13 +298,266 @@ Schema changes are forward-only. If a critical issue surfaces:
 
 ---
 
-## PR2 — Generator + matcher
+## PR2 — Generator + matcher + #373 re-resolution (deploy window)
 
-Standard flake bump + rebuild. No backfill window. Bumps
-`SEARCH_PLAN_GENERATOR_ID`; existing plans regenerate on the next
-5-min cycle through the existing wave-capped reconciliation path.
+PR2 lands the generator/matcher rebuild (U6 stopword cleanup, U7
+distinctiveness-ranked track fallback, U8 VA strategy mix + #373
+detector tighten) and bumps `SEARCH_PLAN_GENERATOR_ID` from
+`search-plan/2026-05-25-0` to `search-plan/2026-05-25-1`. PR2 is
+code-only — **no schema migrations land**.
 
-(Procedure documented when PR2 lands.)
+The new VA detector (Rule 2 tightened post-#373) requires per-track
+artist credits to *diverge* from the album-level credit before
+flipping `is_va_compilation=TRUE`. The PR1 backfill ran against the
+looser pre-#373 detector and flagged ~73 wanted requests as VA; the
+new detector says only ~25 of those are real VA (the other ~48 are
+single-artist Compilation-typed releases — greatest-hits collections,
+artist anthologies). Those 48 rows currently sit at
+`is_va_compilation=TRUE` with NULL/non-diverging per-track artists,
+and their post-deploy regeneration will run `_generate_va_plan` against
+a degraded VA snapshot (no `va_track_artist_*` slots, just the
+`no_track_artists_resolved` omission + the leftover year/catno slots)
+— useless coverage.
+
+The deploy-window heredoc below re-runs `detect_va_compilation`
+against a freshly-fetched MB payload for every `is_va_compilation=TRUE`
+wanted row, and flips the column back to FALSE for the rows the new
+detector rejects. After the flip, the next 5-min cycle regenerates
+their plans through `_generate_normal_plan` (default / literal /
+literal_flac), restoring the full slot coverage.
+
+Estimated total window: **5–10 minutes** wall clock for the
+re-resolution loop (~73 rows × ~1 MB round-trip each, plus the
+standard plan-regen wave on the first 1-2 cycles post-deploy).
+
+### 1. Pre-deploy
+
+#### 1.1 Backup the pipeline DB
+
+```bash
+ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
+  > /tmp/cratedigger_backup_pr2_$(date +%Y%m%d_%H%M%S).sql
+```
+
+Even though PR2 is code-only, the heredoc below mutates rows
+(`is_va_compilation` flips). Backup before the trigger.
+
+#### 1.2 Capture baseline counts
+
+```bash
+ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
+SELECT
+  COUNT(*) FILTER (WHERE is_va_compilation = TRUE) AS va_flagged,
+  COUNT(*) FILTER (WHERE artist_name IN ('\''Various Artists'\'', '\''Various'\'')) AS string_va
+FROM album_requests
+WHERE status = '\''wanted'\''"'
+```
+
+Record the output. Pre-deploy expectation (as of 2026-05-25):
+`va_flagged≈73`, `string_va≈25`. Post-heredoc expectation:
+`va_flagged≈25` (only the genuine VA rows remain; the 48 single-artist
+Compilation rows have flipped to FALSE).
+
+### 2. Deploy code
+
+```bash
+# 1. On dev: push code that landed PR2
+git push origin main
+
+# 2. On doc1: bump cratedigger-src flake input
+ssh doc1 'cd ~/nixosconfig && nix flake update cratedigger-src \
+  && git add flake.lock \
+  && git commit -m "cratedigger: PR2 — search-plan generator + matcher + #373 detector" \
+  && git push'
+
+# 3. On doc2: rebuild. cratedigger-db-migrate is a no-op (no new
+#    migrations). cratedigger-web + cratedigger-importer restart.
+#    cratedigger.service is restartIfChanged=false; the 5-min timer
+#    picks up the new code.
+ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+```
+
+Verify the bumped `GENERATOR_ID` landed in the deployed code:
+
+```bash
+ssh doc2 'grep -n SEARCH_PLAN_GENERATOR_ID /nix/store/*/lib/search.py 2>/dev/null | head -3'
+```
+
+Expect `SEARCH_PLAN_GENERATOR_ID = "search-plan/2026-05-25-1"`.
+
+### 3. Plan-regen wave (automatic, expect 5-15s extra wall time)
+
+On the first 1-2 cycles after the deploy, startup reconciliation
+notices every active plan's `generator_id` is stale and regenerates
+them. The wave is bounded by the existing reconciliation cap (see
+`lib/startup_reconciliation.py`); rows that exceed the per-cycle cap
+land in subsequent cycles.
+
+Monitor:
+
+```bash
+ssh doc2 'sudo journalctl -u cratedigger -f --since "1 min ago"'
+```
+
+Expect a one-time `regenerated N plans` log line on each of the first
+1-2 cycles. After that, steady state.
+
+### 4. Controlled window for VA re-resolution
+
+The 48 wanted rows that flipped status under the looser pre-#373
+detector now sit at `is_va_compilation=TRUE` but produce useless VA
+plans (no diverging per-track artists → degraded VA snapshot).
+Re-run `detect_va_compilation` against a fresh MB payload and flip
+the column back to FALSE for the rows the new detector rejects.
+
+#### 4.1 Stop all three DB-mutating services
+
+```bash
+ssh doc2 'sudo systemctl stop cratedigger.service \
+                            cratedigger-importer.service \
+                            cratedigger-web.service'
+```
+
+```bash
+ssh doc2 'sudo systemctl is-active cratedigger.service \
+                                   cratedigger-importer.service \
+                                   cratedigger-web.service'
+```
+
+#### 4.2 Agent runs the transient VA re-resolution one-shot
+
+Same model as PR1 §3.2: agent generates this from the canonical
+detector surface at deploy time; it doesn't live in `scripts/` (per
+the single-operator invariant). The example shape:
+
+```python
+# ssh doc2 'sudo -u cratedigger /nix/var/cratedigger/bin/python3 -' <<'PY'
+import os
+from lib.pipeline_db import PipelineDB
+from lib.field_resolver_service import detect_va_compilation
+from web import mb as mb_api
+
+dsn = os.environ["PIPELINE_DB_DSN"]
+db = PipelineDB(dsn)
+
+# Walk every wanted row currently flagged VA. The tightened detector
+# (post-#373) only flips True when per-track artist credits diverge
+# from the album-level credit; the rows we're targeting flipped True
+# under the looser pre-#373 rule and need re-evaluation.
+cur = db._execute(
+    "SELECT id, mb_release_id, mb_release_group_id, mb_artist_id, "
+    "discogs_release_id, artist_name "
+    "FROM album_requests "
+    "WHERE status = 'wanted' AND is_va_compilation = TRUE "
+    "  AND mb_release_id IS NOT NULL "
+    "ORDER BY id"
+)
+rows = [dict(r) for r in cur.fetchall()]
+total = len(rows)
+flipped = 0
+kept = 0
+errors = 0
+print(f"VA re-resolution: walking {total} rows")
+
+for i, row in enumerate(rows, start=1):
+    try:
+        # Fresh MB payload (bypass the 24h cache) so the detector sees
+        # the canonical per-track artist credits.
+        payload = mb_api.get_release_raw(row["mb_release_id"], fresh=True)
+        new_is_va = detect_va_compilation(row, mb_release_payload=payload)
+        if new_is_va is False:
+            db.update_request_fields(int(row["id"]), is_va_compilation=False)
+            flipped += 1
+        else:
+            kept += 1
+    except Exception as exc:
+        print(f"  request={row['id']} ERROR: {type(exc).__name__}: {exc}")
+        errors += 1
+    if i % 25 == 0:
+        print(f"  {i}/{total} processed (flipped={flipped} kept={kept} errors={errors})")
+
+print(f"VA re-resolution: done — flipped={flipped} kept={kept} errors={errors}")
+PY
+```
+
+Verify the function names against the current
+`lib/field_resolver_service.py::detect_va_compilation` signature
+before running — the agent is responsible for re-reading the surface
+at deploy time. Errors land as `unresolved_mirror_unavailable`-style
+failures on the next normal cycle; do not retry-loop here.
+
+The 48 flipped rows do NOT need an immediate plan re-bump — their
+`generator_id` was already current after §3, so the next 5-min cycle
+will see `is_va_compilation=False` and run `_generate_normal_plan`
+against them, replacing the degraded VA plan with the full normal
+slot mix.
+
+#### 4.3 Restart services in reverse dependency order
+
+```bash
+ssh doc2 'sudo systemctl start cratedigger-web.service \
+                              cratedigger-importer.service \
+                              cratedigger.service'
+```
+
+```bash
+ssh doc2 'sudo systemctl is-active cratedigger-web.service \
+                                   cratedigger-importer.service \
+                                   cratedigger.service'
+```
+
+### 5. Verify
+
+#### 5.1 VA flag distribution
+
+```bash
+ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
+SELECT
+  COUNT(*) FILTER (WHERE is_va_compilation = TRUE) AS va_flagged,
+  COUNT(*) FILTER (WHERE artist_name IN ('\''Various Artists'\'', '\''Various'\'')) AS string_va
+FROM album_requests
+WHERE status = '\''wanted'\''"'
+```
+
+Expectation: `va_flagged ≈ 25` (down from ~73 baseline). `string_va`
+unchanged at ~25 (artist_name column wasn't touched). The two
+counts should now agree because the rows that survived re-resolution
+are exactly the ones with diverging per-track artists — the genuine
+VA shape.
+
+#### 5.2 Normal-plan restoration for the flipped cohort
+
+After the next 5-min cycle, sample a few flipped rows and confirm
+their active plan is normal-shape (default / literal / literal_flac
+slots present):
+
+```bash
+ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
+SELECT id, artist_name, album_title, is_va_compilation
+FROM album_requests
+WHERE status = '\''wanted'\'' AND is_va_compilation = FALSE
+  AND artist_name NOT IN ('\''Various Artists'\'', '\''Various'\'')
+ORDER BY updated_at DESC
+LIMIT 5"'
+```
+
+Then `pipeline-cli search-plan show <id>` for one of them — should
+list ordinals labelled `default` / `literal` / `literal_flac` /
+`unwild` / `track_*`, not `va_track_artist_*`.
+
+### 6. Known limitations / what this gives us
+
+- The VA re-resolution one-shot only runs against rows with non-NULL
+  `mb_release_id`. Rows that originated from Discogs (no MB release
+  ID) keep the PR1-era VA flag — Discogs VA detection was already
+  Rule 1 (canonical-MBID match), so they were either flagged by 033's
+  pure-SQL seed or stayed FALSE.
+- Rows where the MB mirror is unreachable during the window land as
+  errors and keep their pre-deploy VA flag. Re-running the heredoc
+  picks them up.
+- `is_va_compilation` flips do NOT touch `search_filetype_override`,
+  `min_bitrate`, or any other operator-set fields. Only the column
+  the detector owns.
 
 ---
 

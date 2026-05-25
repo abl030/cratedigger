@@ -482,11 +482,22 @@ change:
 
 - generator output rules (which slots emit, in what order)
 - query tokenisation
-- the low-entropy token set (`the`, `you`, `from`, `and` today)
+- the `STOPWORDS` set (`the`, `you`, `from`, `and` today)
+- the `GENERIC_TITLE_TOKENS` set (distinctiveness blacklist; see
+  `lib/search.py::score_track_distinctiveness`)
 - slot ordering / ranking
 - dedupe behaviour
 - repeat-group identity
 - provenance shape
+
+Recent bumps:
+
+| ID | Date | What landed |
+|---|---|---|
+| `search-plan/2026-05-08-1` | 2026-05-08 | Initial persisted-plan rollout |
+| `search-plan/2026-05-08-2` | 2026-05-08 | First post-rollout fix |
+| `search-plan/2026-05-19-1` | 2026-05-19 | Iteration 1 — entropy + matcher pre-filter |
+| `search-plan/2026-05-25-1` | 2026-05-25 | Iteration 2 PR2 — `literal_lossless` retired, `catalog_number` + `track_3_artist` slots added, distinctiveness-ranked tracks with `GENERIC_TITLE_TOKENS` blacklist, VA-specific strategy mix, stopwords collapsed to single `STOPWORDS` constant. Plan-regen wave on first 1-2 cycles post-deploy is expected and bounded by existing wave caps; monitor `journalctl -u cratedigger` for the wave to clear within ~10-15 min. |
 
 Any change to those that does **not** bump the id will silently leave
 old plans active under a new generator's rules. Two regression guards:

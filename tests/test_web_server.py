@@ -1975,7 +1975,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
 
     def _make_active(
         self, *,
-        generator_id: str = "search-plan/2026-05-19-1",
+        generator_id: str = "search-plan/2026-05-25-1",
         items_count: int = 2,
         next_ordinal: int = 0,
         cycle_count: int = 0,
@@ -4027,9 +4027,22 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "country": "US",
             "tracks": [{"title": "T1"}],
         }
+        # Real-VA shape (post-#373): Compilation rg AND per-track
+        # artist credits diverge from the album-level credit. The
+        # divergence is what flips Rule 2 in `detect_va_compilation`.
         mock_get_raw.return_value = {
             "id": "va-mbid",
             "release-group": {"primary-type": "Compilation"},
+            "artist-credit": [{"name": "Various Artists"}],
+            "media": [{
+                "position": 1,
+                "tracks": [
+                    {"position": 1, "title": "T1",
+                     "artist-credit": [{"name": "Artist A"}]},
+                    {"position": 2, "title": "T2",
+                     "artist-credit": [{"name": "Artist B"}]},
+                ],
+            }],
         }
         mock_rgy.return_value = 2008
 
@@ -4043,6 +4056,83 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         ]
         self.assertGreaterEqual(len(va_writes), 1,
                                 "is_va_compilation=True must be written")
+
+    @patch("web.routes.pipeline.mb_api.get_release_raw")
+    @patch("web.routes.pipeline.mb_api.get_release_group_year")
+    @patch("web.routes.pipeline.mb_api.get_release")
+    def test_pipeline_add_mb_va_compilation_emits_va_plan(
+        self, mock_get_release, mock_rgy, mock_get_raw,
+    ):
+        """PR2 Apply #2: when the resolver flips ``is_va_compilation``
+        on the add path, the SAME add call must produce a VA-shaped
+        plan (``va_track_artist_<idx>`` slots from ``_generate_va_plan``)
+        — not a normal-shaped plan that would have to wait for the
+        next operator regeneration to flip.
+
+        Uses a real ``FakePipelineDB`` because the active plan needs
+        to be fetched after the add lands; ``mock_db`` MagicMock can't
+        round-trip a plan through ``store_search_plan`` /
+        ``get_active_search_plan``.
+        """
+        import web.server as srv
+        from tests.fakes import FakePipelineDB
+        fake_db = FakePipelineDB()
+
+        mock_get_release.return_value = {
+            "release_group_id": "rg-va",
+            "artist_id": "a-1",
+            "artist_name": "Various Artists",
+            "title": "Tarantino Presents",
+            "year": 2008,
+            "country": "US",
+            "tracks": [
+                {"title": "T1", "track_number": 1, "disc_number": 1},
+                {"title": "T2", "track_number": 2, "disc_number": 1},
+                {"title": "T3", "track_number": 3, "disc_number": 1},
+            ],
+        }
+        mock_get_raw.return_value = {
+            "id": "va-plan-mbid",
+            "release-group": {"primary-type": "Compilation"},
+            "artist-credit": [{"name": "Various Artists"}],
+            "media": [{
+                "position": 1,
+                "tracks": [
+                    {"position": 1, "title": "T1",
+                     "artist-credit": [{"name": "Artist A"}]},
+                    {"position": 2, "title": "T2",
+                     "artist-credit": [{"name": "Artist B"}]},
+                    {"position": 3, "title": "T3",
+                     "artist-credit": [{"name": "Artist C"}]},
+                ],
+            }],
+        }
+        mock_rgy.return_value = 2008
+
+        with patch.object(srv, "db", fake_db):
+            status, data = self._post(
+                "/api/pipeline/add", {"mb_release_id": "va-plan-mbid"})
+        self.assertEqual(status, 200)
+
+        new_id = data["id"]
+        # VA flag landed.
+        row = fake_db.get_request(new_id)
+        assert row is not None
+        self.assertTrue(row["is_va_compilation"])
+
+        # And the plan respects it — at least one va_track_artist_*
+        # slot from ``_generate_va_plan``. Pre-fix, the add path
+        # silently passed ``is_va_compilation=False`` into the
+        # generator and the plan was the normal-shape (default /
+        # literal / literal_flac).
+        active = fake_db.get_active_search_plan(new_id)
+        assert active is not None
+        strategies = [item.strategy for item in active.items]
+        self.assertTrue(
+            any(s.startswith("va_track_artist_") for s in strategies),
+            f"VA add path must emit va_track_artist_* slot; got "
+            f"{strategies}",
+        )
 
     @patch("web.routes.pipeline.mb_api.get_release_raw")
     @patch("web.routes.pipeline.mb_api.get_release_group_year",

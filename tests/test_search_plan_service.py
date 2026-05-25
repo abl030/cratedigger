@@ -75,6 +75,20 @@ def _ok_tracks() -> list[dict[str, object]]:
     ]
 
 
+def _va_tracks() -> list[dict[str, object]]:
+    """VA-shaped track list — each track carries a distinct
+    ``track_artist`` (the resolver-set field that drives the VA branch).
+    """
+    return [
+        {"disc_number": 1, "track_number": 1, "title": "Sunshine",
+         "track_artist": "Catband"},
+        {"disc_number": 1, "track_number": 2, "title": "Moonlight",
+         "track_artist": "Dogband"},
+        {"disc_number": 1, "track_number": 3, "title": "Starlight",
+         "track_artist": "Birdband"},
+    ]
+
+
 class TestSearchPlanServiceAddTime(unittest.TestCase):
     """AE1 + duplicate-add + empty-tracks edges for the add-time path."""
 
@@ -697,6 +711,49 @@ class TestSearchPlanSnapshotEquivalence(unittest.TestCase):
         plan_b = generate_search_plan(snap_row, SearchPlanConfig())
         self.assertEqual(plan_a, plan_b)
 
+    def test_cli_and_web_paths_produce_equivalent_va_snapshots_and_plans(self):
+        """Parallel to the non-VA equivalence check (review #10): when
+        the row/payload carry VA-shaped fields
+        (``is_va_compilation=True``, ``catalog_number``, per-track
+        ``track_artist``), both snapshot constructors must produce the
+        same snapshot AND the resulting plan must take the VA branch
+        (at least one ``va_track_artist_*`` slot).
+        """
+        artist = "Various Artists"
+        title = "Now That's What I Call Music #100"
+        year = 2018
+        tracks = _va_tracks()
+        source = "request"
+
+        snap_add = snapshot_from_add_payload(
+            artist_name=artist, album_title=title, year=year,
+            tracks=tracks, source=source,
+            release_group_year=2018,
+            is_va_compilation=True,
+            catalog_number="NOW-100-01",
+        )
+        row = make_request_row(
+            artist_name=artist, album_title=title, year=year, source=source,
+            release_group_year=2018,
+            is_va_compilation=True,
+            catalog_number="NOW-100-01",
+        )
+        snap_row = snapshot_from_request_row(row, tracks)
+
+        self.assertEqual(snap_add, snap_row)
+
+        from lib.search import SearchPlanConfig
+        plan_a = generate_search_plan(snap_add, SearchPlanConfig())
+        plan_b = generate_search_plan(snap_row, SearchPlanConfig())
+        self.assertEqual(plan_a, plan_b)
+        # VA branch was actually taken — at least one va_track_artist_*
+        # slot present in the persisted items.
+        strategies = {it.strategy for it in plan_a.items}
+        self.assertTrue(
+            any(s.startswith("va_track_artist_") for s in strategies),
+            f"expected VA branch, got strategies={strategies!r}",
+        )
+
     def test_cli_and_web_share_generator_id_and_config_source(self):
         """Single source of truth for generator-id and SearchPlanConfig."""
         cfg = CratediggerConfig()
@@ -1015,6 +1072,41 @@ class TestSearchPlanServiceDryRun(unittest.TestCase):
         assert result.metadata_snapshot is not None
         self.assertEqual(
             result.metadata_snapshot.get("release_group_year"), 2000)
+
+    def test_dry_run_metadata_snapshot_includes_is_va_and_catno(self):
+        """PR2 #8 round-trip: when the row carries is_va_compilation /
+        catalog_number, the persisted metadata_snapshot JSONB picks them
+        up — and the typed SearchPlanMetadataSnapshot Struct can decode
+        them back (asymmetry fix: pre-#8 the Struct didn't declare them
+        so msgspec.convert silently dropped them on decode)."""
+        rid = self._seed(
+            id=10, is_va_compilation=True, catalog_number="STRMRT-001",
+        )
+        result = self.svc.dry_run_for_request(rid)
+        assert result.metadata_snapshot is not None
+        # dict-builder writes both fields
+        self.assertEqual(
+            result.metadata_snapshot.get("is_va_compilation"), True)
+        self.assertEqual(
+            result.metadata_snapshot.get("catalog_number"), "STRMRT-001")
+        # Typed-Struct round-trip preserves them
+        from lib.pipeline_db import SearchPlanMetadataSnapshot
+        import msgspec
+        struct = msgspec.convert(
+            result.metadata_snapshot, type=SearchPlanMetadataSnapshot)
+        self.assertEqual(struct.is_va_compilation, True)
+        self.assertEqual(struct.catalog_number, "STRMRT-001")
+        self.assertEqual(struct.release_group_year, 2000)
+
+    def test_dry_run_metadata_snapshot_omits_va_and_catno_when_false(self):
+        """omit_defaults: when is_va_compilation is False and
+        catalog_number is None, the dict-builder skips both keys (Struct
+        defaults are False / None, so the encoded JSONB stays minimal)."""
+        rid = self._seed(id=11)  # defaults: is_va_compilation=False, catalog_number=None
+        result = self.svc.dry_run_for_request(rid)
+        assert result.metadata_snapshot is not None
+        self.assertNotIn("is_va_compilation", result.metadata_snapshot)
+        self.assertNotIn("catalog_number", result.metadata_snapshot)
 
     def test_dry_run_uses_current_generator_id(self):
         from lib.search import SEARCH_PLAN_GENERATOR_ID
