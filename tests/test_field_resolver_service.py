@@ -779,6 +779,72 @@ class TestResolveAll(unittest.TestCase):
         # Sanity: the slow resolver was actually entered (not skipped).
         self.assertTrue(slow_called.is_set())
 
+    def test_completed_future_harvested_after_budget_expires(self):
+        """Regression guard for code-review finding #2: when the iteration
+        gets to a future's slot AFTER the budget has already expired but the
+        future already completed concurrently, the orchestrator MUST harvest
+        the value instead of dropping it as NULL.
+
+        Shape: order the jobs so ``mb_get_release_group_year`` is FIRST and
+        slow (forces budget expiry), and the other resolvers' shared
+        ``mb_get_release`` is FAST (already done by the time iteration
+        reaches them). Pre-fix, those completed futures landed NULL because
+        the ``remaining <= 0`` branch unconditionally dropped them. Post-fix
+        they're harvested via ``fut.done()`` check + ``fut.result(timeout=0)``.
+        """
+        import threading
+        import time as _t
+
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=99, mb_release_group_id="rg-completed")
+
+        # Slow rg_year resolver — exhausts the budget.
+        slow_called = threading.Event()
+        def _slow_year(_rg_id):
+            slow_called.set()
+            _t.sleep(1.5)
+            return 2007
+
+        # FAST get_release — completes well before the budget expires,
+        # so by the time the iteration loop reaches the rg_id / catno /
+        # track-artist slots, ``remaining <= 0`` AND ``fut.done() is True``.
+        def _fast_get_release(mbid, *, fresh=True):
+            return {
+                "release_group_id": "rg-completed",
+                "media": [
+                    {"tracks": [
+                        {"position": 1, "title": "Track 1",
+                         "artist-credit": [{"name": "Some Artist"}]}
+                    ]}
+                ],
+                "label-info": [{"catalog-number": "ABC-001"}],
+            }
+
+        start = _t.monotonic()
+        result = resolve_all(
+            req, db,
+            budget_seconds=0.3,
+            mb_get_release_group_year=_slow_year,
+            mb_get_release=_fast_get_release,
+        )
+        elapsed = _t.monotonic() - start
+
+        # Budget was enforced (returned well before the slow resolver's 1.5s).
+        self.assertLess(elapsed, 1.2,
+                        f"budget not enforced: elapsed={elapsed:.3f}s")
+        # rg_year timed out as expected.
+        self.assertIsNone(result.release_group_year)
+        # The KEY assertion — fast-completing futures were harvested even
+        # though the budget had already expired by the time the iteration
+        # got to their slots.
+        self.assertEqual(result.release_group_id, "rg-completed",
+                         "completed rg_id future not harvested post-budget")
+        self.assertEqual(result.catalog_number, "ABC-001",
+                         "completed catalog_number future not harvested post-budget")
+        self.assertTrue(slow_called.is_set())
+
     def test_mirror_unavailable_does_not_block_add(self):
         """Network error on a resolver → that field lands NULL with
         ``unresolved_mirror_unavailable`` in the side table; ``resolve_all``

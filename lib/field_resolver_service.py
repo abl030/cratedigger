@@ -1317,8 +1317,22 @@ def resolve_all(
             field_name, _fn = jobs[key]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                # Budget already exhausted before we even waited; the
-                # worker may still be running but its slot is timed-out.
+                # Budget already exhausted. BUT — if this future
+                # already completed concurrently while a sibling was
+                # being awaited, harvest its result anyway. The
+                # original bug here (code-review finding #2) dropped
+                # any future that finished AFTER the budget expired
+                # but BEFORE we got to its slot in the iteration,
+                # leaving its row NULL even though the work was done.
+                if fut.done():
+                    try:
+                        outputs[key] = fut.result(timeout=0)
+                        continue
+                    except Exception:  # noqa: BLE001
+                        # Fall through to the timeout-recording path
+                        # below — a completed-but-raised future is
+                        # equivalent to "we got nothing useful".
+                        pass
                 outputs[key] = None
                 if not deferred.already_recorded(field_name):
                     deferred.record_field_resolution(
