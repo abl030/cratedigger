@@ -152,3 +152,13 @@ _.log_message  # unused method (web/server.py:242)
 _.do_GET  # unused method (web/server.py:299)
 _.do_POST  # unused method (web/server.py:339)
 _.do_OPTIONS  # unused method (web/server.py:384)
+# Field resolver service (U2 of search-plan iteration 2) — consumed by
+# U3 backfill script and U4 inline-enqueue path (next units in PR1).
+DiscogsMasterReleasesFn  # unused type alias (lib/field_resolver_service.py)
+_default_discogs_get_master_releases  # unused function (lib/field_resolver_service.py)
+resolve_release_group_year  # unused function (lib/field_resolver_service.py)
+resolve_release_group_id  # unused function (lib/field_resolver_service.py)
+resolve_track_artists  # unused function (lib/field_resolver_service.py)
+resolve_catalog_number  # unused function (lib/field_resolver_service.py)
+detect_va_compilation  # unused function (lib/field_resolver_service.py)
+_.get_field_resolution  # unused method (lib/pipeline_db.py)

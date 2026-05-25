@@ -6007,6 +6007,66 @@ class PipelineDB:
             WHERE id = %s
         """, (next_retry, request_id))
 
+    # --- album_request_field_resolutions (migration 030) ---
+
+    def record_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+        status: str,
+        reason_code: str | None,
+    ) -> None:
+        """Persist one field-resolution attempt for ``request_id``.
+
+        UPSERT: a fresh row carries ``attempts=1``; re-resolving the
+        same ``(request_id, field_name)`` increments ``attempts`` and
+        updates the status / reason / timestamp atomically. ``resolved_at``
+        is bumped to NOW() on conflict so retry-window queries in U3
+        see the actual last-probe time.
+
+        Service layer in ``lib/field_resolver_service.py`` is the single
+        caller; this method just writes the row. The status enum is
+        enforced at the service layer, not via DB CHECK (the migration
+        comments are the canonical source -- new statuses will appear as
+        the system grows and shipped migrations are frozen).
+        """
+        self._execute(
+            """
+            INSERT INTO album_request_field_resolutions
+                (request_id, field_name, status, reason_code)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (request_id, field_name) DO UPDATE
+            SET status = EXCLUDED.status,
+                reason_code = EXCLUDED.reason_code,
+                attempts = album_request_field_resolutions.attempts + 1,
+                resolved_at = NOW()
+            """,
+            (request_id, field_name, status, reason_code),
+        )
+
+    def get_field_resolution(
+        self,
+        request_id: int,
+        field_name: str,
+    ) -> dict[str, Any] | None:
+        """Return the side-table row for ``(request_id, field_name)`` or None.
+
+        Used by tests and by the U3 backfill row-selection. The row's
+        ``resolved_at`` timestamp gives the caller the retry-window
+        anchor; ``attempts`` is the running count.
+        """
+        cur = self._execute(
+            """
+            SELECT id, request_id, field_name, resolved_at, status,
+                   reason_code, attempts
+            FROM album_request_field_resolutions
+            WHERE request_id = %s AND field_name = %s
+            """,
+            (request_id, field_name),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
+
     # --- bad_audio_hashes (curator-reported bad-rip audio-content hashes) ---
 
     def add_bad_audio_hashes(

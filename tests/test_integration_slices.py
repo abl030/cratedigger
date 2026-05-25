@@ -8389,5 +8389,269 @@ class TestReplaceFullPath(unittest.TestCase):
         mocks["remove"].assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 U2 — Field resolver service: round-trip through real mirror shapes
+# ---------------------------------------------------------------------------
+
+
+class TestFieldResolverSlice(unittest.TestCase):
+    """Round-trip the field resolvers through the real HTTP client.
+
+    Patches the leaf seam (``urllib.request.urlopen`` in ``web.mb`` /
+    ``web.discogs``) with realistic JSON payloads captured from the live
+    mirrors at ``192.168.1.35:5200`` (MusicBrainz) and
+    ``discogs.ablz.au``. The resolver service drives the real ``_get``
+    helpers, the real Redis-memoised wrappers (bypassed by ``fresh=True``
+    where used), and the real ``record_field_resolution`` writes against
+    a ``FakePipelineDB``.
+
+    Per ``docs/solutions/testing/mocked-contract-tests-miss-helper-mirror-integration-bugs.md``:
+    a pyright-clean fake-collaborator unit test can still 500 against
+    real-mirror response shape -- this slice catches that.
+    """
+
+    def setUp(self) -> None:
+        # Redis is not initialised in the test harness (web.cache._redis
+        # stays None), so ``memoize_meta`` is a pass-through -- every
+        # call runs ``fetch_fn`` and nothing is cached. No additional
+        # cache-disabling plumbing required.
+        pass
+
+    @staticmethod
+    def _patch_urlopen(monkey_patches: dict[str, bytes]):
+        """Return a context manager patching urlopen with URL→bytes dispatch.
+
+        Both ``web.mb`` and ``web.discogs`` route through
+        ``urllib.request.urlopen``; we patch each module's reference.
+        Bytes are returned via a tiny shim that mimics the
+        ``urlopen() -> response`` contract enough for ``json.loads``.
+        """
+        from contextlib import contextmanager, ExitStack
+        import io
+        from unittest.mock import patch as _patch
+
+        def _make_response(payload: bytes):
+            class _Resp:
+                def __init__(self) -> None:
+                    self._buf = io.BytesIO(payload)
+
+                def read(self, *args, **kwargs) -> bytes:
+                    return self._buf.read()
+
+                def __enter__(self) -> "_Resp":
+                    return self
+
+                def __exit__(self, *args) -> None:
+                    return None
+            return _Resp()
+
+        def _urlopen(req, timeout=10):  # noqa: ARG001
+            url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
+            for key, payload in monkey_patches.items():
+                if key in url:
+                    return _make_response(payload)
+            raise AssertionError(f"unexpected URL in test: {url}")
+
+        @contextmanager
+        def _ctx():
+            with ExitStack() as stack:
+                stack.enter_context(
+                    _patch("web.mb.urllib.request.urlopen", new=_urlopen),
+                )
+                stack.enter_context(
+                    _patch("web.discogs.urllib.request.urlopen", new=_urlopen),
+                )
+                yield
+        return _ctx()
+
+    def test_mb_release_group_year_round_trips_through_real_client(self):
+        """Realistic MB release-group payload → resolved year + side-table row."""
+        from lib.field_resolver_service import (
+            FIELD_RELEASE_GROUP_YEAR,
+            resolve_release_group_year,
+        )
+        from tests.fakes import FakePipelineDB
+
+        # Captured shape from the MB mirror's
+        # /ws/2/release-group/<mbid>?fmt=json endpoint.
+        mb_payload = (
+            b'{"id":"abc-uuid","title":"OK Computer",'
+            b'"primary-type":"Album","first-release-date":"1997-05-21"}'
+        )
+
+        db = FakePipelineDB()
+        req = {
+            "id": 4001,
+            "mb_release_id": "rec-mbid-xyz",
+            "mb_release_group_id": "abc-uuid",
+            "mb_artist_id": None,
+            "discogs_release_id": None,
+        }
+
+        with self._patch_urlopen({"/release-group/abc-uuid": mb_payload}):
+            result = resolve_release_group_year(req, db)
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.value, 1997)
+        row = db.get_field_resolution(4001, FIELD_RELEASE_GROUP_YEAR)
+        assert row is not None
+        self.assertEqual(row["status"], "resolved")
+
+    def test_discogs_master_year_round_trips_through_real_client(self):
+        """Realistic Discogs master payload → resolved year + side-table row."""
+        from lib.field_resolver_service import (
+            FIELD_RELEASE_GROUP_YEAR,
+            resolve_release_group_year,
+        )
+        from tests.fakes import FakePipelineDB
+
+        # Captured shape from the Discogs mirror's
+        # /api/masters/<id> endpoint.
+        discogs_payload = (
+            b'{"id":12345,"title":"OK Computer","primary_type":"Album",'
+            b'"first_release_date":"1997-05-21","artist_credit":"Radiohead",'
+            b'"primary_artist_id":3840,"releases":[]}'
+        )
+
+        db = FakePipelineDB()
+        req = {
+            "id": 4002,
+            "mb_release_id": None,
+            "mb_release_group_id": "12345",  # numeric Discogs master id
+            "discogs_release_id": "67890",
+            "mb_artist_id": None,
+        }
+
+        with self._patch_urlopen({"/api/masters/12345": discogs_payload}):
+            result = resolve_release_group_year(req, db)
+
+        self.assertEqual(result.status, "resolved")
+        self.assertEqual(result.value, 1997)
+
+    def test_mb_release_group_year_404_round_trips_to_unresolved_404(self):
+        """MB mirror returns 404 → web.mb.get_release_group_year returns None.
+
+        The resolver collapses None (which can mean 404 or unparseable
+        date) to ``unresolved_field_missing_upstream`` per the conservative
+        mapping documented in the service. End-to-end this exercises the
+        ``HTTPError(404)`` catch inside ``web.mb.get_release_group_year``.
+        """
+        from lib.field_resolver_service import (
+            FIELD_RELEASE_GROUP_YEAR,
+            resolve_release_group_year,
+        )
+        from tests.fakes import FakePipelineDB
+        from unittest.mock import patch as _patch
+        import urllib.error
+
+        db = FakePipelineDB()
+        req = {
+            "id": 4003,
+            "mb_release_id": "rec-mbid-xyz",
+            "mb_release_group_id": "abc-uuid",
+            "mb_artist_id": None,
+            "discogs_release_id": None,
+        }
+
+        def _raise_404(req_obj, timeout=10):  # noqa: ARG001
+            raise urllib.error.HTTPError(
+                url="x", code=404, msg="Not Found",
+                hdrs=None, fp=None,  # type: ignore[arg-type]
+            )
+
+        with _patch("web.mb.urllib.request.urlopen", new=_raise_404):
+            result = resolve_release_group_year(req, db)
+
+        # web.mb.get_release_group_year catches HTTPError(404) and
+        # returns None; the resolver maps None to
+        # unresolved_field_missing_upstream (sticky 30d).
+        self.assertEqual(
+            result.status, "unresolved_field_missing_upstream",
+        )
+        self.assertIsNone(result.value)
+        row = db.get_field_resolution(4003, FIELD_RELEASE_GROUP_YEAR)
+        assert row is not None
+        self.assertEqual(
+            row["status"], "unresolved_field_missing_upstream",
+        )
+
+    def test_mb_release_track_artists_round_trip(self):
+        """Realistic MB release payload → per-track artist credits.
+
+        Uses the ``inc=recordings+artist-credits+media+release-groups``
+        shape that ``web.mb.get_release`` requests, but unlike the
+        normalised return type of ``get_release``, the resolver works
+        directly off the raw MB JSON (which carries per-track
+        ``artist-credit``).
+        """
+        from lib.field_resolver_service import (
+            FIELD_TRACK_ARTIST,
+            resolve_track_artists,
+        )
+        from tests.fakes import FakePipelineDB
+
+        # Minimal but realistic MB release payload shape -- direct from
+        # the MB mirror, not via web.mb.get_release's normaliser.
+        mb_payload = (
+            b'{"id":"rec-mbid-xyz","title":"Some Album",'
+            b'"date":"1997","artist-credit":[{"name":"Various","joinphrase":""}],'
+            b'"media":[{"position":1,"tracks":['
+            b'{"position":1,"title":"Track A",'
+            b'"artist-credit":[{"name":"Artist X","joinphrase":""}]},'
+            b'{"position":2,"title":"Track B",'
+            b'"artist-credit":[{"name":"Artist Y","joinphrase":""}]}'
+            b']}]}'
+        )
+
+        db = FakePipelineDB()
+        req = {
+            "id": 4004,
+            "mb_release_id": "rec-mbid-xyz",
+            "mb_release_group_id": "abc-uuid",
+            "mb_artist_id": None,
+            "discogs_release_id": None,
+        }
+
+        # The resolver's default uses ``web.mb.get_release`` which
+        # NORMALISES the payload (strips per-track artist-credit). To
+        # exercise the resolver's MB-track-artist extraction logic
+        # end-to-end through real HTTP, we inject the raw-payload
+        # fetcher: a callable that wraps ``_get`` directly, bypassing
+        # the normaliser. This matches the production path the
+        # backfill / enqueue will use once U3/U4 wire it.
+        import json
+        from web.mb import _get, MB_API_BASE
+
+        def _raw_mb_get_release(mbid, fresh=False):  # noqa: ARG001
+            return _get(
+                f"{MB_API_BASE}/release/{mbid}"
+                "?inc=recordings+artist-credits+media+release-groups"
+                "&fmt=json"
+            )
+
+        with self._patch_urlopen({"/release/rec-mbid-xyz": mb_payload}):
+            results = resolve_track_artists(
+                req, db, mb_get_release=_raw_mb_get_release,
+            )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].status, "resolved")
+        self.assertEqual(results[0].value, "Artist X")
+        self.assertEqual(results[1].status, "resolved")
+        self.assertEqual(results[1].value, "Artist Y")
+        # Sanity: side-table summary.
+        row = db.get_field_resolution(4004, FIELD_TRACK_ARTIST)
+        assert row is not None
+        self.assertEqual(row["status"], "resolved")
+        # Round-trip the resolver result through msgspec encode/decode
+        # so the wire-boundary contract is also exercised end-to-end.
+        import msgspec
+        from lib.field_resolver_service import ResolverResult
+        encoded = msgspec.json.encode(results[0])
+        decoded = msgspec.json.decode(encoded, type=ResolverResult)
+        self.assertEqual(decoded.status, "resolved")
+        self.assertEqual(decoded.value, "Artist X")
+
+
 if __name__ == "__main__":
     unittest.main()
