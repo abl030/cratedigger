@@ -1073,6 +1073,41 @@ class TestSearchPlanServiceDryRun(unittest.TestCase):
         self.assertEqual(
             result.metadata_snapshot.get("release_group_year"), 2000)
 
+    def test_dry_run_metadata_snapshot_includes_is_va_and_catno(self):
+        """PR2 #8 round-trip: when the row carries is_va_compilation /
+        catalog_number, the persisted metadata_snapshot JSONB picks them
+        up — and the typed SearchPlanMetadataSnapshot Struct can decode
+        them back (asymmetry fix: pre-#8 the Struct didn't declare them
+        so msgspec.convert silently dropped them on decode)."""
+        rid = self._seed(
+            id=10, is_va_compilation=True, catalog_number="STRMRT-001",
+        )
+        result = self.svc.dry_run_for_request(rid)
+        assert result.metadata_snapshot is not None
+        # dict-builder writes both fields
+        self.assertEqual(
+            result.metadata_snapshot.get("is_va_compilation"), True)
+        self.assertEqual(
+            result.metadata_snapshot.get("catalog_number"), "STRMRT-001")
+        # Typed-Struct round-trip preserves them
+        from lib.pipeline_db import SearchPlanMetadataSnapshot
+        import msgspec
+        struct = msgspec.convert(
+            result.metadata_snapshot, type=SearchPlanMetadataSnapshot)
+        self.assertEqual(struct.is_va_compilation, True)
+        self.assertEqual(struct.catalog_number, "STRMRT-001")
+        self.assertEqual(struct.release_group_year, 2000)
+
+    def test_dry_run_metadata_snapshot_omits_va_and_catno_when_false(self):
+        """omit_defaults: when is_va_compilation is False and
+        catalog_number is None, the dict-builder skips both keys (Struct
+        defaults are False / None, so the encoded JSONB stays minimal)."""
+        rid = self._seed(id=11)  # defaults: is_va_compilation=False, catalog_number=None
+        result = self.svc.dry_run_for_request(rid)
+        assert result.metadata_snapshot is not None
+        self.assertNotIn("is_va_compilation", result.metadata_snapshot)
+        self.assertNotIn("catalog_number", result.metadata_snapshot)
+
     def test_dry_run_uses_current_generator_id(self):
         from lib.search import SEARCH_PLAN_GENERATOR_ID
         rid = self._seed(id=6)

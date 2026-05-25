@@ -1301,6 +1301,10 @@ def _metadata_snapshot_from_snapshot(
     }
     if snapshot.release_group_year is not None:
         out["release_group_year"] = int(snapshot.release_group_year)
+    if snapshot.is_va_compilation:
+        out["is_va_compilation"] = True
+    if snapshot.catalog_number is not None:
+        out["catalog_number"] = snapshot.catalog_number
     return out
 
 

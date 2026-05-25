@@ -54,6 +54,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "release_group_year": None,
         # Migration 028 — VA detection flag (U4). NOT NULL DEFAULT FALSE.
         "is_va_compilation": False,
+        # Migration 032 — label catalog number (PR1 U4). NULL when unresolved.
+        "catalog_number": None,
         "country": "US",
         "format": None,
         "source": "request",

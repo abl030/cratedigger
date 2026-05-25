@@ -281,7 +281,18 @@ class SearchPlanItemInput:
 class SearchPlanMetadataSnapshot(
     msgspec.Struct, frozen=True, omit_defaults=True,
 ):
-    """Typed JSONB boundary for ``search_plans.metadata_snapshot``."""
+    """Typed JSONB boundary for ``search_plans.metadata_snapshot``.
+
+    Mirrors the subset of ``ReleaseSnapshot`` an operator triaging an
+    active plan would want to see without joining back to
+    ``album_requests``. ``release_group_year``, ``is_va_compilation``,
+    and ``catalog_number`` were added in PR2 of search-plan iter2 to
+    close the asymmetry where the dict-builder wrote ``release_group_year``
+    but the Struct didn't declare it (silently dropped on decode).
+    ``track_artists`` is intentionally NOT mirrored — per-track lists
+    can run 50+ entries on box sets and bloat JSONB; operators read
+    ``album_tracks.track_artist`` directly.
+    """
 
     artist_name: str | None = None
     album_title: str | None = None
@@ -289,6 +300,9 @@ class SearchPlanMetadataSnapshot(
     track_count: int | None = None
     redownload: bool = False
     prepend_artist: bool = False
+    release_group_year: int | None = None
+    is_va_compilation: bool = False
+    catalog_number: str | None = None
 
 
 class SearchPlanProvenance(
