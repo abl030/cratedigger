@@ -22,6 +22,11 @@ from typing import Any, Iterator
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Bootstrap ephemeral PostgreSQL — sets TEST_DB_DSN env var via side effect
+# at import time so the production-cursor regression tests (below) actually
+# run instead of being silently skipped (which would fail test_skip_audit).
+sys.path.insert(0, os.path.dirname(__file__))
+import conftest  # noqa: E402, F401
 
 from lib.field_resolver_service import (  # noqa: E402
     FIELD_CATALOG_NUMBER,
@@ -34,6 +39,8 @@ from lib.field_resolver_service import (  # noqa: E402
 from scripts.backfill_field_resolutions import (  # noqa: E402
     _is_retry_eligible,
     _RETRY_WINDOWS,
+    _select_all_requests_factory,
+    _select_requests_needing_resolution_factory,
     BATCH_SIZE,
     FieldBackfillCounters,
     run_backfill,
@@ -1191,6 +1198,91 @@ class TestAdvisoryLock(unittest.TestCase):
 
         self.assertEqual(rc, 5)
         mock_run.assert_not_called()
+
+
+TEST_DSN = os.environ.get("TEST_DB_DSN")
+
+
+def _requires_postgres(cls):
+    if not TEST_DSN:
+        return unittest.skip(
+            "TEST_DB_DSN not set — skipping production-cursor regression tests"
+        )(cls)
+    return cls
+
+
+@_requires_postgres
+class TestProductionCursorPathYieldsDictRows(unittest.TestCase):
+    """Regression guard for the dict(row) crash on a default tuple cursor.
+
+    The unit tests above all inject a Selector that walks
+    FakePipelineDB._requests (already dict-shaped). The production paths
+    in _select_requests_needing_resolution_factory and
+    _select_all_requests_factory open raw psycopg2 cursors and call
+    dict(row) on each result. With a default tuple cursor, dict(tuple)
+    crashes with TypeError on the first row. RealDictCursor is required.
+    These tests exercise the real cursor path against an actual
+    PostgreSQL test DB so the next regression surfaces immediately.
+    """
+
+    def setUp(self):
+        from lib import pipeline_db
+        self.db = pipeline_db.PipelineDB(TEST_DSN)
+        # Clean slate for both tables this regression touches.
+        for table in (
+            "album_request_field_resolutions",
+            "album_tracks",
+            "album_requests",
+        ):
+            self.db._execute(f"TRUNCATE {table} CASCADE")
+        self.db.conn.commit()
+        # Seed one request to make the cursor path actually yield a row.
+        self.req_id = self.db.add_request(
+            mb_release_id="cursor-regression-mbid",
+            artist_name="Cursor",
+            album_title="Regression",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_select_all_requests_factory_yields_dict_rows(self):
+        """Without RealDictCursor, dict(row) crashes on the first
+        row. This test exercises the production code path end-to-end —
+        no Selector injection, no FakePipelineDB."""
+        sel = _select_all_requests_factory(
+            db=self.db, limit=10,
+        )
+        rows = list(sel())
+        self.assertEqual(len(rows), 1)
+        # The row MUST be a dict-shaped object the consumer code can
+        # access by column name. A raw tuple here would silently work
+        # with .get() returning None for every key (the failure mode
+        # the unit tests miss).
+        self.assertIsInstance(rows[0], dict)
+        self.assertEqual(rows[0]["id"], self.req_id)
+        self.assertEqual(rows[0]["mb_release_id"], "cursor-regression-mbid")
+        self.assertEqual(rows[0]["artist_name"], "Cursor")
+
+    def test_select_requests_needing_resolution_factory_yields_dict_rows(self):
+        """Same regression for the retry-eligibility selector — the
+        other raw-cursor path in the backfill script."""
+        # Construct the simplest path: parent column NULL, no side-table
+        # row → row is eligible.
+        sel = _select_requests_needing_resolution_factory(
+            db=self.db,
+            parent_column="release_group_year",
+            field_name="release_group_year",
+            limit=10,
+            now=datetime.now(timezone.utc),
+        )
+        rows = list(sel())
+        # The seeded request has release_group_year NULL → should yield.
+        self.assertEqual(len(rows), 1)
+        self.assertIsInstance(rows[0], dict)
+        self.assertEqual(rows[0]["id"], self.req_id)
+        self.assertEqual(rows[0]["mb_release_id"], "cursor-regression-mbid")
 
 
 if __name__ == "__main__":

@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Protocol
 
+import psycopg2.extras
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -243,14 +245,17 @@ def _select_requests_needing_resolution_factory(
             parts.append(f"LIMIT {int(limit)}")
 
         sql = "\n".join(parts)
-        cur = db.conn.cursor()
+        # RealDictCursor is required — the row consumers below call
+        # ``dict(row)`` and the production code path was unprotected by
+        # tests (every test injects a Selector that yields dicts from
+        # FakePipelineDB._requests, so a default tuple cursor would
+        # crash on first row with ``TypeError: cannot convert dictionary
+        # update sequence element #0 to a sequence``).
+        cur = db.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             cur.execute(sql, tuple(params))
             yielded = 0
             for row in cur.fetchall():
-                # Cursor returns DictRow when factory is set; fall back
-                # to dict() so downstream Python code always gets a real
-                # dict.
                 row_dict = dict(row)
                 status = row_dict.get("arfr_status")
                 resolved_at = row_dict.get("arfr_resolved_at")
@@ -300,7 +305,9 @@ def _select_all_requests_factory(
         if limit is not None:
             sql_parts.append(f"LIMIT {int(limit)}")
         sql = "\n".join(sql_parts)
-        cur = db.conn.cursor()
+        # RealDictCursor — see the matching comment in
+        # _select_requests_needing_resolution_factory above.
+        cur = db.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             cur.execute(sql)
             for row in cur.fetchall():
