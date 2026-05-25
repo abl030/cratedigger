@@ -415,12 +415,21 @@ def resolve_release_group_id(
     *,
     mb_get_release: MBReleaseFn | None = None,
     discogs_get_release: DiscogsReleaseFn | None = None,
+    mb_release_payload: dict[str, Any] | None = None,
+    discogs_release_payload: dict[str, Any] | None = None,
 ) -> ResolverResult:
     """Resolve a request's release-group / master id.
 
     For MB requests: fetch ``GET /release/{mbid}`` and return the
     ``release_group_id`` field. For Discogs requests: fetch
     ``GET /api/releases/{id}`` and return the ``master_id`` field.
+
+    ``mb_release_payload`` / ``discogs_release_payload`` short-circuit
+    the fetch when the caller already has the payload in hand (the
+    ``resolve_all`` orchestrator threads its single fetch through to
+    every per-field resolver — code-review finding #1). Stand-alone
+    callers can keep passing the fetch callables; payload kwargs are
+    optional.
 
     The release_group_id may legitimately be ``None`` upstream (e.g.
     Discogs masterless releases). In that case we record
@@ -441,18 +450,21 @@ def resolve_release_group_id(
 
     # Discogs branch.
     if discogs_release_id and not mb_release_id:
-        fetch = discogs_get_release or _default_discogs_get_release
-        try:
-            data = fetch(str(discogs_release_id), fresh=True)
-        except BaseException as exc:  # noqa: BLE001
-            status, reason = _classify_lookup_exception(exc)
-            result = ResolverResult(
-                field_name=FIELD_RELEASE_GROUP_ID,
-                status=status,
-                reason_code=reason,
-            )
-            _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
-            return result
+        if discogs_release_payload is not None:
+            data = discogs_release_payload
+        else:
+            fetch = discogs_get_release or _default_discogs_get_release
+            try:
+                data = fetch(str(discogs_release_id), fresh=True)
+            except BaseException as exc:  # noqa: BLE001
+                status, reason = _classify_lookup_exception(exc)
+                result = ResolverResult(
+                    field_name=FIELD_RELEASE_GROUP_ID,
+                    status=status,
+                    reason_code=reason,
+                )
+                _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
+                return result
         rg_id = data.get("release_group_id") if isinstance(data, dict) else None
         if not rg_id:
             result = ResolverResult(
@@ -481,18 +493,21 @@ def resolve_release_group_id(
         _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
         return result
 
-    fetch_mb = mb_get_release or _default_mb_get_release
-    try:
-        data = fetch_mb(mb_id, fresh=True)
-    except BaseException as exc:  # noqa: BLE001
-        status, reason = _classify_lookup_exception(exc)
-        result = ResolverResult(
-            field_name=FIELD_RELEASE_GROUP_ID,
-            status=status,
-            reason_code=reason,
-        )
-        _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
-        return result
+    if mb_release_payload is not None:
+        data = mb_release_payload
+    else:
+        fetch_mb = mb_get_release or _default_mb_get_release
+        try:
+            data = fetch_mb(mb_id, fresh=True)
+        except BaseException as exc:  # noqa: BLE001
+            status, reason = _classify_lookup_exception(exc)
+            result = ResolverResult(
+                field_name=FIELD_RELEASE_GROUP_ID,
+                status=status,
+                reason_code=reason,
+            )
+            _record(pdb, request_id, FIELD_RELEASE_GROUP_ID, result)
+            return result
     rg_id = data.get("release_group_id") if isinstance(data, dict) else None
     if not rg_id:
         result = ResolverResult(
@@ -520,6 +535,8 @@ def resolve_track_artists(
     *,
     mb_get_release: MBReleaseFn | None = None,
     discogs_get_release: DiscogsReleaseFn | None = None,
+    mb_release_payload: dict[str, Any] | None = None,
+    discogs_release_payload: dict[str, Any] | None = None,
 ) -> list[ResolverResult]:
     """Resolve per-track artist credits for the album.
 
@@ -535,6 +552,10 @@ def resolve_track_artists(
 
     Per-track results stay in the return list so the caller can
     populate ``album_tracks.track_artist`` row-by-row.
+
+    Payload kwargs short-circuit the fetch when the caller already has
+    the payload — see ``resolve_release_group_id`` for the wider
+    rationale (code-review finding #1).
     """
     request_id = int(request["id"])
     mb_release_id = request.get("mb_release_id")
@@ -557,18 +578,21 @@ def resolve_track_artists(
 
     # Pick branch.
     if discogs_release_id and not mb_release_id:
-        fetch_d = discogs_get_release or _default_discogs_get_release
-        try:
-            data = fetch_d(str(discogs_release_id), fresh=True)
-        except BaseException as exc:  # noqa: BLE001
-            status, reason = _classify_lookup_exception(exc)
-            per_track = [ResolverResult(
-                field_name=FIELD_TRACK_ARTIST,
-                status=status,
-                reason_code=reason,
-            )]
-            _record_summary(per_track)
-            return per_track
+        if discogs_release_payload is not None:
+            data = discogs_release_payload
+        else:
+            fetch_d = discogs_get_release or _default_discogs_get_release
+            try:
+                data = fetch_d(str(discogs_release_id), fresh=True)
+            except BaseException as exc:  # noqa: BLE001
+                status, reason = _classify_lookup_exception(exc)
+                per_track = [ResolverResult(
+                    field_name=FIELD_TRACK_ARTIST,
+                    status=status,
+                    reason_code=reason,
+                )]
+                _record_summary(per_track)
+                return per_track
         return _resolve_discogs_track_artists(
             data, pdb=pdb, request_id=request_id,
         )
@@ -583,18 +607,21 @@ def resolve_track_artists(
         _record(pdb, request_id, FIELD_TRACK_ARTIST, result)
         return [result]
 
-    fetch_mb = mb_get_release or _default_mb_get_release
-    try:
-        data = fetch_mb(mb_id, fresh=True)
-    except BaseException as exc:  # noqa: BLE001
-        status, reason = _classify_lookup_exception(exc)
-        per_track = [ResolverResult(
-            field_name=FIELD_TRACK_ARTIST,
-            status=status,
-            reason_code=reason,
-        )]
-        _record_summary(per_track)
-        return per_track
+    if mb_release_payload is not None:
+        data = mb_release_payload
+    else:
+        fetch_mb = mb_get_release or _default_mb_get_release
+        try:
+            data = fetch_mb(mb_id, fresh=True)
+        except BaseException as exc:  # noqa: BLE001
+            status, reason = _classify_lookup_exception(exc)
+            per_track = [ResolverResult(
+                field_name=FIELD_TRACK_ARTIST,
+                status=status,
+                reason_code=reason,
+            )]
+            _record_summary(per_track)
+            return per_track
     return _resolve_mb_track_artists(
         data, pdb=pdb, request_id=request_id,
     )
@@ -819,6 +846,8 @@ def resolve_catalog_number(
     *,
     mb_get_release: MBReleaseFn | None = None,
     discogs_get_release: DiscogsReleaseFn | None = None,
+    mb_release_payload: dict[str, Any] | None = None,
+    discogs_release_payload: dict[str, Any] | None = None,
 ) -> ResolverResult:
     """Resolve a label catalog number for the request.
 
@@ -826,6 +855,9 @@ def resolve_catalog_number(
     ``labels[].catno``. We pick the first non-empty value seen on the
     release row -- per the plan's Phase 2 generator slot (R2), a
     catalog_number >= 4 chars unlocks an extra search query.
+
+    Payload kwargs short-circuit the fetch when the caller already has
+    the payload — see ``resolve_release_group_id`` (code-review #1).
     """
     request_id = int(request["id"])
     mb_release_id = request.get("mb_release_id")
@@ -841,18 +873,21 @@ def resolve_catalog_number(
         return result
 
     if discogs_release_id and not mb_release_id:
-        fetch = discogs_get_release or _default_discogs_get_release
-        try:
-            data = fetch(str(discogs_release_id), fresh=True)
-        except BaseException as exc:  # noqa: BLE001
-            status, reason = _classify_lookup_exception(exc)
-            result = ResolverResult(
-                field_name=FIELD_CATALOG_NUMBER,
-                status=status,
-                reason_code=reason,
-            )
-            _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
-            return result
+        if discogs_release_payload is not None:
+            data = discogs_release_payload
+        else:
+            fetch = discogs_get_release or _default_discogs_get_release
+            try:
+                data = fetch(str(discogs_release_id), fresh=True)
+            except BaseException as exc:  # noqa: BLE001
+                status, reason = _classify_lookup_exception(exc)
+                result = ResolverResult(
+                    field_name=FIELD_CATALOG_NUMBER,
+                    status=status,
+                    reason_code=reason,
+                )
+                _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
+                return result
         catno = _first_discogs_catno(data)
         if not catno:
             result = ResolverResult(
@@ -880,18 +915,21 @@ def resolve_catalog_number(
         _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
         return result
 
-    fetch_mb = mb_get_release or _default_mb_get_release
-    try:
-        data = fetch_mb(mb_id, fresh=True)
-    except BaseException as exc:  # noqa: BLE001
-        status, reason = _classify_lookup_exception(exc)
-        result = ResolverResult(
-            field_name=FIELD_CATALOG_NUMBER,
-            status=status,
-            reason_code=reason,
-        )
-        _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
-        return result
+    if mb_release_payload is not None:
+        data = mb_release_payload
+    else:
+        fetch_mb = mb_get_release or _default_mb_get_release
+        try:
+            data = fetch_mb(mb_id, fresh=True)
+        except BaseException as exc:  # noqa: BLE001
+            status, reason = _classify_lookup_exception(exc)
+            result = ResolverResult(
+                field_name=FIELD_CATALOG_NUMBER,
+                status=status,
+                reason_code=reason,
+            )
+            _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
+            return result
     catno = _first_mb_catalog_number(data)
     if not catno:
         result = ResolverResult(
@@ -1052,12 +1090,22 @@ def detect_va_compilation(
     if is_discogs:
         # request rows from the Discogs path don't always carry the
         # discogs artist id directly; the payload is authoritative.
+        # Two shapes appear in the wild:
+        #   * ``web/discogs.py::get_release`` (the real production caller)
+        #     flattens to ``payload["artist_id"]`` at the top level.
+        #   * Direct Discogs-mirror payloads carry the nested
+        #     ``payload["artists"][0]["id"]`` shape.
+        # Read both; either presence overrides the skeleton value.
         if isinstance(discogs_release_payload, dict):
-            artists = discogs_release_payload.get("artists") or []
-            if isinstance(artists, list) and artists:
-                first = artists[0] if isinstance(artists[0], dict) else None
-                if first is not None:
-                    artist_id = first.get("id")
+            top_level = discogs_release_payload.get("artist_id")
+            if top_level not in (None, ""):
+                artist_id = top_level
+            else:
+                artists = discogs_release_payload.get("artists") or []
+                if isinstance(artists, list) and artists:
+                    first = artists[0] if isinstance(artists[0], dict) else None
+                    if first is not None:
+                        artist_id = first.get("id")
     if _is_canonical_va_credit(artist_id, source_is_discogs=is_discogs):
         return True
 
@@ -1259,6 +1307,8 @@ def resolve_all(
             request, deferred,
             mb_get_release=mb_get_release,
             discogs_get_release=discogs_get_release,
+            mb_release_payload=mb_release_payload,
+            discogs_release_payload=discogs_release_payload,
         )
 
     def _run_catno() -> ResolverResult:
@@ -1266,6 +1316,8 @@ def resolve_all(
             request, deferred,
             mb_get_release=mb_get_release,
             discogs_get_release=discogs_get_release,
+            mb_release_payload=mb_release_payload,
+            discogs_release_payload=discogs_release_payload,
         )
 
     def _run_track_artists() -> list[ResolverResult]:
@@ -1273,6 +1325,8 @@ def resolve_all(
             request, deferred,
             mb_get_release=mb_get_release,
             discogs_get_release=discogs_get_release,
+            mb_release_payload=mb_release_payload,
+            discogs_release_payload=discogs_release_payload,
         )
 
     jobs: dict[str, tuple[str, Callable[[], Any]]] = {
@@ -1435,3 +1489,63 @@ def resolve_all(
         elapsed_seconds=time.monotonic() - start,
         timed_out_fields=timed_out,
     )
+
+
+# === Apply helper — turn a ResolveAllResult into a DB update ============
+#
+# Single canonical implementation of the "result → update_request_fields"
+# mapping. Web (``web/routes/pipeline.py::_resolve_and_update_after_add``)
+# and CLI (``scripts/pipeline_cli.py::_resolve_and_update_after_add``)
+# previously each carried a near-identical copy. The transient deploy
+# one-shot (``docs/search-plan-iter2-deploy.md`` § 3.2) also benefits —
+# its inline ``updates`` dict-building is the same shape.
+#
+# The helper does NOT catch exceptions: the caller's logging style (web
+# uses ``logger.exception``, CLI uses ``print(..., file=sys.stderr)``,
+# the deploy heredoc just prints) is wrapper-specific and lives in the
+# caller. Raising lets the wrapper decide.
+
+
+class _ApplyResolveAllRecipient(Protocol):
+    """Minimal DB surface ``apply_resolve_all_result`` needs."""
+
+    def update_request_fields(
+        self, request_id: int, **fields: Any,
+    ) -> None: ...
+
+
+def apply_resolve_all_result(
+    db: _ApplyResolveAllRecipient,
+    req_id: int,
+    result: ResolveAllResult,
+    *,
+    existing_mb_release_group_id: str | None = None,
+) -> None:
+    """Persist a ``ResolveAllResult`` into ``album_requests``.
+
+    Writes ``is_va_compilation`` unconditionally (the immutability
+    invariant at enqueue — the schema default is False, so writing the
+    detector's verdict is what makes the column meaningful). Writes
+    ``release_group_year`` / ``catalog_number`` only when the resolver
+    actually produced a value. Writes ``mb_release_group_id`` only when
+    the row didn't already have one (the resolver-derived value must
+    never clobber a known-good upstream value).
+
+    Pass ``existing_mb_release_group_id`` so the caller's "already
+    known" decision lives outside the helper — the row may have come
+    from a fresh add (None until the resolver fills it) or from a
+    re-resolution where the column is already populated.
+    """
+    update_fields: dict[str, Any] = {
+        "is_va_compilation": result.is_va_compilation,
+    }
+    if result.release_group_year is not None:
+        update_fields["release_group_year"] = result.release_group_year
+    if (
+        result.release_group_id is not None
+        and existing_mb_release_group_id is None
+    ):
+        update_fields["mb_release_group_id"] = result.release_group_id
+    if result.catalog_number is not None:
+        update_fields["catalog_number"] = result.catalog_number
+    db.update_request_fields(req_id, **update_fields)

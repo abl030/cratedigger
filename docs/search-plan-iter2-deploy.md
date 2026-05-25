@@ -134,7 +134,7 @@ the canonical resolver service's surface; it doesn't live in
 # ssh doc2 'sudo -u cratedigger /nix/var/cratedigger/bin/python3 -' <<'PY'
 import os
 from lib.pipeline_db import PipelineDB
-from lib.field_resolver_service import resolve_all
+from lib.field_resolver_service import apply_resolve_all_result, resolve_all
 
 dsn = os.environ["PIPELINE_DB_DSN"]
 db = PipelineDB(dsn)
@@ -153,14 +153,10 @@ print(f"backfill: walking {total} wanted requests")
 for i, row in enumerate(rows, start=1):
     try:
         result = resolve_all(row, db, budget_seconds=10.0)
-        updates = {"is_va_compilation": result.is_va_compilation}
-        if result.release_group_year is not None:
-            updates["release_group_year"] = result.release_group_year
-        if result.release_group_id is not None and row.get("mb_release_group_id") is None:
-            updates["mb_release_group_id"] = result.release_group_id
-        if result.catalog_number is not None:
-            updates["catalog_number"] = result.catalog_number
-        db.update_request_fields(int(row["id"]), **updates)
+        apply_resolve_all_result(
+            db, int(row["id"]), result,
+            existing_mb_release_group_id=row.get("mb_release_group_id"),
+        )
     except Exception as exc:
         print(f"  request={row['id']} FAILED: {type(exc).__name__}: {exc}")
     if i % 50 == 0:
@@ -170,10 +166,9 @@ print("backfill: done")
 PY
 ```
 
-(Once the #8 follow-up extracts `apply_resolve_all_result` to
-`lib/field_resolver_service.py`, the per-row `updates` dict-building
-collapses to a one-line call. Until then, the loop above duplicates
-what `_resolve_and_update_after_add` already does inline at enqueue.)
+The one-shot uses the same `apply_resolve_all_result` helper that the
+web + CLI add paths use (`lib/field_resolver_service.py`), so the
+per-row update shape can never drift between enqueue and backfill.
 
 Total runtime is dominated by per-track MB/Discogs round-trips;
 expect 10–15 minutes wall clock against ~830 requests. The script is

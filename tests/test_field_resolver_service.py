@@ -25,8 +25,10 @@ from lib.field_resolver_service import (
     FIELD_RELEASE_GROUP_YEAR,
     FIELD_TRACK_ARTIST,
     MB_VA_ARTIST_MBID,
+    ResolveAllResult,
     ResolverResult,
     _looks_numeric,
+    apply_resolve_all_result,
     detect_va_compilation,
     resolve_catalog_number,
     resolve_release_group_id,
@@ -479,6 +481,46 @@ class TestDetectVaCompilation(unittest.TestCase):
             req, discogs_release_payload=discogs_payload,
         ))
 
+    def test_rule1_canonical_discogs_va_id_match_real_payload_shape(self):
+        """Real ``web/discogs.py::get_release`` shape carries ``artist_id``
+        at the top level, not nested under ``artists``. The detector
+        must read both — Rule 1 was broken for the live web/CLI add
+        path before this guard (code-review finding #5)."""
+        req = _request(mb_release_id=None,
+                       discogs_release_id="555",
+                       mb_artist_id=None)
+        # Shape produced by web/discogs.py::get_release (see line 349-362).
+        discogs_payload = {
+            "id": "555",
+            "title": "Some Compilation",
+            "artist_name": "Various",
+            "artist_id": DISCOGS_VA_ARTIST_ID,
+            "release_group_id": None,
+            "tracks": [],
+            "labels": [],
+        }
+        self.assertTrue(detect_va_compilation(
+            req, discogs_release_payload=discogs_payload,
+        ))
+
+    def test_rule1_negative_real_discogs_shape_non_va_artist(self):
+        """Real Discogs shape with a non-VA ``artist_id`` is not VA."""
+        req = _request(mb_release_id=None,
+                       discogs_release_id="555",
+                       mb_artist_id=None)
+        discogs_payload = {
+            "id": "555",
+            "title": "A Regular Album",
+            "artist_name": "Some Artist",
+            "artist_id": "12345",
+            "release_group_id": None,
+            "tracks": [],
+            "labels": [],
+        }
+        self.assertFalse(detect_va_compilation(
+            req, discogs_release_payload=discogs_payload,
+        ))
+
     def test_rule2_release_group_primary_type_compilation(self):
         req = _request(mb_artist_id="some-other-artist-id")
         rg_payload = {"primary-type": "Compilation", "secondary-types": []}
@@ -664,6 +706,102 @@ class TestResolveAll(unittest.TestCase):
             db.get_field_resolution(10, FIELD_CATALOG_NUMBER))
         self.assertIsNotNone(
             db.get_field_resolution(10, FIELD_TRACK_ARTIST))
+
+    def test_mb_release_fetched_at_most_once_per_invocation(self):
+        """Code-review #1: when ``resolve_all`` is given an
+        ``mb_release_payload`` kwarg, the per-field resolvers must
+        reuse it instead of each making their own
+        ``mb_get_release`` call.
+
+        Pre-fix: ``resolve_release_group_id`` + ``resolve_track_artists``
+        + ``resolve_catalog_number`` each called ``mb_get_release(mbid)``
+        independently, producing 3 mirror round-trips per add for the
+        MB happy path (4 with the ``rg_year`` site, which already runs
+        through ``mb_get_release_group_year``). The fix threads the
+        already-fetched payload through.
+        """
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=801, mb_release_group_id="rg-uuid")
+
+        mb_release_payload = {
+            "release_group_id": "rg-uuid",
+            "media": [{"position": 1, "tracks": [
+                {"position": 1, "title": "T1",
+                 "artist-credit": [{"name": "A1", "joinphrase": ""}]},
+            ]}],
+            "label-info": [{"catalog-number": "CAT-1234"}],
+        }
+
+        call_count = {"mb_get_release": 0}
+
+        def _count_mb_get_release(mbid, *, fresh=True):
+            call_count["mb_get_release"] += 1
+            return mb_release_payload
+
+        result = resolve_all(
+            req, db,
+            mb_release_payload=mb_release_payload,
+            mb_get_release_group_year=lambda _id: 1997,
+            mb_get_release=_count_mb_get_release,
+        )
+
+        self.assertLessEqual(
+            call_count["mb_get_release"], 1,
+            f"resolve_all fetched mb_get_release {call_count['mb_get_release']} "
+            "times in a single invocation — should be 0 (payload threaded "
+            "in via mb_release_payload)",
+        )
+        # And the resolved fields still come out right — payload-driven
+        # resolution is equivalent to fetch-driven resolution.
+        self.assertEqual(result.release_group_id, "rg-uuid")
+        self.assertEqual(result.catalog_number, "CAT-1234")
+        self.assertEqual(result.track_artists, ["A1"])
+
+    def test_discogs_release_fetched_at_most_once_per_invocation(self):
+        """Mirror of the MB single-fetch guard, on the Discogs branch."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=802,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            discogs_release_id="555",
+        )
+
+        discogs_payload = {
+            "id": "555",
+            "title": "Album",
+            "artist_id": "12345",
+            "release_group_id": "rg-master-id",
+            "tracks": [{"disc_number": 1, "track_number": 1, "title": "T1",
+                        "artists": [{"name": "Artist X"}]}],
+            "labels": [{"catno": "CAT-7"}],
+        }
+
+        call_count = {"discogs_get_release": 0}
+
+        def _count_discogs(_rid, *, fresh=True):
+            call_count["discogs_get_release"] += 1
+            return discogs_payload
+
+        result = resolve_all(
+            req, db,
+            discogs_release_payload=discogs_payload,
+            discogs_get_master_year=lambda _id: 2010,
+            discogs_get_release=_count_discogs,
+        )
+
+        self.assertLessEqual(
+            call_count["discogs_get_release"], 1,
+            f"resolve_all fetched discogs_get_release "
+            f"{call_count['discogs_get_release']} times — should be 0 (payload "
+            "threaded in via discogs_release_payload)",
+        )
+        self.assertEqual(result.release_group_id, "rg-master-id")
+        self.assertEqual(result.catalog_number, "CAT-7")
 
     def test_va_detection_via_canonical_mbid(self):
         """Rule 1: primary-artist MBID matches the canonical VA id."""
@@ -1011,6 +1149,115 @@ class TestResolveAll(unittest.TestCase):
             self.assertEqual(
                 row["status"], "unresolved_malformed",
                 f"{field} status: {row['status']}",
+            )
+
+
+# --------------------------------------------------------------------- #
+# apply_resolve_all_result — DB write helper
+# --------------------------------------------------------------------- #
+
+
+class TestApplyResolveAllResult(unittest.TestCase):
+    """Helper that turns a ``ResolveAllResult`` into the right
+    ``update_request_fields`` call. Extracted from web + CLI
+    ``_resolve_and_update_after_add`` (code-review finding #8)."""
+
+    def test_writes_all_resolved_fields(self):
+        db = FakePipelineDB()
+        result = ResolveAllResult(
+            release_group_year=1997,
+            release_group_id="rg-uuid-aaa",
+            catalog_number="CAT-001",
+            track_artists=["Artist A"],
+            is_va_compilation=False,
+        )
+
+        apply_resolve_all_result(db, 42, result, existing_mb_release_group_id=None)
+
+        self.assertEqual(len(db.update_request_fields_calls), 1)
+        req_id, fields = db.update_request_fields_calls[0]
+        self.assertEqual(req_id, 42)
+        self.assertEqual(fields["release_group_year"], 1997)
+        self.assertEqual(fields["mb_release_group_id"], "rg-uuid-aaa")
+        self.assertEqual(fields["catalog_number"], "CAT-001")
+        self.assertFalse(fields["is_va_compilation"])
+
+    def test_skips_fields_that_resolver_could_not_populate(self):
+        db = FakePipelineDB()
+        result = ResolveAllResult(
+            release_group_year=None,
+            release_group_id=None,
+            catalog_number=None,
+            is_va_compilation=True,
+        )
+
+        apply_resolve_all_result(db, 7, result)
+
+        self.assertEqual(len(db.update_request_fields_calls), 1)
+        req_id, fields = db.update_request_fields_calls[0]
+        self.assertEqual(req_id, 7)
+        # ``is_va_compilation`` is always written (immutability invariant
+        # at enqueue) — the schema default is False, so writing the
+        # detector's verdict matters here.
+        self.assertTrue(fields["is_va_compilation"])
+        # Optional fields are absent when resolution returned None.
+        self.assertNotIn("release_group_year", fields)
+        self.assertNotIn("mb_release_group_id", fields)
+        self.assertNotIn("catalog_number", fields)
+
+    def test_does_not_clobber_existing_release_group_id(self):
+        """If the row already had an MB release-group id from the
+        upstream release fetch, the resolver-derived value must not
+        overwrite it."""
+        db = FakePipelineDB()
+        result = ResolveAllResult(
+            release_group_id="resolver-derived-rg",
+            is_va_compilation=False,
+        )
+
+        apply_resolve_all_result(
+            db, 9, result,
+            existing_mb_release_group_id="upstream-known-rg",
+        )
+
+        req_id, fields = db.update_request_fields_calls[0]
+        self.assertEqual(req_id, 9)
+        self.assertNotIn("mb_release_group_id", fields)
+
+    def test_writes_release_group_id_when_existing_is_none(self):
+        db = FakePipelineDB()
+        result = ResolveAllResult(
+            release_group_id="resolver-derived-rg",
+            is_va_compilation=False,
+        )
+
+        apply_resolve_all_result(
+            db, 11, result,
+            existing_mb_release_group_id=None,
+        )
+
+        req_id, fields = db.update_request_fields_calls[0]
+        self.assertEqual(req_id, 11)
+        self.assertEqual(fields["mb_release_group_id"], "resolver-derived-rg")
+
+    def test_db_failure_does_not_raise(self):
+        """``update_request_fields`` exceptions are reported via the
+        caller's exception channel; the helper itself does not raise.
+        Web + CLI wrappers own their own logging style — the helper
+        raises so the wrapper can decide how to surface it."""
+        from typing import Any
+
+        class FailingDB:
+            update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
+
+            def update_request_fields(self, request_id: int, **fields: Any) -> None:
+                raise RuntimeError("db boom")
+
+        # Helper re-raises; wrapper catches and reports in its own style.
+        with self.assertRaises(RuntimeError):
+            apply_resolve_all_result(
+                FailingDB(), 99,
+                ResolveAllResult(is_va_compilation=False),
             )
 
 

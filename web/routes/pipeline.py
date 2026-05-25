@@ -83,7 +83,11 @@ def _resolve_and_update_after_add(
     values are also persisted via ``update_request_fields`` here, so the
     caller does not need to know which columns the resolver touches.
     """
-    from lib.field_resolver_service import ResolveAllResult, resolve_all
+    from lib.field_resolver_service import (
+        ResolveAllResult,
+        apply_resolve_all_result,
+        resolve_all,
+    )
 
     skeleton = {
         "id": req_id,
@@ -110,23 +114,11 @@ def _resolve_and_update_after_add(
         )
         return ResolveAllResult()
 
-    update_fields: dict[str, object] = {}
-    # ``is_va_compilation`` is always written so the immutability
-    # invariant holds even when the detector returns False (the schema
-    # default is False, so writing it is a no-op in that case but
-    # matches the U3 backfill's idempotent shape).
-    update_fields["is_va_compilation"] = result.is_va_compilation
-    if result.release_group_year is not None:
-        update_fields["release_group_year"] = result.release_group_year
-    if result.release_group_id is not None and mb_release_group_id is None:
-        # Only fill the column when the row didn't already have an RG
-        # id from the upstream release fetch; never clobber a known
-        # value with a resolver-derived alternative.
-        update_fields["mb_release_group_id"] = result.release_group_id
-    if result.catalog_number is not None:
-        update_fields["catalog_number"] = result.catalog_number
     try:
-        db.update_request_fields(req_id, **update_fields)
+        apply_resolve_all_result(
+            db, req_id, result,
+            existing_mb_release_group_id=mb_release_group_id,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "post_pipeline_add: update_request_fields failed for "

@@ -303,7 +303,11 @@ def _resolve_and_update_after_add(
     liner on resolver outcomes so the operator running the script
     knows whether a field landed NULL.
     """
-    from lib.field_resolver_service import ResolveAllResult, resolve_all
+    from lib.field_resolver_service import (
+        ResolveAllResult,
+        apply_resolve_all_result,
+        resolve_all,
+    )
 
     skeleton = {
         "id": req_id,
@@ -323,17 +327,11 @@ def _resolve_and_update_after_add(
         print(f"  Field resolution crashed: {exc}", file=sys.stderr)
         return ResolveAllResult()
 
-    update_fields: dict[str, object] = {
-        "is_va_compilation": result.is_va_compilation,
-    }
-    if result.release_group_year is not None:
-        update_fields["release_group_year"] = result.release_group_year
-    if result.release_group_id is not None and mb_release_group_id is None:
-        update_fields["mb_release_group_id"] = result.release_group_id
-    if result.catalog_number is not None:
-        update_fields["catalog_number"] = result.catalog_number
     try:
-        db.update_request_fields(req_id, **update_fields)
+        apply_resolve_all_result(
+            db, req_id, result,
+            existing_mb_release_group_id=mb_release_group_id,
+        )
     except Exception as exc:  # noqa: BLE001
         print(
             f"  Failed to persist resolved fields: {exc}",
