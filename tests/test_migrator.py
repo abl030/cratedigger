@@ -2311,6 +2311,52 @@ class TestAlbumRequestsReleaseGroupYearSchema(unittest.TestCase):
         )
         self.assertEqual(len(rows), 1)
 
+    # --- 032 album_requests.catalog_number ---
+
+    def test_032_catalog_number_column_exists(self):
+        rows = self._query("""
+            SELECT data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'album_requests'
+              AND column_name = 'catalog_number'
+        """)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "text")
+        self.assertEqual(rows[0][1], "YES")
+
+    def test_032_catalog_number_accepts_value_and_null(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('032-catno-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            # NULL is the default for new rows.
+            rows = self._query(
+                "SELECT catalog_number FROM album_requests WHERE id = %s",
+                (rid,),
+            )
+            self.assertIsNone(rows[0][0])
+            # And explicit writes round-trip.
+            self._exec(
+                "UPDATE album_requests SET catalog_number = %s WHERE id = %s",
+                ("SP 290", rid),
+            )
+            rows = self._query(
+                "SELECT catalog_number FROM album_requests WHERE id = %s",
+                (rid,),
+            )
+            self.assertEqual(rows[0][0], "SP 290")
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_records_applied_version_032(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 32"
+        )
+        self.assertEqual(len(rows), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

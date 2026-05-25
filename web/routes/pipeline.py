@@ -122,6 +122,8 @@ def _resolve_and_update_after_add(
         # id from the upstream release fetch; never clobber a known
         # value with a resolver-derived alternative.
         update_fields["mb_release_group_id"] = result.release_group_id
+    if result.catalog_number is not None:
+        update_fields["catalog_number"] = result.catalog_number
     try:
         db.update_request_fields(req_id, **update_fields)
     except Exception as exc:  # noqa: BLE001

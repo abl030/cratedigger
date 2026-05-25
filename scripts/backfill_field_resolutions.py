@@ -432,31 +432,43 @@ def run_catalog_number(
     dry_run: bool = False,
     batch_size: int = BATCH_SIZE,
 ) -> FieldBackfillCounters:
-    """Backfill ``catalog_number`` -- but there's no column for it today.
+    """Backfill ``catalog_number`` for every eligible request.
 
-    The plan reserves a ``catalog_number`` slot at the generator (R2 in
-    Phase 2). For now, the resolver records the side-table row so the
-    enqueue-time path (U4) and the generator (PR2) can consume the
-    value when added. No parent column write happens.
+    The Phase 2 generator (PR2) emits a ``catalog_number`` strategy
+    slot when ``request.catalog_number`` is non-NULL (R2 in the
+    brainstorm). Migration 032 adds the parent column. The resolver
+    pulls the catalog number from MB ``labels[*].catalog-number`` or
+    Discogs ``labels[*].catno`` and the side table records every
+    resolution attempt; this runner writes the resolved value to the
+    parent column so the generator has something to read.
     """
     c = FieldBackfillCounters(field_name=FIELD_CATALOG_NUMBER)
     for row in selector():
         c.fetched += 1
+        request_id = int(row["id"])
         try:
             result = resolver(row, db)
         except Exception:  # noqa: BLE001
             c.errors += 1
             logger.exception(
                 "catalog_number resolver crashed for request=%s",
-                row.get("id"),
+                request_id,
             )
             _progress(c)
             continue
-        if result.status == "resolved":
+        if result.status == "resolved" and result.value is not None:
             c.resolved += 1
-            # No parent column to write yet -- the side table carries
-            # the value via reason_code for now. The Phase 2 generator
-            # will consume it.
+            if not dry_run:
+                try:
+                    db.update_request_fields(
+                        request_id, catalog_number=str(result.value),
+                    )
+                except Exception:  # noqa: BLE001
+                    c.errors += 1
+                    logger.exception(
+                        "catalog_number column write failed for request=%s",
+                        request_id,
+                    )
         else:
             c.unresolved += 1
         _progress(c, batch_size=batch_size)

@@ -719,6 +719,126 @@ class TestTrackArtistBackfill(unittest.TestCase):
 
 
 # --------------------------------------------------------------------- #
+# catalog_number (migration 032 + write-through)
+# --------------------------------------------------------------------- #
+
+
+class TestCatalogNumberBackfill(unittest.TestCase):
+    """The resolver returns a catalog string (e.g. '5284821-AB' for the
+    Kid A 2008 vinyl reissue). Migration 032 added the parent column;
+    this runner must write the resolved value through so PR2's
+    generator can read it. Regression guard against the original bug
+    where the value was silently discarded."""
+
+    def _import_run_catalog_number(self):
+        # Lazy import to keep the unrelated test classes' import cost down.
+        from scripts.backfill_field_resolutions import run_catalog_number
+        return run_catalog_number
+
+    def test_happy_path_populates_parent_and_side_table(self):
+        from lib.field_resolver_service import FIELD_CATALOG_NUMBER
+        run_catalog_number = self._import_run_catalog_number()
+        db = FakePipelineDB()
+        rid = _seed_request(
+            db, artist="Radiohead", album="Kid A",
+            mb_release_id="kid-a-2008-mbid",
+        )
+        row = db.get_request(rid)
+        assert row is not None
+
+        def resolver(req: dict[str, Any], pdb: Any) -> ResolverResult:
+            result = ResolverResult(
+                field_name=FIELD_CATALOG_NUMBER,
+                value="5284821-AB",
+                status="resolved",
+            )
+            pdb.record_field_resolution(
+                request_id=int(req["id"]),
+                field_name=FIELD_CATALOG_NUMBER,
+                status=result.status,
+                reason_code=result.reason_code,
+            )
+            return result
+
+        counters = run_catalog_number(
+            db=db, selector=_selector_over([row]), resolver=resolver,
+        )
+
+        self.assertEqual(counters.fetched, 1)
+        self.assertEqual(counters.resolved, 1)
+        self.assertEqual(counters.unresolved, 0)
+        self.assertEqual(counters.errors, 0)
+        # Parent column written -- the bug fix's core assertion.
+        post = db.get_request(rid)
+        assert post is not None
+        self.assertEqual(post["catalog_number"], "5284821-AB")
+        # Side table recorded the attempt.
+        side = db.get_field_resolution(rid, FIELD_CATALOG_NUMBER)
+        assert side is not None
+        self.assertEqual(side["status"], "resolved")
+
+    def test_unresolved_leaves_parent_null(self):
+        from lib.field_resolver_service import FIELD_CATALOG_NUMBER
+        run_catalog_number = self._import_run_catalog_number()
+        db = FakePipelineDB()
+        rid = _seed_request(db, mb_release_id="no-catno-mbid")
+        row = db.get_request(rid)
+        assert row is not None
+
+        def resolver(req: dict[str, Any], pdb: Any) -> ResolverResult:
+            result = ResolverResult(
+                field_name=FIELD_CATALOG_NUMBER,
+                status="unresolved_field_missing_upstream",
+                reason_code="mb_no_catalog_number",
+            )
+            pdb.record_field_resolution(
+                request_id=int(req["id"]),
+                field_name=FIELD_CATALOG_NUMBER,
+                status=result.status,
+                reason_code=result.reason_code,
+            )
+            return result
+
+        counters = run_catalog_number(
+            db=db, selector=_selector_over([row]), resolver=resolver,
+        )
+
+        self.assertEqual(counters.resolved, 0)
+        self.assertEqual(counters.unresolved, 1)
+        post = db.get_request(rid)
+        assert post is not None
+        self.assertIsNone(post.get("catalog_number"))
+
+    def test_dry_run_skips_parent_write(self):
+        from lib.field_resolver_service import FIELD_CATALOG_NUMBER
+        run_catalog_number = self._import_run_catalog_number()
+        db = FakePipelineDB()
+        rid = _seed_request(db, mb_release_id="dryrun-catno-mbid")
+        row = db.get_request(rid)
+        assert row is not None
+
+        def resolver(req: dict[str, Any], pdb: Any) -> ResolverResult:
+            return ResolverResult(
+                field_name=FIELD_CATALOG_NUMBER,
+                value="DRY-001",
+                status="resolved",
+            )
+
+        counters = run_catalog_number(
+            db=db, selector=_selector_over([row]), resolver=resolver,
+            dry_run=True,
+        )
+
+        self.assertEqual(counters.resolved, 1)
+        # Parent stays NULL under dry-run; the resolver may still have
+        # written the side-table row but the runner does not write the
+        # parent.
+        post = db.get_request(rid)
+        assert post is not None
+        self.assertIsNone(post.get("catalog_number"))
+
+
+# --------------------------------------------------------------------- #
 # is_va_compilation (the 25-row regression guard)
 # --------------------------------------------------------------------- #
 
