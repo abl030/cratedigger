@@ -309,7 +309,6 @@ def _year_is_known(year: str | None) -> bool:
 _STRATEGY_DEFAULT = "default"
 _STRATEGY_LITERAL = "literal"
 _STRATEGY_LITERAL_FLAC = "literal_flac"
-_STRATEGY_UNWILD = "unwild"
 _STRATEGY_UNWILD_YEAR = "unwild_year"
 _STRATEGY_UNWILD_RG_YEAR = "unwild_rg_year"
 # PR2 U8 — new slots for the iteration-2 generator mix.
@@ -517,14 +516,17 @@ def _has_dropped_low_entropy(*token_lists: list[str]) -> set[str]:
     drop happens inside `_normalize_query_tokens`. The presence check is
     case-insensitive.
 
-    Routes through `strip_stopwords` to keep `STOPWORDS` as a private read.
+    Reads ``STOPWORDS`` directly — this module is the canonical owner of
+    the constant, so the AST audit's external-readers rule does not
+    apply. Single-pass membership check (review #13): the earlier
+    two-pass via ``strip_stopwords`` existed only to keep ``STOPWORDS``
+    a private read for external modules.
     """
     dropped: set[str] = set()
     for tokens in token_lists:
-        kept = {t.lower() for t in strip_stopwords(tokens)}
         for tok in tokens:
             key = tok.lower()
-            if key not in kept:
+            if key in STOPWORDS:
                 dropped.add(key)
     return dropped
 
@@ -786,8 +788,6 @@ def _generate_normal_plan(
     """
     artist = snapshot.artist_name
     title = snapshot.title
-    year = snapshot.year
-    rg_year = snapshot.release_group_year
     track_titles = list(snapshot.track_titles)
     prepend_artist = snapshot.prepend_artist
 
@@ -862,53 +862,17 @@ def _generate_normal_plan(
         ))
 
     # 5. unwild_year slot — when release `year` is known.
-    year_known = _year_is_known(year)
-    if year_known and literal_query:
-        assert year is not None
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_YEAR,
-            repeat_group=_STRATEGY_UNWILD_YEAR,
-            query=f"{literal_query} {year[:4]}",
-            omit_reason=None,
-            extra_provenance={"year": year[:4]},
-        ))
-    else:
-        reason = "year_unknown" if not year_known else "empty_literal_query"
-        candidates.append(_Candidate(
-            strategy=_STRATEGY_UNWILD_YEAR,
-            repeat_group=_STRATEGY_UNWILD_YEAR,
-            query=None,
-            omit_reason=reason,
-        ))
-
-    # 6. unwild_rg_year slot — emit a query only when rg_year is known,
-    #    year is known, the two differ, and the literal body exists.
-    #    Otherwise emit one omission with a precise reason.
-    rg_query: str | None = None
-    rg_omit_reason: str | None = None
-    rg_provenance: dict[str, Any] = (
-        {"release_group_year": int(rg_year)}
-        if rg_year is not None else {}
+    candidates.append(
+        _unwild_year_candidate(snapshot, prepend_artist=prepend_artist),
     )
-    if rg_year is None:
-        rg_omit_reason = "release_group_year_unknown"
-    elif not year_known:
-        rg_omit_reason = "year_unknown"
-    elif str(rg_year) == (year[:4] if year else ""):
-        rg_omit_reason = "release_group_year_matches_year"
-    elif not literal_query:
-        rg_omit_reason = "empty_literal_query"
-    elif int(rg_year) <= 0:
-        rg_omit_reason = "release_group_year_unknown"
-    else:
-        rg_query = f"{literal_query} {int(rg_year):04d}"
-    candidates.append(_Candidate(
-        strategy=_STRATEGY_UNWILD_RG_YEAR,
-        repeat_group=_STRATEGY_UNWILD_RG_YEAR,
-        query=rg_query,
-        omit_reason=rg_omit_reason,
-        extra_provenance=rg_provenance,
-    ))
+
+    # 6. unwild_rg_year slot — emit when rg_year is known, year is
+    #    known, the two differ, and the literal body exists. Otherwise
+    #    emit one omission with a precise reason. Shared with VA via
+    #    the prepend_artist kwarg.
+    candidates.append(
+        _unwild_rg_year_candidate(snapshot, prepend_artist=prepend_artist),
+    )
 
     # 7. catalog_number slot (PR2 U8 R2) — emit when the resolved
     #    catalog number is non-empty and meets the length cutoff.
@@ -988,17 +952,22 @@ def _catalog_number_candidate(
     )
 
 
-def _unwild_year_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
-    """Build a body-less ``unwild_year`` slot for the VA branch.
+def _unwild_year_candidate(
+    snapshot: ReleaseSnapshot,
+    *,
+    prepend_artist: bool = False,
+) -> _Candidate:
+    """Build the ``unwild_year`` slot — shared between non-VA and VA.
 
     Year discriminates even when the artist axis is degenerate (every
     track is by a different artist). VA mix wants the year slot, but
     can't rely on the album-level literal body — for VA, the title is
     often a generic word ("Compilation") that collapses post-dedupe.
 
-    Uses ``<title> <year>`` (no artist tokens — VA strips the artist
-    side). When ``title`` is empty or year is unknown, returns the
-    omission shape.
+    ``prepend_artist`` defaults to False (VA-safe). Non-VA callers pass
+    ``snapshot.prepend_artist`` to get the artist+title body. When
+    ``title``/body is empty or year is unknown, returns the omission
+    shape with a precise reason.
     """
     year = snapshot.year
     if not _year_is_known(year):
@@ -1009,11 +978,9 @@ def _unwild_year_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
             omit_reason="year_unknown",
         )
     assert year is not None
-    # VA: never prepend artist (Various Artists is non-discriminating);
-    # wildcard=False so the literal title carries through.
     body = _build_query(
         snapshot.artist_name, snapshot.title,
-        prepend_artist=False, wildcard=False,
+        prepend_artist=prepend_artist, wildcard=False,
     )
     if not body:
         return _Candidate(
@@ -1032,11 +999,21 @@ def _unwild_year_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
     )
 
 
-def _unwild_rg_year_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
-    """Build the VA-branch ``unwild_rg_year`` slot.
+def _unwild_rg_year_candidate(
+    snapshot: ReleaseSnapshot,
+    *,
+    prepend_artist: bool = False,
+) -> _Candidate:
+    """Build the ``unwild_rg_year`` slot — shared between non-VA and VA.
 
-    Mirrors the non-VA logic: emit a query only when rg_year is known,
-    year is known, the two differ, and the title body is non-empty.
+    Emit a query only when rg_year is known, year is known, the two
+    differ, and the body is non-empty. ``prepend_artist`` defaults to
+    False (VA-safe); non-VA callers pass ``snapshot.prepend_artist``.
+
+    The ``int(rg_year) <= 0`` branch is defensive only —
+    ``_release_group_year_from_value`` (lib/release_snapshot.py) already
+    normalises non-positive ints to None, so the path is unreachable in
+    production. Kept for the same reason both inline copies kept it.
     """
     rg_year = snapshot.release_group_year
     year = snapshot.year
@@ -1078,7 +1055,7 @@ def _unwild_rg_year_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
         )
     body = _build_query(
         snapshot.artist_name, snapshot.title,
-        prepend_artist=False, wildcard=False,
+        prepend_artist=prepend_artist, wildcard=False,
     )
     if not body:
         return _Candidate(

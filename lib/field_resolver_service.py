@@ -1107,6 +1107,27 @@ def _has_divergent_track_credits(
     return _has_divergent_track_credits_only(album_artist_credit, tracks)
 
 
+def _flatten_release_tracks(mb_release_payload: dict[str, Any]) -> list[Any]:
+    """Flatten ``media[].tracks[]`` into a single track list.
+
+    Used by VA detection Rules 2 (Compilation rg + divergent credits)
+    and 3 (split-artist joinphrase) — both need the per-track artist
+    credits in flat form. Defensive against malformed payloads: returns
+    ``[]`` for missing/non-list ``media`` or non-list ``tracks``.
+    """
+    media = mb_release_payload.get("media") or []
+    if not isinstance(media, list):
+        return []
+    flat: list[Any] = []
+    for m in media:
+        if not isinstance(m, dict):
+            continue
+        tr = m.get("tracks") or []
+        if isinstance(tr, list):
+            flat.extend(tr)
+    return flat
+
+
 def detect_va_compilation(
     request: dict[str, Any],
     *,
@@ -1201,28 +1222,14 @@ def detect_va_compilation(
             )
     if is_compilation_rg and isinstance(mb_release_payload, dict):
         album_ac = mb_release_payload.get("artist-credit")
-        media = mb_release_payload.get("media") or []
-        all_tracks_r2: list[Any] = []
-        if isinstance(media, list):
-            for m in media:
-                if isinstance(m, dict):
-                    tr = m.get("tracks") or []
-                    if isinstance(tr, list):
-                        all_tracks_r2.extend(tr)
+        all_tracks_r2 = _flatten_release_tracks(mb_release_payload)
         if _has_divergent_track_credits_only(album_ac, all_tracks_r2):
             return True
 
     # Rule 3 (MB-only -- split-artist compilations).
     if isinstance(mb_release_payload, dict):
         album_ac = mb_release_payload.get("artist-credit")
-        media = mb_release_payload.get("media") or []
-        all_tracks: list[Any] = []
-        if isinstance(media, list):
-            for m in media:
-                if isinstance(m, dict):
-                    tr = m.get("tracks") or []
-                    if isinstance(tr, list):
-                        all_tracks.extend(tr)
+        all_tracks = _flatten_release_tracks(mb_release_payload)
         if _has_divergent_track_credits(album_ac, all_tracks):
             return True
 

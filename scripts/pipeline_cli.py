@@ -867,8 +867,11 @@ def cmd_show(db, args):
     print(f"  MB Artist:    {req['mb_artist_id']}")
     print(f"  Discogs:      {req['discogs_release_id']}")
     print(f"  Year:         {req['year']}")
+    print(f"  RG Year:      {req.get('release_group_year') or '-'}")
     print(f"  Country:      {req['country']}")
     print(f"  Format:       {req['format']}")
+    print(f"  VA Comp:      {'yes' if req.get('is_va_compilation') else 'no'}")
+    print(f"  Catalog #:    {req.get('catalog_number') or '-'}")
     print(f"  Source Path:  {req['source_path']}")
     if req.get("reasoning"):
         print(f"  Reasoning:    {req['reasoning'][:120]}...")

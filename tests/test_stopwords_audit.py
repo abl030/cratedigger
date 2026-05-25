@@ -83,6 +83,22 @@ class TestStopwordsInlineLiteralGuard(unittest.TestCase):
 
     Catches the pattern where a future PR drops a `{"the", "and"}` literal
     into a new helper instead of reaching for `strip_stopwords()`.
+
+    Scope note (review #12): detects direct ``Set`` / ``List`` / ``Tuple``
+    literals and ``frozenset(...)`` / ``set(...)`` calls only. Patterns
+    this audit will NOT catch:
+
+      * Set / dict comprehensions:
+        ``{w for w in src if w in {"the", "and"}}``
+      * Dict-VALUE embedded sets:
+        ``CONFIG = {"stopwords": {"the", "and"}}``
+      * Set unions: ``OUR_SET = STOPWORDS | {"the"}``
+      * String-split literals: ``"the,and,from".split(",")``
+
+    The structurally-cheapest scope catches the most-likely
+    re-introduction pattern (a fresh hardcoded set in a new helper).
+    Wider scope would trade audit-time cost for negligible additional
+    coverage.
     """
 
     def _literal_strings(self, node: ast.AST) -> list[str] | None:

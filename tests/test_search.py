@@ -17,6 +17,7 @@ from lib.search import (
     SEARCH_PLAN_GENERATOR_ID,
     PLAN_STATUS_SUCCESS, PLAN_STATUS_GENERATION_FAILED,
     MAX_TRACK_SLOTS_PER_PLAN,
+    MAX_VA_TRACK_ARTIST_SLOTS,
     score_track_distinctiveness,
     GENERIC_TITLE_TOKENS,
 )
@@ -1338,6 +1339,126 @@ class TestGenerateSearchPlanSlotMix(unittest.TestCase):
                 and o["reason"] == "no_volume_marker"
                 for o in omitted),
         )
+
+    # --- PR2 review #9: stronger VA per-track-artist slot guarantees ---
+
+    def test_va_track_artist_slot_renders_artist_plus_title(self):
+        """VA per-track-artist slot must carry BOTH the track artist
+        and the track title — that's the discriminating signal vs the
+        collapsed 'Various Artists Compilation' shape.
+        """
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Various Artists",
+                title="Some Comp",
+                year="2010",
+                track_titles=("Help", "Satisfaction"),
+                track_artists=("Beatles", "Stones"),
+                prepend_artist=True,
+                is_va_compilation=True,
+            ),
+            SearchPlanConfig(),
+        )
+        va_slots = [
+            it for it in plan.items
+            if it.strategy.startswith("va_track_artist_")
+        ]
+        self.assertGreaterEqual(len(va_slots), 1)
+        # At least one slot's query must mention both an artist and
+        # the matching title — not just the album-level shape.
+        joined = " | ".join((it.query or "") for it in va_slots).lower()
+        self.assertIn("beatles", joined)
+        self.assertIn("help", joined)
+
+    def test_va_track_artist_slots_ordered_by_distinctiveness(self):
+        """The VA picker ranks pairs by title distinctiveness — the
+        most-distinctive title should land in va_track_artist_0.
+
+        Uses a deliberately skewed set so the score ordering is
+        unambiguous (one very-distinctive title; the others are
+        generic).
+        """
+        # Pick titles whose distinctiveness scores form a clear order.
+        # We'll compute them ourselves below and assert the picker
+        # respects that ranking.
+        titles = ("Hits", "Best Of", "Everything in Its Right Place",
+                  "Soundtrack")
+        artists = ("Catband", "Dogband", "Birdband", "Fishband")
+        scored = sorted(
+            zip(titles, artists),
+            key=lambda p: -score_track_distinctiveness(p[0]),
+        )
+        # Sanity precondition for the test: ranking is non-trivial.
+        # The most distinctive should not tie with the second most.
+        s0 = score_track_distinctiveness(scored[0][0])
+        s1 = score_track_distinctiveness(scored[1][0])
+        self.assertGreater(
+            s0, s1,
+            f"test precondition failed: top scores tie {s0} == {s1}",
+        )
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Various Artists",
+                title="Some Comp",
+                year="2010",
+                track_titles=titles,
+                track_artists=artists,
+                prepend_artist=True,
+                is_va_compilation=True,
+            ),
+            SearchPlanConfig(),
+        )
+        by_strategy = {it.strategy: it for it in plan.items}
+        slot0 = by_strategy.get("va_track_artist_0")
+        self.assertIsNotNone(
+            slot0,
+            "va_track_artist_0 missing from plan",
+        )
+        assert slot0 is not None  # for pyright
+        # Slot 0 must reference the most-distinctive title's artist.
+        top_artist = scored[0][1].lower()
+        self.assertIn(top_artist, (slot0.query or "").lower())
+
+    def test_va_track_artist_excess_omitted(self):
+        """When more track artists than MAX_VA_TRACK_ARTIST_SLOTS are
+        resolved, the picker emits at most MAX_VA_TRACK_ARTIST_SLOTS
+        slots AND records the excess pairs as omissions with the
+        ``exceeded_max_va_track_artist_slots`` reason.
+        """
+        # Generate MAX + 2 unique title/artist pairs.
+        n = MAX_VA_TRACK_ARTIST_SLOTS + 2
+        titles = tuple(f"Distinctive Title Number {i}" for i in range(n))
+        artists = tuple(f"Artist Number {i}" for i in range(n))
+        plan = generate_search_plan(
+            ReleaseSnapshot(
+                artist_name="Various Artists",
+                title="Some Comp",
+                year="2010",
+                track_titles=titles,
+                track_artists=artists,
+                prepend_artist=True,
+                is_va_compilation=True,
+            ),
+            SearchPlanConfig(),
+        )
+        va_slots = [
+            it for it in plan.items
+            if it.strategy.startswith("va_track_artist_")
+        ]
+        self.assertLessEqual(len(va_slots), MAX_VA_TRACK_ARTIST_SLOTS)
+        omitted = plan.provenance["omitted_candidates"]
+        excess_omits = [
+            o for o in omitted
+            if o.get("reason") == "exceeded_max_va_track_artist_slots"
+        ]
+        # We added exactly 2 excess pairs.
+        self.assertEqual(
+            len(excess_omits), 2,
+            f"expected 2 excess omissions, got {excess_omits!r}",
+        )
+        # Excess omissions carry the strategy label the picker uses.
+        for o in excess_omits:
+            self.assertEqual(o["strategy"], "va_track_artist_excess")
 
 
 if __name__ == "__main__":
