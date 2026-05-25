@@ -1975,7 +1975,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
 
     def _make_active(
         self, *,
-        generator_id: str = "search-plan/2026-05-19-1",
+        generator_id: str = "search-plan/2026-05-25-1",
         items_count: int = 2,
         next_ordinal: int = 0,
         cycle_count: int = 0,
@@ -4027,9 +4027,22 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "country": "US",
             "tracks": [{"title": "T1"}],
         }
+        # Real-VA shape (post-#373): Compilation rg AND per-track
+        # artist credits diverge from the album-level credit. The
+        # divergence is what flips Rule 2 in `detect_va_compilation`.
         mock_get_raw.return_value = {
             "id": "va-mbid",
             "release-group": {"primary-type": "Compilation"},
+            "artist-credit": [{"name": "Various Artists"}],
+            "media": [{
+                "position": 1,
+                "tracks": [
+                    {"position": 1, "title": "T1",
+                     "artist-credit": [{"name": "Artist A"}]},
+                    {"position": 2, "title": "T2",
+                     "artist-credit": [{"name": "Artist B"}]},
+                ],
+            }],
         }
         mock_rgy.return_value = 2008
 

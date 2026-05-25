@@ -103,16 +103,6 @@ def year_from_value(value: object) -> str | None:
     return None
 
 
-def _track_titles_from_tracks(tracks: list[dict[str, Any]]) -> tuple[str, ...]:
-    """Extract ordered track titles from a tracks list.
-
-    Sort by (disc_number, track_number) so the snapshot ordering matches
-    pressing order — the generator's tiebreaker depends on it.
-    """
-    titles, _artists = _tracks_titles_and_artists(tracks)
-    return titles
-
-
 def _tracks_titles_and_artists(
     tracks: list[dict[str, Any]],
 ) -> tuple[tuple[str, ...], tuple[str | None, ...]]:

@@ -1454,32 +1454,6 @@ def score_track_distinctiveness(title: str) -> float:
     return float(longest * len(non_generic))
 
 
-def pick_distinctive_tracks(
-    track_titles: list[str], n: int,
-) -> list[tuple[int, str]]:
-    """Return the top-``n`` (source_index, title) pairs by distinctiveness.
-
-    Stable tiebreak on source index (MB ordinal). Returns fewer than
-    ``n`` only when ``len(track_titles) < n``. Single-track albums
-    return that one pair verbatim — they're handled separately upstream;
-    this helper just stays well-defined on the edge case.
-
-    For all-generic-titles albums (every title scores 0 — e.g. every
-    title is "Untitled 1", "Untitled 2"), falls back to source-index
-    order so the picker stays deterministic.
-    """
-    if not track_titles or n <= 0:
-        return []
-    pairs = list(enumerate(track_titles))
-    if len(pairs) == 1:
-        return pairs
-    ranked = sorted(
-        pairs,
-        key=lambda p: (-score_track_distinctiveness(p[1]), p[0]),
-    )
-    return ranked[:n]
-
-
 def _build_track_candidates(
     track_titles: list[str],
     per_track_pairs: list[tuple[int, str]],

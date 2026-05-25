@@ -17,7 +17,7 @@ from lib.search import (
     SEARCH_PLAN_GENERATOR_ID,
     PLAN_STATUS_SUCCESS, PLAN_STATUS_GENERATION_FAILED,
     MAX_TRACK_SLOTS_PER_PLAN,
-    score_track_distinctiveness, pick_distinctive_tracks,
+    score_track_distinctiveness,
     GENERIC_TITLE_TOKENS,
 )
 
@@ -950,87 +950,6 @@ class TestScoreTrackDistinctiveness(unittest.TestCase):
             "intro", "outro", "interlude", "untitled", "overture", "theme",
             "motion", "picture", "soundtrack", "prelude", "reprise",
         }))
-
-
-class TestPickDistinctiveTracks(unittest.TestCase):
-    """U7 picker — top-N source-index/title pairs by distinctiveness.
-
-    Stable on source index for ties. Falls back to source order on
-    all-zero-score albums so the picker stays deterministic.
-    """
-
-    KID_A = [
-        "Everything in Its Right Place",
-        "Kid A",
-        "The National Anthem",
-        "How to Disappear Completely",
-        "Treefingers",
-        "Optimistic",
-        "In Limbo",
-        "Idioteque",
-        "Morning Bell",
-        "Motion Picture Soundtrack",
-    ]
-
-    def test_kid_a_picks_distinctive_over_generic(self):
-        """Canonical bad case from the plan: Kid A's track list.
-
-        ``Motion Picture Soundtrack`` (score 0) must NOT appear in the
-        top-3, and the two longest-distinctive titles MUST."""
-        picks = pick_distinctive_tracks(self.KID_A, 3)
-        titles = [t for _, t in picks]
-        self.assertNotIn(
-            "Motion Picture Soundtrack", titles,
-            f"generic title must not be in top-3: {titles!r}",
-        )
-        self.assertIn("Everything in Its Right Place", titles)
-        self.assertIn("How to Disappear Completely", titles)
-
-    def test_returns_pairs_with_source_index(self):
-        picks = pick_distinctive_tracks(self.KID_A, 3)
-        for src_idx, title in picks:
-            self.assertEqual(self.KID_A[src_idx], title)
-
-    def test_single_track_returns_verbatim(self):
-        picks = pick_distinctive_tracks(["Solo Track"], 3)
-        self.assertEqual(picks, [(0, "Solo Track")])
-
-    def test_empty_list_returns_empty(self):
-        self.assertEqual(pick_distinctive_tracks([], 3), [])
-
-    def test_n_zero_returns_empty(self):
-        self.assertEqual(pick_distinctive_tracks(self.KID_A, 0), [])
-
-    def test_n_negative_returns_empty(self):
-        self.assertEqual(pick_distinctive_tracks(self.KID_A, -1), [])
-
-    def test_n_larger_than_titles_returns_all(self):
-        picks = pick_distinctive_tracks(["A Song", "B Song"], 10)
-        self.assertEqual(len(picks), 2)
-
-    def test_all_generic_titles_falls_back_to_source_order(self):
-        """All titles score 0 → ordering is deterministic on source index."""
-        titles = ["Untitled 1", "Untitled 2", "Untitled 3"]
-        # Each has score 1.0 ("1"/"2"/"3" survives as the only
-        # non-generic token of length 1). Tied scores break on src idx.
-        picks = pick_distinctive_tracks(titles, 3)
-        self.assertEqual(
-            picks,
-            [(0, "Untitled 1"), (1, "Untitled 2"), (2, "Untitled 3")],
-        )
-
-    def test_all_zero_score_titles_falls_back_to_source_order(self):
-        """All titles literally score 0 → source-index order, no panic."""
-        titles = ["Theme", "Intro", "Outro", "Untitled"]
-        picks = pick_distinctive_tracks(titles, 2)
-        self.assertEqual(picks, [(0, "Theme"), (1, "Intro")])
-
-    def test_tie_break_on_source_index(self):
-        """Two equal-score titles preserve source order."""
-        # Both are 1-token, length 5 → score 5 each.
-        titles = ["AlphX", "BetaY"]
-        picks = pick_distinctive_tracks(titles, 2)
-        self.assertEqual(picks, [(0, "AlphX"), (1, "BetaY")])
 
 
 class TestGeneratorUsesDistinctivenessScoring(unittest.TestCase):

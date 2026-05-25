@@ -198,7 +198,9 @@ class TestCmdAdd(unittest.TestCase):
     @patch("web.mb.get_release", return_value={
         "release_group_id": "rg-uuid",
         "tracks": [], "labels": [],
-        # Rule 2: release-group is typed as Compilation.
+        # Rule 2 (tightened post-#373): release-group is typed as
+        # Compilation AND per-track artist credits diverge from the
+        # album-level credit (a real VA shape, not a greatest-hits).
         "release-group": {"primary-type": "Compilation"},
     })
     @patch("web.mb.get_release_group_year", return_value=2010)
@@ -207,11 +209,33 @@ class TestCmdAdd(unittest.TestCase):
         self, mock_fetch, _mock_rgy, _mock_release,
     ):
         """U4 CLI happy path for VA: a release-group typed as
-        Compilation flips ``is_va_compilation=True`` once at enqueue."""
+        Compilation with diverging per-track artist credits flips
+        ``is_va_compilation=True`` at enqueue. The diverging credits are
+        required post-#373 — a Compilation rg whose tracks all share the
+        album artist is a greatest-hits / single-artist comp and stays
+        False (so the VA strategy mix doesn't replace its
+        default/literal queries)."""
         sample = dict(SAMPLE_MB_RELEASE)
         sample["release-group"] = {
             "id": "rg-uuid", "primary-type": "Compilation",
         }
+        # Diverging per-track credits: each track is by a different
+        # artist. This is the real-VA shape Rule 2 was designed to
+        # catch.
+        sample["media"] = [{
+            "position": 1,
+            "tracks": [
+                {"position": 1, "title": "Houdini Crush",
+                 "length": 200000,
+                 "artist-credit": [{"name": "Artist A"}]},
+                {"position": 2, "title": "Hiccup",
+                 "length": 180000,
+                 "artist-credit": [{"name": "Artist B"}]},
+                {"position": 3, "title": "Metazoa",
+                 "length": 220000,
+                 "artist-credit": [{"name": "Artist C"}]},
+            ],
+        }]
         mock_fetch.return_value = sample
         args = MagicMock(
             mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request",
