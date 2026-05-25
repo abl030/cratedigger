@@ -1851,6 +1851,466 @@ class TestAlbumRequestsReleaseGroupYearSchema(unittest.TestCase):
         """)
         self.assertEqual(len(rows), 1)
 
+    # --- 027 search_log forensics columns ---
+
+    def test_027_search_log_forensics_columns_exist(self):
+        rows = self._query("""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'search_log'
+              AND column_name IN (
+                'rejection_reason',
+                'result_count_uncapped',
+                'query_token_count',
+                'query_distinct_token_count',
+                'expected_track_count',
+                'matcher_score_top1',
+                'query_template'
+              )
+        """)
+        by_col = {r[0]: (r[1], r[2]) for r in rows}
+        expected = {
+            "rejection_reason": "text",
+            "result_count_uncapped": "integer",
+            "query_token_count": "integer",
+            "query_distinct_token_count": "integer",
+            "expected_track_count": "integer",
+            "matcher_score_top1": "real",
+            "query_template": "text",
+        }
+        for col, dt in expected.items():
+            with self.subTest(col=col):
+                self.assertIn(col, by_col, f"missing column {col}")
+                self.assertEqual(by_col[col][0], dt)
+                self.assertEqual(by_col[col][1], "YES", f"{col} must be nullable")
+
+    def test_027_search_log_forensics_columns_accept_values(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('027-forensics-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            sl_id = self._query("""
+                INSERT INTO search_log (
+                    request_id, query, outcome,
+                    rejection_reason, result_count_uncapped,
+                    query_token_count, query_distinct_token_count,
+                    expected_track_count, matcher_score_top1,
+                    query_template
+                )
+                VALUES (%s, 'q', 'no_match',
+                    'strict_count_mismatch', 1500,
+                    4, 4, 12, 0.91,
+                    '{artist} {track_N}')
+                RETURNING id
+            """, (rid,))[0][0]
+            rows = self._query("""
+                SELECT rejection_reason, result_count_uncapped,
+                       query_token_count, query_distinct_token_count,
+                       expected_track_count, matcher_score_top1,
+                       query_template
+                FROM search_log WHERE id = %s
+            """, (sl_id,))
+            self.assertEqual(
+                rows[0],
+                ('strict_count_mismatch', 1500, 4, 4, 12, 0.91, '{artist} {track_N}'),
+            )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_records_applied_version_027(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 27"
+        )
+        self.assertEqual(len(rows), 1)
+
+    # --- 028 album_requests observability columns ---
+
+    def test_028_album_requests_observability_columns_exist(self):
+        rows = self._query("""
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'album_requests'
+              AND column_name IN (
+                'failure_class', 'is_va_compilation',
+                'unfindable_category', 'unfindable_categorised_at',
+                'last_artist_probe_at', 'last_artist_probe_match_count',
+                'rescued_at', 'prior_unfindable_category'
+              )
+        """)
+        by_col = {r[0]: (r[1], r[2], r[3]) for r in rows}
+        self.assertIn("failure_class", by_col)
+        self.assertEqual(by_col["failure_class"][0], "text")
+        self.assertEqual(by_col["failure_class"][1], "YES")
+        self.assertIn("is_va_compilation", by_col)
+        self.assertEqual(by_col["is_va_compilation"][0], "boolean")
+        self.assertEqual(by_col["is_va_compilation"][1], "NO")
+        # Default false (PG stores it as 'false' literal).
+        self.assertIn("false", str(by_col["is_va_compilation"][2]).lower())
+        for col in (
+            "unfindable_category",
+            "unfindable_categorised_at",
+            "last_artist_probe_at",
+            "last_artist_probe_match_count",
+            "rescued_at",
+            "prior_unfindable_category",
+        ):
+            with self.subTest(col=col):
+                self.assertIn(col, by_col, f"missing column {col}")
+                self.assertEqual(by_col[col][1], "YES", f"{col} must be nullable")
+
+    def test_028_failure_class_check_constraint_rejects_typos(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('028-fc-check', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            # Valid value passes.
+            self._exec(
+                "UPDATE album_requests SET failure_class = %s WHERE id = %s",
+                ("A_zero_results_dominant", rid),
+            )
+            # Invalid value rejected.
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    "UPDATE album_requests SET failure_class = %s WHERE id = %s",
+                    ("typo_not_a_real_bucket", rid),
+                )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_028_unfindable_category_check_constraint_rejects_typos(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('028-uc-check', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec(
+                "UPDATE album_requests SET unfindable_category = %s WHERE id = %s",
+                ("artist_absent", rid),
+            )
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    "UPDATE album_requests SET unfindable_category = %s WHERE id = %s",
+                    ("not_a_category", rid),
+                )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_028_prior_unfindable_category_check_constraint(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('028-puc-check', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec(
+                "UPDATE album_requests SET prior_unfindable_category = %s WHERE id = %s",
+                ("album_absent_artist_present", rid),
+            )
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    "UPDATE album_requests SET prior_unfindable_category = %s WHERE id = %s",
+                    ("nonsense", rid),
+                )
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_028_partial_index_on_unfindable_category(self):
+        rows = self._query("""
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'album_requests'
+              AND indexname = 'idx_album_requests_unfindable_category'
+        """)
+        self.assertEqual(len(rows), 1)
+        indexdef = rows[0][0].lower()
+        self.assertIn("unfindable_category is not null", indexdef)
+
+    def test_028_is_va_compilation_default_false_for_existing_rows(self):
+        # Insert a row WITHOUT specifying is_va_compilation; should default to FALSE.
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('028-vacomp-default', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            rows = self._query(
+                "SELECT is_va_compilation FROM album_requests WHERE id = %s",
+                (rid,),
+            )
+            self.assertEqual(rows[0][0], False)
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_records_applied_version_028(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 28"
+        )
+        self.assertEqual(len(rows), 1)
+
+    # --- 029 album_tracks.track_artist ---
+
+    def test_029_album_tracks_track_artist_column_exists(self):
+        rows = self._query("""
+            SELECT data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'album_tracks'
+              AND column_name = 'track_artist'
+        """)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "text")
+        self.assertEqual(rows[0][1], "YES")
+
+    def test_029_track_artist_accepts_value_and_null(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('029-tracks-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec("""
+                INSERT INTO album_tracks
+                    (request_id, disc_number, track_number, title, track_artist)
+                VALUES (%s, 1, 1, 'Track One', 'Nat King Cole')
+            """, (rid,))
+            self._exec("""
+                INSERT INTO album_tracks
+                    (request_id, disc_number, track_number, title)
+                VALUES (%s, 1, 2, 'Track Two')
+            """, (rid,))
+            rows = self._query(
+                "SELECT track_number, track_artist FROM album_tracks "
+                "WHERE request_id = %s ORDER BY track_number",
+                (rid,),
+            )
+            self.assertEqual(rows, [(1, "Nat King Cole"), (2, None)])
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_records_applied_version_029(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 29"
+        )
+        self.assertEqual(len(rows), 1)
+
+    # --- 030 album_request_field_resolutions ---
+
+    def test_030_field_resolutions_table_exists_with_expected_columns(self):
+        rows = self._query("""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'album_request_field_resolutions'
+            ORDER BY ordinal_position
+        """)
+        by_col = {r[0]: (r[1], r[2]) for r in rows}
+        for col, dt, null in [
+            ("id", "integer", "NO"),
+            ("request_id", "integer", "NO"),
+            ("field_name", "text", "NO"),
+            ("resolved_at", "timestamp with time zone", "NO"),
+            ("status", "text", "NO"),
+            ("reason_code", "text", "YES"),
+            ("attempts", "integer", "NO"),
+        ]:
+            with self.subTest(col=col):
+                self.assertIn(col, by_col, f"missing column {col}")
+                self.assertEqual(by_col[col][0], dt)
+                self.assertEqual(by_col[col][1], null)
+
+    def test_030_field_resolutions_unique_constraint(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('030-uniq-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec("""
+                INSERT INTO album_request_field_resolutions
+                    (request_id, field_name, status)
+                VALUES (%s, 'release_group_year', 'resolved')
+            """, (rid,))
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO album_request_field_resolutions
+                        (request_id, field_name, status)
+                    VALUES (%s, 'release_group_year', 'unresolved_404')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_030_field_resolutions_cascades_on_request_delete(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('030-cascade-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        self._exec("""
+            INSERT INTO album_request_field_resolutions
+                (request_id, field_name, status)
+            VALUES (%s, 'track_artist', 'resolved')
+        """, (rid,))
+        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+        rows = self._query(
+            "SELECT id FROM album_request_field_resolutions "
+            "WHERE request_id = %s",
+            (rid,),
+        )
+        self.assertEqual(rows, [])
+
+    def test_030_field_resolutions_indexes_present(self):
+        rows = self._query("""
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'album_request_field_resolutions'
+        """)
+        index_names = {r[0] for r in rows}
+        self.assertIn("idx_arfr_request", index_names)
+        self.assertIn("idx_arfr_field_status", index_names)
+        self.assertIn("idx_arfr_field_resolved_at", index_names)
+
+    def test_030_attempts_default_one(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('030-attempts-default', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            self._exec("""
+                INSERT INTO album_request_field_resolutions
+                    (request_id, field_name, status)
+                VALUES (%s, 'catalog_number', 'unresolved_field_missing_upstream')
+            """, (rid,))
+            rows = self._query("""
+                SELECT attempts FROM album_request_field_resolutions
+                WHERE request_id = %s AND field_name = 'catalog_number'
+            """, (rid,))
+            self.assertEqual(rows[0][0], 1)
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_records_applied_version_030(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 30"
+        )
+        self.assertEqual(len(rows), 1)
+
+    # --- 031 request_search_summary view + supporting index ---
+
+    def test_031_request_search_summary_view_exists(self):
+        rows = self._query("""
+            SELECT viewname
+            FROM pg_views
+            WHERE schemaname = 'public' AND viewname = 'request_search_summary'
+        """)
+        self.assertEqual(len(rows), 1)
+
+    def test_031_request_search_summary_view_columns(self):
+        rows = self._query("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'request_search_summary'
+        """)
+        cols = {r[0] for r in rows}
+        expected = {
+            "request_id",
+            "total_searches",
+            "with_cands_count",
+            "found_count",
+            "near_cap_count",
+            "zero_results_count",
+            "pre_filter_skips_total",
+            "first_strategy_with_cands",
+            "dominant_rejection_reason",
+            "last_search_at",
+        }
+        self.assertEqual(cols, expected)
+
+    def test_031_request_search_summary_rolls_up_correctly(self):
+        rid = self._query("""
+            INSERT INTO album_requests
+                (mb_release_id, artist_name, album_title, source)
+            VALUES ('031-rollup-test', 'A', 'B', 'request')
+            RETURNING id
+        """)[0][0]
+        try:
+            # Three rows in the window: 1 found, 1 no_results, 1 no_match
+            # with candidates and a rejection_reason.
+            self._exec("""
+                INSERT INTO search_log (
+                    request_id, query, outcome, result_count, candidates,
+                    plan_strategy, rejection_reason, pre_filter_skip_count
+                )
+                VALUES
+                    (%s, 'q1', 'found', 30, '[]'::jsonb, 'default', NULL, 0),
+                    (%s, 'q2', 'no_results', 0, '[]'::jsonb, 'literal', NULL, 0),
+                    (%s, 'q3', 'no_match', 50,
+                     '[{"username":"u","dir":"d","filetype":"flac",
+                        "matched_tracks":3,"total_tracks":10,
+                        "avg_ratio":0.5,"missing_titles":[],
+                        "file_count":3,"pre_filter_skip":false}]'::jsonb,
+                     'track_0_artist', 'strict_count_mismatch', 5)
+            """, (rid, rid, rid))
+            rows = self._query("""
+                SELECT total_searches, with_cands_count, found_count,
+                       near_cap_count, zero_results_count,
+                       pre_filter_skips_total, dominant_rejection_reason
+                FROM request_search_summary WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(len(rows), 1)
+            (total, with_cands, found, near_cap, zero, skips, dom_reason) = rows[0]
+            self.assertEqual(total, 3)
+            self.assertEqual(with_cands, 1)
+            self.assertEqual(found, 1)
+            self.assertEqual(near_cap, 0)
+            self.assertEqual(zero, 1)
+            self.assertEqual(skips, 5)
+            self.assertEqual(dom_reason, "strict_count_mismatch")
+        finally:
+            self._exec(
+                "DELETE FROM search_log WHERE request_id = %s", (rid,)
+            )
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_031_search_log_composite_index_used_by_view(self):
+        # The view's per-request access pattern relies on the existing
+        # composite index from migration 011. Verify it's still there.
+        rows = self._query("""
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'search_log'
+              AND indexname = 'idx_search_log_request_created_at'
+        """)
+        self.assertEqual(len(rows), 1)
+        # Order matters: leading column is request_id (point lookup),
+        # trailing column is created_at DESC (range scan within window).
+        indexdef = rows[0][0].lower()
+        self.assertIn("request_id", indexdef)
+        self.assertIn("created_at", indexdef)
+
+    def test_records_applied_version_031(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 31"
+        )
+        self.assertEqual(len(rows), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
