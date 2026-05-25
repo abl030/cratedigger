@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import urllib.error
 from pathlib import Path
 from typing import Literal
 
@@ -1705,10 +1706,21 @@ def post_pipeline_upgrade(h, body: dict) -> None:
         else:
             release = mb_api.get_release(mbid, fresh=True)
             rg_id_upgrade = release.get("release_group_id")
-            rg_year_upgrade = (
-                mb_api.get_release_group_year(rg_id_upgrade)
-                if rg_id_upgrade else None
-            )
+            # ``get_release_group_year`` now propagates ``HTTPError(404)``
+            # so the resolver service can disambiguate "MBID does not
+            # exist" from "exists but missing year". On this orphan-
+            # upgrade path we don't care about the distinction — leaving
+            # the column NULL when the rg doesn't exist or has no year
+            # is the right thing — so we treat both as None locally.
+            rg_year_upgrade: int | None = None
+            if rg_id_upgrade:
+                try:
+                    rg_year_upgrade = mb_api.get_release_group_year(
+                        rg_id_upgrade)
+                except urllib.error.HTTPError as exc:
+                    if exc.code != 404:
+                        raise
+                    rg_year_upgrade = None
             req_id = s._db().add_request(
                 mb_release_id=mbid,
                 mb_release_group_id=rg_id_upgrade,

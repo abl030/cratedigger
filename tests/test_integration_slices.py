@@ -8529,12 +8529,13 @@ class TestFieldResolverSlice(unittest.TestCase):
         self.assertEqual(result.value, 1997)
 
     def test_mb_release_group_year_404_round_trips_to_unresolved_404(self):
-        """MB mirror returns 404 → web.mb.get_release_group_year returns None.
+        """MB mirror returns 404 → ``HTTPError`` propagates from web.mb,
+        resolver classifies as ``unresolved_404`` (sticky 30d).
 
-        The resolver collapses None (which can mean 404 or unparseable
-        date) to ``unresolved_field_missing_upstream`` per the conservative
-        mapping documented in the service. End-to-end this exercises the
-        ``HTTPError(404)`` catch inside ``web.mb.get_release_group_year``.
+        Disambiguated from "exists but year unparseable" — that landed on
+        the previous (conflated) ``unresolved_field_missing_upstream``
+        mapping. Code-review finding #17 split them: 404 → sticky, missing
+        year → field_missing_upstream.
         """
         from lib.field_resolver_service import (
             FIELD_RELEASE_GROUP_YEAR,
@@ -8562,18 +8563,53 @@ class TestFieldResolverSlice(unittest.TestCase):
         with _patch("web.mb.urllib.request.urlopen", new=_raise_404):
             result = resolve_release_group_year(req, db)
 
-        # web.mb.get_release_group_year catches HTTPError(404) and
-        # returns None; the resolver maps None to
-        # unresolved_field_missing_upstream (sticky 30d).
+        self.assertEqual(result.status, "unresolved_404")
+        self.assertEqual(result.reason_code, "http_404")
+        self.assertIsNone(result.value)
+        row = db.get_field_resolution(4003, FIELD_RELEASE_GROUP_YEAR)
+        assert row is not None
+        self.assertEqual(row["status"], "unresolved_404")
+        self.assertEqual(row["reason_code"], "http_404")
+
+    def test_mb_release_group_year_missing_round_trips_to_field_missing(self):
+        """MB mirror returns 200 with no ``first-release-date`` →
+        ``web.mb.get_release_group_year`` returns None → resolver maps
+        to ``unresolved_field_missing_upstream``. Pairs with
+        ``test_mb_release_group_year_404_round_trips_to_unresolved_404``
+        to pin the 404 / missing-year disambiguation (code-review #17).
+        """
+        from lib.field_resolver_service import (
+            FIELD_RELEASE_GROUP_YEAR,
+            resolve_release_group_year,
+        )
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        req = {
+            "id": 4011,
+            "mb_release_id": "rec-mbid-zzz",
+            "mb_release_group_id": "abc-uuid-missing-year",
+            "mb_artist_id": None,
+            "discogs_release_id": None,
+        }
+        # Real MB response shape, but no first-release-date.
+        rg_payload = b'{"id":"abc-uuid-missing-year","title":"Album"}'
+
+        with self._patch_urlopen(
+            {"/release-group/abc-uuid-missing-year": rg_payload},
+        ):
+            result = resolve_release_group_year(req, db)
+
         self.assertEqual(
             result.status, "unresolved_field_missing_upstream",
         )
-        self.assertIsNone(result.value)
-        row = db.get_field_resolution(4003, FIELD_RELEASE_GROUP_YEAR)
+        self.assertEqual(result.reason_code, "mb_release_group_no_year")
+        row = db.get_field_resolution(4011, FIELD_RELEASE_GROUP_YEAR)
         assert row is not None
         self.assertEqual(
             row["status"], "unresolved_field_missing_upstream",
         )
+        self.assertEqual(row["reason_code"], "mb_release_group_no_year")
 
     def test_mb_release_track_artists_round_trip(self):
         """Realistic MB release payload → per-track artist credits.

@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 
 # Status enum -- mirrors the working values in migration 030's comment.
 # The DB has no CHECK constraint; this module is the source of truth.
+#
+# ``unresolved_internal_error`` distinguishes programmer-error escapes
+# (e.g. ``KeyError`` in the orchestrator) from genuine transient mirror
+# failures (``unresolved_mirror_unavailable``). The two used to be
+# conflated under "mirror_unavailable" — that's a triage bug; bugs that
+# look transient get re-run forever instead of being seen.
 ResolverStatus = Literal[
     "resolved",
     "unresolved_404",
@@ -51,6 +57,7 @@ ResolverStatus = Literal[
     "unresolved_mirror_unavailable",
     "unresolved_timeout",
     "unresolved_field_missing_upstream",
+    "unresolved_internal_error",
 ]
 
 
@@ -377,15 +384,16 @@ def resolve_release_group_year(
         _record(pdb, request_id, FIELD_RELEASE_GROUP_YEAR, result)
         return result
     if year is None:
-        # web.mb.get_release_group_year returns None on HTTP 404 already
-        # (it catches HTTPError(404) internally) AND on unparseable
-        # dates. We can't easily distinguish here; the more conservative
-        # mapping is unresolved_field_missing_upstream (sticky 30d) --
-        # the alternative would loop monthly on genuinely-404 rgs.
+        # ``web.mb.get_release_group_year`` now propagates
+        # ``HTTPError(404)`` (the resolver classifies that as
+        # ``unresolved_404`` via ``_classify_lookup_exception``). So a
+        # ``None`` here unambiguously means "release-group record exists
+        # but carries no parseable year" → record as
+        # ``unresolved_field_missing_upstream``.
         result = ResolverResult(
             field_name=FIELD_RELEASE_GROUP_YEAR,
             status="unresolved_field_missing_upstream",
-            reason_code="mb_release_group_no_year_or_404",
+            reason_code="mb_release_group_no_year",
         )
         _record(pdb, request_id, FIELD_RELEASE_GROUP_YEAR, result)
         return result
@@ -1337,20 +1345,31 @@ def resolve_all(
             except Exception as exc:  # noqa: BLE001
                 # The four resolvers handle their own exception
                 # classification internally — anything escaping here is
-                # a programmer error (an invariant the resolvers don't
-                # check). Surface it as unresolved_mirror_unavailable
-                # so the row still lands; log the traceback for triage.
+                # either a transient that slipped past the resolver's
+                # classifier (race, novel transport error) or a genuine
+                # programmer error (e.g. KeyError on a payload shape).
+                # Distinguishing the two matters: transients retry,
+                # programmer errors don't. Reuse the same classifier the
+                # per-field resolvers use; if it raises (programmer
+                # error), tag the row ``unresolved_internal_error`` with
+                # ``reason_code='bug_<ExcName>'`` so it sticks rather
+                # than masquerading as a recoverable mirror outage.
                 logger.exception(
                     "resolve_all: %s raised unexpectedly for request=%d: %s",
                     field_name, request_id, exc,
                 )
                 outputs[key] = None
+                try:
+                    status, reason = _classify_lookup_exception(exc)
+                except BaseException:  # noqa: BLE001
+                    status = "unresolved_internal_error"
+                    reason = f"bug_{type(exc).__name__}"
                 if not deferred.already_recorded(field_name):
                     deferred.record_field_resolution(
                         request_id=request_id,
                         field_name=field_name,
-                        status="unresolved_mirror_unavailable",
-                        reason_code=type(exc).__name__,
+                        status=status,
+                        reason_code=reason,
                     )
     finally:
         # Don't block on stuck workers — the budget is the point.

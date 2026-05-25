@@ -194,18 +194,17 @@ def get_release_group_year(rg_mbid):
     single fetch is enough — no need to paginate child releases and
     derive ``min(release.date)``.
 
-    Returns ``None`` when the mirror returns 404, when the response
-    lacks a parseable date, or when the year prefix is not 4 digits.
-    Callers treat ``None`` as "leave the column NULL"; they never
-    fail-hard on a missing release-group.
+    Returns ``None`` only when the release-group record exists but
+    carries no parseable year. ``urllib.error.HTTPError(code=404)``
+    propagates so the resolver service can disambiguate "MBID does not
+    exist" from "exists but missing year" — the former routes to
+    ``unresolved_404`` (sticky), the latter to
+    ``unresolved_field_missing_upstream``. Other HTTPErrors and
+    network-style errors propagate too; callers classify them via
+    ``lib.field_resolver_service._classify_lookup_exception``.
     """
     def _fetch() -> int | None:
-        try:
-            data = _get(f"{MB_API_BASE}/release-group/{rg_mbid}?fmt=json")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return None
-            raise
+        data = _get(f"{MB_API_BASE}/release-group/{rg_mbid}?fmt=json")
         from lib.util import parse_mb_first_release_year
         return parse_mb_first_release_year(data)
 

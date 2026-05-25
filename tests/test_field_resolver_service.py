@@ -157,6 +157,29 @@ class TestResolveReleaseGroupYear(unittest.TestCase):
         self.assertEqual(result.status, "unresolved_field_missing_upstream")
         self.assertIsNone(result.value)
 
+    def test_mb_release_group_with_no_parseable_year_is_field_missing(self):
+        """Code-review #17: ``web.mb.get_release_group_year`` now
+        propagates ``HTTPError(404)`` so the resolver can disambiguate
+        "MBID does not exist" (→ ``unresolved_404``) from "exists but
+        no parseable year" (→ ``unresolved_field_missing_upstream``).
+        This test pins the non-404 None branch."""
+        db = FakePipelineDB()
+        req = _request(id=51, mb_release_group_id="abc-uuid")
+
+        result = resolve_release_group_year(
+            req, db, mb_get_release_group_year=lambda _: None,
+        )
+        self.assertEqual(
+            result.status, "unresolved_field_missing_upstream",
+        )
+        self.assertEqual(result.reason_code, "mb_release_group_no_year")
+        row = db.get_field_resolution(51, FIELD_RELEASE_GROUP_YEAR)
+        assert row is not None
+        self.assertEqual(
+            row["status"], "unresolved_field_missing_upstream",
+        )
+        self.assertEqual(row["reason_code"], "mb_release_group_no_year")
+
     def test_empty_rg_id_records_unresolved_malformed_and_no_mirror_call(self):
         db = FakePipelineDB()
         req = _request(id=49, mb_release_group_id=None,
@@ -905,6 +928,45 @@ class TestResolveAll(unittest.TestCase):
             rg_year_row["status"], "unresolved_mirror_unavailable")
         # The orchestrator does NOT raise.
         self.assertFalse(result.is_va_compilation)
+
+    def test_internal_error_in_resolver_lands_unresolved_internal_error(self):
+        """Code-review #18: a programmer-error escape from a per-field
+        resolver (something the resolver's own classifier can't classify)
+        lands as ``unresolved_internal_error`` with
+        ``reason_code='bug_<ExcName>'`` — NOT as
+        ``unresolved_mirror_unavailable``. The two used to be conflated;
+        the conflation made real bugs look like transient mirror outages
+        and they got retried forever instead of being surfaced for fix.
+
+        Mechanism: a collaborator that raises a non-transient exception
+        (``KeyError``) propagates through the per-field resolver's
+        ``_classify_lookup_exception`` (which re-raises programmer
+        errors) and into ``resolve_all``'s ``except Exception`` clause.
+        That clause now classifies the escape and tags it as
+        ``unresolved_internal_error``.
+        """
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(id=181, mb_release_group_id="rg-uuid")
+
+        def _bug(_rg_id: str) -> int | None:
+            raise KeyError("simulated bug")
+
+        result = resolve_all(
+            req, db,
+            mb_get_release_group_year=_bug,
+            mb_get_release=lambda mbid, *, fresh=True: {
+                "release_group_id": "rg-uuid",
+                "media": [], "label-info": [],
+            },
+        )
+
+        self.assertIsNone(result.release_group_year)
+        row = db.get_field_resolution(181, FIELD_RELEASE_GROUP_YEAR)
+        assert row is not None
+        self.assertEqual(row["status"], "unresolved_internal_error")
+        self.assertEqual(row["reason_code"], "bug_KeyError")
 
     def test_malformed_request_lands_with_nulls(self):
         """Missing release ids → resolvers return ``unresolved_malformed``;
