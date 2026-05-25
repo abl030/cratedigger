@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 """Backfill ``album_requests.release_group_year`` from the local MB mirror.
 
+.. deprecated:: search-plan iteration 2 (2026-05-25)
+    Superseded by ``scripts/backfill_field_resolutions.py``. The new
+    script is a dual-source backfill (MB + Discogs) and writes every
+    attempt to ``album_request_field_resolutions`` (migration 030), so
+    operators can see why a given field stayed NULL. It also handles
+    four additional fields beyond ``release_group_year``
+    (``release_group_id``, ``track_artist``, ``catalog_number``,
+    ``is_va_compilation``) plus the ``one_track_structural`` unfindable
+    category.
+
+    This module is kept around for callers (operator runbooks, existing
+    systemd one-shots) that still invoke it by name. New deploys should
+    run ``python3 scripts/backfill_field_resolutions.py --field=all``
+    instead -- the new script subsumes the old one's behaviour and
+    records audit trails the old script ignores.
+
 U3 / R9 of the search-plan-entropy plan. The migration
 ``026_album_requests_release_group_year.sql`` adds the column as
 nullable. This script populates it for every request that has an
