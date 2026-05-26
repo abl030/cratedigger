@@ -1499,6 +1499,12 @@ class TestApplyResolveAllResult(unittest.TestCase):
             def update_request_fields(self, request_id: int, **fields: Any) -> None:
                 raise RuntimeError("db boom")
 
+            def update_track_artists(
+                self, request_id: int, track_artists: list[str | None],
+            ) -> None:
+                # Never reached: update_request_fields raises first.
+                raise AssertionError("unexpected call")
+
         # Helper re-raises; wrapper catches and reports in its own style.
         with self.assertRaises(RuntimeError):
             apply_resolve_all_result(

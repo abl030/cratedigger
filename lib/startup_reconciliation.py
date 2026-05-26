@@ -218,13 +218,19 @@ def reconcile_search_plans(
                     needing_classification)
             )
 
-    active_current = 0
-    generated = 0
-    old_generator_replaced = 0
-    deterministic_failed = 0
-    retryable_failed = 0
-    skipped = 0
-    unclassified_no_plan = 0
+    # Per-bucket request_ids for the operator-facing INFO surfacing
+    # after the loop. Counts are still summed for ReconciliationSummary;
+    # the id lists exist so an operator can spot-check which requests
+    # ended up in each non-trivial bucket without a follow-up SQL query.
+    bucket_ids: dict[str, list[int]] = {
+        "active_current": [],
+        "generated": [],
+        "old_generator_replaced": [],
+        "deterministic_failed": [],
+        "retryable_failed": [],
+        "skipped": [],
+        "unclassified_no_plan": [],
+    }
 
     for index, candidate in enumerate(candidates, start=1):
         try:
@@ -245,20 +251,8 @@ def reconcile_search_plans(
             )
             outcome = "unclassified_no_plan"
 
-        if outcome == "active_current":
-            active_current += 1
-        elif outcome == "generated":
-            generated += 1
-        elif outcome == "old_generator_replaced":
-            old_generator_replaced += 1
-        elif outcome == "deterministic_failed":
-            deterministic_failed += 1
-        elif outcome == "retryable_failed":
-            retryable_failed += 1
-        elif outcome == "skipped":
-            skipped += 1
-        else:  # unclassified_no_plan
-            unclassified_no_plan += 1
+        bucket_ids[outcome].append(candidate.request_id)
+        if outcome == "unclassified_no_plan":
             logger.error(
                 "search_plan_reconciliation: request_id=%s wanted with no "
                 "active plan and no current-generator failure record -- "
@@ -271,22 +265,47 @@ def reconcile_search_plans(
                 "search_plan_reconciliation progress: %d/%d processed "
                 "(active=%d generated=%d replaced=%d det_fail=%d "
                 "trans_fail=%d skipped=%d unclassified=%d)",
-                index, wanted_total, active_current, generated,
-                old_generator_replaced, deterministic_failed,
-                retryable_failed, skipped, unclassified_no_plan,
+                index, wanted_total,
+                len(bucket_ids["active_current"]),
+                len(bucket_ids["generated"]),
+                len(bucket_ids["old_generator_replaced"]),
+                len(bucket_ids["deterministic_failed"]),
+                len(bucket_ids["retryable_failed"]),
+                len(bucket_ids["skipped"]),
+                len(bucket_ids["unclassified_no_plan"]),
+            )
+
+    # Per-bucket id surfacing (issue #377). Skip the routine buckets
+    # (active_current, generated) — on first-deploy cycles ``generated``
+    # alone can be ~600 ids and dwarfs the interesting buckets. The
+    # remaining buckets are operator-actionable enough that listing
+    # their contents pays for itself.
+    for bucket_name in (
+        "old_generator_replaced",
+        "deterministic_failed",
+        "retryable_failed",
+        "skipped",
+        "unclassified_no_plan",
+    ):
+        ids = bucket_ids[bucket_name]
+        if ids:
+            logger.info(
+                "search_plan_reconciliation bucket=%s count=%d "
+                "request_ids=%s",
+                bucket_name, len(ids), ids,
             )
 
     duration_s = time.time() - started
     summary = ReconciliationSummary(
         generator_id=generator_id,
         wanted_total=wanted_total,
-        active_current=active_current,
-        generated=generated,
-        old_generator_replaced=old_generator_replaced,
-        deterministic_failed=deterministic_failed,
-        retryable_failed=retryable_failed,
-        skipped=skipped,
-        unclassified_no_plan=unclassified_no_plan,
+        active_current=len(bucket_ids["active_current"]),
+        generated=len(bucket_ids["generated"]),
+        old_generator_replaced=len(bucket_ids["old_generator_replaced"]),
+        deterministic_failed=len(bucket_ids["deterministic_failed"]),
+        retryable_failed=len(bucket_ids["retryable_failed"]),
+        skipped=len(bucket_ids["skipped"]),
+        unclassified_no_plan=len(bucket_ids["unclassified_no_plan"]),
         duration_s=duration_s,
         dry_run=dry_run,
     )

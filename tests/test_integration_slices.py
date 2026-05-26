@@ -4184,6 +4184,100 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         self.assertEqual(summary.unclassified_no_plan, 0)
         service.generate_for_request.assert_not_called()
 
+    def test_non_trivial_buckets_surface_request_ids_at_info(self):
+        """Operator-facing surfacing for issue #377.
+
+        The single-line summary log already includes counts. This test
+        guards the per-bucket follow-up INFO lines that list the actual
+        request_ids in each non-trivial bucket so an operator reading the
+        cycle log can spot-check which requests were classified that way
+        without a second SQL query.
+
+        Non-trivial buckets = old_generator_replaced, deterministic_failed,
+        retryable_failed, skipped, unclassified_no_plan. active_current /
+        generated are routine and skipped to avoid 600-line dumps on
+        first-deploy cycles.
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        # det-failed via sticky failure on current generator id.
+        rid_det = self._seed_wanted(db, "det-1")
+        db.create_failed_search_plan(
+            request_id=rid_det, generator_id="g-current",
+            failure_class="no_runnable_query", transient=False)
+        # retryable_failed via sticky transient on current generator id.
+        rid_trans = self._seed_wanted(db, "trans-1")
+        db.create_failed_search_plan(
+            request_id=rid_trans, generator_id="g-current",
+            failure_class="resolver_unavailable", transient=True)
+        # old_generator_replaced.
+        rid_old = self._seed_wanted(db, "old-1")
+        db.create_successful_search_plan(
+            request_id=rid_old, generator_id="g-old",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+        # active_current (NOT logged — routine).
+        rid_active = self._seed_wanted(db, "active-1")
+        db.create_successful_search_plan(
+            request_id=rid_active, generator_id="g-current",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+
+        with self.assertLogs(
+            "lib.startup_reconciliation", level="INFO",
+        ) as cm:
+            summary = reconcile_search_plans(
+                db, self._service(db, generator_id="g-current"),
+            )
+
+        # Sanity: buckets populated as expected.
+        self.assertEqual(summary.deterministic_failed, 1)
+        self.assertEqual(summary.retryable_failed, 1)
+        self.assertEqual(summary.old_generator_replaced, 1)
+        self.assertEqual(summary.active_current, 1)
+
+        joined = "\n".join(cm.output)
+        # Each non-trivial non-empty bucket emits one INFO line carrying
+        # its request_ids.
+        self.assertIn(
+            f"bucket=deterministic_failed", joined,
+            f"missing deterministic_failed surfacing line: {joined}")
+        self.assertIn(
+            f"request_ids=[{rid_det}]", joined,
+            f"deterministic_failed line should list rid_det={rid_det}: {joined}")
+        self.assertIn("bucket=retryable_failed", joined)
+        self.assertIn(f"request_ids=[{rid_trans}]", joined)
+        self.assertIn("bucket=old_generator_replaced", joined)
+        self.assertIn(f"request_ids=[{rid_old}]", joined)
+        # active_current must NOT get its own surfacing line — it's
+        # routine and would dwarf the interesting buckets.
+        self.assertNotIn("bucket=active_current", joined)
+
+    def test_empty_buckets_do_not_emit_surfacing_lines(self):
+        """No surfacing lines when every wanted row is active_current.
+
+        Avoids noise on the steady-state cycle where nothing changed.
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "steady-1")
+        db.create_successful_search_plan(
+            request_id=rid, generator_id="g-current",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q")],
+        )
+
+        with self.assertNoLogs(
+            "lib.startup_reconciliation", level="INFO",
+        ):
+            reconcile_search_plans(
+                db, self._service(db, generator_id="g-current"),
+            )
+
     def test_per_row_exception_does_not_stop_other_rows(self):
         """One row's generation exception must not block reconciliation."""
         from lib.startup_reconciliation import reconcile_search_plans
