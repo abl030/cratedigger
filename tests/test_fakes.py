@@ -743,6 +743,212 @@ class TestFakePipelineDBFieldResolutions(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Triage cohort fakes (U15)
+# ---------------------------------------------------------------------------
+
+
+class TestFakePipelineDBTriage(unittest.TestCase):
+    """Each of the four triage-bound methods on ``FakePipelineDB`` has a
+    self-test so the cohort path stays trustworthy when the production
+    SQL is updated. The N+1 guard test lives in
+    ``tests/test_triage_service.py``.
+    """
+
+    def _seed_two_requests(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, artist_name="Artist One", album_title="Album One",
+            unfindable_category="artist_absent",
+        ))
+        db.seed_request(make_request_row(
+            id=2, artist_name="Artist Two", album_title="Album Two",
+        ))
+        return db
+
+    def test_list_triage_page_filter_all(self):
+        from lib.triage_service import parse_filter
+        db = self._seed_two_requests()
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("all"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1, 2])
+        self.assertEqual(db.query_counts["list_triage_page"], 1)
+
+    def test_list_triage_page_filter_unfindable(self):
+        from lib.triage_service import parse_filter
+        db = self._seed_two_requests()
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("unfindable"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+    def test_list_triage_page_keyset_pagination(self):
+        from lib.triage_service import parse_filter
+        db = FakePipelineDB()
+        for i in range(1, 6):
+            db.seed_request(make_request_row(id=i))
+        page = db.list_triage_page(
+            filter_spec=parse_filter("all"),
+            page_size=2,
+            after_request_id=2,
+        )
+        self.assertEqual([r["id"] for r in page], [3, 4])
+
+    def test_list_triage_page_filter_data_quality(self):
+        """The EXISTS-join branch over ``album_request_field_resolutions``.
+
+        Three rows: (1) has an unresolved field-resolution, (2) has only
+        a resolved-status row, (3) has none. Only row 1 must match the
+        bare ``data_quality`` filter; narrowing on field_name / status_code
+        / reason_code further restricts the cohort. Mirrors the production
+        SQL contract — same shape would fail if the fake forgot a sub-filter.
+        """
+        from lib.triage_service import parse_filter
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.seed_request(make_request_row(id=3))
+        db.record_field_resolution(
+            request_id=1, field_name="release_group_year",
+            status="unresolved_4xx_client", reason_code="http_400",
+        )
+        db.record_field_resolution(
+            request_id=2, field_name="catalog_number",
+            status="resolved", reason_code=None,
+        )
+
+        # Bare data_quality — only request 1 (has unresolved_*).
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Narrow on field_name — release_group_year matches request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality:release_group_year"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Narrow on status — unresolved_4xx_client matches request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter(
+                "data_quality:status=unresolved_4xx_client",
+            ),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Narrow on reason_code — http_400 matches request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality:reason=http_400"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Negative narrow — a mismatched reason_code excludes request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality:reason=http_999"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual(rows, [])
+
+    def test_list_triage_page_filter_search_not_converting(self):
+        """The join against ``request_search_summary`` excludes rows with
+        no search log entries AND rows with any found outcome.
+
+        Three rows: (1) 3 searches all rejected → matches; (2) one found
+        outcome → excluded; (3) no searches → excluded.
+        """
+        from lib.triage_service import parse_filter
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.seed_request(make_request_row(id=3))
+        for _ in range(3):
+            db.log_search(
+                request_id=1, query="q", result_count=10, outcome="rejected",
+            )
+        db.log_search(
+            request_id=2, query="q", result_count=10, outcome="found",
+        )
+        # Request 3: no search log rows.
+
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("search_not_converting"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+    def test_get_field_resolutions_for_requests_groups_by_id(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.record_field_resolution(
+            request_id=1, field_name="release_group_year",
+            status="resolved", reason_code=None,
+        )
+        db.record_field_resolution(
+            request_id=1, field_name="catalog_number",
+            status="unresolved_404", reason_code="http_404",
+        )
+        db.record_field_resolution(
+            request_id=2, field_name="release_group_year",
+            status="resolved", reason_code=None,
+        )
+        out = db.get_field_resolutions_for_requests([1, 2])
+        self.assertEqual(len(out[1]), 2)
+        self.assertEqual(len(out[2]), 1)
+        self.assertEqual(db.query_counts["get_field_resolutions_for_requests"], 1)
+
+    def test_get_field_resolutions_for_requests_empty_input(self):
+        db = FakePipelineDB()
+        self.assertEqual(db.get_field_resolutions_for_requests([]), {})
+
+    def test_get_search_summaries_for_requests_emits_zero_groups_only_when_present(
+        self,
+    ):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.log_search(
+            request_id=1, query="q", result_count=5, outcome="found",
+        )
+        out = db.get_search_summaries_for_requests([1, 2])
+        # Only request 1 has search_log rows; request 2 has no row in
+        # the view (mirrors GROUP BY excluding empty groups).
+        self.assertIn(1, out)
+        self.assertNotIn(2, out)
+        self.assertEqual(out[1]["total_searches"], 1)
+        self.assertEqual(out[1]["found_count"], 1)
+        self.assertEqual(db.query_counts["get_search_summaries_for_requests"], 1)
+
+    def test_get_recent_search_log_for_requests_bounded_per_request(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        for i in range(20):
+            db.log_search(
+                request_id=1, query=f"q{i}", result_count=i, outcome="error",
+            )
+        out = db.get_recent_search_log_for_requests([1], per_request_limit=5)
+        self.assertEqual(len(out[1]), 5)
+        # Newest first — last logged query is "q19".
+        self.assertEqual(out[1][0]["query"], "q19")
+        self.assertEqual(db.query_counts["get_recent_search_log_for_requests"], 1)
+
+
+# ---------------------------------------------------------------------------
 # Persisted search plans (U1) — fake parity
 # ---------------------------------------------------------------------------
 

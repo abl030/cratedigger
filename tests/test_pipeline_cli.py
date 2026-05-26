@@ -10,6 +10,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
+import msgspec
+
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.insert(0, os.path.dirname(__file__))
 import conftest  # noqa: F401
@@ -2782,6 +2784,371 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
         self.assertIn("request_id", payload)
         self.assertIn("rows", payload)
         self.assertIn("next_before_id", payload)
+
+
+class TestPipelineCliTriage(unittest.TestCase):
+    """``pipeline-cli triage`` (U16) wraps ``lib.triage_service``.
+
+    Counterpart of the U17 HTTP routes — both wrap the same service and
+    must stay in sync (CLAUDE.md § "CLI ⇄ API surface symmetry"). Tests
+    drive the real service against ``FakePipelineDB`` rather than
+    mocking ``compose_triage_for_request`` / ``list_triage`` — those are
+    our own logic, not leaf seams. See `MOCKS: LEAF-SEAM ONLY`.
+    """
+
+    def _seed_healthy(self, db, rid: int) -> None:
+        from tests.helpers import make_request_row
+        db.seed_request(make_request_row(
+            id=rid, artist_name="Healthy", album_title="Imported Album",
+            status="imported", failure_class="resolved",
+        ))
+
+    def _seed_unfindable(self, db, rid: int, category: str = "artist_absent") -> None:
+        from datetime import datetime, timezone
+        from tests.helpers import make_request_row
+        now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc)
+        db.seed_request(make_request_row(
+            id=rid, artist_name=f"Vanished {rid}",
+            album_title=f"Unfindable Album {rid}",
+            status="wanted",
+            unfindable_category=category,
+            unfindable_categorised_at=now,
+        ))
+
+    def _seed_data_quality(
+        self, db, rid: int, *,
+        field_name: str = "release_group_year",
+        status: str = "unresolved_404",
+        reason_code: str = "http_404",
+    ) -> None:
+        """Seed a request with one unresolved field-resolution row.
+
+        Production shape: ``status`` is the resolver-status bucket
+        (``unresolved_4xx_client`` / ``unresolved_404`` / ...) and
+        ``reason_code`` is the per-occurrence specifier (``http_400`` /
+        ``http_404`` / ...). See ``lib/field_resolver_service.py``.
+        """
+        from tests.helpers import make_request_row
+        db.seed_request(make_request_row(
+            id=rid, artist_name=f"DataOnly {rid}",
+            album_title=f"Field Album {rid}", status="wanted",
+        ))
+        db.record_field_resolution(
+            request_id=rid, field_name=field_name,
+            status=status, reason_code=reason_code,
+        )
+
+    # --- triage show ----------------------------------------------------
+
+    def _run_show(self, db, rid, *, json_out=False):
+        args = SimpleNamespace(id=rid, json=json_out)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_show(db, args)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_show_human_renders_request_meta_and_search_log(self):
+        from lib.triage_service import TriageResult  # noqa: F401
+        db = FakePipelineDB()
+        self._seed_unfindable(db, 42)
+        # One search_log row so the recent_entries renderer is exercised.
+        db.log_search(
+            request_id=42, query="vanished album", result_count=0,
+            outcome="exhausted", rejection_reason=None,
+        )
+        rc, out, err = self._run_show(db, 42)
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Vanished 42", out)
+        self.assertIn("Unfindable Album 42", out)
+        self.assertIn("wanted", out)
+        self.assertIn("artist_absent", out)
+        # At least one rendered search log row.
+        self.assertIn("exhausted", out)
+        self.assertIn("recent_entries", out)
+
+    def test_show_json_round_trips_through_msgspec(self):
+        """`--json` payload must decode back into a ``TriageResult`` so
+        the API consumer gets the same wire shape on both surfaces."""
+        from lib.triage_service import TriageResult
+        db = FakePipelineDB()
+        self._seed_unfindable(db, 42)
+        db.log_search(
+            request_id=42, query="q", result_count=0, outcome="exhausted",
+        )
+        rc, out, err = self._run_show(db, 42, json_out=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        # Valid JSON parseable as TriageResult via msgspec convert.
+        payload = json.loads(out)
+        result = msgspec.convert(payload, type=TriageResult)
+        self.assertEqual(result.request_meta.id, 42)
+        self.assertEqual(result.request_meta.artist_name, "Vanished 42")
+        assert result.unfindable is not None
+        self.assertEqual(result.unfindable.category, "artist_absent")
+
+    def test_show_unknown_id_returns_2_with_stderr_message(self):
+        db = FakePipelineDB()
+        rc, out, err = self._run_show(db, 9999)
+        self.assertEqual(rc, 2)
+        # Human path writes to stderr; the operator running `triage show`
+        # should see the error there, not on stdout.
+        self.assertIn("9999", err)
+        self.assertIn("not found", err.lower())
+
+    def test_show_unknown_id_json_returns_2_with_structured_payload(self):
+        db = FakePipelineDB()
+        rc, out, err = self._run_show(db, 9999, json_out=True)
+        self.assertEqual(rc, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "Not found")
+        self.assertEqual(payload["request_id"], 9999)
+
+    def test_show_healthy_request_renders_no_unfindable_signal(self):
+        db = FakePipelineDB()
+        self._seed_healthy(db, 1)
+        rc, out, err = self._run_show(db, 1)
+        self.assertEqual(rc, 0)
+        self.assertIn("Healthy", out)
+        self.assertIn("Imported Album", out)
+        self.assertIn("(no signals)", out)
+
+    # --- triage list ----------------------------------------------------
+
+    def _run_list(self, db, *, filter_spec="all", limit=50, after=None,
+                  json_out=False):
+        args = SimpleNamespace(
+            filter=filter_spec,
+            limit=limit,
+            after=after,
+            json=json_out,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_list(db, args)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def _seed_cohort(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        self._seed_healthy(db, 1)
+        self._seed_unfindable(db, 2, category="artist_absent")
+        self._seed_unfindable(db, 3, category="wrong_pressing_available")
+        # Production shape: status='unresolved_4xx_client' (the sticky
+        # bucket #374 surfaces on), reason_code='http_400' (the specific
+        # HTTP code the resolver hit).
+        self._seed_data_quality(
+            db, 4, field_name="release_group_year",
+            status="unresolved_4xx_client", reason_code="http_400",
+        )
+        return db
+
+    def test_list_unfindable_returns_only_unfindable_rows(self):
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(db, filter_spec="unfindable")
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        # Rows 2 and 3 are unfindable. Row 1 (healthy) and row 4 (data
+        # quality only) must be absent from the rendered table.
+        self.assertIn("Vanished 2", out)
+        self.assertIn("Vanished 3", out)
+        self.assertNotIn("Healthy", out)
+        self.assertNotIn("DataOnly 4", out)
+
+    def test_list_data_quality_returns_data_quality_rows(self):
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(db, filter_spec="data_quality")
+        self.assertEqual(rc, 0)
+        self.assertIn("DataOnly 4", out)
+        # Healthy + unfindable rows without resolutions must not appear.
+        self.assertNotIn("Healthy", out)
+        self.assertNotIn("Vanished 2", out)
+
+    def test_list_data_quality_status_filter_374(self):
+        """#374 canonical form — ``data_quality:status=<resolver_status>``
+        filters on the resolver-status column (what
+        ``lib/field_resolver_service.py`` actually writes)."""
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(
+            db, filter_spec="data_quality:status=unresolved_4xx_client",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("DataOnly 4", out)
+
+    def test_list_data_quality_reason_code_filter(self):
+        """``data_quality:reason=<code>`` complementary filter on the
+        ``reason_code`` column (HTTP code-specific)."""
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(
+            db, filter_spec="data_quality:reason=http_400",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("DataOnly 4", out)
+
+    def test_list_invalid_filter_returns_3_and_emits_valid_forms(self):
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(db, filter_spec="garbage_value")
+        self.assertEqual(rc, 3)
+        # Operator sees the valid forms on stderr.
+        self.assertIn("Invalid filter spec", err)
+        self.assertIn("all", err)
+        self.assertIn("unfindable", err)
+        self.assertIn("data_quality", err)
+        self.assertIn("search_not_converting", err)
+
+    def test_list_json_emits_envelope_matching_api_shape(self):
+        """CLI ``--json`` wraps results in the same envelope the API
+        emits: ``{results, next_after, page_size, filter}``. Without
+        the envelope, agents piping ``--json | jq '.next_after'``
+        cannot extract the pagination cursor."""
+        from lib.triage_service import TriageResult
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(
+            db, filter_spec="unfindable", json_out=True,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        # Envelope-shape contract.
+        self.assertIsInstance(payload, dict)
+        self.assertIn("results", payload)
+        self.assertIn("next_after", payload)
+        self.assertIn("page_size", payload)
+        self.assertIn("filter", payload)
+        self.assertEqual(payload["filter"], "unfindable")
+        self.assertEqual(payload["page_size"], 50)
+        # Partial page (2 of 50) → next_after is None.
+        self.assertIsNone(payload["next_after"])
+        self.assertIsInstance(payload["results"], list)
+        self.assertEqual(len(payload["results"]), 2)
+        # Each element must round-trip back to TriageResult.
+        triage_rows = [
+            msgspec.convert(entry, type=TriageResult)
+            for entry in payload["results"]
+        ]
+        ids = sorted(r.request_meta.id for r in triage_rows)
+        self.assertEqual(ids, [2, 3])
+
+    def test_list_json_invalid_filter_emits_json_error_envelope(self):
+        """``--json`` + invalid filter must emit a JSON-parseable
+        payload on stdout (mirrors cmd_triage_show's 404 path and the
+        API 400 envelope). Without this, agents piping ``--json | jq``
+        break on the text-stderr fallback."""
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(
+            db, filter_spec="garbage_value", json_out=True,
+        )
+        self.assertEqual(rc, 3)
+        self.assertEqual(err, "")  # Nothing on stderr in JSON mode.
+        payload = json.loads(out)
+        self.assertIn("error", payload)
+        self.assertIn("valid_filters", payload)
+        self.assertIn("valid_unfindable_categories", payload)
+        self.assertIn("valid_data_quality_fields", payload)
+        self.assertIsInstance(payload["valid_filters"], list)
+        self.assertIn("all", payload["valid_filters"])
+
+    def test_list_limit_out_of_range_returns_3(self):
+        """API-parity bounds check: limit must be in [1, 200]."""
+        db = self._seed_cohort()
+        rc, _out, err = self._run_list(db, filter_spec="all", limit=500)
+        self.assertEqual(rc, 3)
+        self.assertIn("--limit", err)
+
+    def test_list_after_below_one_returns_3(self):
+        """API-parity bounds check: after must be >= 1."""
+        db = self._seed_cohort()
+        rc, _out, err = self._run_list(db, filter_spec="all", after=0)
+        self.assertEqual(rc, 3)
+        self.assertIn("--after", err)
+
+    def test_list_empty_result_is_exit_0(self):
+        db = FakePipelineDB()
+        # No rows seeded — empty cohort under any filter.
+        rc, out, err = self._run_list(db, filter_spec="unfindable")
+        self.assertEqual(rc, 0)
+        self.assertIn("No results", out)
+
+    def test_list_limit_returns_page_with_next_after_footer(self):
+        db = self._seed_cohort()
+        # 2 unfindable rows seeded (ids 2 and 3); limit=2 means full page
+        # and the footer should print the next --after cursor.
+        rc, out, err = self._run_list(
+            db, filter_spec="unfindable", limit=2,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("Vanished 2", out)
+        self.assertIn("Vanished 3", out)
+        self.assertIn("--after=3", out)
+        self.assertIn("--limit=2", out)
+
+    def test_list_partial_page_omits_next_after_footer(self):
+        db = self._seed_cohort()
+        # Only 2 unfindable rows; limit=10 returns a partial page with no
+        # follow-on cursor.
+        rc, out, err = self._run_list(
+            db, filter_spec="unfindable", limit=10,
+        )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("--after=", out)
+
+
+class TestPipelineCliRoutes(unittest.TestCase):
+    """U18 step 3: ``pipeline-cli routes`` self-documents the CLI surface."""
+
+    def _run_routes(
+        self, json_mode: bool = False,
+    ) -> tuple[int, str]:
+        argv = ["pipeline_cli.py", "routes"]
+        if json_mode:
+            argv.append("--json")
+        # ``cmd_routes`` doesn't need a DB; ``main()`` short-circuits the
+        # PipelineDB construction for this subcommand. The patch is still
+        # in place defensively in case a future caller flips that wiring.
+        db = FakePipelineDB()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.PipelineDB", return_value=db,
+        ), redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+        code = raised.exception.code
+        return (code if isinstance(code, int) else 0), out.getvalue()
+
+    def test_routes_text_lists_known_subcommands(self):
+        rc, output = self._run_routes()
+        self.assertEqual(rc, 0)
+        # Top-level subcommands that exist regardless of nested routing.
+        self.assertIn("list", output)
+        self.assertIn("status", output)
+        # Nested commands are emitted as space-separated leaves.
+        self.assertIn("search-plan show", output)
+        self.assertIn("triage list", output)
+        # The ``routes`` command must self-describe.
+        self.assertIn("routes", output)
+
+    def test_routes_json_emits_shape_matching_help_metadata(self):
+        rc, output = self._run_routes(json_mode=True)
+        self.assertEqual(rc, 0)
+        data = json.loads(output)
+        self.assertIsInstance(data, list)
+        for entry in data:
+            self.assertIn("subcommand", entry)
+            self.assertIn("args", entry)
+            self.assertIn("description", entry)
+            self.assertIsInstance(entry["subcommand"], str)
+            self.assertIsInstance(entry["args"], list)
+            self.assertIsInstance(entry["description"], str)
+        names_list = [entry["subcommand"] for entry in data]
+        names_set = set(names_list)
+        for expected in ("list", "search-plan show", "triage list", "routes"):
+            self.assertIn(expected, names_set)
+
+        # Sort invariant — operators consume this as a stable index.
+        # Compare the raw list against ``sorted(names_list)`` (not
+        # ``sorted(names_set)``) so a duplicate subcommand surfaces as
+        # the inequality it is, rather than being silently deduped.
+        self.assertEqual(names_list, sorted(names_list))
 
 
 if __name__ == "__main__":

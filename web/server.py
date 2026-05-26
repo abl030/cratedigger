@@ -239,6 +239,35 @@ class Handler(BaseHTTPRequestHandler):
         *getattr(_pipeline_routes, "POST_PATTERNS", []),
     ]
 
+    # Description tables (U18): human-readable strings for the route index,
+    # mirroring the dispatch-table merge above. Each route module exports
+    # parallel `*_DESCRIPTIONS` dicts/lists that start empty and are
+    # populated incrementally. Empty until U18 step 2.
+    _FUNC_GET_DESCRIPTIONS: dict[str, str] = {
+        **_browse_routes.GET_DESCRIPTIONS,
+        **_labels_routes.GET_DESCRIPTIONS,
+        **_pipeline_routes.GET_DESCRIPTIONS,
+        **_library_routes.GET_DESCRIPTIONS,
+        **_imports_routes.GET_DESCRIPTIONS,
+    }
+
+    _FUNC_POST_DESCRIPTIONS: dict[str, str] = {
+        **_pipeline_routes.POST_DESCRIPTIONS,
+        **_library_routes.POST_DESCRIPTIONS,
+        **_imports_routes.POST_DESCRIPTIONS,
+    }
+
+    _FUNC_GET_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+        *_browse_routes.PATTERN_DESCRIPTIONS,
+        *_labels_routes.PATTERN_DESCRIPTIONS,
+        *_pipeline_routes.PATTERN_DESCRIPTIONS,
+        *_library_routes.PATTERN_DESCRIPTIONS,
+    ]
+
+    _FUNC_POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+        *getattr(_pipeline_routes, "POST_PATTERN_DESCRIPTIONS", []),
+    ]
+
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         log.info(format % args)
 

@@ -147,3 +147,24 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
 POST_ROUTES: dict[str, object] = {
     "/api/beets/delete": post_beets_delete,
 }
+
+# Human-readable descriptions for the route index (U18). Parallel to the
+# GET_ROUTES / GET_PATTERNS / POST_ROUTES dispatch tables above.
+GET_DESCRIPTIONS: dict[str, str] = {
+    "/api/beets/search": (
+        "Beets library album search by query string; pipeline-enriched."
+    ),
+    "/api/beets/recent": (
+        "Recently imported beets albums; pipeline-enriched."
+    ),
+}
+POST_DESCRIPTIONS: dict[str, str] = {
+    "/api/beets/delete": (
+        "Delete a beets album (DESTRUCTIVE — files removed); optional "
+        "pipeline purge. Requires confirm='DELETE'."
+    ),
+}
+PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/beets/album/(\d+)$"),
+     "Beets album detail — full tracks + library / pipeline overlay."),
+]

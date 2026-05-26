@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+    from lib.triage_service import ParsedTriageFilter
     from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
 import psycopg2
@@ -6651,3 +6652,242 @@ class PipelineDB:
         """, (request_id,))
         row = cur.fetchone()
         return dict(row) if row else None
+
+    # --- Triage (U15) -----------------------------------------------------
+    #
+    # The cohort-listing service ``lib.triage_service.list_triage`` reads
+    # one bulk page query + three ``WHERE ... = ANY(%s)`` bulk queries
+    # (field resolutions, search summaries, recent search_log slice).
+    # These four methods are the DB-layer half. Filter parsing lives in
+    # ``lib.triage_service.parse_filter`` and the parsed filter is what
+    # the service passes here; this method never inspects raw strings.
+
+    def list_triage_page(
+        self,
+        *,
+        filter_spec: "ParsedTriageFilter",
+        page_size: int,
+        after_request_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """One cohort page of ``album_requests`` rows for the triage view.
+
+        ``filter_spec`` is the ``ParsedTriageFilter`` produced by
+        ``lib.triage_service.parse_filter``. We type via ``TYPE_CHECKING``
+        so static analysis can catch a caller passing a wrong shape, but
+        the import stays deferred at runtime — the service owns the
+        parser, the DB owns the SQL.
+
+        Ordered by ``id`` ASC; ``after_request_id`` is the keyset cursor
+        from the previous page's last row. ``page_size`` is honoured
+        verbatim (caller clamps).
+
+        SELECT lists the columns the triage service composes into
+        ``RequestMeta`` + ``UnfindableState``; the field-resolutions /
+        search summaries / recent search_log entries come from the
+        sibling bulk getters.
+
+        **Replaced rows are intentionally included.** Rows with
+        ``status='replaced'`` are frozen audit tombstones from the
+        operator's Replace action (see ``CLAUDE.md`` invariant #6).
+        Including them in cohort listings lets the operator spot
+        patterns across replacement history — e.g. an MBID-shape that
+        keeps tripping HTTP 4xx and keeps getting replaced. The
+        lineage chain (``replaces_request_id``) is read via
+        ``pipeline-cli show <id>`` for per-request audit detail.
+        ``tests/test_triage_service.py::test_list_includes_replaced_rows``
+        pins this contract.
+        """
+        select_cols = (
+            "ar.id, ar.artist_name, ar.album_title, ar.year, ar.status, "
+            "ar.source, ar.mb_release_id, ar.discogs_release_id, "
+            "ar.release_group_year, ar.is_va_compilation, ar.catalog_number, "
+            "ar.failure_class, ar.search_filetype_override, "
+            "ar.unfindable_category, ar.unfindable_categorised_at, "
+            "ar.last_artist_probe_at, ar.last_artist_probe_match_count, "
+            "ar.rescued_at, ar.prior_unfindable_category"
+        )
+
+        # filter_spec's attributes are normalised + safe-by-parse; the
+        # values flow into placeholders, never string-interpolation.
+        kind = getattr(filter_spec, "kind", None)
+        unfindable_category = getattr(filter_spec, "unfindable_category", None)
+        field_name = getattr(filter_spec, "field_name", None)
+        status_code = getattr(filter_spec, "status_code", None)
+        reason_code = getattr(filter_spec, "reason_code", None)
+
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        joins: list[str] = []
+
+        if kind == "unfindable":
+            where_clauses.append("ar.unfindable_category IS NOT NULL")
+            if unfindable_category is not None:
+                where_clauses.append("ar.unfindable_category = %s")
+                params.append(unfindable_category)
+        elif kind == "data_quality":
+            # EXISTS-join — any row in the side table whose status is in
+            # the unresolved-* enum qualifies. Sub-filters narrow on
+            # field name, status, or reason_code. Status values come from
+            # ``lib.field_resolver_service.ResolverStatus`` to avoid the
+            # ``LIKE 'unresolved_%%'`` underscore-wildcard ambiguity.
+            from lib.field_resolver_service import ResolverStatus
+            from typing import get_args as _get_args
+            unresolved_statuses = [
+                s for s in _get_args(ResolverStatus)
+                if s.startswith("unresolved_")
+            ]
+            sub = (
+                "SELECT 1 FROM album_request_field_resolutions fr "
+                "WHERE fr.request_id = ar.id "
+                "AND fr.status = ANY(%s)"
+            )
+            sub_params: list[Any] = [unresolved_statuses]
+            if field_name is not None:
+                sub += " AND fr.field_name = %s"
+                sub_params.append(field_name)
+            if status_code is not None:
+                sub += " AND fr.status = %s"
+                sub_params.append(status_code)
+            if reason_code is not None:
+                sub += " AND fr.reason_code = %s"
+                sub_params.append(reason_code)
+            where_clauses.append(f"EXISTS ({sub})")
+            params.extend(sub_params)
+        elif kind == "search_not_converting":
+            joins.append(
+                "JOIN request_search_summary rss ON rss.request_id = ar.id"
+            )
+            where_clauses.append("rss.total_searches > 0")
+            where_clauses.append("rss.found_count = 0")
+        elif kind == "all":
+            pass  # No predicate.
+        else:  # pragma: no cover — parser is the gate
+            raise ValueError(f"unsupported triage filter kind: {kind!r}")
+
+        if after_request_id is not None:
+            where_clauses.append("ar.id > %s")
+            params.append(int(after_request_id))
+
+        sql = f"SELECT {select_cols} FROM album_requests ar"
+        if joins:
+            sql += " " + " ".join(joins)
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+        sql += " ORDER BY ar.id ASC LIMIT %s"
+        params.append(int(page_size))
+
+        cur = self._execute(sql, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_field_resolutions_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Bulk-fetch ``album_request_field_resolutions`` for a request set.
+
+        Returns ``{request_id: [row, ...]}``. Each row dict carries the
+        same fields ``get_field_resolution`` returns (id, request_id,
+        field_name, resolved_at, status, reason_code, attempts).
+        Requests with no resolutions are omitted from the result; the
+        triage composer treats absence as an empty list.
+
+        Ordering: ``field_name`` ASC for stable per-request rendering.
+        """
+        if not request_ids:
+            return {}
+        cur = self._execute(
+            """
+            SELECT id, request_id, field_name, resolved_at, status,
+                   reason_code, attempts
+            FROM album_request_field_resolutions
+            WHERE request_id = ANY(%s)
+            ORDER BY request_id, field_name
+            """,
+            ([int(r) for r in request_ids],),
+        )
+        out: dict[int, list[dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            rid = int(row["request_id"])
+            out.setdefault(rid, []).append(dict(row))
+        return out
+
+    def get_search_summaries_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        """Bulk-fetch rows from the ``request_search_summary`` view.
+
+        Returns ``{request_id: row_dict}``. Requests with zero searches
+        in the view's 14-day window are absent from the result; the
+        triage composer renders the all-zeros summary in that case.
+        """
+        if not request_ids:
+            return {}
+        cur = self._execute(
+            """
+            SELECT request_id, total_searches, with_cands_count,
+                   found_count, near_cap_count, zero_results_count,
+                   pre_filter_skips_total, first_strategy_with_cands,
+                   dominant_rejection_reason, last_search_at
+            FROM request_search_summary
+            WHERE request_id = ANY(%s)
+            """,
+            ([int(r) for r in request_ids],),
+        )
+        out: dict[int, dict[str, Any]] = {}
+        for row in cur.fetchall():
+            rid = int(row["request_id"])
+            out[rid] = dict(row)
+        return out
+
+    def get_recent_search_log_for_requests(
+        self,
+        request_ids: list[int],
+        *,
+        per_request_limit: int,
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Bulk-fetch the most-recent N ``search_log`` rows per request.
+
+        Returns ``{request_id: [row, ...]}`` newest-first; each list is
+        at most ``per_request_limit`` rows long. Uses a single
+        ``ROW_NUMBER() OVER (PARTITION BY request_id ORDER BY created_at
+        DESC)`` window so the bulk path stays one query regardless of
+        how many requests are in the cohort.
+
+        Rows carry the columns the triage forensics struct needs —
+        id, created_at, plan_strategy, query, outcome, result_count,
+        rejection_reason, matcher_score_top1. Anything else stays in
+        ``search_log``; ``search-plan history`` is the full-row view.
+        """
+        if not request_ids:
+            return {}
+        cur = self._execute(
+            """
+            SELECT id, request_id, created_at, plan_strategy, query,
+                   outcome, result_count, rejection_reason,
+                   matcher_score_top1
+            FROM (
+                SELECT sl.id, sl.request_id, sl.created_at,
+                       sl.plan_strategy, sl.query, sl.outcome,
+                       sl.result_count, sl.rejection_reason,
+                       sl.matcher_score_top1,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY sl.request_id
+                           ORDER BY sl.created_at DESC, sl.id DESC
+                       ) AS rn
+                FROM search_log sl
+                WHERE sl.request_id = ANY(%s)
+            ) ranked
+            WHERE rn <= %s
+            ORDER BY request_id, created_at DESC, id DESC
+            """,
+            (
+                [int(r) for r in request_ids],
+                int(per_request_limit),
+            ),
+        )
+        out: dict[int, list[dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            rid = int(row["request_id"])
+            out.setdefault(rid, []).append(dict(row))
+        return out

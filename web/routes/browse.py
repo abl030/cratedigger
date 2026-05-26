@@ -653,3 +653,45 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/discogs/master/(\d+)$"), get_discogs_master),
     (re.compile(r"^/api/discogs/release/(\d+)$"), get_discogs_release),
 ]
+
+# Human-readable descriptions for the route index (U18). Parallel to the
+# GET_ROUTES / GET_PATTERNS dispatch tables above.
+GET_DESCRIPTIONS: dict[str, str] = {
+    "/api/search": (
+        "MusicBrainz search by artist (default) or release group "
+        "(type=release)."
+    ),
+    "/api/browse/resolve": (
+        "Resolve a pasted MBID / Discogs ID / URL into the artist-view "
+        "drop-in target (source, kind, expand_id, leaf_id)."
+    ),
+    "/api/library/artist": (
+        "Library albums by artist (beets-backed), pipeline-status enriched."
+    ),
+    "/api/artist/compare": (
+        "Side-by-side MB + Discogs discographies for one artist, "
+        "fuzzy-merged with in-library overlay."
+    ),
+    "/api/discogs/search": (
+        "Discogs search by artist (default) or release (type=release)."
+    ),
+}
+PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/artist/([a-f0-9-]+)$"),
+     "MB artist detail — release groups with library/pipeline overlay."),
+    (re.compile(r"^/api/artist/([a-f0-9-]+)/disambiguate$"),
+     "MB artist disambiguate view — per-release-group pressing analysis "
+     "with in-library + pipeline overlay."),
+    (re.compile(r"^/api/release-group/([a-f0-9-]+)$"),
+     "MB release group detail — releases in this group with overlay."),
+    (re.compile(r"^/api/release/([a-f0-9-]+)$"),
+     "MB release detail (auto-routes to Discogs for numeric IDs); "
+     "library + pipeline status and beets tracks if present."),
+    (re.compile(r"^/api/discogs/artist/(\d+)$"),
+     "Discogs artist detail — masters with in-library overlay."),
+    (re.compile(r"^/api/discogs/master/(\d+)$"),
+     "Discogs master detail — releases under this master with overlay."),
+    (re.compile(r"^/api/discogs/release/(\d+)$"),
+     "Discogs release detail — library + pipeline status and beets "
+     "tracks if present."),
+]

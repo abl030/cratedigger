@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -1010,6 +1012,8 @@ class TestRouteContractAudit(unittest.TestCase):
     """Every web/routes.py endpoint must be covered by a frontend contract decision."""
 
     CLASSIFIED_ROUTES = {
+        # U18 step 2: self-documenting API surface.
+        "/api/_index",
         "/api/search",
         "/api/browse/resolve",
         "/api/library/artist",
@@ -1069,6 +1073,11 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/wrong-matches/converge",
         "/api/wrong-matches/triage",
         "/api/wrong-matches/explorer",
+        # U17: /api/triage HTTP endpoints. Per-request composition and
+        # cohort listing both wrap ``lib.triage_service`` (U15) — same
+        # service as ``pipeline-cli triage`` (U16) per CLI ⇄ API symmetry.
+        "/api/triage/list",
+        r"^/api/triage/(\d+)$",
     }
 
     def test_all_web_routes_are_classified_for_contract_coverage(self):
@@ -1085,6 +1094,177 @@ class TestRouteContractAudit(unittest.TestCase):
                          f"Unclassified web routes: {sorted(actual - self.CLASSIFIED_ROUTES)}")
         self.assertFalse(self.CLASSIFIED_ROUTES - actual,
                          f"Stale route classifications: {sorted(self.CLASSIFIED_ROUTES - actual)}")
+
+    def test_every_registered_route_has_a_description(self):
+        """U18 step 3: every registered route must carry a human-readable
+        one-liner in the parallel description dispatch tables. Fails if a
+        future route is added without one — fixing it is a one-line edit
+        in the route module."""
+        import web.server as srv
+
+        get_paths = set(srv.Handler._FUNC_GET_ROUTES.keys())
+        post_paths = set(srv.Handler._FUNC_POST_ROUTES.keys())
+        get_pattern_strs = {
+            p.pattern for p, _fn in srv.Handler._FUNC_GET_PATTERNS}
+        post_pattern_strs = {
+            p.pattern for p, _fn in srv.Handler._FUNC_POST_PATTERNS}
+
+        get_desc_paths = set(srv.Handler._FUNC_GET_DESCRIPTIONS.keys())
+        post_desc_paths = set(srv.Handler._FUNC_POST_DESCRIPTIONS.keys())
+        get_pattern_desc_strs = {
+            p.pattern for p, _d in srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS}
+        post_pattern_desc_strs = {
+            p.pattern for p, _d in srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS}
+
+        missing_get = get_paths - get_desc_paths
+        missing_post = post_paths - post_desc_paths
+        missing_get_patterns = get_pattern_strs - get_pattern_desc_strs
+        missing_post_patterns = post_pattern_strs - post_pattern_desc_strs
+
+        self.assertFalse(
+            missing_get,
+            f"GET routes missing descriptions: {sorted(missing_get)}",
+        )
+        self.assertFalse(
+            missing_post,
+            f"POST routes missing descriptions: {sorted(missing_post)}",
+        )
+        self.assertFalse(
+            missing_get_patterns,
+            "GET pattern routes missing descriptions: "
+            f"{sorted(missing_get_patterns)}",
+        )
+        self.assertFalse(
+            missing_post_patterns,
+            "POST pattern routes missing descriptions: "
+            f"{sorted(missing_post_patterns)}",
+        )
+
+        # Empty-string registration would pass the presence check above
+        # and defeat the U18 intent — every route must carry a non-empty
+        # one-liner. Surface each offender by name so the fix is
+        # one-route-at-a-time.
+        def _empty_desc_paths(registered: dict[str, str]) -> list[str]:
+            return sorted(p for p, d in registered.items() if not (d and d.strip()))
+
+        empty_get = _empty_desc_paths(srv.Handler._FUNC_GET_DESCRIPTIONS)
+        empty_post = _empty_desc_paths(srv.Handler._FUNC_POST_DESCRIPTIONS)
+        empty_get_pat = sorted(
+            p.pattern
+            for p, d in srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS
+            if not (d and d.strip())
+        )
+        empty_post_pat = sorted(
+            p.pattern
+            for p, d in srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS
+            if not (d and d.strip())
+        )
+        self.assertFalse(
+            empty_get,
+            f"GET routes with empty description string: {empty_get}",
+        )
+        self.assertFalse(
+            empty_post,
+            f"POST routes with empty description string: {empty_post}",
+        )
+        self.assertFalse(
+            empty_get_pat,
+            f"GET pattern routes with empty description string: {empty_get_pat}",
+        )
+        self.assertFalse(
+            empty_post_pat,
+            f"POST pattern routes with empty description string: {empty_post_pat}",
+        )
+
+
+class TestRouteDescriptionMechanism(unittest.TestCase):
+    """U18 step 1: structural test that the route-description dispatch tables exist.
+
+    Proves the registration plumbing mirrors the GET_ROUTES / POST_ROUTES /
+    GET_PATTERNS / POST_PATTERNS pattern in web/server.py. Contents are
+    populated in U18 step 2; empty is fine here.
+    """
+
+    def test_description_dispatch_tables_exist_with_correct_shapes(self):
+        import re
+        import web.server as srv
+
+        # All four class attributes must exist.
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_GET_DESCRIPTIONS"))
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_POST_DESCRIPTIONS"))
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_GET_PATTERN_DESCRIPTIONS"))
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_POST_PATTERN_DESCRIPTIONS"))
+
+        get_desc = srv.Handler._FUNC_GET_DESCRIPTIONS
+        post_desc = srv.Handler._FUNC_POST_DESCRIPTIONS
+        get_pattern_desc = srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS
+        post_pattern_desc = srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS
+
+        # Dict shapes: path (str) → description (str).
+        self.assertIsInstance(get_desc, dict)
+        self.assertIsInstance(post_desc, dict)
+        for path, desc in get_desc.items():
+            self.assertIsInstance(path, str)
+            self.assertIsInstance(desc, str)
+        for path, desc in post_desc.items():
+            self.assertIsInstance(path, str)
+            self.assertIsInstance(desc, str)
+
+        # List-of-tuple shapes: (re.Pattern, str).
+        self.assertIsInstance(get_pattern_desc, list)
+        self.assertIsInstance(post_pattern_desc, list)
+        for entry in get_pattern_desc:
+            self.assertIsInstance(entry, tuple)
+            self.assertEqual(len(entry), 2)
+            self.assertIsInstance(entry[0], re.Pattern)
+            self.assertIsInstance(entry[1], str)
+        for entry in post_pattern_desc:
+            self.assertIsInstance(entry, tuple)
+            self.assertEqual(len(entry), 2)
+            self.assertIsInstance(entry[0], re.Pattern)
+            self.assertIsInstance(entry[1], str)
+
+
+class TestApiIndexRouteContract(_WebServerCase):
+    """U18 step 2: contract test for the self-documenting ``/api/_index``."""
+
+    INDEX_ENTRY_REQUIRED_FIELDS = {
+        "method", "path", "description", "request_model",
+    }
+
+    def test_api_index_returns_classified_routes_with_pydantic_models(self):
+        status, data = self._get("/api/_index")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(data, list)
+        # We register ~40+ routes; assert a healthy floor so a regression
+        # that empties the merge can't silently sneak through.
+        self.assertGreaterEqual(len(data), 30, msg=f"only {len(data)} entries")
+
+        for entry in data:
+            _assert_required_fields(
+                self, entry, self.INDEX_ENTRY_REQUIRED_FIELDS,
+                f"_index entry {entry.get('path')!r}",
+            )
+            self.assertIn(entry["method"], {"GET", "POST"})
+            self.assertIsInstance(entry["path"], str)
+            self.assertIsInstance(entry["description"], str)
+
+        # The Pydantic introspection must surface at least one known
+        # POST handler so we know the regex is biting the real source.
+        post_models = {
+            (e["path"], e["request_model"])
+            for e in data if e["method"] == "POST"
+        }
+        self.assertIn(
+            ("/api/pipeline/add", "PipelineAddRequest"),
+            post_models,
+            f"PipelineAddRequest not surfaced in post_models: {post_models}",
+        )
+
+        # Sort invariant — operators consume this as a stable index.
+        sorted_entries = sorted(
+            data, key=lambda e: (str(e["method"]), str(e["path"])))
+        self.assertEqual(data, sorted_entries)
 
 
 class TestPipelineRouteContracts(_WebServerCase):
@@ -9500,6 +9680,301 @@ class TestBeetsDistanceRouteContract(_WebServerCase):
         # Numeric id (Discogs-shaped) — pattern shouldn't match.
         status, _ = self._get("/api/beets-distance/100/2048516")
         self.assertEqual(status, 404)
+
+
+class TestTriageRouteContracts(_WebServerCase):
+    """U17 contracts for ``GET /api/triage/<id>`` and ``GET /api/triage/list``.
+
+    Both endpoints wrap ``lib.triage_service`` (U15) — the same service
+    layer ``pipeline-cli triage show/list`` (U16) wraps. The wire shape
+    on the cohort + composition payloads is the
+    ``msgspec.to_builtins(TriageResult)`` shape verbatim, so the same
+    Struct round-trips through ``msgspec.convert`` on both sides (CLI
+    ⇄ API surface symmetry).
+
+    Tests drive the real ``compose_triage_for_request`` and
+    ``list_triage`` paths against a real :class:`FakePipelineDB`
+    (reached via ``self.mock_db._fake``) — no service-layer mocking,
+    per ``code-quality.md`` § MOCKS: LEAF-SEAM ONLY. Seeded rows use
+    production-shape values: ``datetime.datetime`` for timestamps via
+    ``make_request_row``'s defaults, real ``FieldResolutionRow`` /
+    ``SearchLogRow`` via the typed seed helpers.
+    """
+
+    # The frontend triage drawer renders these top-level fields out of
+    # ``msgspec.to_builtins(TriageResult)``. Pin every one so a future
+    # field rename can't silently break the JS without flipping a test.
+    SHOW_REQUIRED_FIELDS = {
+        "request_meta", "unfindable", "field_quality", "search_forensics",
+    }
+
+    # ``request_meta`` fields the frontend depends on for the "Artist –
+    # Album (year) #N" header + identity probes (failure_class, source,
+    # search_filetype_override).
+    SHOW_REQUEST_META_FIELDS = {
+        "id", "artist_name", "album_title", "year", "status", "source",
+        "mb_release_id", "discogs_release_id", "release_group_year",
+        "is_va_compilation", "catalog_number", "failure_class",
+        "search_filetype_override",
+    }
+
+    LIST_REQUIRED_FIELDS = {"results", "next_after", "page_size", "filter"}
+
+    # MagicMock attribute names whose pre-set ``.return_value`` /
+    # ``.side_effect`` from ``_make_server`` would short-circuit a call
+    # to the wrapped fake. We need the triage path to hit the fresh
+    # FakePipelineDB on every method ``compose_triage_for_request`` /
+    # ``list_triage`` touches, so each test resets the relevant child
+    # mocks to forwarding ``side_effect`` lambdas that call through to
+    # the fresh backing fake.
+    _TRIAGE_DB_METHODS = (
+        "get_request",
+        "list_triage_page",
+        "get_field_resolutions_for_requests",
+        "get_search_summaries_for_requests",
+        "get_recent_search_log_for_requests",
+    )
+
+    def setUp(self) -> None:
+        # Each test gets its own FakePipelineDB so seeded rows from one
+        # test never bleed into the next. Re-wrap the harness so the
+        # MagicMock layer keeps recording but `._fake` points at the
+        # fresh fake.
+        fresh = FakePipelineDB()
+        self._old_backing = self.mock_db._fake
+        self.mock_db._mock_wraps = fresh
+        self.mock_db._fake = fresh
+        # Snapshot the pre-existing child-mock state for the methods
+        # the triage service touches, then force them to forward to the
+        # fresh fake. Without this, _make_server's static
+        # ``mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST``
+        # would short-circuit every composed triage to request_id=100.
+        self._triage_method_state: dict[str, MagicMock] = {}
+        for name in self._TRIAGE_DB_METHODS:
+            self._triage_method_state[name] = getattr(self.mock_db, name)
+            forwarder = MagicMock(side_effect=getattr(fresh, name))
+            setattr(self.mock_db, name, forwarder)
+
+    def tearDown(self) -> None:
+        for name, prev in self._triage_method_state.items():
+            setattr(self.mock_db, name, prev)
+        self.mock_db._mock_wraps = self._old_backing
+        self.mock_db._fake = self._old_backing
+
+    @property
+    def _fake(self) -> "FakePipelineDB":
+        return self.mock_db._fake
+
+    # --- /api/triage/<id> -------------------------------------------------
+
+    def test_show_returns_200_with_required_fields_and_roundtrips(self):
+        """Happy path: a seeded request composes through to a 200 with
+        the full TriageResult shape, and the response body round-trips
+        through ``msgspec.convert(payload, type=TriageResult)`` — the
+        wire-boundary contract per CLI ⇄ API symmetry."""
+        from lib.triage_service import TriageResult
+        self._fake.seed_request(make_request_row(
+            id=4242,
+            artist_name="Triage Artist",
+            album_title="Triage Album",
+            status="wanted",
+            failure_class="search_not_converting",
+            unfindable_category="artist_absent",
+            unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+            last_artist_probe_at=datetime(2026, 5, 22, tzinfo=timezone.utc),
+            last_artist_probe_match_count=0,
+        ))
+
+        status, data = self._get("/api/triage/4242")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.SHOW_REQUIRED_FIELDS,
+                                "triage show response")
+        _assert_required_fields(self, data["request_meta"],
+                                self.SHOW_REQUEST_META_FIELDS,
+                                "triage show request_meta")
+        # The wire shape is exactly the Struct shape — round-trip proves
+        # no field drift / coercion happened at the boundary.
+        composed = msgspec.convert(data, type=TriageResult)
+        self.assertEqual(composed.request_meta.id, 4242)
+        self.assertEqual(composed.request_meta.artist_name, "Triage Artist")
+        self.assertEqual(
+            composed.request_meta.failure_class, "search_not_converting",
+        )
+        # Unfindable struct populated because the seeded row has signals.
+        self.assertIsNotNone(composed.unfindable)
+        assert composed.unfindable is not None
+        self.assertEqual(composed.unfindable.category, "artist_absent")
+
+    def test_show_returns_404_when_request_id_missing(self):
+        """Unknown request id → 404 with ``error`` + ``request_id`` in body
+        so the frontend can surface "not found" with the right id."""
+        status, data = self._get("/api/triage/99999")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+        self.assertEqual(data["request_id"], 99999)
+
+    def test_show_returns_404_for_non_int_path(self):
+        """A non-numeric path segment doesn't even match the regex
+        (which requires ``\\d+``), so the route table itself replies
+        404. This test pins the route-table contract (no silent
+        coercion to a different handler)."""
+        status, _ = self._get("/api/triage/not-an-int")
+        # The regex r"^/api/triage/(\d+)$" does not match — falls
+        # through to the catch-all 404.
+        self.assertEqual(status, 404)
+
+    # --- /api/triage/list --------------------------------------------------
+
+    def test_list_filter_unfindable_returns_200_with_required_fields(self):
+        """A seeded unfindable request shows up under
+        ``filter=unfindable`` with the documented envelope shape."""
+        from lib.triage_service import TriageResult
+        self._fake.seed_request(make_request_row(
+            id=10, artist_name="Stuck Artist",
+            unfindable_category="artist_absent",
+            unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        ))
+        # Decoy row without any unfindable signal — must NOT appear in
+        # the filtered cohort.
+        self._fake.seed_request(make_request_row(
+            id=11, artist_name="Healthy Artist", status="imported",
+        ))
+
+        status, data = self._get("/api/triage/list?filter=unfindable")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.LIST_REQUIRED_FIELDS,
+                                "triage list response")
+        self.assertEqual(data["filter"], "unfindable")
+        self.assertEqual(data["page_size"], 50)
+        # Only the unfindable row should be returned.
+        self.assertEqual(len(data["results"]), 1)
+        composed = msgspec.convert(data["results"][0], type=TriageResult)
+        self.assertEqual(composed.request_meta.id, 10)
+        # Page is shorter than page_size → next_after is None
+        # (cohort exhausted).
+        self.assertIsNone(data["next_after"])
+
+    def test_list_filter_data_quality_status_filters_by_status_column(self):
+        """``filter=data_quality:status=<status>`` (issue #374 canonical
+        form) returns only requests with at least one
+        ``album_request_field_resolutions`` row whose ``status`` column
+        matches the spec. Mirrors what
+        ``lib/field_resolver_service.py::_classify_lookup_exception``
+        actually writes."""
+        # Seeded request A: has a release_group_year resolution in the
+        # sticky 4xx-client bucket — matches.
+        self._fake.seed_request(make_request_row(id=20))
+        self._fake.record_field_resolution(
+            request_id=20, field_name="release_group_year",
+            status="unresolved_4xx_client", reason_code="http_400",
+        )
+        # Seeded request B: has a field resolution but a different
+        # status bucket — must NOT appear.
+        self._fake.seed_request(make_request_row(id=21))
+        self._fake.record_field_resolution(
+            request_id=21, field_name="catalog_number",
+            status="unresolved_mirror_unavailable",
+            reason_code="ConnectionError",
+        )
+
+        status, data = self._get(
+            "/api/triage/list?filter=data_quality:status=unresolved_4xx_client"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            data["filter"], "data_quality:status=unresolved_4xx_client",
+        )
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["request_meta"]["id"], 20)
+
+    def test_list_filter_data_quality_reason_filters_by_reason_code(self):
+        """``filter=data_quality:reason=<code>`` filters on the
+        ``reason_code`` column (HTTP code specifier — http_400,
+        http_410, http_422, etc.)."""
+        # Seeded request A: 4xx-client status, reason_code=http_400 — matches.
+        self._fake.seed_request(make_request_row(id=22))
+        self._fake.record_field_resolution(
+            request_id=22, field_name="release_group_year",
+            status="unresolved_4xx_client", reason_code="http_400",
+        )
+        # Seeded request B: 4xx-client status but reason_code=http_410 — excluded.
+        self._fake.seed_request(make_request_row(id=23))
+        self._fake.record_field_resolution(
+            request_id=23, field_name="catalog_number",
+            status="unresolved_4xx_client", reason_code="http_410",
+        )
+
+        status, data = self._get(
+            "/api/triage/list?filter=data_quality:reason=http_400"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["filter"], "data_quality:reason=http_400")
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["request_meta"]["id"], 22)
+
+    def test_list_invalid_filter_returns_400_with_valid_filters_array(self):
+        """An unparseable filter spec surfaces as a 400 carrying
+        ``error`` + a ``valid_filters`` array, so the operator can
+        self-correct without leaving the network response."""
+        status, data = self._get("/api/triage/list?filter=garbage_value")
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertIn("valid_filters", data)
+        self.assertIsInstance(data["valid_filters"], list)
+        # The four canonical scalar forms must be advertised.
+        self.assertIn("all", data["valid_filters"])
+        self.assertIn("unfindable", data["valid_filters"])
+        self.assertIn("data_quality", data["valid_filters"])
+        self.assertIn("search_not_converting", data["valid_filters"])
+
+    def test_list_limit_caps_results_and_emits_next_after_cursor(self):
+        """When the page is exactly ``limit`` long the response carries
+        ``next_after`` = last request_id so the operator can paginate."""
+        for rid in (30, 31, 32):
+            self._fake.seed_request(make_request_row(
+                id=rid, status="imported",
+            ))
+
+        status, data = self._get("/api/triage/list?filter=all&limit=2")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["page_size"], 2)
+        self.assertEqual(len(data["results"]), 2)
+        # Page was full → next_after is the last id in the page.
+        self.assertEqual(data["next_after"],
+                         data["results"][-1]["request_meta"]["id"])
+
+    def test_list_default_filter_when_query_string_omitted(self):
+        """Missing ``filter=`` defaults to ``all`` so a bare hit on
+        ``/api/triage/list`` is meaningful."""
+        self._fake.seed_request(make_request_row(id=40, status="imported"))
+
+        status, data = self._get("/api/triage/list")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["filter"], "all")
+        self.assertGreaterEqual(len(data["results"]), 1)
+
+    def test_list_rejects_non_int_limit(self):
+        status, data = self._get("/api/triage/list?filter=all&limit=abc")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_list_rejects_out_of_bounds_limit(self):
+        status, data = self._get("/api/triage/list?filter=all&limit=500")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_list_rejects_non_int_after(self):
+        status, data = self._get(
+            "/api/triage/list?filter=all&after=not-an-int")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
 
 
 if __name__ == "__main__":

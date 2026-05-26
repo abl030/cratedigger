@@ -9624,5 +9624,226 @@ class TestRescueCaptureSlice(unittest.TestCase):
             retried["prior_unfindable_category"], "wrong_pressing_available")
 
 
+class TestTriageServiceSlice(unittest.TestCase):
+    """U15: end-to-end ``TriageResult`` round-trip through msgspec.
+
+    Validates the wire-boundary contract by encoding a fully-populated
+    ``TriageResult`` (production-shaped fields: ``datetime`` timestamps,
+    nested Structs, ``Optional`` fields exercised in both populated
+    and ``None`` shapes) to JSON and decoding back into a Struct.
+    Equality round-trip proves the contract.
+
+    Per ``docs/solutions/testing/contract-test-mocks-must-mirror-
+    production-shape.md``: contract tests that exercise wire types
+    must use the same shapes production emits. Naive str/int mocks
+    pass Pyright + the schema test but 500 the moment the JSON
+    encoder hits a real ``datetime``. This slice forces that path.
+    """
+
+    @staticmethod
+    def _populated_triage_result():
+        from datetime import datetime, timezone
+        from lib.triage_service import (
+            FieldResolutionState,
+            RequestMeta,
+            SearchForensicsSummary,
+            SearchLogEntry,
+            TriageResult,
+            UnfindableState,
+        )
+        now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc)
+        return TriageResult(
+            request_meta=RequestMeta(
+                id=42,
+                artist_name="Russian Winters",
+                album_title="An Album That Vanished",
+                year=2008,
+                status="wanted",
+                source="request",
+                mb_release_id="mbid-russian-winters",
+                discogs_release_id=None,
+                release_group_year=2008,
+                is_va_compilation=False,
+                catalog_number=None,
+                failure_class="A_zero_results_dominant",
+                search_filetype_override="lossless",
+            ),
+            unfindable=UnfindableState(
+                category="artist_absent",
+                categorised_at=now,
+                last_artist_probe_at=now,
+                last_artist_probe_match_count=0,
+                rescued_at=None,
+                prior_unfindable_category=None,
+            ),
+            field_quality=[
+                FieldResolutionState(
+                    field_name="release_group_year",
+                    status="resolved",
+                    reason_code=None,
+                    attempts=1,
+                    resolved_at=now,
+                ),
+                FieldResolutionState(
+                    field_name="catalog_number",
+                    status="unresolved_404",
+                    reason_code="http_404",
+                    attempts=3,
+                    resolved_at=now,
+                ),
+            ],
+            search_forensics=SearchForensicsSummary(
+                total_searches=42,
+                with_cands_count=3,
+                found_count=0,
+                near_cap_count=12,
+                zero_results_count=8,
+                pre_filter_skips_total=120,
+                first_strategy_with_cands="full_release_query",
+                dominant_rejection_reason="album_token_missing",
+                last_search_at=now,
+                recent_entries=[
+                    SearchLogEntry(
+                        id=1001,
+                        created_at=now,
+                        plan_strategy="full_release_query",
+                        query="russian winters album",
+                        outcome="rejected",
+                        result_count=12,
+                        rejection_reason="album_token_missing",
+                        matcher_score_top1=0.32,
+                    ),
+                ],
+            ),
+        )
+
+    def test_populated_triage_result_round_trips_through_msgspec(self) -> None:
+        """Production-shaped fields → encode → decode → equal Struct."""
+        import msgspec
+
+        from lib.triage_service import TriageResult
+
+        original = self._populated_triage_result()
+        encoded = msgspec.json.encode(original)
+        decoded = msgspec.json.decode(encoded, type=TriageResult)
+        self.assertEqual(decoded, original)
+        # Belt-and-braces: nested types remain Structs (not dicts).
+        from lib.triage_service import (
+            FieldResolutionState, RequestMeta, SearchForensicsSummary,
+            UnfindableState,
+        )
+        self.assertIsInstance(decoded.request_meta, RequestMeta)
+        assert decoded.unfindable is not None
+        self.assertIsInstance(decoded.unfindable, UnfindableState)
+        self.assertIsInstance(
+            decoded.search_forensics, SearchForensicsSummary,
+        )
+        self.assertTrue(
+            all(isinstance(f, FieldResolutionState)
+                for f in decoded.field_quality)
+        )
+
+    def test_unfindable_none_path_round_trips(self) -> None:
+        """A healthy request has ``unfindable=None`` and an empty
+        ``field_quality`` list. Pin this shape so the wrappers can
+        rely on it."""
+        import msgspec
+
+        from lib.triage_service import (
+            RequestMeta,
+            SearchForensicsSummary,
+            TriageResult,
+        )
+
+        result = TriageResult(
+            request_meta=RequestMeta(
+                id=1,
+                artist_name="Healthy",
+                album_title="Album",
+                year=None,
+                status="imported",
+                source="request",
+                mb_release_id=None,
+                discogs_release_id=None,
+                release_group_year=None,
+                is_va_compilation=False,
+                catalog_number=None,
+                failure_class="resolved",
+                search_filetype_override=None,
+            ),
+            unfindable=None,
+            field_quality=[],
+            search_forensics=SearchForensicsSummary(
+                total_searches=0,
+                with_cands_count=0,
+                found_count=0,
+                near_cap_count=0,
+                zero_results_count=0,
+                pre_filter_skips_total=0,
+                first_strategy_with_cands=None,
+                dominant_rejection_reason=None,
+                last_search_at=None,
+                recent_entries=[],
+            ),
+        )
+
+        encoded = msgspec.json.encode(result)
+        decoded = msgspec.json.decode(encoded, type=TriageResult)
+        self.assertEqual(decoded, result)
+        self.assertIsNone(decoded.unfindable)
+        self.assertEqual(decoded.field_quality, [])
+
+    def test_compose_then_round_trip_against_fake_db(self) -> None:
+        """End-to-end: seed a FakePipelineDB → compose_triage_for_request
+        → encode → decode → equal Struct. Validates the full chain that
+        runs in production: bulk getter → in-memory compose → wire
+        encoding.
+        """
+        import msgspec
+        from datetime import datetime, timezone
+
+        from lib.triage_service import (
+            TriageResult,
+            compose_triage_for_request,
+        )
+
+        now = datetime(2026, 5, 20, 9, 0, 0, tzinfo=timezone.utc)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=99,
+            artist_name="Slice Artist",
+            album_title="Slice Album",
+            year=2010,
+            status="wanted",
+            unfindable_category="wrong_pressing_available",
+            unfindable_categorised_at=now,
+        ))
+        db.record_field_resolution(
+            request_id=99, field_name="release_group_year",
+            status="resolved", reason_code=None,
+        )
+        db.log_search(
+            request_id=99, query="slice artist album",
+            result_count=5, outcome="rejected",
+            rejection_reason="album_token_missing",
+            matcher_score_top1=0.41,
+        )
+
+        result = compose_triage_for_request(99, db)
+        assert result is not None
+        encoded = msgspec.json.encode(result)
+        decoded = msgspec.json.decode(encoded, type=TriageResult)
+        self.assertEqual(decoded, result)
+        assert decoded.unfindable is not None
+        self.assertEqual(
+            decoded.unfindable.category, "wrong_pressing_available",
+        )
+        self.assertEqual(len(decoded.field_quality), 1)
+        self.assertEqual(decoded.search_forensics.total_searches, 1)
+        self.assertEqual(
+            len(decoded.search_forensics.recent_entries), 1,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
