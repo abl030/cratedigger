@@ -59,7 +59,7 @@ DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localh
 
 # Exponential backoff: base_minutes * 2^(attempts-1), capped at max
 BACKOFF_BASE_MINUTES = 30
-BACKOFF_MAX_MINUTES = 60 * 6  # 6 hours
+BACKOFF_MAX_MINUTES = 60 * 4  # 4 hours — caps steady-state at ~6 searches/release/day
 DASHBOARD_WINDOWS: tuple[tuple[str, int], ...] = (("24h", 24), ("6h", 6))
 DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
     ("6h", 6),
