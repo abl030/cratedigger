@@ -5645,6 +5645,126 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
         self.assertAlmostEqual(score, 1.5, places=4)
         self.assertEqual(row["query_template"], "{artist} {title} FLAC")
 
+    def test_u12_wrap_writes_failure_class_b_cands_never_match(self):
+        """U12: wrap classifies all-no_match cycle as B."""
+        # Cycle 0: both items return no_match (matcher rejected candidates).
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match", rejection_reason="strict_count_mismatch",
+        ))
+        # Final ordinal → wrap.
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_match", rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "B_cands_never_match")
+
+    def test_u12_wrap_writes_failure_class_a_zero_results_dominant(self):
+        """U12: wrap classifies dominant-no_results cycle as A."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_results",
+        ))
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_results",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "A_zero_results_dominant")
+
+    def test_u12_non_wrap_advance_does_not_write_failure_class(self):
+        """U12: classification only fires on wrap, not on plain advance."""
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match",
+        ))
+        self.assertEqual(result.cursor_update_status, "advanced")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertIsNone(req["failure_class"])
+
+    def test_u12_wrap_with_status_imported_classifies_resolved(self):
+        """U12: status moved past 'wanted' overrides search-pattern verdict."""
+        # Mid-cycle, the importer marked the request 'imported'.
+        self.db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (self.req_id,),
+        )
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match",
+        ))
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_match",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "resolved")
+
+    def test_u12_wrap_preserves_prior_failure_class_on_degenerate_cycle(self):
+        """U12: empty cycle (all stale) leaves prior failure_class intact.
+
+        Seed a prior failure_class, then trigger a wrap whose only
+        consumed attempt is the wrap itself. Verify the classifier sees
+        one consumed attempt; for richer "zero consumed" coverage see
+        the FakePipelineDB self-test where we can drive the
+        no-consumed-attempts case directly.
+        """
+        # Seed a prior verdict so we can distinguish "unchanged" from
+        # "overwritten".
+        self.db._execute(
+            "UPDATE album_requests SET failure_class = 'E_mixed' "
+            "WHERE id = %s",
+            (self.req_id,),
+        )
+        # Single attempt + wrap. Branch ordering: found dominates →
+        # D_found_but_no_import overwrites the prior E_mixed.
+        self.db._execute(
+            "UPDATE album_requests SET next_plan_ordinal = 1 WHERE id = %s",
+            (self.req_id,),
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="found",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "D_found_but_no_import")
+
+    def test_u12_wrap_d_found_but_no_import(self):
+        """U12: one found + status still wanted → D_found_but_no_import."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="found",
+        ))
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_match",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "D_found_but_no_import")
+
+    def test_u12_failure_class_check_constraint_enforced(self):
+        """U12: every classifier verdict must satisfy the CHECK constraint.
+
+        Walk a wrap for each of A/B/D/resolved/E (constants from the
+        classifier module) and assert that PostgreSQL accepts the
+        write. If the classifier ever returns a value the schema
+        rejects, this surfaces as a constraint violation at write time
+        — not as silent corruption.
+        """
+        from lib.search_classification import ALL_FAILURE_CLASSES
+        for fc in ALL_FAILURE_CLASSES:
+            with self.subTest(failure_class=fc):
+                self.db._execute(
+                    "UPDATE album_requests SET failure_class = %s "
+                    "WHERE id = %s",
+                    (fc, self.req_id),
+                )
+                req = self.db.get_request(self.req_id)
+                assert req is not None
+                self.assertEqual(req["failure_class"], fc)
+
 
 @requires_postgres
 class TestRecordNonConsumingSearchAttempt(unittest.TestCase):

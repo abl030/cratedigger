@@ -88,6 +88,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "active_plan_id": None,
         "next_plan_ordinal": 0,
         "plan_cycle_count": 0,
+        # Migration 028 / U12 — failure_class materialised at plan-wrap.
+        "failure_class": None,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.

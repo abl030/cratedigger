@@ -47,6 +47,10 @@ from lib.quality import (
     should_cooldown,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.search_classification import (
+    SearchSummary as _SearchSummary,
+    classify_failure_class as _classify_failure_class,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -5721,7 +5725,7 @@ class PipelineDB:
             ) as cur:
                 cur.execute(
                     "SELECT active_plan_id, next_plan_ordinal, "
-                    "       plan_cycle_count "
+                    "       plan_cycle_count, status "
                     "FROM album_requests WHERE id = %s FOR UPDATE",
                     (attempt.request_id,),
                 )
@@ -5732,6 +5736,7 @@ class PipelineDB:
                 active_plan_id = row["active_plan_id"]
                 next_ordinal = int(row["next_plan_ordinal"])
                 cycle_count = int(row["plan_cycle_count"])
+                current_status = str(row["status"])
 
                 cur.execute(
                     """
@@ -5918,6 +5923,54 @@ class PipelineDB:
                             "WHERE id = %s",
                             (now, now, attempt.request_id),
                         )
+
+                    # U12: when the cursor just wrapped, classify the
+                    # cycle that completed (cycle_count, pre-increment)
+                    # and persist the verdict to
+                    # ``album_requests.failure_class``. Folded into
+                    # this transaction rather than a separate
+                    # ``update_failure_class`` call so the wrap and the
+                    # classification commit together — operators
+                    # cannot observe a cursor-advanced-but-unclassified
+                    # state, nor a classified-but-unwrapped state. The
+                    # classifier returns ``None`` for "no signal"
+                    # (degenerate cycle with zero consumed attempts);
+                    # in that case we leave the column alone so an
+                    # earlier verdict survives.
+                    if cursor_update_status == CURSOR_UPDATE_WRAPPED:
+                        cur.execute(
+                            """
+                            SELECT outcome, rejection_reason
+                            FROM search_log
+                            WHERE request_id = %s
+                              AND plan_cycle_snapshot = %s
+                              AND attempt_consumed = TRUE
+                            ORDER BY id
+                            """,
+                            (attempt.request_id, cycle_count),
+                        )
+                        summary_rows = cur.fetchall()
+                        summaries = [
+                            _SearchSummary(
+                                outcome=str(r["outcome"]),
+                                rejection_reason=(
+                                    str(r["rejection_reason"])
+                                    if r["rejection_reason"] is not None
+                                    else None
+                                ),
+                            )
+                            for r in summary_rows
+                        ]
+                        verdict = _classify_failure_class(
+                            summaries, current_status=current_status,
+                        )
+                        if verdict is not None:
+                            cur.execute(
+                                "UPDATE album_requests "
+                                "SET failure_class = %s, updated_at = %s "
+                                "WHERE id = %s",
+                                (verdict, now, attempt.request_id),
+                            )
 
             self.conn.commit()
             return ConsumedAttemptResult(

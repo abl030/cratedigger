@@ -61,6 +61,10 @@ from lib.quality import (
     AlbumQualityEvidence,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.search_classification import (
+    SearchSummary as _SearchSummary,
+    classify_failure_class as _classify_failure_class,
+)
 
 
 def _utcnow() -> datetime:
@@ -2207,6 +2211,9 @@ class FakePipelineDB:
             "active_plan_id": None,
             "next_plan_ordinal": 0,
             "plan_cycle_count": 0,
+            # Migration 028 / U12 — failure_class is materialised at
+            # plan-wrap; NULL until the first cycle completes.
+            "failure_class": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.
@@ -4020,6 +4027,35 @@ class FakePipelineDB:
                     and attempt.scheduler_success
                 ):
                     row["last_attempt_at"] = now
+
+                # U12: mirror the wrap-time failure_class write in
+                # ``PipelineDB.record_consumed_search_attempt``. The
+                # classification runs only on wrap (the cycle that
+                # just completed is ``cycle_count``, pre-increment)
+                # and only overwrites ``failure_class`` when the
+                # classifier returns a non-None verdict — degenerate
+                # cycles (zero consumed attempts) preserve the prior
+                # value.
+                if cursor_update_status == CURSOR_UPDATE_WRAPPED:
+                    summaries = [
+                        _SearchSummary(
+                            outcome=str(lr.outcome),
+                            rejection_reason=lr.rejection_reason,
+                        )
+                        for lr in self.search_logs
+                        if (
+                            lr.request_id == attempt.request_id
+                            and lr.plan_cycle_snapshot == cycle_count
+                            and bool(lr.attempt_consumed)
+                        )
+                    ]
+                    verdict = _classify_failure_class(
+                        summaries,
+                        current_status=str(row.get("status") or "wanted"),
+                    )
+                    if verdict is not None:
+                        row["failure_class"] = verdict
+                        row["updated_at"] = now
             return ConsumedAttemptResult(
                 search_log_id=log_id,
                 cursor_update_status=cursor_update_status,

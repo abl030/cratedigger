@@ -9148,5 +9148,167 @@ class TestVaPlanRoundTripsThroughDB(unittest.TestCase):
         )
 
 
+class TestPlanWrapClassificationSlice(unittest.TestCase):
+    """U12: drive a real cursor-wrap through the system end-to-end.
+
+    Exercises the real ``classify_failure_class`` pure function plus
+    the real wrap-time write path inside FakePipelineDB's
+    ``record_consumed_search_attempt`` (which mirrors the production
+    implementation in ``lib.pipeline_db``). Walks across multi-cycle
+    transitions to prove:
+
+    1. Within one cycle wrap, the cursor advance, cycle increment, and
+       failure_class write all land together.
+    2. A subsequent cycle re-classifies based on its own searches, not
+       the prior cycle's.
+    3. A rollback (validation failure mid-wrap) leaves all three
+       fields at their pre-call values — no partial mutation.
+    """
+
+    def _items(self, *queries: str):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(
+                ordinal=i, strategy=f"slot_{i}", query=q,
+                canonical_query_key=f"q{i}",
+            )
+            for i, q in enumerate(queries)
+        ]
+
+    def _build_attempt(
+        self, db, rid, plan_id, ordinal, *, outcome,
+        rejection_reason=None, plan_item_count=2,
+    ):
+        from lib.pipeline_db import ConsumedAttemptInput
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        # Snapshot the cycle count at "executor selection time" so
+        # mid-cycle regeneration races are detectable. Tests walking
+        # multiple cycles must reflect the live cycle here, not 0.
+        cycle_snapshot = int(db.request(rid)["plan_cycle_count"])
+        return ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[ordinal].id,
+            plan_ordinal=ordinal,
+            plan_strategy=active.items[ordinal].strategy,
+            plan_canonical_query_key=(
+                active.items[ordinal].canonical_query_key),
+            plan_repeat_group=None, plan_generator_id="g1",
+            query=active.items[ordinal].query,
+            outcome=outcome, rejection_reason=rejection_reason,
+            plan_item_count=plan_item_count,
+            cycle_count_snapshot=cycle_snapshot,
+        )
+
+    def _setup_request_with_plan(self, n_items=2):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items(*[f"Q{i}" for i in range(n_items)]),
+        )
+        return db, rid, plan_id
+
+    def test_wrap_writes_failure_class_and_increments_cycle_together(self):
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        # First slot: no_match advances cursor without classifying.
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+        ))
+        req = db.request(rid)
+        self.assertEqual(req["next_plan_ordinal"], 1)
+        self.assertEqual(req["plan_cycle_count"], 0)
+        self.assertIsNone(req["failure_class"])
+        # Second slot: no_match → wrap → all-no_match cycle → B.
+        # The cursor reset to 0, cycle++ to 1, and failure_class=
+        # 'B_cands_never_match' all observable in the same row update.
+        result = db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_match",
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = db.request(rid)
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 1)
+        self.assertEqual(req["failure_class"], "B_cands_never_match")
+
+    def test_second_cycle_reclassifies_independently(self):
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        # Cycle 0: all-no_match → B.
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+        ))
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_match",
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(db.request(rid)["failure_class"],
+                         "B_cands_never_match")
+        # Cycle 1: both no_results → A. The classifier sees ONLY cycle
+        # 1's rows (plan_cycle_snapshot=1), proving the per-cycle
+        # filter doesn't pollute new verdicts with old data.
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_results",
+        ))
+        result = db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_results",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = db.request(rid)
+        self.assertEqual(req["plan_cycle_count"], 2)
+        self.assertEqual(req["failure_class"], "A_zero_results_dominant")
+
+    def test_rollback_preserves_failure_class_cursor_and_cycle_together(self):
+        """Atomicity: validation failure mid-wrap leaves all three intact."""
+        from lib.pipeline_db import ConsumedAttemptInput
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        # Establish a prior verdict + advance the cursor so we can
+        # detect any partial mutation on rollback.
+        db.update_request_fields(
+            rid,
+            failure_class="E_mixed",
+            next_plan_ordinal=1,
+        )
+        pre = dict(db.request(rid))
+        # Try to wrap with an invalid plan_item_id. Fakes raise, real
+        # PG raises a FK violation. Either way the txn must roll back
+        # cleanly.
+        with self.assertRaises(Exception):
+            db.record_consumed_search_attempt(ConsumedAttemptInput(
+                request_id=rid, plan_id=plan_id,
+                plan_item_id=999999, plan_ordinal=1,
+                plan_strategy="slot_1", plan_canonical_query_key="q1",
+                plan_repeat_group=None, plan_generator_id="g1",
+                query="Q1", outcome="found", plan_item_count=2,
+            ))
+        post = db.request(rid)
+        self.assertEqual(post["failure_class"], pre["failure_class"])
+        self.assertEqual(post["next_plan_ordinal"], pre["next_plan_ordinal"])
+        self.assertEqual(post["plan_cycle_count"], pre["plan_cycle_count"])
+        # No log row landed either — strict log-or-nothing invariant.
+        self.assertEqual(db.search_logs, [])
+
+    def test_resolved_verdict_when_status_moves_mid_cycle(self):
+        """Mid-cycle status change → 'resolved' on the next wrap."""
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+        ))
+        # Importer drops in mid-cycle and flips status.
+        db.update_request_fields(rid, status="imported")
+        result = db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_match",
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        self.assertEqual(db.request(rid)["failure_class"], "resolved")
+
+
 if __name__ == "__main__":
     unittest.main()
