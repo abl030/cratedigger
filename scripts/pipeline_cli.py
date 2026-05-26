@@ -2380,6 +2380,282 @@ def cmd_search_plan_history(db, args):
     return _search_plan_exit_code(result.outcome)
 
 
+# --- U16: pipeline-cli triage ------------------------------------------------
+#
+# Two subcommands wrap the U15 triage service:
+#
+#   * ``pipeline-cli triage show <id>`` — per-request composition.
+#   * ``pipeline-cli triage list --filter=<spec>`` — cohort listing.
+#
+# Both adhere to CLAUDE.md § "CLI ⇄ API surface symmetry": each one is a
+# thin wrapper around ``lib.triage_service``; the matching HTTP routes
+# (U17) wrap the same service with the same outcome → exit-code /
+# status-code mapping.
+
+
+_TRIAGE_VALID_FILTER_FORMS = (
+    "all",
+    "unfindable",
+    "unfindable:<category>  (category ∈ "
+    "{artist_absent, album_absent_artist_present, "
+    "one_track_structural, wrong_pressing_available})",
+    "data_quality",
+    "data_quality:<field_name>",
+    "data_quality:reason=<reason_code>",
+    "search_not_converting",
+)
+
+
+def _truncate(text: str, width: int) -> str:
+    """Truncate ``text`` to ``width`` characters, marking with an ellipsis.
+
+    Pure helper used by ``triage list``'s human-readable table renderer.
+    Avoids pulling in textwrap for a 4-line helper.
+    """
+    if text is None:
+        return ""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "…"
+
+
+def _format_dt(value) -> str:
+    """Compact display of a datetime/date/time for table cells.
+
+    Uses the same ISO 8601 rendering ``_json_default`` emits, but strips
+    sub-second precision so the table stays narrow. Returns ``"-"`` on
+    ``None`` so empty cells are visually distinct from a zero-length
+    string.
+    """
+    if value is None:
+        return "-"
+    if isinstance(value, (date, datetime, time)):
+        iso = value.isoformat()
+        # Drop microseconds + timezone marker for table compactness.
+        if "." in iso:
+            iso = iso.split(".", 1)[0]
+        if iso.endswith("+00:00"):
+            iso = iso[:-6] + "Z"
+        return iso
+    return str(value)
+
+
+def cmd_triage_show(db, args):
+    """``pipeline-cli triage show <id>`` — per-request triage composition.
+
+    Wraps ``compose_triage_for_request`` and renders the full payload
+    (request meta + unfindable + field-quality + search forensics +
+    recent search_log slice). Mirrors the human/JSON conventions
+    established by ``cmd_search_plan_show`` and the U17 API.
+
+    Exit codes:
+      * 0 — success
+      * 2 — request not found
+    """
+    from lib.triage_service import compose_triage_for_request
+
+    rid = int(args.id)
+    result = compose_triage_for_request(rid, db)
+    if result is None:
+        if getattr(args, "json", False):
+            print(json.dumps({
+                "error": "Not found",
+                "request_id": rid,
+            }, indent=2, sort_keys=True))
+        else:
+            print(f"  Request {rid} not found.", file=sys.stderr)
+        return 2
+
+    if getattr(args, "json", False):
+        payload = msgspec.to_builtins(result)
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+        return 0
+
+    # Human-readable rendering.
+    meta = result.request_meta
+    print(f"  Request ID:        {meta.id}")
+    print(f"  Artist / Album:    {meta.artist_name} — {meta.album_title}")
+    if meta.year is not None:
+        print(f"  Year:              {meta.year}")
+    print(f"  Status:            {meta.status}")
+    print(f"  Source:            {meta.source or '-'}")
+    if meta.mb_release_id:
+        print(f"  MB release id:     {meta.mb_release_id}")
+    if meta.discogs_release_id:
+        print(f"  Discogs id:        {meta.discogs_release_id}")
+    if meta.failure_class:
+        print(f"  Failure class:     {meta.failure_class}")
+    if meta.search_filetype_override:
+        print(f"  Search filetype:   {meta.search_filetype_override}")
+
+    # Unfindable cohort state.
+    if result.unfindable is None:
+        print("  Unfindable:        (no signals)")
+    else:
+        u = result.unfindable
+        print("  Unfindable:")
+        print(f"    category:                  {u.category or '-'}")
+        print(f"    categorised_at:            {_format_dt(u.categorised_at)}")
+        print(
+            f"    last_artist_probe_at:      "
+            f"{_format_dt(u.last_artist_probe_at)}"
+        )
+        if u.last_artist_probe_match_count is not None:
+            print(
+                f"    last_probe_match_count:    "
+                f"{u.last_artist_probe_match_count}"
+            )
+        if u.rescued_at is not None:
+            print(f"    rescued_at:                {_format_dt(u.rescued_at)}")
+            print(
+                f"    prior_unfindable_category: "
+                f"{u.prior_unfindable_category or '-'}"
+            )
+
+    # Field-quality rows (the resolver side table, U2).
+    if not result.field_quality:
+        print("  Field quality:     (no resolutions)")
+    else:
+        print(f"  Field quality:     {len(result.field_quality)} resolution(s)")
+        for fr in result.field_quality:
+            reason = fr.reason_code or "-"
+            print(
+                f"    [{fr.field_name}] status={fr.status} reason={reason} "
+                f"attempts={fr.attempts} resolved_at={_format_dt(fr.resolved_at)}"
+            )
+
+    # Search forensics summary + recent entries.
+    sf = result.search_forensics
+    print("  Search forensics:")
+    print(f"    total_searches:            {sf.total_searches}")
+    print(f"    with_cands_count:          {sf.with_cands_count}")
+    print(f"    found_count:               {sf.found_count}")
+    print(f"    near_cap_count:            {sf.near_cap_count}")
+    print(f"    zero_results_count:        {sf.zero_results_count}")
+    print(f"    pre_filter_skips_total:    {sf.pre_filter_skips_total}")
+    print(
+        f"    first_strategy_with_cands: "
+        f"{sf.first_strategy_with_cands or '-'}"
+    )
+    print(
+        f"    dominant_rejection_reason: "
+        f"{sf.dominant_rejection_reason or '-'}"
+    )
+    print(f"    last_search_at:            {_format_dt(sf.last_search_at)}")
+
+    if not sf.recent_entries:
+        print("    recent_entries:            (none)")
+    else:
+        print(f"    recent_entries:            {len(sf.recent_entries)} "
+              f"(newest first, max 10)")
+        for entry in sf.recent_entries:
+            strategy = entry.plan_strategy or "(legacy)"
+            reason = entry.rejection_reason or "-"
+            matcher = (
+                f"{entry.matcher_score_top1:.2f}"
+                if entry.matcher_score_top1 is not None else "-"
+            )
+            rc = (
+                str(entry.result_count) if entry.result_count is not None
+                else "-"
+            )
+            query = entry.query or ""
+            print(
+                f"      [{_format_dt(entry.created_at)}] id={entry.id} "
+                f"{entry.outcome} {strategy} rc={rc} reject={reason} "
+                f"matcher={matcher} query={query!r}"
+            )
+
+    return 0
+
+
+def cmd_triage_list(db, args):
+    """``pipeline-cli triage list --filter=<spec>`` — cohort listing.
+
+    Wraps ``list_triage``. Default page size is 50. Use ``--after=<id>``
+    to resume; the page footer prints the next ``--after`` value when
+    the returned page is exactly ``--limit`` long.
+
+    Exit codes:
+      * 0 — success (empty list is a valid cohort state)
+      * 3 — invalid filter spec (``InvalidFilterError``)
+    """
+    from lib.triage_service import InvalidFilterError, list_triage
+
+    limit = int(args.limit) if args.limit is not None else 50
+    after = int(args.after) if args.after is not None else None
+
+    try:
+        results = list_triage(
+            args.filter, db,
+            page_size=limit,
+            after_request_id=after,
+        )
+    except InvalidFilterError as exc:
+        message = (
+            f"Invalid filter spec: {exc}\n"
+            "Valid forms:\n"
+            + "\n".join(f"  - {form}" for form in _TRIAGE_VALID_FILTER_FORMS)
+        )
+        print(message, file=sys.stderr)
+        return 3
+
+    if getattr(args, "json", False):
+        payload = [msgspec.to_builtins(r) for r in results]
+        print(json.dumps(payload, indent=2, sort_keys=True,
+                         default=_json_default))
+        return 0
+
+    if not results:
+        print(f"  No results for filter={args.filter!r}.")
+        return 0
+
+    # Human table.
+    header_cols = (
+        ("id", 6),
+        ("artist", 25),
+        ("album", 25),
+        ("status", 12),
+        ("category/failure", 28),
+        ("last_search_at", 20),
+    )
+    header_line = "  ".join(name.ljust(width) for name, width in header_cols)
+    print(header_line)
+    print("  ".join("-" * width for _, width in header_cols))
+
+    for r in results:
+        meta = r.request_meta
+        category_or_failure = (
+            (r.unfindable.category if r.unfindable is not None else None)
+            or meta.failure_class
+            or "-"
+        )
+        last_search = _format_dt(r.search_forensics.last_search_at)
+        row_cells = (
+            str(meta.id),
+            _truncate(meta.artist_name, 25),
+            _truncate(meta.album_title, 25),
+            _truncate(meta.status, 12),
+            _truncate(category_or_failure, 28),
+            _truncate(last_search, 20),
+        )
+        print("  ".join(
+            cell.ljust(width) for cell, (_, width) in zip(row_cells, header_cols)
+        ))
+
+    print(f"  ({len(results)} rows)")
+    if len(results) == limit:
+        next_after = results[-1].request_meta.id
+        print(
+            f"  next page: pipeline-cli triage list --filter={args.filter} "
+            f"--limit={limit} --after={next_after}"
+        )
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
@@ -2498,6 +2774,44 @@ def main():
         help="Resume cursor: pass the previous page's next_before_id")
     p_sp_history.add_argument("--json", action="store_true",
                               help="Print structured JSON instead of text")
+
+    # triage (U16) — operator-facing composition of unfindable + field-quality
+    # + search-forensics. Wraps ``lib.triage_service`` (U15). Nested under a
+    # subparser for the same reason ``search-plan`` is: the per-request view
+    # and the cohort list share enough state to benefit from a shared
+    # namespace, and the convention is consistent with the rest of this CLI.
+    p_triage_op = sub.add_parser(
+        "triage",
+        help="Operator triage (U16) — compose unfindable + field-quality + "
+             "search-forensics for one request, or list a cohort by filter")
+    tr_sub = p_triage_op.add_subparsers(dest="triage_command")
+
+    p_tr_show = tr_sub.add_parser(
+        "show",
+        help="Per-request triage composition (request meta + unfindable + "
+             "field-quality + search forensics + last 10 search_log rows). "
+             "Note: subcommand form mirrors `search-plan show <id>`; bare "
+             "`triage <id>` is not accepted.")
+    p_tr_show.add_argument("id", type=int, help="Request ID")
+    p_tr_show.add_argument("--json", action="store_true",
+                            help="Print structured JSON instead of text")
+
+    p_tr_list = tr_sub.add_parser(
+        "list",
+        help="Cohort listing by filter spec")
+    p_tr_list.add_argument(
+        "--filter", default="all",
+        help="Filter spec: all | unfindable[:<category>] | "
+             "data_quality[:<field>] | data_quality:reason=<code> | "
+             "search_not_converting")
+    p_tr_list.add_argument(
+        "--limit", type=int, default=50,
+        help="Page size (default 50)")
+    p_tr_list.add_argument(
+        "--after", type=int, default=None,
+        help="Resume cursor: last request_id from prior page")
+    p_tr_list.add_argument("--json", action="store_true",
+                            help="Print structured JSON instead of text")
 
     # quality
     p_quality = sub.add_parser("quality", help="Show quality state and simulate decisions")
@@ -2636,6 +2950,10 @@ def main():
             args, "search_plan_command", None):
         p_sp.print_help()
         sys.exit(1)
+    if args.command == "triage" and not getattr(
+            args, "triage_command", None):
+        p_triage_op.print_help()
+        sys.exit(1)
 
     db = PipelineDB(args.dsn)
 
@@ -2669,9 +2987,15 @@ def main():
         "dry-run": cmd_search_plan_dry_run,
         "saturation": cmd_search_plan_saturation,
     }
+    triage_commands = {
+        "show": cmd_triage_show,
+        "list": cmd_triage_list,
+    }
     try:
         if args.command == "search-plan":
             rc = search_plan_commands[args.search_plan_command](db, args)
+        elif args.command == "triage":
+            rc = triage_commands[args.triage_command](db, args)
         else:
             rc = commands[args.command](db, args)
     finally:
