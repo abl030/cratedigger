@@ -798,6 +798,99 @@ class TestFakePipelineDBTriage(unittest.TestCase):
         )
         self.assertEqual([r["id"] for r in page], [3, 4])
 
+    def test_list_triage_page_filter_data_quality(self):
+        """The EXISTS-join branch over ``album_request_field_resolutions``.
+
+        Three rows: (1) has an unresolved field-resolution, (2) has only
+        a resolved-status row, (3) has none. Only row 1 must match the
+        bare ``data_quality`` filter; narrowing on field_name / status_code
+        / reason_code further restricts the cohort. Mirrors the production
+        SQL contract — same shape would fail if the fake forgot a sub-filter.
+        """
+        from lib.triage_service import parse_filter
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.seed_request(make_request_row(id=3))
+        db.record_field_resolution(
+            request_id=1, field_name="release_group_year",
+            status="unresolved_4xx_client", reason_code="http_400",
+        )
+        db.record_field_resolution(
+            request_id=2, field_name="catalog_number",
+            status="resolved", reason_code=None,
+        )
+
+        # Bare data_quality — only request 1 (has unresolved_*).
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Narrow on field_name — release_group_year matches request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality:release_group_year"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Narrow on status — unresolved_4xx_client matches request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter(
+                "data_quality:status=unresolved_4xx_client",
+            ),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Narrow on reason_code — http_400 matches request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality:reason=http_400"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
+        # Negative narrow — a mismatched reason_code excludes request 1.
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("data_quality:reason=http_999"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual(rows, [])
+
+    def test_list_triage_page_filter_search_not_converting(self):
+        """The join against ``request_search_summary`` excludes rows with
+        no search log entries AND rows with any found outcome.
+
+        Three rows: (1) 3 searches all rejected → matches; (2) one found
+        outcome → excluded; (3) no searches → excluded.
+        """
+        from lib.triage_service import parse_filter
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2))
+        db.seed_request(make_request_row(id=3))
+        for _ in range(3):
+            db.log_search(
+                request_id=1, query="q", result_count=10, outcome="rejected",
+            )
+        db.log_search(
+            request_id=2, query="q", result_count=10, outcome="found",
+        )
+        # Request 3: no search log rows.
+
+        rows = db.list_triage_page(
+            filter_spec=parse_filter("search_not_converting"),
+            page_size=10,
+            after_request_id=None,
+        )
+        self.assertEqual([r["id"] for r in rows], [1])
+
     def test_get_field_resolutions_for_requests_groups_by_id(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))

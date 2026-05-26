@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import textwrap
 import urllib.error
 from pathlib import Path
 from typing import Literal
@@ -2394,27 +2395,23 @@ def get_beets_distance(
 # (``compose_triage_for_request`` / ``list_triage``) so the CLI ⇄ API
 # symmetry rule holds — see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
 
-# Filter forms surfaced in the 400 body so operators can self-correct
-# without leaving the network response. Kept narrow to mirror the CLI's
-# ``_TRIAGE_VALID_FILTER_FORMS`` (the API echoes machine-parseable
-# tokens; the CLI's prose-form parenthetical lives only in CLI help).
-_TRIAGE_VALID_FILTER_FORMS_API: tuple[str, ...] = (
-    "all",
-    "unfindable",
-    "unfindable:<category>",
-    "data_quality",
-    "data_quality:<field>",
-    "data_quality:reason=<code>",
-    "search_not_converting",
-)
+# Filter forms surfaced in the 400 body — single source of truth lives
+# in ``lib.triage_service.VALID_FILTER_FORMS`` so the CLI and the HTTP
+# 400 envelope advertise the same vocabulary.
+from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_API  # noqa: E402
 
-# Page-size bounds for ``GET /api/triage/list``. Mirrors the convention
-# established by ``get_pipeline_search_plan_history`` (1..200): a hard
-# upper bound prevents an unbounded scan; the lower bound rules out the
-# nonsense ``limit=0`` request shape.
-_TRIAGE_LIST_MIN_LIMIT = 1
-_TRIAGE_LIST_MAX_LIMIT = 200
-_TRIAGE_LIST_DEFAULT_LIMIT = 50
+# Page-size bounds for ``GET /api/triage/list`` — re-exports of the
+# single-source-of-truth constants on ``lib.triage_service`` so the CLI
+# and API enforce the same ranges. Mirrors the convention established by
+# ``get_pipeline_search_plan_history`` (1..200): a hard upper bound
+# prevents an unbounded scan; the lower bound rules out the nonsense
+# ``limit=0`` request shape.
+from lib.triage_service import (  # noqa: E402
+    DEFAULT_TRIAGE_PAGE_SIZE as _TRIAGE_LIST_DEFAULT_LIMIT,
+    TRIAGE_AFTER_MIN as _TRIAGE_LIST_MIN_AFTER,
+    TRIAGE_LIMIT_MAX as _TRIAGE_LIST_MAX_LIMIT,
+    TRIAGE_LIMIT_MIN as _TRIAGE_LIST_MIN_LIMIT,
+)
 
 
 def get_triage_for_request(
@@ -2431,18 +2428,16 @@ def get_triage_for_request(
 
     Status-code mapping (mirrors ``cmd_triage_show``'s exit codes):
       * 200 — composition success.
-      * 400 — non-int request id (caught here; the service never sees
-              garbage).
       * 404 — ``compose_triage_for_request`` returned ``None`` (no row).
+
+    The route's regex (``r"^/api/triage/(\\d+)$"``) requires a digit-only
+    path segment, so ``req_id_str`` is always coercible — non-digit
+    paths never match this pattern in the first place and fall through
+    to the catch-all 404 in ``web/server.py``.
     """
     from lib.triage_service import compose_triage_for_request
 
-    try:
-        request_id = int(req_id_str)
-    except (TypeError, ValueError):
-        h._error("Invalid request id")
-        return
-
+    request_id = int(req_id_str)
     db = _server()._db()
     result = compose_triage_for_request(request_id, db)
     if result is None:
@@ -2517,8 +2512,10 @@ def get_triage_list(
         except (TypeError, ValueError):
             h._error("after must be an integer")
             return
-        if after < 1:
-            h._error("after must be >= 1", status=400)
+        if after < _TRIAGE_LIST_MIN_AFTER:
+            h._error(
+                f"after must be >= {_TRIAGE_LIST_MIN_AFTER}", status=400,
+            )
             return
 
     db = _server()._db()
@@ -2527,10 +2524,24 @@ def get_triage_list(
             filter_spec, db, page_size=limit, after_request_id=after,
         )
     except InvalidFilterError as exc:
+        # Pull the parameter-vocab arrays so API-only operators can
+        # self-correct from the response body alone (e.g. on
+        # ``unfindable:<bad_cat>``, the operator sees the four valid
+        # categories without needing to consult --help).
+        from lib.triage_service import (
+            VALID_DATA_QUALITY_FIELD_NAMES,
+            VALID_UNFINDABLE_CATEGORIES,
+        )
         h._json(
             {
                 "error": str(exc),
                 "valid_filters": list(_TRIAGE_VALID_FILTER_FORMS_API),
+                "valid_unfindable_categories": sorted(
+                    VALID_UNFINDABLE_CATEGORIES
+                ),
+                "valid_data_quality_fields": sorted(
+                    VALID_DATA_QUALITY_FIELD_NAMES
+                ),
             },
             status=400,
         )
@@ -2541,7 +2552,7 @@ def get_triage_list(
         next_after = results[-1].request_meta.id
 
     payload: dict[str, object] = {
-        "results": [msgspec.to_builtins(r) for r in results],
+        "results": msgspec.to_builtins(results),
         "next_after": next_after,
         "page_size": limit,
         "filter": filter_spec,
@@ -2554,38 +2565,56 @@ def get_triage_list(
 # Walks ``web.server.Handler``'s merged dispatch tables and emits one row per
 # registered route: path/pattern, method, description, and the Pydantic
 # ``*Request`` model name extracted from the handler's body. The Pydantic
-# field comes from ``inspect.getsource`` + a regex against the canonical
-# ``parse_body(h, body, SomeRequest)`` shape — see
+# field comes from ``inspect.getsource`` + an AST walk for the
+# ``parse_body(h, body, SomeRequest)`` call — see
 # ``code-quality.md`` § "HTTP request bodies — use pydantic.BaseModel".
 #
 # Frontends and the CLI's ``routes`` command both consume this to build
 # self-documenting indexes — keep the response shape stable.
 
-_PARSE_BODY_RE = re.compile(
-    # Match ``parse_body(h, body, ModelClass)`` and the
-    # ``parse_body(h, body or {}, ModelClass)`` variant used by route
-    # handlers whose body may be empty.
-    r"parse_body\s*\(\s*[A-Za-z_][\w]*\s*,\s*[^,]+?\s*,\s*"
-    r"([A-Za-z_][\w]*)\s*\)"
-)
-
-
 def _extract_request_model(fn: object) -> str | None:
     """Pull the Pydantic ``*Request`` model name from a POST handler.
 
-    Returns the class name found in the first ``parse_body(h, body, X)``
-    call inside the handler's source, or None if the handler doesn't
-    use Pydantic.
+    Walks the handler's AST and returns the class name of the first
+    ``parse_body(h, body, X)`` call (third positional argument). Returns
+    ``None`` if the handler doesn't use ``parse_body`` or if the source
+    is unavailable (e.g. .pyc-only deploys).
+
+    Uses the same AST-walk pattern as ``tests/test_pydantic_route_audit.py
+    ::_handler_uses_parse_body`` — no regex brittleness on non-canonical
+    arg shapes.
     """
     if not callable(fn):
         return None
+    import ast
     import inspect
     try:
         source = inspect.getsource(fn)  # type: ignore[arg-type]
     except (OSError, TypeError):
         return None
-    m = _PARSE_BODY_RE.search(source)
-    return m.group(1) if m else None
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if isinstance(target, ast.Name) and target.id == "parse_body":
+            pass
+        elif isinstance(target, ast.Attribute) and target.attr == "parse_body":
+            pass
+        else:
+            continue
+        # Third positional arg is the Pydantic model class.
+        if len(node.args) < 3:
+            continue
+        cls_arg = node.args[2]
+        if isinstance(cls_arg, ast.Name):
+            return cls_arg.id
+        if isinstance(cls_arg, ast.Attribute):
+            return cls_arg.attr
+    return None
 
 
 def get_api_index(h, params: dict[str, list[str]]) -> None:
@@ -2754,7 +2783,11 @@ GET_DESCRIPTIONS: dict[str, str] = {
     ),
     "/api/triage/list": (
         "Cohort triage listing — filter by unfindable category, "
-        "field-quality reason, or search-not-converting state."
+        "field-quality field/status/reason, or search-not-converting "
+        "state. ``data_quality:status=<status>`` filters on the "
+        "resolver-status column (e.g. unresolved_4xx_client); "
+        "``data_quality:reason=<code>`` filters on the reason_code "
+        "column (e.g. http_400)."
     ),
 }
 POST_DESCRIPTIONS: dict[str, str] = {

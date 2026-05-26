@@ -9715,7 +9715,6 @@ class TestTriageServiceSlice(unittest.TestCase):
                     ),
                 ],
             ),
-            failure_class="A_zero_results_dominant",
         )
 
     def test_populated_triage_result_round_trips_through_msgspec(self) -> None:
@@ -9786,7 +9785,6 @@ class TestTriageServiceSlice(unittest.TestCase):
                 last_search_at=None,
                 recent_entries=[],
             ),
-            failure_class="resolved",
         )
 
         encoded = msgspec.json.encode(result)

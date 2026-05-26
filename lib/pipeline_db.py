@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+    from lib.triage_service import ParsedTriageFilter
     from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
 import psycopg2
@@ -6664,17 +6665,17 @@ class PipelineDB:
     def list_triage_page(
         self,
         *,
-        filter_spec: Any,
+        filter_spec: "ParsedTriageFilter",
         page_size: int,
         after_request_id: int | None,
     ) -> list[dict[str, Any]]:
         """One cohort page of ``album_requests`` rows for the triage view.
 
         ``filter_spec`` is the ``ParsedTriageFilter`` produced by
-        ``lib.triage_service.parse_filter``. We accept it as ``Any`` here
-        rather than importing the service-layer type to keep
-        ``pipeline_db`` free of upstream service imports — the service
-        owns the parser, the DB owns the SQL.
+        ``lib.triage_service.parse_filter``. We type via ``TYPE_CHECKING``
+        so static analysis can catch a caller passing a wrong shape, but
+        the import stays deferred at runtime — the service owns the
+        parser, the DB owns the SQL.
 
         Ordered by ``id`` ASC; ``after_request_id`` is the keyset cursor
         from the previous page's last row. ``page_size`` is honoured
@@ -6700,6 +6701,7 @@ class PipelineDB:
         kind = getattr(filter_spec, "kind", None)
         unfindable_category = getattr(filter_spec, "unfindable_category", None)
         field_name = getattr(filter_spec, "field_name", None)
+        status_code = getattr(filter_spec, "status_code", None)
         reason_code = getattr(filter_spec, "reason_code", None)
 
         where_clauses: list[str] = []
@@ -6712,18 +6714,29 @@ class PipelineDB:
                 where_clauses.append("ar.unfindable_category = %s")
                 params.append(unfindable_category)
         elif kind == "data_quality":
-            # EXISTS-join — any row in the side table whose status starts
-            # with ``unresolved_`` qualifies. Sub-filters narrow on field
-            # name or reason_code.
+            # EXISTS-join — any row in the side table whose status is in
+            # the unresolved-* enum qualifies. Sub-filters narrow on
+            # field name, status, or reason_code. Status values come from
+            # ``lib.field_resolver_service.ResolverStatus`` to avoid the
+            # ``LIKE 'unresolved_%%'`` underscore-wildcard ambiguity.
+            from lib.field_resolver_service import ResolverStatus
+            from typing import get_args as _get_args
+            unresolved_statuses = [
+                s for s in _get_args(ResolverStatus)
+                if s.startswith("unresolved_")
+            ]
             sub = (
                 "SELECT 1 FROM album_request_field_resolutions fr "
                 "WHERE fr.request_id = ar.id "
-                "AND fr.status LIKE 'unresolved_%%'"
+                "AND fr.status = ANY(%s)"
             )
-            sub_params: list[Any] = []
+            sub_params: list[Any] = [unresolved_statuses]
             if field_name is not None:
                 sub += " AND fr.field_name = %s"
                 sub_params.append(field_name)
+            if status_code is not None:
+                sub += " AND fr.status = %s"
+                sub_params.append(status_code)
             if reason_code is not None:
                 sub += " AND fr.reason_code = %s"
                 sub_params.append(reason_code)

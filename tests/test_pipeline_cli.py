@@ -2818,8 +2818,16 @@ class TestPipelineCliTriage(unittest.TestCase):
     def _seed_data_quality(
         self, db, rid: int, *,
         field_name: str = "release_group_year",
+        status: str = "unresolved_404",
         reason_code: str = "http_404",
     ) -> None:
+        """Seed a request with one unresolved field-resolution row.
+
+        Production shape: ``status`` is the resolver-status bucket
+        (``unresolved_4xx_client`` / ``unresolved_404`` / ...) and
+        ``reason_code`` is the per-occurrence specifier (``http_400`` /
+        ``http_404`` / ...). See ``lib/field_resolver_service.py``.
+        """
         from tests.helpers import make_request_row
         db.seed_request(make_request_row(
             id=rid, artist_name=f"DataOnly {rid}",
@@ -2827,7 +2835,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         ))
         db.record_field_resolution(
             request_id=rid, field_name=field_name,
-            status="unresolved_404", reason_code=reason_code,
+            status=status, reason_code=reason_code,
         )
 
     # --- triage show ----------------------------------------------------
@@ -2927,9 +2935,12 @@ class TestPipelineCliTriage(unittest.TestCase):
         self._seed_healthy(db, 1)
         self._seed_unfindable(db, 2, category="artist_absent")
         self._seed_unfindable(db, 3, category="wrong_pressing_available")
+        # Production shape: status='unresolved_4xx_client' (the sticky
+        # bucket #374 surfaces on), reason_code='http_400' (the specific
+        # HTTP code the resolver hit).
         self._seed_data_quality(
             db, 4, field_name="release_group_year",
-            reason_code="unresolved_4xx_client",
+            status="unresolved_4xx_client", reason_code="http_400",
         )
         return db
 
@@ -2954,10 +2965,23 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertNotIn("Healthy", out)
         self.assertNotIn("Vanished 2", out)
 
-    def test_list_data_quality_reason_code_filter_374(self):
+    def test_list_data_quality_status_filter_374(self):
+        """#374 canonical form — ``data_quality:status=<resolver_status>``
+        filters on the resolver-status column (what
+        ``lib/field_resolver_service.py`` actually writes)."""
         db = self._seed_cohort()
         rc, out, err = self._run_list(
-            db, filter_spec="data_quality:reason=unresolved_4xx_client",
+            db, filter_spec="data_quality:status=unresolved_4xx_client",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("DataOnly 4", out)
+
+    def test_list_data_quality_reason_code_filter(self):
+        """``data_quality:reason=<code>`` complementary filter on the
+        ``reason_code`` column (HTTP code-specific)."""
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(
+            db, filter_spec="data_quality:reason=http_400",
         )
         self.assertEqual(rc, 0)
         self.assertIn("DataOnly 4", out)
@@ -2973,7 +2997,11 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertIn("data_quality", err)
         self.assertIn("search_not_converting", err)
 
-    def test_list_json_emits_array_of_triage_results(self):
+    def test_list_json_emits_envelope_matching_api_shape(self):
+        """CLI ``--json`` wraps results in the same envelope the API
+        emits: ``{results, next_after, page_size, filter}``. Without
+        the envelope, agents piping ``--json | jq '.next_after'``
+        cannot extract the pagination cursor."""
         from lib.triage_service import TriageResult
         db = self._seed_cohort()
         rc, out, err = self._run_list(
@@ -2982,14 +3010,58 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
         payload = json.loads(out)
-        self.assertIsInstance(payload, list)
-        self.assertEqual(len(payload), 2)
+        # Envelope-shape contract.
+        self.assertIsInstance(payload, dict)
+        self.assertIn("results", payload)
+        self.assertIn("next_after", payload)
+        self.assertIn("page_size", payload)
+        self.assertIn("filter", payload)
+        self.assertEqual(payload["filter"], "unfindable")
+        self.assertEqual(payload["page_size"], 50)
+        # Partial page (2 of 50) → next_after is None.
+        self.assertIsNone(payload["next_after"])
+        self.assertIsInstance(payload["results"], list)
+        self.assertEqual(len(payload["results"]), 2)
         # Each element must round-trip back to TriageResult.
         triage_rows = [
-            msgspec.convert(entry, type=TriageResult) for entry in payload
+            msgspec.convert(entry, type=TriageResult)
+            for entry in payload["results"]
         ]
         ids = sorted(r.request_meta.id for r in triage_rows)
         self.assertEqual(ids, [2, 3])
+
+    def test_list_json_invalid_filter_emits_json_error_envelope(self):
+        """``--json`` + invalid filter must emit a JSON-parseable
+        payload on stdout (mirrors cmd_triage_show's 404 path and the
+        API 400 envelope). Without this, agents piping ``--json | jq``
+        break on the text-stderr fallback."""
+        db = self._seed_cohort()
+        rc, out, err = self._run_list(
+            db, filter_spec="garbage_value", json_out=True,
+        )
+        self.assertEqual(rc, 3)
+        self.assertEqual(err, "")  # Nothing on stderr in JSON mode.
+        payload = json.loads(out)
+        self.assertIn("error", payload)
+        self.assertIn("valid_filters", payload)
+        self.assertIn("valid_unfindable_categories", payload)
+        self.assertIn("valid_data_quality_fields", payload)
+        self.assertIsInstance(payload["valid_filters"], list)
+        self.assertIn("all", payload["valid_filters"])
+
+    def test_list_limit_out_of_range_returns_3(self):
+        """API-parity bounds check: limit must be in [1, 200]."""
+        db = self._seed_cohort()
+        rc, _out, err = self._run_list(db, filter_spec="all", limit=500)
+        self.assertEqual(rc, 3)
+        self.assertIn("--limit", err)
+
+    def test_list_after_below_one_returns_3(self):
+        """API-parity bounds check: after must be >= 1."""
+        db = self._seed_cohort()
+        rc, _out, err = self._run_list(db, filter_spec="all", after=0)
+        self.assertEqual(rc, 3)
+        self.assertIn("--after", err)
 
     def test_list_empty_result_is_exit_0(self):
         db = FakePipelineDB()
@@ -3067,15 +3139,16 @@ class TestPipelineCliRoutes(unittest.TestCase):
             self.assertIsInstance(entry["subcommand"], str)
             self.assertIsInstance(entry["args"], list)
             self.assertIsInstance(entry["description"], str)
-        names = {entry["subcommand"] for entry in data}
+        names_list = [entry["subcommand"] for entry in data]
+        names_set = set(names_list)
         for expected in ("list", "search-plan show", "triage list", "routes"):
-            self.assertIn(expected, names)
+            self.assertIn(expected, names_set)
 
         # Sort invariant — operators consume this as a stable index.
-        names_sorted = sorted(names)
-        self.assertEqual(
-            [entry["subcommand"] for entry in data], names_sorted,
-        )
+        # Compare the raw list against ``sorted(names_list)`` (not
+        # ``sorted(names_set)``) so a duplicate subcommand surfaces as
+        # the inequality it is, rather than being silently deduped.
+        self.assertEqual(names_list, sorted(names_list))
 
 
 if __name__ == "__main__":

@@ -15,9 +15,10 @@ result for one request_id; ``list_triage`` returns a paged cohort under
 an operator filter spec.
 
 The cohort path is N+1-bounded: regardless of page size, ``list_triage``
-emits **at most 4 DB queries** (page + bulk field-resolutions + bulk
-search-summaries + bulk recent search_log rows). The N+1 guard test in
-``tests/test_triage_service.py`` asserts the bound holds at page_size=50.
+emits **4 DB queries (+ 1 headroom for future growth)** — the page +
+bulk field-resolutions + bulk search-summaries + bulk recent search_log
+rows. The N+1 guard test in ``tests/test_triage_service.py`` asserts
+the bound holds at page_size=50.
 
 This module deliberately lives upstream of the CLI / HTTP wrappers.
 ``pipeline-cli triage`` and ``/api/triage`` are thin adapters mapping
@@ -35,6 +36,19 @@ from typing import Any, Iterable, Optional, Protocol
 
 import msgspec
 
+from lib.field_resolver_service import (
+    FIELD_CATALOG_NUMBER,
+    FIELD_RELEASE_GROUP_ID,
+    FIELD_RELEASE_GROUP_YEAR,
+    FIELD_TRACK_ARTIST,
+)
+from lib.unfindable_detection_service import (
+    CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT,
+    CATEGORY_ARTIST_ABSENT,
+    CATEGORY_ONE_TRACK_STRUCTURAL,
+    CATEGORY_WRONG_PRESSING_AVAILABLE,
+)
+
 
 # --- Filter parsing -------------------------------------------------------
 
@@ -49,12 +63,41 @@ _FILTER_UNFINDABLE = "unfindable"
 _FILTER_DATA_QUALITY = "data_quality"
 _FILTER_SEARCH_NOT_CONVERTING = "search_not_converting"
 
-_UNFINDABLE_CATEGORIES = frozenset({
-    "artist_absent",
-    "album_absent_artist_present",
-    "one_track_structural",
-    "wrong_pressing_available",
+# Sourced from ``lib.unfindable_detection_service`` — the daily detection
+# service owns the vocabulary; this parser is downstream. Adding a new
+# category there auto-flows into the cohort filter.
+VALID_UNFINDABLE_CATEGORIES: frozenset[str] = frozenset({
+    CATEGORY_ARTIST_ABSENT,
+    CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT,
+    CATEGORY_ONE_TRACK_STRUCTURAL,
+    CATEGORY_WRONG_PRESSING_AVAILABLE,
 })
+
+# Sourced from ``lib.field_resolver_service`` — the resolver service owns
+# the side-table column names. Used by the ``data_quality:<field>`` filter
+# arm to reject typos before they reach the DB.
+VALID_DATA_QUALITY_FIELD_NAMES: frozenset[str] = frozenset({
+    FIELD_RELEASE_GROUP_YEAR,
+    FIELD_RELEASE_GROUP_ID,
+    FIELD_TRACK_ARTIST,
+    FIELD_CATALOG_NUMBER,
+})
+
+
+# Canonical list of valid filter forms — single source of truth for the
+# CLI ``--help`` text and the API 400 envelope. CLI and HTTP route both
+# import this tuple; the values are machine-parseable tokens that the
+# operator can paste back into a follow-up request.
+VALID_FILTER_FORMS: tuple[str, ...] = (
+    _FILTER_ALL,
+    _FILTER_UNFINDABLE,
+    f"{_FILTER_UNFINDABLE}:<category>",
+    _FILTER_DATA_QUALITY,
+    f"{_FILTER_DATA_QUALITY}:<field>",
+    f"{_FILTER_DATA_QUALITY}:status=<status>",
+    f"{_FILTER_DATA_QUALITY}:reason=<code>",
+    _FILTER_SEARCH_NOT_CONVERTING,
+)
 
 
 class InvalidFilterError(ValueError):
@@ -75,12 +118,18 @@ class ParsedTriageFilter(msgspec.Struct, frozen=True):
 
     * ``unfindable_category`` — set for ``unfindable:<cat>``.
     * ``field_name`` — set for ``data_quality:<field>``.
-    * ``reason_code`` — set for ``data_quality:reason=<reason>`` (#374).
+    * ``status_code`` — set for ``data_quality:status=<status>`` (#374
+      canonical form — matches ``album_request_field_resolutions.status``
+      which is what ``lib.field_resolver_service`` actually writes).
+    * ``reason_code`` — set for ``data_quality:reason=<code>`` (filters
+      on ``album_request_field_resolutions.reason_code``, e.g.
+      ``http_400`` / ``http_410`` / ``http_422``).
     """
 
     kind: str
     unfindable_category: Optional[str] = None
     field_name: Optional[str] = None
+    status_code: Optional[str] = None
     reason_code: Optional[str] = None
     raw: str = ""
 
@@ -110,10 +159,10 @@ def parse_filter(spec: str) -> ParsedTriageFilter:
             raise InvalidFilterError(
                 "unfindable:<category> requires a non-empty category"
             )
-        if cat not in _UNFINDABLE_CATEGORIES:
+        if cat not in VALID_UNFINDABLE_CATEGORIES:
             raise InvalidFilterError(
                 f"unknown unfindable category {cat!r}; "
-                f"expected one of {sorted(_UNFINDABLE_CATEGORIES)}"
+                f"expected one of {sorted(VALID_UNFINDABLE_CATEGORIES)}"
             )
         return ParsedTriageFilter(
             kind=_FILTER_UNFINDABLE, unfindable_category=cat, raw=raw,
@@ -126,7 +175,17 @@ def parse_filter(spec: str) -> ParsedTriageFilter:
         rest = raw[len(_FILTER_DATA_QUALITY) + 1 :].strip()
         if not rest:
             raise InvalidFilterError(
-                "data_quality:<field>|reason=<code> requires a value"
+                "data_quality:<field>|status=<status>|reason=<code> "
+                "requires a value"
+            )
+        if rest.startswith("status="):
+            status = rest[len("status=") :].strip()
+            if not status:
+                raise InvalidFilterError(
+                    "data_quality:status= requires a status value"
+                )
+            return ParsedTriageFilter(
+                kind=_FILTER_DATA_QUALITY, status_code=status, raw=raw,
             )
         if rest.startswith("reason="):
             code = rest[len("reason=") :].strip()
@@ -137,7 +196,12 @@ def parse_filter(spec: str) -> ParsedTriageFilter:
             return ParsedTriageFilter(
                 kind=_FILTER_DATA_QUALITY, reason_code=code, raw=raw,
             )
-        # No "reason=" prefix → field name selector.
+        # No "status=" / "reason=" prefix → field name selector.
+        if rest not in VALID_DATA_QUALITY_FIELD_NAMES:
+            raise InvalidFilterError(
+                f"unknown data_quality field {rest!r}; expected one of "
+                f"{sorted(VALID_DATA_QUALITY_FIELD_NAMES)}"
+            )
         return ParsedTriageFilter(
             kind=_FILTER_DATA_QUALITY, field_name=rest, raw=raw,
         )
@@ -244,13 +308,17 @@ class SearchForensicsSummary(msgspec.Struct, frozen=True):
 
 
 class TriageResult(msgspec.Struct, frozen=True):
-    """The full per-request triage payload."""
+    """The full per-request triage payload.
+
+    ``failure_class`` is on ``request_meta`` (the canonical home —
+    every other ``album_requests`` column lives there). Consumers
+    that need it should read ``result.request_meta.failure_class``.
+    """
 
     request_meta: RequestMeta
     unfindable: Optional[UnfindableState]
     field_quality: list[FieldResolutionState]
     search_forensics: SearchForensicsSummary
-    failure_class: Optional[str]
 
 
 # --- Service entrypoint ---------------------------------------------------
@@ -260,6 +328,13 @@ class TriageResult(msgspec.Struct, frozen=True):
 # scroll of the last attempts; the historical timeline lives behind
 # ``search-plan history``.
 DEFAULT_RECENT_SEARCH_LOG_LIMIT = 10
+
+# Page-size + cursor bounds for ``list_triage`` — single source of truth
+# for the CLI and HTTP wrappers, so both surfaces reject the same set of
+# out-of-range values. Mirrors the convention of ``search-plan history``.
+TRIAGE_LIMIT_MIN = 1
+TRIAGE_LIMIT_MAX = 200
+TRIAGE_AFTER_MIN = 1
 
 # Default page size for ``list_triage``.
 DEFAULT_TRIAGE_PAGE_SIZE = 50
@@ -335,8 +410,8 @@ def list_triage(
 ) -> list[TriageResult]:
     """List one page of triage results matching ``filter_spec``.
 
-    N+1-bounded: regardless of ``page_size``, the call emits at most
-    four DB queries:
+    N+1-bounded: regardless of ``page_size``, the call emits 4 DB
+    queries (+ 1 headroom for future growth):
 
     1. ``list_triage_page`` — the cohort page filtered + keyset-paged.
     2. ``get_field_resolutions_for_requests`` — one bulk
@@ -396,7 +471,6 @@ def _compose_one(
         unfindable=unfindable,
         field_quality=field_quality,
         search_forensics=search_forensics,
-        failure_class=request_row.get("failure_class"),
     )
 
 

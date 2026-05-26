@@ -2393,6 +2393,13 @@ def cmd_search_plan_history(db, args):
 # status-code mapping.
 
 
+# The canonical machine-parseable forms come from the service-layer
+# ``VALID_FILTER_FORMS`` (single source of truth across CLI and HTTP);
+# the prose variants below are CLI-only embellishments to help operators
+# remember the parameterised vocab. New filter forms get added at the
+# service layer; both wrappers auto-pick them up.
+from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_BASE  # noqa: E402
+
 _TRIAGE_VALID_FILTER_FORMS = (
     "all",
     "unfindable",
@@ -2400,8 +2407,12 @@ _TRIAGE_VALID_FILTER_FORMS = (
     "{artist_absent, album_absent_artist_present, "
     "one_track_structural, wrong_pressing_available})",
     "data_quality",
-    "data_quality:<field_name>",
-    "data_quality:reason=<reason_code>",
+    "data_quality:<field_name>  (field ∈ "
+    "{release_group_year, release_group_id, track_artist, catalog_number})",
+    "data_quality:status=<resolver_status>  (e.g. "
+    "unresolved_4xx_client, unresolved_404, unresolved_timeout)",
+    "data_quality:reason=<reason_code>  (e.g. http_400, http_410, "
+    "http_422)",
     "search_not_converting",
 )
 
@@ -2412,8 +2423,6 @@ def _truncate(text: str, width: int) -> str:
     Pure helper used by ``triage list``'s human-readable table renderer.
     Avoids pulling in textwrap for a 4-line helper.
     """
-    if text is None:
-        return ""
     if len(text) <= width:
         return text
     if width <= 1:
@@ -2421,13 +2430,14 @@ def _truncate(text: str, width: int) -> str:
     return text[: width - 1] + "…"
 
 
-def _format_dt(value) -> str:
+def _format_dt(value: object) -> str:
     """Compact display of a datetime/date/time for table cells.
 
     Uses the same ISO 8601 rendering ``_json_default`` emits, but strips
     sub-second precision so the table stays narrow. Returns ``"-"`` on
     ``None`` so empty cells are visually distinct from a zero-length
-    string.
+    string. ``object`` is wider than necessary, but the helper is used
+    against ``msgspec.to_builtins`` output which is statically untyped.
     """
     if value is None:
         return "-"
@@ -2581,12 +2591,44 @@ def cmd_triage_list(db, args):
 
     Exit codes:
       * 0 — success (empty list is a valid cohort state)
-      * 3 — invalid filter spec (``InvalidFilterError``)
-    """
-    from lib.triage_service import InvalidFilterError, list_triage
+      * 3 — invalid filter spec (``InvalidFilterError``) or out-of-range
+        ``--limit`` / ``--after``
 
+    JSON envelope (mirrors the API):
+        ``{"results": [...], "next_after": <int|null>,
+           "page_size": <int>, "filter": <spec>}``
+    """
+    from lib.triage_service import (
+        InvalidFilterError,
+        TRIAGE_AFTER_MIN,
+        TRIAGE_LIMIT_MAX,
+        TRIAGE_LIMIT_MIN,
+        list_triage,
+    )
+
+    json_mode = bool(getattr(args, "json", False))
     limit = int(args.limit) if args.limit is not None else 50
     after = int(args.after) if args.after is not None else None
+
+    # Bounds — mirrors the API's [1..200] / [>=1] check so the two
+    # surfaces reject the same set of out-of-range values.
+    if not (TRIAGE_LIMIT_MIN <= limit <= TRIAGE_LIMIT_MAX):
+        msg = (
+            f"--limit must be in [{TRIAGE_LIMIT_MIN}, {TRIAGE_LIMIT_MAX}]; "
+            f"got {limit}"
+        )
+        if json_mode:
+            print(json.dumps({"error": msg}, indent=2, sort_keys=True))
+        else:
+            print(msg, file=sys.stderr)
+        return 3
+    if after is not None and after < TRIAGE_AFTER_MIN:
+        msg = f"--after must be >= {TRIAGE_AFTER_MIN}; got {after}"
+        if json_mode:
+            print(json.dumps({"error": msg}, indent=2, sort_keys=True))
+        else:
+            print(msg, file=sys.stderr)
+        return 3
 
     try:
         results = list_triage(
@@ -2595,16 +2637,52 @@ def cmd_triage_list(db, args):
             after_request_id=after,
         )
     except InvalidFilterError as exc:
-        message = (
-            f"Invalid filter spec: {exc}\n"
-            "Valid forms:\n"
-            + "\n".join(f"  - {form}" for form in _TRIAGE_VALID_FILTER_FORMS)
+        from lib.triage_service import (
+            VALID_DATA_QUALITY_FIELD_NAMES,
+            VALID_UNFINDABLE_CATEGORIES,
         )
-        print(message, file=sys.stderr)
+        if json_mode:
+            # JSON-mode error path — emit a structured payload on stdout
+            # so callers piping ``--json | jq`` keep parsing. Mirrors
+            # cmd_triage_show's 404 JSON path and the API 400 envelope.
+            print(json.dumps(
+                {
+                    "error": str(exc),
+                    "valid_filters": list(_TRIAGE_VALID_FILTER_FORMS_BASE),
+                    "valid_unfindable_categories": sorted(
+                        VALID_UNFINDABLE_CATEGORIES
+                    ),
+                    "valid_data_quality_fields": sorted(
+                        VALID_DATA_QUALITY_FIELD_NAMES
+                    ),
+                },
+                indent=2, sort_keys=True,
+            ))
+        else:
+            message = (
+                f"Invalid filter spec: {exc}\n"
+                "Valid forms:\n"
+                + "\n".join(f"  - {form}" for form in _TRIAGE_VALID_FILTER_FORMS)
+            )
+            print(message, file=sys.stderr)
         return 3
 
-    if getattr(args, "json", False):
-        payload = [msgspec.to_builtins(r) for r in results]
+    # ``next_after`` matches the API's ``>= limit`` predicate so the
+    # CLI and HTTP surfaces report identical pagination state on the
+    # same data.
+    next_after: int | None = None
+    if results and len(results) >= limit:
+        next_after = results[-1].request_meta.id
+
+    if json_mode:
+        # Envelope wrap matches the API shape so agents pipe-and-jq the
+        # same way against both surfaces.
+        payload = {
+            "results": msgspec.to_builtins(results),
+            "next_after": next_after,
+            "page_size": limit,
+            "filter": args.filter,
+        }
         print(json.dumps(payload, indent=2, sort_keys=True,
                          default=_json_default))
         return 0
@@ -2647,8 +2725,7 @@ def cmd_triage_list(db, args):
         ))
 
     print(f"  ({len(results)} rows)")
-    if len(results) == limit:
-        next_after = results[-1].request_meta.id
+    if next_after is not None:
         print(
             f"  next page: pipeline-cli triage list --filter={args.filter} "
             f"--limit={limit} --after={next_after}"
@@ -2812,8 +2889,8 @@ def _build_parser() -> tuple[
     p_tr_list.add_argument(
         "--filter", default="all",
         help="Filter spec: all | unfindable[:<category>] | "
-             "data_quality[:<field>] | data_quality:reason=<code> | "
-             "search_not_converting")
+             "data_quality[:<field>] | data_quality:status=<status> | "
+             "data_quality:reason=<code> | search_not_converting")
     p_tr_list.add_argument(
         "--limit", type=int, default=50,
         help="Page size (default 50)")

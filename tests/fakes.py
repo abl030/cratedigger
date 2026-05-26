@@ -2075,6 +2075,7 @@ class FakePipelineDB:
         kind = getattr(filter_spec, "kind", None)
         unfindable_category = getattr(filter_spec, "unfindable_category", None)
         field_name = getattr(filter_spec, "field_name", None)
+        status_code = getattr(filter_spec, "status_code", None)
         reason_code = getattr(filter_spec, "reason_code", None)
 
         def keep(row: dict[str, Any]) -> bool:
@@ -2094,6 +2095,8 @@ class FakePipelineDB:
                     if not fr.status.startswith("unresolved_"):
                         continue
                     if field_name is not None and fr.field_name != field_name:
+                        continue
+                    if status_code is not None and fr.status != status_code:
                         continue
                     if reason_code is not None and fr.reason_code != reason_code:
                         continue

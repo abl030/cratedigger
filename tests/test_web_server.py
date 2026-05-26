@@ -1140,6 +1140,42 @@ class TestRouteContractAudit(unittest.TestCase):
             f"{sorted(missing_post_patterns)}",
         )
 
+        # Empty-string registration would pass the presence check above
+        # and defeat the U18 intent — every route must carry a non-empty
+        # one-liner. Surface each offender by name so the fix is
+        # one-route-at-a-time.
+        def _empty_desc_paths(registered: dict[str, str]) -> list[str]:
+            return sorted(p for p, d in registered.items() if not (d and d.strip()))
+
+        empty_get = _empty_desc_paths(srv.Handler._FUNC_GET_DESCRIPTIONS)
+        empty_post = _empty_desc_paths(srv.Handler._FUNC_POST_DESCRIPTIONS)
+        empty_get_pat = sorted(
+            p.pattern
+            for p, d in srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS
+            if not (d and d.strip())
+        )
+        empty_post_pat = sorted(
+            p.pattern
+            for p, d in srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS
+            if not (d and d.strip())
+        )
+        self.assertFalse(
+            empty_get,
+            f"GET routes with empty description string: {empty_get}",
+        )
+        self.assertFalse(
+            empty_post,
+            f"POST routes with empty description string: {empty_post}",
+        )
+        self.assertFalse(
+            empty_get_pat,
+            f"GET pattern routes with empty description string: {empty_get_pat}",
+        )
+        self.assertFalse(
+            empty_post_pat,
+            f"POST pattern routes with empty description string: {empty_post_pat}",
+        )
+
 
 class TestRouteDescriptionMechanism(unittest.TestCase):
     """U18 step 1: structural test that the route-description dispatch tables exist.
@@ -9670,7 +9706,6 @@ class TestTriageRouteContracts(_WebServerCase):
     # field rename can't silently break the JS without flipping a test.
     SHOW_REQUIRED_FIELDS = {
         "request_meta", "unfindable", "field_quality", "search_forensics",
-        "failure_class",
     }
 
     # ``request_meta`` fields the frontend depends on for the "Artist –
@@ -9763,7 +9798,9 @@ class TestTriageRouteContracts(_WebServerCase):
         composed = msgspec.convert(data, type=TriageResult)
         self.assertEqual(composed.request_meta.id, 4242)
         self.assertEqual(composed.request_meta.artist_name, "Triage Artist")
-        self.assertEqual(composed.failure_class, "search_not_converting")
+        self.assertEqual(
+            composed.request_meta.failure_class, "search_not_converting",
+        )
         # Unfindable struct populated because the seeded row has signals.
         self.assertIsNotNone(composed.unfindable)
         assert composed.unfindable is not None
@@ -9777,7 +9814,7 @@ class TestTriageRouteContracts(_WebServerCase):
         self.assertIn("error", data)
         self.assertEqual(data["request_id"], 99999)
 
-    def test_show_returns_400_for_non_int_id(self):
+    def test_show_returns_404_for_non_int_path(self):
         """A non-numeric path segment doesn't even match the regex
         (which requires ``\\d+``), so the route table itself replies
         404. This test pins the route-table contract (no silent
@@ -9819,35 +9856,65 @@ class TestTriageRouteContracts(_WebServerCase):
         # (cohort exhausted).
         self.assertIsNone(data["next_after"])
 
-    def test_list_filter_data_quality_reason_filters_by_reason_code(self):
-        """``filter=data_quality:reason=<code>`` (issue #374 scope)
-        returns only requests with at least one ``unresolved_*`` field
-        whose ``reason_code`` matches the spec."""
-        # Seeded request A: has a release_group_year resolution with
-        # the matching reason_code.
+    def test_list_filter_data_quality_status_filters_by_status_column(self):
+        """``filter=data_quality:status=<status>`` (issue #374 canonical
+        form) returns only requests with at least one
+        ``album_request_field_resolutions`` row whose ``status`` column
+        matches the spec. Mirrors what
+        ``lib/field_resolver_service.py::_classify_lookup_exception``
+        actually writes."""
+        # Seeded request A: has a release_group_year resolution in the
+        # sticky 4xx-client bucket — matches.
         self._fake.seed_request(make_request_row(id=20))
         self._fake.record_field_resolution(
             request_id=20, field_name="release_group_year",
-            status="unresolved_404", reason_code="unresolved_4xx_client",
+            status="unresolved_4xx_client", reason_code="http_400",
         )
-        # Seeded request B: also has a field resolution but a different
-        # reason_code — must NOT appear in the filtered cohort.
+        # Seeded request B: has a field resolution but a different
+        # status bucket — must NOT appear.
         self._fake.seed_request(make_request_row(id=21))
         self._fake.record_field_resolution(
             request_id=21, field_name="catalog_number",
-            status="unresolved_5xx", reason_code="unresolved_5xx_server",
+            status="unresolved_mirror_unavailable",
+            reason_code="ConnectionError",
         )
 
         status, data = self._get(
-            "/api/triage/list?filter=data_quality:reason=unresolved_4xx_client"
+            "/api/triage/list?filter=data_quality:status=unresolved_4xx_client"
         )
 
         self.assertEqual(status, 200)
         self.assertEqual(
-            data["filter"], "data_quality:reason=unresolved_4xx_client",
+            data["filter"], "data_quality:status=unresolved_4xx_client",
         )
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(data["results"][0]["request_meta"]["id"], 20)
+
+    def test_list_filter_data_quality_reason_filters_by_reason_code(self):
+        """``filter=data_quality:reason=<code>`` filters on the
+        ``reason_code`` column (HTTP code specifier — http_400,
+        http_410, http_422, etc.)."""
+        # Seeded request A: 4xx-client status, reason_code=http_400 — matches.
+        self._fake.seed_request(make_request_row(id=22))
+        self._fake.record_field_resolution(
+            request_id=22, field_name="release_group_year",
+            status="unresolved_4xx_client", reason_code="http_400",
+        )
+        # Seeded request B: 4xx-client status but reason_code=http_410 — excluded.
+        self._fake.seed_request(make_request_row(id=23))
+        self._fake.record_field_resolution(
+            request_id=23, field_name="catalog_number",
+            status="unresolved_4xx_client", reason_code="http_410",
+        )
+
+        status, data = self._get(
+            "/api/triage/list?filter=data_quality:reason=http_400"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["filter"], "data_quality:reason=http_400")
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["request_meta"]["id"], 22)
 
     def test_list_invalid_filter_returns_400_with_valid_filters_array(self):
         """An unparseable filter spec surfaces as a 400 carrying

@@ -7,9 +7,9 @@ Covers the three deliverables of the service:
   ``InvalidFilterError``; the wrappers map onto exit/status codes.
 * ``compose_triage_for_request`` — single-request payload composed
   from ``album_requests`` + the three side domains.
-* ``list_triage`` — cohort listing with N+1 mitigation. The "≤5 DB
-  queries" guard is the contract; it runs against ``FakePipelineDB``
-  which records per-method call counts.
+* ``list_triage`` — cohort listing with N+1 mitigation. The contract
+  is "4 queries (+ 1 headroom for future growth)" — the guard runs
+  against ``FakePipelineDB`` which records per-method call counts.
 """
 
 from __future__ import annotations
@@ -65,12 +65,31 @@ class TestParseFilter(unittest.TestCase):
         self.assertEqual(parsed.field_name, "release_group_year")
         self.assertIsNone(parsed.reason_code)
 
-    def test_data_quality_with_reason_code(self) -> None:
-        """#374 — sticky 4xx-client cohort uses the reason=<code> form."""
-        parsed = parse_filter("data_quality:reason=unresolved_4xx_client")
+    def test_data_quality_with_status(self) -> None:
+        """#374 canonical form — sticky 4xx-client cohort uses
+        ``status=<resolver_status>`` (matches the ``status`` column
+        ``lib/field_resolver_service.py`` writes)."""
+        parsed = parse_filter("data_quality:status=unresolved_4xx_client")
         self.assertEqual(parsed.kind, "data_quality")
         self.assertIsNone(parsed.field_name)
-        self.assertEqual(parsed.reason_code, "unresolved_4xx_client")
+        self.assertIsNone(parsed.reason_code)
+        self.assertEqual(parsed.status_code, "unresolved_4xx_client")
+
+    def test_data_quality_with_reason_code(self) -> None:
+        """Complementary form — filter on the specific HTTP code
+        in the ``reason_code`` column (e.g. http_400, http_410)."""
+        parsed = parse_filter("data_quality:reason=http_400")
+        self.assertEqual(parsed.kind, "data_quality")
+        self.assertIsNone(parsed.field_name)
+        self.assertIsNone(parsed.status_code)
+        self.assertEqual(parsed.reason_code, "http_400")
+
+    def test_data_quality_unknown_field_raises(self) -> None:
+        """A typo in the field name (e.g. ``release_year``) is rejected
+        at parse time; the operator sees the four valid names in the
+        error message."""
+        with self.assertRaises(InvalidFilterError):
+            parse_filter("data_quality:release_year")
 
     def test_search_not_converting(self) -> None:
         parsed = parse_filter("search_not_converting")
@@ -100,6 +119,10 @@ class TestParseFilter(unittest.TestCase):
     def test_data_quality_empty_reason_raises(self) -> None:
         with self.assertRaises(InvalidFilterError):
             parse_filter("data_quality:reason=")
+
+    def test_data_quality_empty_status_raises(self) -> None:
+        with self.assertRaises(InvalidFilterError):
+            parse_filter("data_quality:status=")
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +160,7 @@ class TestComposeTriage(unittest.TestCase):
         self.assertEqual(result.request_meta.id, 1)
         self.assertEqual(result.request_meta.artist_name, "Healthy Artist")
         self.assertEqual(result.request_meta.status, "imported")
-        self.assertEqual(result.failure_class, "resolved")
+        self.assertEqual(result.request_meta.failure_class, "resolved")
         self.assertIsNone(result.unfindable)
         self.assertEqual(result.field_quality, [])
         # Empty search forensics: zero counters, empty recent_entries.
@@ -302,17 +325,17 @@ class TestListTriage(unittest.TestCase):
             request_id=3, field_name="release_group_year",
             status="unresolved_404", reason_code="http_404",
         )
-        # 4 — only data-quality issue, no unfindable cohort. Carries the
-        # ``reason_code=unresolved_4xx_client`` we filter on for #374; the
-        # status is the side-table's ``unresolved_*`` shape (whatever the
-        # resolver emitted) and reason_code carries the sticky 4xx-class
-        # marker the operator pages on.
+        # 4 — only data-quality issue, no unfindable cohort. Production
+        # shape per ``lib/field_resolver_service.py::_classify_lookup_exception``:
+        # ``status='unresolved_4xx_client'`` is the sticky-bucket marker
+        # operators page on for #374; ``reason_code='http_400'`` is the
+        # specific HTTP code the resolver hit.
         db.seed_request(make_request_row(
             id=4, artist_name="DataOnly", album_title="Album", status="wanted",
         ))
         db.record_field_resolution(
             request_id=4, field_name="catalog_number",
-            status="unresolved_404", reason_code="unresolved_4xx_client",
+            status="unresolved_4xx_client", reason_code="http_400",
         )
         return db
 
@@ -349,11 +372,30 @@ class TestListTriage(unittest.TestCase):
         )
         self.assertEqual([r.request_meta.id for r in results], [3])
 
-    def test_filter_data_quality_by_reason_code(self) -> None:
-        """#374: the sticky 4xx-client cohort selector."""
+    def test_filter_data_quality_by_status_code(self) -> None:
+        """#374: the canonical sticky 4xx-client cohort selector.
+
+        ``data_quality:status=unresolved_4xx_client`` matches on the
+        ``status`` column — which is what ``lib/field_resolver_service.py``
+        actually writes for sticky 4xx errors. Operator workflow:
+        ``triage list --filter=data_quality:status=unresolved_4xx_client``.
+        """
         db = self._seed_three()
         results = list_triage(
-            "data_quality:reason=unresolved_4xx_client", db, page_size=10,
+            "data_quality:status=unresolved_4xx_client", db, page_size=10,
+        )
+        self.assertEqual([r.request_meta.id for r in results], [4])
+
+    def test_filter_data_quality_by_reason_code(self) -> None:
+        """The complementary form: filter on the ``reason_code`` column.
+
+        ``reason_code`` carries the specific HTTP code (``http_400`` /
+        ``http_410`` / ``http_422`` / etc.). Useful when triaging
+        a specific upstream behaviour.
+        """
+        db = self._seed_three()
+        results = list_triage(
+            "data_quality:reason=http_400", db, page_size=10,
         )
         self.assertEqual([r.request_meta.id for r in results], [4])
 
@@ -400,7 +442,8 @@ class TestListTriage(unittest.TestCase):
 
 
 class TestListTriageN1Guard(unittest.TestCase):
-    """The cohort path emits ≤5 DB queries regardless of page size.
+    """The cohort path emits 4 queries (+ 1 headroom for future growth)
+    regardless of page size.
 
     Asserted by counting calls on ``FakePipelineDB.query_counts``. The
     list path is bounded to four entries (page + three bulk getters);
@@ -436,7 +479,8 @@ class TestListTriageN1Guard(unittest.TestCase):
         self.assertLessEqual(
             total_queries, 5,
             f"list_triage emitted {total_queries} DB queries "
-            f"(breakdown: {db.query_counts}); contract is ≤5",
+            f"(breakdown: {db.query_counts}); contract is "
+            "4 queries (+ 1 headroom for future growth)",
         )
         # Belt-and-braces — each bulk method must fire exactly once.
         self.assertEqual(db.query_counts.get("list_triage_page"), 1)
@@ -467,7 +511,7 @@ class TestStructShape(unittest.TestCase):
         self.assertIsInstance(result, TriageResult)
         # Frozen — assignment fails.
         with self.assertRaises((AttributeError, TypeError)):
-            result.failure_class = "mutated"  # type: ignore[misc]
+            result.unfindable = None  # type: ignore[misc]
 
     def test_search_forensics_summary_has_required_fields(self) -> None:
         # Defensive check: keep the field set explicit so a refactor
