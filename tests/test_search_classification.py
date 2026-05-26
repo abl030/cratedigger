@@ -183,16 +183,16 @@ class TestClassifyFailureClass(unittest.TestCase):
                 )
 
 
-class TestSearchSummaryStructContract(unittest.TestCase):
-    """Pin the wire-boundary type's shape so DB-row → struct conversion
+class TestSearchSummaryDataclassContract(unittest.TestCase):
+    """Pin the internal type's shape so DB-row → dataclass conversion
     has one declared contract."""
 
-    def test_struct_is_frozen(self):
+    def test_dataclass_is_frozen(self):
         s = SearchSummary(outcome="no_match", rejection_reason="x")
-        with self.assertRaises(AttributeError):
+        with self.assertRaises(Exception):
             s.outcome = "found"  # type: ignore[misc]
 
-    def test_struct_defaults_rejection_reason_to_none(self):
+    def test_dataclass_defaults_rejection_reason_to_none(self):
         s = SearchSummary(outcome="found")
         self.assertEqual(s.outcome, "found")
         self.assertIsNone(s.rejection_reason)

@@ -83,13 +83,6 @@ class SearchResult:
     # to detect completions after mid-flight regeneration. None for
     # legacy / no-plan code paths.
     plan_execution: "PlanExecutionContext | None" = None
-    # U11 R22: dominant rejection reason synthesised by the matcher when
-    # ``outcome`` is ``no_match`` (e.g. ``strict_count_mismatch``,
-    # ``avg_ratio_low``, ``all_skipped_pre_filter``,
-    # ``cross_check_failed``). ``None`` when the search matched, never
-    # ran the matcher (no_results / error / empty_query), or when the
-    # matcher produced no candidates to classify (broken_user).
-    rejection_reason: str | None = None
     # U11 R23: uncapped result count from slskd's terminal state
     # response. ``responseCount`` is what slskd's writer tracked;
     # ``result_count`` is what our harvest call returned. The two
@@ -98,13 +91,14 @@ class SearchResult:
     # lookup failed before a terminal state was observed (pre-attempt /
     # error paths).
     result_count_uncapped: int | None = None
-    # U11 R26: top-1 matcher score (``matched_tracks + avg_ratio``
-    # composite) of the highest-scored candidate produced by the
-    # matcher this search. ``None`` when no scored candidate was
-    # produced (broken_user, all pre-filter-skipped, no_results,
-    # error). Carried from the matcher via ``MatchResult`` →
-    # ``FindDownloadResult``.
-    matcher_score_top1: float | None = None
+    # NOTE: ``rejection_reason`` (U11 R22) and ``matcher_score_top1``
+    # (U11 R26) are NOT carried on SearchResult. The log site in
+    # ``cratedigger.py::_log_search_result`` reconstructs both from
+    # ``result.candidates`` via the pure helpers
+    # ``lib.matching.classify_rejection_from_log_inputs`` and
+    # ``lib.matching.matcher_score_top1_for`` — the single source of
+    # truth for both scalars. Adding them back to SearchResult would
+    # be dead duplication.
 
 
 @dataclass(frozen=True)

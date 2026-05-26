@@ -59,8 +59,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
-import msgspec
-
 logger = logging.getLogger(__name__)
 
 
@@ -143,24 +141,25 @@ RESULT_NOT_DUE = "not_due"
 
 
 # ---------------------------------------------------------------------------
-# Wire-boundary types. msgspec.Struct because the classifier's input
-# dataclass is conceptually a serialisable contract — operator tooling
-# (e.g. a future CLI dry-run) can construct one from JSON.
+# Internal types. Plain ``@dataclass(frozen=True)`` because these are
+# pure-internal Python types constructed entirely from our own typed
+# code — never crossing JSON, never re-encoded. Per
+# `.claude/rules/code-quality.md` § "Wire-boundary types", Struct is
+# reserved for types that actually traverse a wire boundary.
 # ---------------------------------------------------------------------------
 
 
-class UnfindableSearchLogSignal(msgspec.Struct, frozen=True):
+@dataclass(frozen=True)
+class UnfindableSearchLogSignal:
     """Aggregated search-log evidence read for one request.
 
     Pre-computed by the service's DB query so the pure classifier
     doesn't need to reason about row windowing or status filtering.
     """
 
-    # Number of distinct ``plan_cycle_snapshot`` values observed in the
-    # recent window (the M cohort for the zero-find rule).
-    cycles_observed: int
-    # Of ``cycles_observed``, how many produced ZERO ``found`` outcomes
-    # for this request. ``zero_find_cycles >= REQUIRED_ZERO_FIND_CYCLES``
+    # Of the distinct ``plan_cycle_snapshot`` values observed in the
+    # recent window, how many produced ZERO ``found`` outcomes for
+    # this request. ``zero_find_cycles >= REQUIRED_ZERO_FIND_CYCLES``
     # is one of the inputs to the ``album_absent_artist_present`` rule.
     zero_find_cycles: int
     # Count of search_log rows in the window whose
@@ -170,16 +169,12 @@ class UnfindableSearchLogSignal(msgspec.Struct, frozen=True):
     wrong_pressing_hits: int
 
 
-class UnfindableInputs(msgspec.Struct, frozen=True):
+@dataclass(frozen=True)
+class UnfindableInputs:
     """All decision-relevant state for one request, in one struct."""
 
     # Operator-visible context. Used for ``one_track_structural``.
     total_tracks: int | None
-    # ``album_requests.unfindable_category`` at the moment we read the
-    # row. Drives the downgrade contract — clearing happens only when a
-    # category was previously set and the new verdict is ``None`` /
-    # different.
-    current_category: str | None
     # Recent probe history: most-recent first. Each entry is the
     # ``last_artist_probe_match_count`` recorded at that observation.
     # The classifier looks at ``REQUIRED_LOW_PROBES`` rows for the
@@ -195,7 +190,8 @@ class UnfindableInputs(msgspec.Struct, frozen=True):
     search_log_signal: UnfindableSearchLogSignal
 
 
-class UnfindableCategorisation(msgspec.Struct, frozen=True):
+@dataclass(frozen=True)
+class UnfindableCategorisation:
     """Pure classifier result: the category + the reason it fired.
 
     ``reason`` is operator-facing — a short human string that explains
@@ -272,8 +268,10 @@ def classify_unfindable_from_state(
     5. Otherwise → ``None`` (no signal yet / downgrade candidate).
 
     Returns ``None`` when no rule matches. The service interprets
-    ``None`` against the row's ``current_category`` to decide whether
-    to clear the column (downgrade) or leave it alone.
+    ``None`` against the row's previous ``unfindable_category`` to
+    decide whether to clear the column (downgrade) or leave it alone.
+    The classifier itself is stateless — the prior category does NOT
+    feed any rule, so it's not on the inputs struct.
     """
     # Branch 1: structural shape dominates.
     if inputs.total_tracks is not None and inputs.total_tracks <= 1:
@@ -619,7 +617,6 @@ class UnfindableDetectionService:
         tracks = self.db.get_tracks(request_id) or []
         inputs = UnfindableInputs(
             total_tracks=len(tracks) if tracks else None,
-            current_category=previous,
             probe_match_counts=tuple(probe_history),
             probe_observed_artist_match=probe.artist_observed,
             search_log_signal=signal,

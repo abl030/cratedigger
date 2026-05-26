@@ -35,7 +35,7 @@ See:
 
 from __future__ import annotations
 
-import msgspec
+from dataclasses import dataclass
 
 # Failure-class constants. These mirror the CHECK constraint on
 # ``album_requests.failure_class`` (migration 028).
@@ -76,15 +76,18 @@ _OUTCOME_NO_MATCH = "no_match"
 _ZERO_RESULTS_DOMINANT_THRESHOLD = 0.8
 
 
-class SearchSummary(msgspec.Struct, frozen=True):
+@dataclass(frozen=True)
+class SearchSummary:
     """One consumed search attempt's classification signal.
 
-    Wire-boundary type (``msgspec.Struct``): the DB layer constructs
-    these from ``search_log`` rows by reading the ``outcome`` and
-    ``rejection_reason`` columns. Keeping the type narrow protects
-    callers from accidentally pulling other forensics columns into the
-    classifier's contract — only these two fields drive the verdict
-    today.
+    Pure-internal type — constructed by the DB layer from
+    ``search_log`` rows (reading the ``outcome`` and ``rejection_reason``
+    columns) and consumed in-process by ``classify_failure_class``. Never
+    crosses a wire boundary, so plain ``@dataclass(frozen=True)`` is the
+    right tool here per `.claude/rules/code-quality.md` § "Wire-boundary
+    types". Keeping the type narrow protects callers from accidentally
+    pulling other forensics columns into the classifier's contract —
+    only these two fields drive the verdict today.
 
     The classifier only sees consumed attempts (``attempt_consumed =
     TRUE``). Stale completions and pre-attempt failures are filtered

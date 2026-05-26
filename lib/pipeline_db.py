@@ -2148,12 +2148,12 @@ class PipelineDB:
         """Aggregate the search-log signal for the unfindable classifier.
 
         Window-bounded so historical noise doesn't pin a verdict
-        forever. Computes three scalars in one pass:
+        forever. Computes two scalars in one pass:
 
-          * ``cycles_observed`` — distinct ``plan_cycle_snapshot``
-            values seen for this request in the window.
-          * ``zero_find_cycles`` — of those, how many cycles had zero
-            rows with ``outcome='found'``. Drives the
+          * ``zero_find_cycles`` — of the distinct
+            ``plan_cycle_snapshot`` values seen for this request in the
+            window, how many cycles had zero rows with
+            ``outcome='found'``. Drives the
             ``album_absent_artist_present`` rule.
           * ``wrong_pressing_hits`` — count of rows with
             ``rejection_reason='strict_count_mismatch'`` AND
@@ -2181,8 +2181,6 @@ class PipelineDB:
                 GROUP BY plan_cycle_snapshot
             )
             SELECT
-                (SELECT COUNT(*) FROM per_cycle)::int
-                    AS cycles_observed,
                 (SELECT COUNT(*) FROM per_cycle WHERE found_count = 0)::int
                     AS zero_find_cycles,
                 (SELECT COUNT(*) FROM window_rows
@@ -2200,12 +2198,10 @@ class PipelineDB:
         row = cur.fetchone()
         if row is None:
             return UnfindableSearchLogSignal(
-                cycles_observed=0,
                 zero_find_cycles=0,
                 wrong_pressing_hits=0,
             )
         return UnfindableSearchLogSignal(
-            cycles_observed=int(row.get("cycles_observed") or 0),
             zero_find_cycles=int(row.get("zero_find_cycles") or 0),
             wrong_pressing_hits=int(row.get("wrong_pressing_hits") or 0),
         )

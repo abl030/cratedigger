@@ -67,21 +67,19 @@ from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
 def _zero_signal() -> UnfindableSearchLogSignal:
     return UnfindableSearchLogSignal(
-        cycles_observed=0, zero_find_cycles=0, wrong_pressing_hits=0,
+        zero_find_cycles=0, wrong_pressing_hits=0,
     )
 
 
 def _inputs(
     *,
     total_tracks: int | None = 12,
-    current_category: str | None = None,
     probe_match_counts: tuple[int, ...] = (),
     probe_observed_artist_match: bool = False,
     search_log_signal: UnfindableSearchLogSignal | None = None,
 ) -> UnfindableInputs:
     return UnfindableInputs(
         total_tracks=total_tracks,
-        current_category=current_category,
         probe_match_counts=probe_match_counts,
         probe_observed_artist_match=probe_observed_artist_match,
         search_log_signal=search_log_signal or _zero_signal(),
@@ -127,7 +125,6 @@ class TestClassifyUnfindableFromState(unittest.TestCase):
                 probe_match_counts=(0, 0),
                 probe_observed_artist_match=False,
                 search_log_signal=UnfindableSearchLogSignal(
-                    cycles_observed=3,
                     zero_find_cycles=3,
                     wrong_pressing_hits=WRONG_PRESSING_MIN_HITS,
                 ),
@@ -154,7 +151,6 @@ class TestClassifyUnfindableFromState(unittest.TestCase):
                 probe_match_counts=(20,),
                 probe_observed_artist_match=True,
                 search_log_signal=UnfindableSearchLogSignal(
-                    cycles_observed=3,
                     zero_find_cycles=REQUIRED_ZERO_FIND_CYCLES,
                     wrong_pressing_hits=0,
                 ),
@@ -218,7 +214,6 @@ class TestClassifyUnfindableFromState(unittest.TestCase):
                 probe_match_counts=(50,),
                 probe_observed_artist_match=True,
                 search_log_signal=UnfindableSearchLogSignal(
-                    cycles_observed=2,
                     zero_find_cycles=REQUIRED_ZERO_FIND_CYCLES - 1,
                     wrong_pressing_hits=0,
                 ),
@@ -226,12 +221,16 @@ class TestClassifyUnfindableFromState(unittest.TestCase):
             None,
         ),
         # 10. Downgrade: previously artist_absent, recent probe surged
-        # → returns None (service then clears the column).
+        # → returns None (service then clears the column). The
+        # classifier itself is stateless — it does not know about the
+        # row's prior category, so the inputs look like any other
+        # "recent probe surge" row. The downgrade decision lives in
+        # the service layer based on the row's persisted
+        # ``unfindable_category``.
         (
             "downgrade: prior artist_absent + match surge → None",
             _inputs(
                 total_tracks=12,
-                current_category=CATEGORY_ARTIST_ABSENT,
                 probe_match_counts=(50, 0),
                 probe_observed_artist_match=True,
             ),
@@ -243,7 +242,6 @@ class TestClassifyUnfindableFromState(unittest.TestCase):
             _inputs(
                 total_tracks=12,
                 search_log_signal=UnfindableSearchLogSignal(
-                    cycles_observed=2,
                     zero_find_cycles=0,
                     wrong_pressing_hits=WRONG_PRESSING_MIN_HITS - 1,
                 ),

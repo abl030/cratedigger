@@ -2340,10 +2340,8 @@ class FakePipelineDB:
                 and entry.matcher_score_top1 >= float(matcher_score_threshold)
             ):
                 wrong_pressing_hits += 1
-        cycles_observed = len(cycles)
         zero_find_cycles = sum(1 for v in cycles.values() if v == 0)
         return UnfindableSearchLogSignal(
-            cycles_observed=cycles_observed,
             zero_find_cycles=zero_find_cycles,
             wrong_pressing_hits=wrong_pressing_hits,
         )

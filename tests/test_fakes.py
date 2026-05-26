@@ -3831,7 +3831,6 @@ class TestFakePipelineDBUnfindable(unittest.TestCase):
             rid, window_days=30, matcher_score_threshold=0.85,
         )
         self.assertIsInstance(sig, UnfindableSearchLogSignal)
-        self.assertEqual(sig.cycles_observed, 3)  # cycles 0, 1, 2
         self.assertEqual(sig.zero_find_cycles, 2)  # cycles 0 and 2
         self.assertEqual(sig.wrong_pressing_hits, 1)  # cycle 0 only
 
