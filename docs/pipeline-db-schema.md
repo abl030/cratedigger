@@ -391,6 +391,114 @@ representative ladder snapshot, so any output drift forces
 `tests/test_search.py::test_generator_id_constant_is_pinned` to fail
 until the id is intentionally bumped.
 
+## Search-plan iteration 2 (migrations 026–033)
+
+Iteration 2 layers observability + detection state onto the
+persisted-search-plans surface. Every column below was added by a
+PR1 migration; PR3 wires the writes. The iter2 brainstorm and plan
+docs (`docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md`,
+`docs/plans/2026-05-25-001-feat-search-plan-iteration-2-plan.md`) are
+the requirement-id source of truth — each entry below points at the
+R-id it satisfies.
+
+### `search_log` forensics columns (migration 027, written by PR3 U11)
+
+Seven nullable scalars that let triage SQL skip JSONB introspection
+into `candidates`. Populated at log-write time by
+`lib/pipeline_db.py::log_search` via the matcher
+(`lib/matching.py::check_for_match`) and search-executor layer.
+Historical rows pre-deploy carry `NULL` in all seven; new rows
+post-PR3 populate every applicable column.
+
+| Column | Type | Notes |
+|---|---|---|
+| `rejection_reason` | `TEXT NULL` | Dominant matcher rejection from the top-scored candidate. One of `strict_count_mismatch`, `avg_ratio_low`, `cross_check_failed`, `all_skipped_pre_filter`, `bitrate_below_min`, `denylisted_user`, `cooldown`, `cap_truncation_no_survivors`. `NULL` on `outcome='found'` or when there were no candidates to reject. (R22) |
+| `result_count_uncapped` | `INTEGER NULL` | slskd's true `responseCount` before the cratedigger 1000-cap is applied. `result_count` remains the post-cap count. Comparing the two surfaces saturated searches honestly. (R23) |
+| `query_token_count` | `INTEGER NULL` | `len(query.split())` — total tokens, including duplicates and stopwords. (R24) |
+| `query_distinct_token_count` | `INTEGER NULL` | `len(set(query.split()))` — distinct tokens. Low distinctiveness correlates with bag-of-words slskd searches that match too many peers. (R24) |
+| `expected_track_count` | `INTEGER NULL` | The request's `total_tracks` snapshotted at search-execution time. Not slskd's result count, not a hardcoded value — the operator's expectation for this release. (R25) |
+| `matcher_score_top1` | `REAL NULL` | The top candidate's composite score (`matched_tracks + avg_ratio`) from `candidates[0]`. `0.0` on `no_results` / `no_match` with empty candidate set. (R26) |
+| `query_template` | `TEXT NULL` | Operator-readable shape derived from `plan_strategy` (e.g. `{artist} {title}`, `{artist} {track_N}`, `{catalog_number}`). Lets `GROUP BY query_template` surface which template shapes are productive vs noise. (R27) |
+
+### `album_requests` observability columns (migration 028, written by PR3 U12 / U13 / U14)
+
+Eight columns covering plan-wrap classification, VA detection,
+unfindable categorisation, and long-tail-rescue audit. CHECK
+constraints on the three enum-shaped TEXT columns surface typos as
+constraint violations rather than silent corruption.
+
+| Column | Type | Notes |
+|---|---|---|
+| `failure_class` | `TEXT NULL` | 5-bucket cycle classification: `A_zero_results_dominant`, `B_cands_never_match`, `D_found_but_no_import`, `E_mixed`, `resolved`. Written by `lib/search_plan_service.py` at plan-wrap inside the cursor-advance transaction (PR3 U12). `NULL` until the first cycle wraps. A wrap with zero searches in the cycle leaves it `NULL` (defensive: "no signal" is not a classification). CHECK enforces the enum. (R28) |
+| `is_va_compilation` | `BOOLEAN NOT NULL DEFAULT FALSE` | VA detection flag set at enqueue by `lib/field_resolver_service.py::detect_va_compilation` (3-rule detector — canonical VA MBID match, Compilation release-group + divergent track credits, split-artist joinphrase). Consumed by `_generate_va_plan` in the generator. (R12) |
+| `unfindable_category` | `TEXT NULL` | 4-bucket cohort taxonomy: `artist_absent`, `album_absent_artist_present`, `one_track_structural`, `wrong_pressing_available`. Written by `lib/unfindable_detection_service.py` on its daily cadence (PR3 U13). Cleared on long-tail-rescue (U14). CHECK enforces the enum. Partial index `idx_album_requests_unfindable_category` over rows where the column is non-NULL supports the operator triage scan. (R18, R19) |
+| `unfindable_categorised_at` | `TIMESTAMPTZ NULL` | When the categoriser last ran for this request. Used by the detection job to pick the K oldest probes per run. |
+| `last_artist_probe_at` | `TIMESTAMPTZ NULL` | Most recent artist-only catalog probe against slskd. Per-request probe cadence target is ~7 days. |
+| `last_artist_probe_match_count` | `INTEGER NULL` | Result count from the last artist-only probe. Feeds the `artist_absent` vs `album_absent_artist_present` classifier branch. |
+| `rescued_at` | `TIMESTAMPTZ NULL` | Long-tail-rescue audit timestamp. Set by the importer success path (PR3 U14, `lib/import_dispatch.py` → `PipelineDB.mark_imported_with_rescue`) when a request that was carrying an `unfindable_category` transitions to `imported`. First-rescue-wins — immutable once set; Replace flows do not re-stamp it. (R21) |
+| `prior_unfindable_category` | `TEXT NULL` | The `unfindable_category` value cleared by the rescue (same enum + CHECK as `unfindable_category`). Lets `SELECT prior_unfindable_category, COUNT(*) FROM album_requests WHERE rescued_at IS NOT NULL` surface which cohorts the watch loop actually rescues over time. (R21) |
+
+R20 ("the system never stops searching") is enforced structurally: the
+`cratedigger-unfindable.service` shares no code path with the regular
+5-min search loop and an `ast.parse` walk over
+`lib/unfindable_detection_service.py` + `scripts/run_unfindable_detection.py`
+rejects any reference to cursor-mutation names.
+
+### `album_requests.catalog_number` (migration 032, resolved at enqueue)
+
+| Column | Type | Notes |
+|---|---|---|
+| `catalog_number` | `TEXT NULL` | Resolved at enqueue via the dual-source field resolver (MB + Discogs), populating the `catalog_number` plan-strategy slot the PR2 generator adds. |
+
+### `album_tracks.track_artist` (migration 029, populated at enqueue)
+
+| Column | Type | Notes |
+|---|---|---|
+| `track_artist` | `TEXT NULL` | Per-track artist persisted from the resolver output. Consumed by PR2's VA plan generation (`va_track_artist_*` slots). NULL until resolution succeeds for that track. |
+
+### `album_request_field_resolutions` (migration 030, side table)
+
+Tracks per-(request, field) resolution attempts for the four
+network-dependent fields (`release_group_year`, `release_group_id`,
+`track_artist`, `catalog_number`). Used by enqueue-time inline
+resolution + the operator deploy-window backfill heredoc.
+
+| Column | Type | Notes |
+|---|---|---|
+| `request_id` | `INTEGER NOT NULL` | FK → `album_requests(id) ON DELETE CASCADE` |
+| `field_name` | `TEXT NOT NULL` | One of the four resolved fields above |
+| `status` | `TEXT NOT NULL` | `resolved`, `unresolved_no_data`, `unresolved_4xx_client`, `unresolved_mirror_unavailable`, `unresolved_timeout`, `unresolved_field_missing_upstream` |
+| `attempted_at` | `TIMESTAMPTZ NOT NULL DEFAULT NOW()` | Last attempt timestamp |
+| (audit metadata) | | Details preserved per-row for forensic queries against upstream-data gaps |
+
+Transient buckets (`unresolved_mirror_unavailable`, `unresolved_timeout`)
+retry on the next enqueue path; permanent buckets (`unresolved_no_data`,
+`unresolved_4xx_client`, `unresolved_field_missing_upstream`) record
+the audit trail without retry.
+
+### `request_search_summary` view (migration 031, consumed by PR4)
+
+Per-request 14-day rollup over `search_log` for the future operator
+triage surface. Plain VIEW, not materialised — operator triage
+frequency is human-paced and the bounded scan cost rides on the
+existing `idx_search_log_request_created_at` composite index.
+
+| Column | Type | Notes |
+|---|---|---|
+| `request_id` | `INTEGER` | Group key |
+| `total_searches` | `BIGINT` | Search count in the 14-day window |
+| `with_cands_count` | `BIGINT` | Rows where `candidates` JSONB is non-empty |
+| `found_count` | `BIGINT` | Rows where `outcome='found'` |
+| `near_cap_count` | `BIGINT` | Rows where `result_count >= 950` — popular albums hitting the 1000-cap |
+| `zero_results_count` | `BIGINT` | Rows where `result_count = 0` |
+| `pre_filter_skips_total` | `BIGINT` | Sum of `pre_filter_skip_count` (column added by migration 025) |
+| `first_strategy_with_cands` | `TEXT` | Oldest `plan_strategy` in the window that produced ≥1 candidate |
+| `dominant_rejection_reason` | `TEXT` | `MODE()` over `rejection_reason` (R22 column) for non-NULL rows |
+| `last_search_at` | `TIMESTAMPTZ` | `MAX(created_at)` |
+
+The 14-day window is intentional — triage windows that need older
+data should query `search_log` directly. (R29)
+
 ## `album_requests.manual_reason`
 
 A free-form `TEXT` column populated by system flips that move a request to `status='manual'`. Currently unused — the persisted-search-plans cutover replaced the legacy variant ladder's `exhausted` flow with cursor wrap (no manual flip). The column stays for future operator-hold workflows that need a structured reason without overloading the human-authored `reasoning` field. Cleared (`NULL`) on every `reset_to_wanted` so re-queue starts with a clean slate.

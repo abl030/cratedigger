@@ -601,11 +601,189 @@ list ordinals labelled `default` / `literal` / `literal_flac` /
 
 ## PR3 — Detection + telemetry
 
-Standard flake bump + rebuild. Adds a new `cratedigger-unfindable.service`
-oneshot + `cratedigger-unfindable.timer` (daily). The timer runs the
-first detection sweep ~24h after deploy.
+Code-only deploy (no schema migrations land). Wires `search_log`
+forensics writes (R22-R27), materialises `album_requests.failure_class`
+at plan-wrap (R28), ships the dedicated `cratedigger-unfindable.service`
+oneshot + `cratedigger-unfindable.timer` for the 4-bucket
+`unfindable_category` taxonomy (R18-R20), and captures the
+long-tail-rescue `rescued_at` / `prior_unfindable_category` audit on
+import success (R21).
 
-(Procedure documented when PR3 lands.)
+Deploy date: 2026-05-26.
+
+### 1. Pre-deploy
+
+#### 1.1 Backup the pipeline DB
+
+```bash
+ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
+  > /tmp/cratedigger_backup_pr3_$(date +%Y%m%d_%H%M%S).sql
+```
+
+PR3 mutates `album_requests` columns (`failure_class`,
+`unfindable_category`, `rescued_at`, `prior_unfindable_category`) and
+adds rows to `search_log` with the forensics columns populated.
+Backup before pulling the trigger.
+
+### 2. Deploy code
+
+```bash
+# 1. On dev: push code that landed PR3 (merged via PR #380)
+git push origin main
+
+# 2. On doc1: bump cratedigger-src flake input
+ssh doc1 'cd ~/nixosconfig && nix flake update cratedigger-src \
+  && git add flake.lock \
+  && git commit -m "cratedigger: PR3 — detection + telemetry" \
+  && git push'
+
+# 3. On doc2: rebuild. cratedigger-db-migrate is a no-op (no new
+#    migrations — 027-033 all shipped in PR1). cratedigger-web +
+#    cratedigger-importer restart. cratedigger.service is
+#    restartIfChanged=false; the 5-min timer picks up the new code.
+#    cratedigger-unfindable.{service,timer} land for the first time.
+ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+```
+
+### 3. Downstream wrapper hotfix — `EnvironmentFile` for the detection unit
+
+**Caught by the post-deploy smoke test on 2026-05-26.** The upstream
+module (`nix/module.nix`) exposes the `cratedigger-unfindable.service`
+shape with `Environment="PIPELINE_DB_DSN=..."` but does NOT inject
+sops secret paths — secret paths are host-owned (per the
+single-operator wrapper pattern used for `cratedigger.service` and
+`cratedigger-web.service`). First run failed with:
+
+```
+psycopg2.OperationalError: fe_sendauth: no password supplied
+```
+
+Fix landed in the downstream wrapper
+(`~/nixosconfig/modules/nixos/services/cratedigger.nix`, commit
+`113c203a`):
+
+```nix
+systemd.services.cratedigger-unfindable.serviceConfig.EnvironmentFile =
+  lib.mkAfter [config.sops.secrets."cratedigger-pgpass".path];
+```
+
+Mirror the pattern from the same wrapper's existing
+`cratedigger.service.serviceConfig.EnvironmentFile` augmentation —
+both units need libpq credentials from the same sops secret. Verify
+after the fix:
+
+```bash
+ssh doc2 'sudo systemctl cat cratedigger-unfindable.service | grep EnvironmentFile'
+```
+
+Should show `EnvironmentFile=/run/secrets/cratedigger-pgpass` in the
+override drop-in.
+
+### 4. Verify
+
+#### 4.1 Forensics columns populated on fresh cycle
+
+After the next 5-min cycle, sample new search_log rows:
+
+```bash
+ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
+SELECT
+  outcome,
+  rejection_reason,
+  matcher_score_top1,
+  query_template,
+  query_token_count,
+  query_distinct_token_count,
+  expected_track_count,
+  result_count,
+  result_count_uncapped
+FROM search_log
+WHERE created_at > NOW() - INTERVAL '\''10 min'\''
+ORDER BY id DESC
+LIMIT 5"'
+```
+
+Expect non-NULL values for the seven R22-R27 columns on every new
+row. Sample post-deploy on 2026-05-26 showed a representative
+`no_match` row with `rejection_reason='strict_count_mismatch'`,
+`matcher_score_top1=0.0`, `query_template='{artist} {title}'`.
+
+#### 4.2 failure_class materialisation
+
+After a few requests have cycle-wrapped post-deploy:
+
+```bash
+ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
+SELECT failure_class, COUNT(*)
+FROM album_requests
+WHERE status = '\''wanted'\''
+GROUP BY failure_class
+ORDER BY COUNT(*) DESC"'
+```
+
+Distribution populates as wanted requests wrap their cycles; rows that
+haven't yet wrapped under PR3 code stay `NULL`. Full coverage takes
+~1-2 cycles per request, so steady-state is typically reached within
+~24h on the 5-min cadence.
+
+#### 4.3 First detection-job smoke test
+
+```bash
+ssh doc2 'sudo systemctl start cratedigger-unfindable.service --no-block'
+ssh doc2 'sudo journalctl -u cratedigger-unfindable.service -f --since "10 min ago"'
+```
+
+First-run smoke test on 2026-05-26: 21 rows probed in ~8 min,
+distribution:
+
+| Category | Count |
+|---|---|
+| `album_absent_artist_present` | 18 |
+| `one_track_structural` | 3 |
+
+(The `one_track_structural` rows were already seeded by migration 033;
+the run re-asserted them.) The detection unit runs K=100 rows per
+batch on its daily timer with a weekly per-request cadence target —
+full cohort coverage takes ~9 days at this rate.
+
+Verify the categorisation surfaced:
+
+```bash
+ssh doc2 'sudo PGPASSWORD=$(sudo grep ^PGPASSWORD /run/secrets/cratedigger-pgpass | cut -d= -f2) pipeline-cli query --json "
+SELECT unfindable_category, COUNT(*)
+FROM album_requests
+WHERE status = '\''wanted'\''
+GROUP BY unfindable_category
+ORDER BY COUNT(*) DESC NULLS LAST"'
+```
+
+#### 4.4 systemd units healthy
+
+```bash
+ssh doc2 'systemctl is-active cratedigger-unfindable.timer'
+ssh doc2 'systemctl list-timers cratedigger-unfindable.timer'
+```
+
+Timer should be `active` with the next fire scheduled within ~24h +
+the `RandomizedDelaySec=30min` jitter.
+
+### 5. Known limitations / what this gives us
+
+- **No new migrations.** All 7 schema migrations (027-033) shipped in
+  PR1. PR3 is pure write-wiring + a new systemd unit pair.
+- **First-cycle `failure_class` coverage is incremental.** A request
+  only gets a `failure_class` when its cursor wraps under PR3 code.
+  Rows with very long plans wrap less often; expect a slow ramp to
+  full coverage over the first ~24h.
+- **Detection cohort coverage takes ~9 days.** K=100/day × ~830
+  wanted requests + weekly per-request cadence → first complete
+  sweep finishes in ~9 days. Cohort distribution numbers stabilise
+  after that.
+- **Rescue-capture is forward-only.** Requests imported before PR3
+  deploy that were categorised at the time do NOT retroactively
+  populate `rescued_at` — the importer success path only captures
+  rescues on imports that land under PR3 code. Forward-only by
+  design.
 
 ---
 
