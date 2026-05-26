@@ -1012,6 +1012,8 @@ class TestRouteContractAudit(unittest.TestCase):
     """Every web/routes.py endpoint must be covered by a frontend contract decision."""
 
     CLASSIFIED_ROUTES = {
+        # U18 step 2: self-documenting API surface.
+        "/api/_index",
         "/api/search",
         "/api/browse/resolve",
         "/api/library/artist",
@@ -1093,6 +1095,51 @@ class TestRouteContractAudit(unittest.TestCase):
         self.assertFalse(self.CLASSIFIED_ROUTES - actual,
                          f"Stale route classifications: {sorted(self.CLASSIFIED_ROUTES - actual)}")
 
+    def test_every_registered_route_has_a_description(self):
+        """U18 step 3: every registered route must carry a human-readable
+        one-liner in the parallel description dispatch tables. Fails if a
+        future route is added without one — fixing it is a one-line edit
+        in the route module."""
+        import web.server as srv
+
+        get_paths = set(srv.Handler._FUNC_GET_ROUTES.keys())
+        post_paths = set(srv.Handler._FUNC_POST_ROUTES.keys())
+        get_pattern_strs = {
+            p.pattern for p, _fn in srv.Handler._FUNC_GET_PATTERNS}
+        post_pattern_strs = {
+            p.pattern for p, _fn in srv.Handler._FUNC_POST_PATTERNS}
+
+        get_desc_paths = set(srv.Handler._FUNC_GET_DESCRIPTIONS.keys())
+        post_desc_paths = set(srv.Handler._FUNC_POST_DESCRIPTIONS.keys())
+        get_pattern_desc_strs = {
+            p.pattern for p, _d in srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS}
+        post_pattern_desc_strs = {
+            p.pattern for p, _d in srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS}
+
+        missing_get = get_paths - get_desc_paths
+        missing_post = post_paths - post_desc_paths
+        missing_get_patterns = get_pattern_strs - get_pattern_desc_strs
+        missing_post_patterns = post_pattern_strs - post_pattern_desc_strs
+
+        self.assertFalse(
+            missing_get,
+            f"GET routes missing descriptions: {sorted(missing_get)}",
+        )
+        self.assertFalse(
+            missing_post,
+            f"POST routes missing descriptions: {sorted(missing_post)}",
+        )
+        self.assertFalse(
+            missing_get_patterns,
+            "GET pattern routes missing descriptions: "
+            f"{sorted(missing_get_patterns)}",
+        )
+        self.assertFalse(
+            missing_post_patterns,
+            "POST pattern routes missing descriptions: "
+            f"{sorted(missing_post_patterns)}",
+        )
+
 
 class TestRouteDescriptionMechanism(unittest.TestCase):
     """U18 step 1: structural test that the route-description dispatch tables exist.
@@ -1140,6 +1187,48 @@ class TestRouteDescriptionMechanism(unittest.TestCase):
             self.assertEqual(len(entry), 2)
             self.assertIsInstance(entry[0], re.Pattern)
             self.assertIsInstance(entry[1], str)
+
+
+class TestApiIndexRouteContract(_WebServerCase):
+    """U18 step 2: contract test for the self-documenting ``/api/_index``."""
+
+    INDEX_ENTRY_REQUIRED_FIELDS = {
+        "method", "path", "description", "request_model",
+    }
+
+    def test_api_index_returns_classified_routes_with_pydantic_models(self):
+        status, data = self._get("/api/_index")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(data, list)
+        # We register ~40+ routes; assert a healthy floor so a regression
+        # that empties the merge can't silently sneak through.
+        self.assertGreaterEqual(len(data), 30, msg=f"only {len(data)} entries")
+
+        for entry in data:
+            _assert_required_fields(
+                self, entry, self.INDEX_ENTRY_REQUIRED_FIELDS,
+                f"_index entry {entry.get('path')!r}",
+            )
+            self.assertIn(entry["method"], {"GET", "POST"})
+            self.assertIsInstance(entry["path"], str)
+            self.assertIsInstance(entry["description"], str)
+
+        # The Pydantic introspection must surface at least one known
+        # POST handler so we know the regex is biting the real source.
+        post_models = {
+            (e["path"], e["request_model"])
+            for e in data if e["method"] == "POST"
+        }
+        self.assertIn(
+            ("/api/pipeline/add", "PipelineAddRequest"),
+            post_models,
+            f"PipelineAddRequest not surfaced in post_models: {post_models}",
+        )
+
+        # Sort invariant — operators consume this as a stable index.
+        sorted_entries = sorted(
+            data, key=lambda e: (str(e["method"]), str(e["path"])))
+        self.assertEqual(data, sorted_entries)
 
 
 class TestPipelineRouteContracts(_WebServerCase):

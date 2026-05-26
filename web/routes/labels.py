@@ -203,7 +203,15 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
 ]
 
 # Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / GET_PATTERNS dispatch tables above. Populated incrementally;
-# empty entries are intentional until U18 step 2.
-GET_DESCRIPTIONS: dict[str, str] = {}
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
+# GET_ROUTES / GET_PATTERNS dispatch tables above.
+GET_DESCRIPTIONS: dict[str, str] = {
+    "/api/discogs/label/search": (
+        "Discogs label search — returns label entities (no release overlay)."
+    ),
+}
+PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/discogs/label/(\d+)$"),
+     "Discogs label detail — entity + paginated release catalogue with "
+     "library/pipeline overlay; auto-flips include_sublabels off for "
+     "UMG-class big labels."),
+]

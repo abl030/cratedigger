@@ -2549,7 +2549,104 @@ def get_triage_list(
     h._json(payload)
 
 
+# --- U18 step 2: /api/_index — self-documenting API surface ----------------
+#
+# Walks ``web.server.Handler``'s merged dispatch tables and emits one row per
+# registered route: path/pattern, method, description, and the Pydantic
+# ``*Request`` model name extracted from the handler's body. The Pydantic
+# field comes from ``inspect.getsource`` + a regex against the canonical
+# ``parse_body(h, body, SomeRequest)`` shape — see
+# ``code-quality.md`` § "HTTP request bodies — use pydantic.BaseModel".
+#
+# Frontends and the CLI's ``routes`` command both consume this to build
+# self-documenting indexes — keep the response shape stable.
+
+_PARSE_BODY_RE = re.compile(
+    # Match ``parse_body(h, body, ModelClass)`` and the
+    # ``parse_body(h, body or {}, ModelClass)`` variant used by route
+    # handlers whose body may be empty.
+    r"parse_body\s*\(\s*[A-Za-z_][\w]*\s*,\s*[^,]+?\s*,\s*"
+    r"([A-Za-z_][\w]*)\s*\)"
+)
+
+
+def _extract_request_model(fn: object) -> str | None:
+    """Pull the Pydantic ``*Request`` model name from a POST handler.
+
+    Returns the class name found in the first ``parse_body(h, body, X)``
+    call inside the handler's source, or None if the handler doesn't
+    use Pydantic.
+    """
+    if not callable(fn):
+        return None
+    import inspect
+    try:
+        source = inspect.getsource(fn)  # type: ignore[arg-type]
+    except (OSError, TypeError):
+        return None
+    m = _PARSE_BODY_RE.search(source)
+    return m.group(1) if m else None
+
+
+def get_api_index(h, params: dict[str, list[str]]) -> None:
+    """``GET /api/_index`` — self-documenting API surface.
+
+    Returns a list of ``{method, path, description, request_model}`` rows
+    sorted by ``(method, path)``. ``path`` is the registered string for
+    static routes and the compiled regex pattern for pattern routes.
+    ``request_model`` is the Pydantic model name for POST handlers that
+    use ``parse_body``; null otherwise.
+    """
+    from web import server as srv
+
+    entries: list[dict[str, object]] = []
+
+    for path, fn in srv.Handler._FUNC_GET_ROUTES.items():
+        entries.append({
+            "method": "GET",
+            "path": path,
+            "description": srv.Handler._FUNC_GET_DESCRIPTIONS.get(path, ""),
+            "request_model": None,
+        })
+
+    get_pattern_desc_by_str = {
+        p.pattern: d
+        for p, d in srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS
+    }
+    for pattern, _fn in srv.Handler._FUNC_GET_PATTERNS:
+        entries.append({
+            "method": "GET",
+            "path": pattern.pattern,
+            "description": get_pattern_desc_by_str.get(pattern.pattern, ""),
+            "request_model": None,
+        })
+
+    for path, fn in srv.Handler._FUNC_POST_ROUTES.items():
+        entries.append({
+            "method": "POST",
+            "path": path,
+            "description": srv.Handler._FUNC_POST_DESCRIPTIONS.get(path, ""),
+            "request_model": _extract_request_model(fn),
+        })
+
+    post_pattern_desc_by_str = {
+        p.pattern: d
+        for p, d in srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS
+    }
+    for pattern, fn in srv.Handler._FUNC_POST_PATTERNS:
+        entries.append({
+            "method": "POST",
+            "path": pattern.pattern,
+            "description": post_pattern_desc_by_str.get(pattern.pattern, ""),
+            "request_model": _extract_request_model(fn),
+        })
+
+    entries.sort(key=lambda e: (str(e["method"]), str(e["path"])))
+    h._json(entries)
+
+
 GET_ROUTES: dict[str, object] = {
+    "/api/_index": get_api_index,
     "/api/pipeline/log": get_pipeline_log,
     "/api/pipeline/status": get_pipeline_status,
     "/api/pipeline/recent": get_pipeline_recent,
@@ -2608,18 +2705,123 @@ POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
 
 # Human-readable descriptions for the route index (U18). Parallel to the
 # GET_ROUTES / GET_PATTERNS / POST_ROUTES / POST_PATTERNS dispatch tables
-# above. Populated incrementally; empty entries are intentional until U18
-# step 2.
+# above.
 GET_DESCRIPTIONS: dict[str, str] = {
+    "/api/_index": (
+        "Self-documenting API surface — every route's path, method, "
+        "description, and Pydantic request model."
+    ),
+    "/api/pipeline/log": (
+        "Recent download_log rows with per-row classification badges + "
+        "rolling found-search counts."
+    ),
+    "/api/pipeline/status": (
+        "Status counts + the first 50 wanted requests for the dashboard."
+    ),
+    "/api/pipeline/recent": (
+        "Recently updated pipeline requests with beets / pipeline / "
+        "download-history enrichment."
+    ),
+    "/api/pipeline/all": (
+        "All pipeline requests bucketed by status; latest download "
+        "history attached per row. include_replaced=true opts in to "
+        "frozen audit rows."
+    ),
+    "/api/pipeline/downloading": (
+        "Pipeline requests currently in the downloading status."
+    ),
+    "/api/pipeline/dashboard": (
+        "Operational metrics for the dashboard subtab (searches, "
+        "cycles, redis)."
+    ),
+    "/api/pipeline/constants": (
+        "Decision tree structure + thresholds for the Decisions diagram."
+    ),
+    "/api/pipeline/simulate": (
+        "Run the full pipeline decision with query-string inputs "
+        "(simulator)."
+    ),
+    "/api/import-jobs": (
+        "Recent import-queue jobs filtered by status / request_id."
+    ),
+    "/api/import-jobs/timeline": (
+        "Recent import-queue jobs with request metadata attached "
+        "(timeline view)."
+    ),
+    "/api/pipeline/active-rgs": (
+        "Distinct release-group IDs held by any non-replaced request "
+        "(Replace-button enable set)."
+    ),
     "/api/triage/list": (
         "Cohort triage listing — filter by unfindable category, "
         "field-quality reason, or search-not-converting state."
     ),
 }
-POST_DESCRIPTIONS: dict[str, str] = {}
+POST_DESCRIPTIONS: dict[str, str] = {
+    "/api/pipeline/add": (
+        "Add a new pipeline request by MB or Discogs release id."
+    ),
+    "/api/pipeline/update": (
+        "Change the status of a pipeline request."
+    ),
+    "/api/pipeline/upgrade": (
+        "Queue an upgrade search for a release (lossless tiers, MB / "
+        "Discogs aware)."
+    ),
+    "/api/pipeline/set-quality": (
+        "Set a request's min_bitrate and/or status."
+    ),
+    "/api/pipeline/set-intent": (
+        "Toggle lossless-on-disk intent for a request."
+    ),
+    "/api/pipeline/ban-source": (
+        "Mark a rip as bad: denylist the uploader, hash + bad-byte "
+        "ripple-stop, and remove from beets."
+    ),
+    "/api/pipeline/force-import": (
+        "Enqueue a force-import job for a rejected download_log row."
+    ),
+    "/api/pipeline/delete": (
+        "Delete a pipeline request (blocked when a superseding "
+        "request exists)."
+    ),
+}
 PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$"),
+     "Real beets match distance for one (download_log_id, mbid) pair; "
+     "refuses cross-release-group comparisons."),
+    (re.compile(r"^/api/pipeline/(\d+)$"),
+     "Full pipeline request detail — tracks, download history, last "
+     "search, beets tracks if present."),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
+     "Read-only view of a request's persisted search plan (cursor, "
+     "items, provenance, per-slot stats)."),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/dry-run$"),
+     "Generator simulator — runs generate_search_plan against the "
+     "current snapshot without writing."),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/saturation$"),
+     "Saturation rate + pre-filter skip total over a recent search_log "
+     "window for this request."),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
+     "Cursor-paginated read of one request's search_log rows."),
+    (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),
+     "Non-replaced album_requests rows sharing the given release "
+     "group, id-descending."),
+    (re.compile(r"^/api/import-jobs/(\d+)$"),
+     "Single import-job detail by job id."),
     (re.compile(r"^/api/triage/(\d+)$"),
      "Per-request triage composition — unfindable categorisation, "
      "field-resolution telemetry, search-log forensics."),
 ]
-POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
+POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/regenerate$"),
+     "Regenerate the search plan for a request."),
+    (re.compile(r"^/api/pipeline/(\d+)/search-plan/advance$"),
+     "Forward-only operator advance of the search-plan cursor "
+     "(by ordinal or strategy prefix)."),
+    (re.compile(r"^/api/pipeline/(\d+)/replace$"),
+     "Supersede the source request with a new row at a different "
+     "MBID in the same release group."),
+    (re.compile(r"^/api/pipeline/(\d+)/resolve-rg$"),
+     "Lazy-backfill mb_release_group_id for a legacy request row."),
+]

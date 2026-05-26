@@ -3022,5 +3022,61 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertNotIn("--after=", out)
 
 
+class TestPipelineCliRoutes(unittest.TestCase):
+    """U18 step 3: ``pipeline-cli routes`` self-documents the CLI surface."""
+
+    def _run_routes(
+        self, json_mode: bool = False,
+    ) -> tuple[int, str]:
+        argv = ["pipeline_cli.py", "routes"]
+        if json_mode:
+            argv.append("--json")
+        # ``cmd_routes`` doesn't need a DB; ``main()`` short-circuits the
+        # PipelineDB construction for this subcommand. The patch is still
+        # in place defensively in case a future caller flips that wiring.
+        db = FakePipelineDB()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.PipelineDB", return_value=db,
+        ), redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+        code = raised.exception.code
+        return (code if isinstance(code, int) else 0), out.getvalue()
+
+    def test_routes_text_lists_known_subcommands(self):
+        rc, output = self._run_routes()
+        self.assertEqual(rc, 0)
+        # Top-level subcommands that exist regardless of nested routing.
+        self.assertIn("list", output)
+        self.assertIn("status", output)
+        # Nested commands are emitted as space-separated leaves.
+        self.assertIn("search-plan show", output)
+        self.assertIn("triage list", output)
+        # The ``routes`` command must self-describe.
+        self.assertIn("routes", output)
+
+    def test_routes_json_emits_shape_matching_help_metadata(self):
+        rc, output = self._run_routes(json_mode=True)
+        self.assertEqual(rc, 0)
+        data = json.loads(output)
+        self.assertIsInstance(data, list)
+        for entry in data:
+            self.assertIn("subcommand", entry)
+            self.assertIn("args", entry)
+            self.assertIn("description", entry)
+            self.assertIsInstance(entry["subcommand"], str)
+            self.assertIsInstance(entry["args"], list)
+            self.assertIsInstance(entry["description"], str)
+        names = {entry["subcommand"] for entry in data}
+        for expected in ("list", "search-plan show", "triage list", "routes"):
+            self.assertIn(expected, names)
+
+        # Sort invariant — operators consume this as a stable index.
+        names_sorted = sorted(names)
+        self.assertEqual(
+            [entry["subcommand"] for entry in data], names_sorted,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

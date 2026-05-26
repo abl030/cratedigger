@@ -1001,7 +1001,46 @@ POST_ROUTES: dict[str, object] = {
 }
 
 # Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / POST_ROUTES dispatch tables above. Populated incrementally;
-# empty entries are intentional until U18 step 2.
-GET_DESCRIPTIONS: dict[str, str] = {}
-POST_DESCRIPTIONS: dict[str, str] = {}
+# GET_ROUTES / POST_ROUTES dispatch tables above.
+GET_DESCRIPTIONS: dict[str, str] = {
+    "/api/manual-import/scan": (
+        "Scan a Complete folder for album dirs and fuzzy-match each to "
+        "wanted pipeline requests."
+    ),
+    "/api/wrong-matches": (
+        "Wrong-match queue — rejected downloads grouped by request, with "
+        "per-entry quality + on-disk fields for operator review."
+    ),
+    "/api/wrong-matches/audio": (
+        "Stream one wrong-match audio file with byte-range support."
+    ),
+    "/api/wrong-matches/explorer": (
+        "Filesystem-backed file/tag explorer payload for one wrong match."
+    ),
+}
+POST_DESCRIPTIONS: dict[str, str] = {
+    "/api/manual-import/import": (
+        "Enqueue a manual-import job for an on-disk folder against a "
+        "pipeline request."
+    ),
+    "/api/import-preview": (
+        "Preview whether an import would pass — accepts typed values, "
+        "a download_log_id, or a request_id+path."
+    ),
+    "/api/wrong-matches/delete": (
+        "Operator-triggered deletion of one visible Wrong Matches "
+        "candidate (DESTRUCTIVE on disk)."
+    ),
+    "/api/wrong-matches/delete-group": (
+        "Operator-triggered deletion of all current Wrong Matches for "
+        "a request (DESTRUCTIVE on disk)."
+    ),
+    "/api/wrong-matches/converge": (
+        "Queue acceptable candidates for force-import and delete the "
+        "rest for one request (one-click cleanup)."
+    ),
+    "/api/wrong-matches/triage": (
+        "Run the full Wrong Matches cleanup classifier across the queue "
+        "(DESTRUCTIVE); requires confirm_all_wrong_matches=true."
+    ),
+}
