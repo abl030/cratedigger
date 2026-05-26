@@ -135,6 +135,8 @@ the canonical resolver service's surface; it doesn't live in
 import os
 from lib.pipeline_db import PipelineDB
 from lib.field_resolver_service import apply_resolve_all_result, resolve_all
+from web.mb import get_release_raw, get_release_group
+from web.discogs import get_release as discogs_get_release
 
 dsn = os.environ["PIPELINE_DB_DSN"]
 db = PipelineDB(dsn)
@@ -152,7 +154,38 @@ print(f"backfill: walking {total} wanted requests")
 
 for i, row in enumerate(rows, start=1):
     try:
-        result = resolve_all(row, db, budget_seconds=10.0)
+        # IMPORTANT: fetch upstream payloads and thread them through to
+        # resolve_all. detect_va_compilation Rules 2 (Compilation rg +
+        # divergent track credits) and 3 (split-artist joinphrase) both
+        # require mb_release_payload. Old rows where mb_artist_id is
+        # NULL (Rule 1 silenced) are silently mis-classified as
+        # is_va_compilation=False if the payloads are omitted —
+        # apply_resolve_all_result then writes that wrong verdict
+        # unconditionally. The web add path
+        # (web/routes/pipeline.py::post_pipeline_add) fetches via
+        # get_release_raw and threads through; mirror that here.
+        mb_payload = None
+        rg_payload = None
+        discogs_payload = None
+        if row.get("mb_release_id"):
+            mb_payload = get_release_raw(row["mb_release_id"], fresh=False)
+        if row.get("mb_release_group_id"):
+            try:
+                rg_payload = get_release_group(row["mb_release_group_id"])
+            except Exception:
+                rg_payload = None
+        if row.get("discogs_release_id") and not mb_payload:
+            try:
+                discogs_payload = discogs_get_release(
+                    int(row["discogs_release_id"]), fresh=False)
+            except Exception:
+                discogs_payload = None
+        result = resolve_all(
+            row, db, budget_seconds=10.0,
+            mb_release_payload=mb_payload,
+            mb_release_group_payload=rg_payload,
+            discogs_release_payload=discogs_payload,
+        )
         apply_resolve_all_result(
             db, int(row["id"]), result,
             existing_mb_release_group_id=row.get("mb_release_group_id"),
@@ -169,6 +202,11 @@ PY
 The one-shot uses the same `apply_resolve_all_result` helper that the
 web + CLI add paths use (`lib/field_resolver_service.py`), so the
 per-row update shape can never drift between enqueue and backfill.
+The payload-fetching pattern (`get_release_raw` + `get_release_group`
+threaded through `resolve_all`) mirrors `post_pipeline_add` for the
+same reason — without it, VA detection silently degrades to Rule 1
+only and old rows with NULL `mb_artist_id` mis-classify (#378 burned
+this on 2026-05-26).
 
 Total runtime is dominated by per-track MB/Discogs round-trips;
 expect 10–15 minutes wall clock against ~830 requests. The script is
