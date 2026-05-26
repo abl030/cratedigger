@@ -110,6 +110,25 @@ def main() -> int:
     try:
         slskd_client = _build_slskd_client(cfg)
         service = UnfindableDetectionService(db, slskd_client)
+        # Backlog visibility: surface the cohort size before the batch
+        # so operators can spot a growing tail. The detection batch is
+        # cap-limited at ``--limit`` (default DEFAULT_BATCH_SIZE) per
+        # run; if the due-count keeps growing well beyond the cap the
+        # daily cadence is no longer draining the backlog and the
+        # operator should bump the limit (or the timer frequency).
+        # Re-uses the same ``list_unfindable_probe_candidates`` SQL
+        # the service uses, just with a generous upper bound so the
+        # count reflects the real backlog rather than the batch cap.
+        # The probe interval here matches the service's internal
+        # constant (no kwarg overrides — single source of truth).
+        from lib.unfindable_detection_service import PROBE_INTERVAL_DAYS
+        backlog = db.list_unfindable_probe_candidates(
+            limit=10_000, probe_interval_days=PROBE_INTERVAL_DAYS,
+        )
+        logger.info(
+            "unfindable_detection: backlog due_count=%d batch_limit=%d",
+            len(backlog), int(args.limit),
+        )
         results = service.categorise_due_batch(limit=int(args.limit))
         counts = _summarise(results)
         # Log per-row outcomes at INFO so journalctl grep is fruitful.

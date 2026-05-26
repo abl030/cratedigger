@@ -1000,7 +1000,13 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = [preStartScript];
+        # Same ExecStartPre shape as cratedigger.service: gate on
+        # slskd reachability when the operator has health-check
+        # enabled, then render the config. The detection job hits
+        # slskd just as much as the main loop does, so a slskd
+        # outage should fail the unit fast rather than write
+        # garbage probe-failed rows for every cohort member.
+        ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
         Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;
@@ -1017,9 +1023,11 @@ in {
       timerConfig = {
         OnCalendar = "daily";
         Persistent = true;
-        # Spread the daily fire across a window so a synchronised swarm
-        # of identical NixOS deployments doesn't pile onto slskd at the
-        # exact same wall-clock instant.
+        # Jitter the daily fire so the detection batch does not
+        # collide with other midnight tasks on doc2 (logrotate,
+        # postgres autovacuum, etc.). Single-operator install — there
+        # is no fleet of NixOS deployments to spread across, the
+        # randomisation is purely a local cron-collision avoidance.
         RandomizedDelaySec = "30min";
       };
     };
