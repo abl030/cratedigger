@@ -9485,5 +9485,130 @@ class TestUnfindableDetectionSlice(unittest.TestCase):
                          CATEGORY_WRONG_PRESSING_AVAILABLE)
 
 
+# ---------------------------------------------------------------------------
+# U14. Long-tail-rescue capture — integration slice (real PG atomicity)
+# ---------------------------------------------------------------------------
+
+
+class TestRescueCaptureSlice(unittest.TestCase):
+    """U14 integration slice: real-PG ``mark_imported_with_rescue`` atomicity.
+
+    The unit-level tests in ``test_pipeline_db.py`` already pin the
+    happy paths and one-shot semantics against the real PG fixture.
+    This slice nails down the contract that matters operationally:
+    a forced mid-flow failure must roll back ALL four writes
+    together, leaving the row indistinguishable from the pre-call
+    state. Without the autocommit-flip + try/finally pattern, three
+    separate UPDATEs would leave a half-rescued row in the audit
+    trail forever.
+
+    Covers AE6 (rescue capture round-trips through the real DB).
+    """
+
+    def setUp(self):
+        import psycopg2
+        from lib.pipeline_db import PipelineDB
+        self._psycopg2 = psycopg2
+        self.db = PipelineDB(_u7_test_dsn())
+        self.addCleanup(self.db.close)
+        self._mbids: list[str] = []
+
+    def tearDown(self):
+        if self._mbids:
+            conn = self._psycopg2.connect(_u7_test_dsn())
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM album_requests WHERE mb_release_id = ANY(%s)",
+                        (self._mbids,),
+                    )
+            finally:
+                conn.close()
+
+    def _seed(self, *, mbid: str, category: str) -> int:
+        from datetime import datetime, timezone
+
+        self._mbids.append(mbid)
+        rid = self.db.add_request(
+            mb_release_id=mbid,
+            artist_name="Rescue Slice",
+            album_title="Slice Album",
+            source="request",
+        )
+        self.db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (rid,),
+        )
+        self.db.set_unfindable_category(
+            rid, category=category,
+            categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        )
+        return rid
+
+    def test_round_trip_rescue_capture_writes_all_four_columns(self):
+        """End-to-end: categorised row + import → all four writes land."""
+        rid = self._seed(mbid="slice-happy-rescue", category="artist_absent")
+
+        self.db.mark_imported_with_rescue(rid, beets_distance=0.07)
+
+        row = self.db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        self.assertIsNone(row["unfindable_category"])
+        self.assertIsNotNone(row["rescued_at"])
+        self.assertEqual(float(row["beets_distance"]), 0.07)
+
+    def test_mid_flow_failure_rolls_back_all_four_writes_together(self):
+        """A forced UPDATE failure must leave the row in its original state.
+
+        Forces an exception inside the autocommit-disabled
+        transaction by passing an extra kwarg that references a
+        non-existent column; ``UndefinedColumn`` raises AFTER the row
+        lock has been taken and BEFORE the commit fires — the exact
+        mid-flow scenario the autocommit-flip pattern protects
+        against. Without ``conn.autocommit=False`` + try/finally
+        rollback the partial UPDATEs would leave observable
+        corruption (e.g. ``unfindable_category`` cleared but
+        ``rescued_at`` NULL — a row that lies about whether it was
+        ever rescued).
+        """
+        rid = self._seed(
+            mbid="slice-atomic-rollback", category="wrong_pressing_available",
+        )
+
+        before = self.db.get_request(rid)
+        assert before is not None
+        self.assertEqual(before["status"], "downloading")
+        self.assertEqual(
+            before["unfindable_category"], "wrong_pressing_available")
+
+        with self.assertRaises(Exception):
+            self.db.mark_imported_with_rescue(
+                rid, column_that_does_not_exist=1,
+            )
+
+        after = self.db.get_request(rid)
+        assert after is not None
+        # Status untouched.
+        self.assertEqual(after["status"], "downloading")
+        # Category untouched.
+        self.assertEqual(
+            after["unfindable_category"], "wrong_pressing_available")
+        # Rescue columns NEVER landed.
+        self.assertIsNone(after["rescued_at"])
+        self.assertIsNone(after["prior_unfindable_category"])
+        # The connection is autocommit-restored so subsequent calls work.
+        self.assertTrue(self.db.conn.autocommit)
+        # Sanity: the next call still works.
+        self.db.mark_imported_with_rescue(rid, beets_distance=0.07)
+        retried = self.db.get_request(rid)
+        assert retried is not None
+        self.assertEqual(retried["status"], "imported")
+        self.assertEqual(
+            retried["prior_unfindable_category"], "wrong_pressing_available")
+
+
 if __name__ == "__main__":
     unittest.main()

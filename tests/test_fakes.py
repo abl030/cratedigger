@@ -3905,5 +3905,92 @@ class TestFakePipelineDBUnfindable(unittest.TestCase):
         self.assertGreaterEqual(len(db.advance_search_plan_cursor_calls), 1)
 
 
+class TestFakePipelineDBRescueCapture(unittest.TestCase):
+    """U14: ``FakePipelineDB.mark_imported_with_rescue`` self-tests.
+
+    Mirrors the real-PG contract in ``test_pipeline_db.py``:
+    happy-path rescue stamp, no-prior-category no-op, one-shot
+    immutability after a prior rescue, and atomic semantics on the
+    in-memory store (rollback simulation via patched commit).
+    """
+
+    UNFINDABLE_CATEGORIES = (
+        "artist_absent",
+        "album_absent_artist_present",
+        "one_track_structural",
+        "wrong_pressing_available",
+    )
+
+    def _seed_downloading(self, db, *, category=None, rescued_at=None,
+                          prior_category=None):
+        rid = db.add_request(
+            artist_name="Rescue", album_title="Album",
+            source="request",
+            mb_release_id=f"m-rescue-{category or 'none'}",
+        )
+        db.update_status(rid, "downloading", state_json="{}")
+        if category is not None:
+            ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
+            db.set_unfindable_category(
+                rid, category=category, categorised_at=ts,
+            )
+        if rescued_at is not None or prior_category is not None:
+            db._requests[rid]["rescued_at"] = rescued_at
+            db._requests[rid]["prior_unfindable_category"] = prior_category
+        return rid
+
+    def test_rescue_writes_three_columns_for_each_category(self) -> None:
+        for category in self.UNFINDABLE_CATEGORIES:
+            with self.subTest(category=category):
+                db = FakePipelineDB()
+                rid = self._seed_downloading(db, category=category)
+
+                db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+                row = db.request(rid)
+                self.assertEqual(row["status"], "imported")
+                self.assertIsNone(row["unfindable_category"])
+                self.assertEqual(
+                    row["prior_unfindable_category"], category)
+                self.assertIsNotNone(row["rescued_at"])
+                # Imported-side extras still flow through.
+                self.assertEqual(row["beets_distance"], 0.05)
+                # status_history records the transition.
+                self.assertIn((rid, "imported"), db.status_history)
+
+    def test_no_rescue_stamp_when_unfindable_was_null(self) -> None:
+        db = FakePipelineDB()
+        rid = self._seed_downloading(db, category=None)
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.1)
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["rescued_at"])
+        self.assertIsNone(row["prior_unfindable_category"])
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_first_rescue_wins_re_import_is_a_noop_on_audit_columns(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        rid = self._seed_downloading(
+            db,
+            category="wrong_pressing_available",
+            rescued_at=original_rescue_at,
+            prior_category="artist_absent",
+        )
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["rescued_at"], original_rescue_at)
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        # The current category is still cleared.
+        self.assertIsNone(row["unfindable_category"])
+
+
 if __name__ == "__main__":
     unittest.main()

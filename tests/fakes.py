@@ -1458,6 +1458,49 @@ class FakePipelineDB:
             row[key] = val
         self.status_history.append((request_id, status))
 
+    def mark_imported_with_rescue(
+        self,
+        request_id: int,
+        **extra: Any,
+    ) -> None:
+        """Mirror ``PipelineDB.mark_imported_with_rescue`` (U14).
+
+        Atomic in-memory equivalent: writes ``status='imported'``,
+        clears ``unfindable_category``, and on the FIRST rescue stamps
+        ``rescued_at`` + ``prior_unfindable_category``. Reserved
+        kwargs the production method rejects are rejected here too.
+        """
+        reserved = {
+            "status", "active_download_state", "updated_at",
+            "rescued_at", "prior_unfindable_category", "unfindable_category",
+            "unfindable_categorised_at",
+        }
+        bad = set(extra) & reserved
+        if bad:
+            raise ValueError(
+                "mark_imported_with_rescue: reserved kwargs not allowed: "
+                + ", ".join(sorted(bad))
+            )
+        row = self._requests.get(request_id)
+        if row is None:
+            return
+        now = _utcnow()
+        current_category = row.get("unfindable_category")
+        already_rescued = row.get("rescued_at") is not None
+
+        row["status"] = "imported"
+        row["active_download_state"] = None
+        row["updated_at"] = now
+        if current_category is not None:
+            row["unfindable_category"] = None
+            row["unfindable_categorised_at"] = now
+        if current_category is not None and not already_rescued:
+            row["rescued_at"] = now
+            row["prior_unfindable_category"] = current_category
+        for key, val in extra.items():
+            row[key] = val
+        self.status_history.append((request_id, "imported"))
+
     def update_imported_path_by_release_id(
         self,
         *,

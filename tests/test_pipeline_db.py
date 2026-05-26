@@ -6777,5 +6777,168 @@ class TestFieldResolutionRecording(unittest.TestCase):
         self.assertIsNone(db.get_field_resolution(req_id, "track_artist"))
 
 
+@requires_postgres
+class TestMarkImportedWithRescue(unittest.TestCase):
+    """U14: long-tail-rescue event capture against real PG.
+
+    Pins the atomic four-write contract:
+      1. ``status`` → ``'imported'``
+      2. ``rescued_at`` → ``NOW()`` (when prior unfindable category set)
+      3. ``prior_unfindable_category`` → the cleared category value
+      4. ``unfindable_category`` → ``NULL`` (the rescue IS the resolution)
+
+    All four mutations commit together OR none of them apply. The
+    method follows the ``replace_request_with_new_mbid`` autocommit-flip
+    pattern: ``conn.autocommit=False`` + explicit ``commit()`` /
+    ``rollback()`` in try/finally.
+    """
+
+    UNFINDABLE_CATEGORIES = (
+        "artist_absent",
+        "album_absent_artist_present",
+        "one_track_structural",
+        "wrong_pressing_available",
+    )
+
+    def _seed_wanted(self, db, *, category=None, rescued_at=None,
+                     prior_category=None):
+        rid = db.add_request(
+            mb_release_id=f"rescue-{category or 'none'}",
+            artist_name="Rescue Artist",
+            album_title="Rescue Album",
+            source="request",
+        )
+        # Move to downloading so the imported transition is the canonical one.
+        db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (rid,),
+        )
+        if category is not None:
+            ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
+            db.set_unfindable_category(
+                rid, category=category, categorised_at=ts,
+            )
+        if rescued_at is not None or prior_category is not None:
+            db._execute(
+                "UPDATE album_requests "
+                "SET rescued_at = %s, prior_unfindable_category = %s "
+                "WHERE id = %s",
+                (rescued_at, prior_category, rid),
+            )
+        return rid
+
+    def test_rescue_writes_three_columns_on_first_import_from_unfindable(self):
+        """Happy path: row with unfindable_category gets rescue stamp."""
+        for category in self.UNFINDABLE_CATEGORIES:
+            with self.subTest(category=category):
+                db = make_db()
+                rid = self._seed_wanted(db, category=category)
+
+                db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+                row = db.get_request(rid)
+                assert row is not None
+                self.assertEqual(row["status"], "imported")
+                self.assertIsNone(row["unfindable_category"])
+                self.assertEqual(
+                    row["prior_unfindable_category"], category)
+                self.assertIsNotNone(row["rescued_at"])
+                # Sanity: the imported extras also landed.
+                self.assertEqual(float(row["beets_distance"]), 0.05)
+
+    def test_no_rescue_stamp_when_unfindable_was_null(self):
+        """No prior category → ``rescued_at`` stays NULL."""
+        db = make_db()
+        rid = self._seed_wanted(db, category=None)
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["rescued_at"])
+        self.assertIsNone(row["prior_unfindable_category"])
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_first_rescue_wins_re_import_does_not_overwrite(self):
+        """One-shot capture: a row already rescued is not re-stamped.
+
+        Simulates: rescued → Replace → new request → re-categorised →
+        imports again. The second import must NOT bump ``rescued_at``
+        nor change ``prior_unfindable_category``. Original rescue
+        instant is the canonical audit record.
+        """
+        db = make_db()
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        rid = self._seed_wanted(
+            db,
+            category="album_absent_artist_present",
+            rescued_at=original_rescue_at,
+            prior_category="artist_absent",
+        )
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        # rescued_at is immutable once set.
+        self.assertEqual(row["rescued_at"], original_rescue_at)
+        # prior_unfindable_category is immutable too — original rescue wins.
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        # Current unfindable_category is still cleared (the rescue IS
+        # the resolution, regardless of one-shot-stamp semantics).
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_atomic_rollback_on_mid_transaction_failure(self):
+        """A forced failure inside the transaction leaves the row untouched.
+
+        Forces an exception inside the autocommit-disabled block by
+        passing an ``extra`` kwarg that references a non-existent
+        column. The dynamic ``UPDATE`` raises ``UndefinedColumn``
+        AFTER the row lock + read have been taken but BEFORE the
+        commit fires — exactly the mid-flow scenario the autocommit-
+        flip pattern exists to protect against.
+
+        Without ``autocommit=False`` + try/finally, three separate
+        UPDATEs in autocommit mode would leave a half-rescued row in
+        the audit trail. With the pattern, the row is rolled back to
+        its pre-call state and autocommit is restored for subsequent
+        calls.
+        """
+        db = make_db()
+        rid = self._seed_wanted(db, category="artist_absent")
+
+        before = db.get_request(rid)
+        assert before is not None
+        self.assertEqual(before["status"], "downloading")
+        self.assertEqual(before["unfindable_category"], "artist_absent")
+
+        with self.assertRaises(Exception):
+            # ``column_that_does_not_exist`` rides through the
+            # dynamic ``sets`` builder into the UPDATE statement,
+            # raising ``UndefinedColumn`` inside the transaction.
+            db.mark_imported_with_rescue(
+                rid, column_that_does_not_exist=1,
+            )
+
+        # All writes rolled back together — the row is untouched.
+        after = db.get_request(rid)
+        assert after is not None
+        self.assertEqual(after["status"], "downloading")
+        self.assertEqual(after["unfindable_category"], "artist_absent")
+        self.assertIsNone(after["rescued_at"])
+        self.assertIsNone(after["prior_unfindable_category"])
+        # Autocommit restored after the failure so subsequent calls work.
+        self.assertTrue(db.conn.autocommit)
+        # Sanity: the next call still works (proves rollback cleared
+        # the failed transaction state).
+        db.mark_imported_with_rescue(rid, beets_distance=0.07)
+        retried = db.get_request(rid)
+        assert retried is not None
+        self.assertEqual(retried["status"], "imported")
+        self.assertEqual(retried["prior_unfindable_category"], "artist_absent")
+
+
 if __name__ == "__main__":
     unittest.main()

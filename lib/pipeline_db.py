@@ -2205,6 +2205,140 @@ class PipelineDB:
         )
         self.conn.commit()
 
+    def mark_imported_with_rescue(
+        self,
+        request_id: int,
+        **extra: Any,
+    ) -> None:
+        """Flip ``status`` to ``'imported'`` + capture long-tail-rescue audit
+        atomically. U14 / R21.
+
+        When a request transitions to ``imported`` and its
+        ``unfindable_category`` was non-NULL, this is the
+        long-tail-rescue moment (the archivist frame's entire payoff —
+        an "unfindable" request finally landed because a fresh peer
+        appeared). Four mutations commit together OR none of them
+        apply:
+
+          1. ``status`` → ``'imported'`` + ``active_download_state``
+             cleared (same shape as ``update_status``).
+          2. ``rescued_at`` → ``NOW()`` (only if the row was not
+             already rescued — first rescue wins).
+          3. ``prior_unfindable_category`` → the cleared category
+             value (only if the row was not already rescued).
+          4. ``unfindable_category`` → ``NULL`` (the rescue IS the
+             resolution; the category no longer applies, regardless
+             of one-shot-stamp semantics).
+
+        **One-shot capture semantics:** once ``rescued_at`` is
+        populated, it is immutable. A subsequent re-import (e.g. via
+        Replace → re-categorise → re-import) does NOT bump the
+        timestamp nor overwrite ``prior_unfindable_category``. The
+        original rescue instant is the canonical audit record;
+        downstream surfaces (web UI, reports) treat it as a "rescued
+        at" lineage marker, not a "last-import-touched" timestamp.
+        The current ``unfindable_category`` IS still cleared on every
+        call, because the rescue still IS the resolution.
+
+        **Atomicity contract:** ``PipelineDB`` is autocommit-mode by
+        default. Without a transaction boundary, three separate
+        UPDATEs would leave a crash window where (e.g.)
+        ``unfindable_category`` is cleared but ``rescued_at`` is not
+        yet written — observable corruption that lies about whether
+        a request was ever rescued. Follows the canonical
+        autocommit-flip pattern from ``replace_request_with_new_mbid``:
+        temporarily flip ``autocommit=False``, wrap explicit
+        ``commit()`` / ``rollback()`` in try/finally so a mid-flow
+        failure leaves the row in its original state.
+
+        ``**extra`` mirrors ``update_status`` — additional column
+        writes that ride along with the status flip (e.g.
+        ``beets_distance``, ``beets_scenario``, spectral fields).
+        Reserved keys (``status``, ``active_download_state``,
+        ``updated_at``, the four rescue columns) are not accepted —
+        they're managed by this method.
+        """
+        reserved = {
+            "status", "active_download_state", "updated_at",
+            "rescued_at", "prior_unfindable_category", "unfindable_category",
+            "unfindable_categorised_at",
+        }
+        bad = set(extra) & reserved
+        if bad:
+            raise ValueError(
+                "mark_imported_with_rescue: reserved kwargs not allowed: "
+                + ", ".join(sorted(bad))
+            )
+
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                # 1. Read the row's current rescue + categorisation
+                #    state under a row lock so the read-then-write is
+                #    serialised against concurrent operator actions on
+                #    the same id.
+                cur.execute(
+                    "SELECT unfindable_category, rescued_at, "
+                    "       prior_unfindable_category "
+                    "FROM album_requests WHERE id = %s FOR UPDATE",
+                    (request_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    # Mirror update_status's missing-row tolerance —
+                    # the caller's audit (download_log) will still
+                    # tell the story.
+                    self.conn.commit()
+                    return
+                current_category = row["unfindable_category"]
+                already_rescued = row["rescued_at"] is not None
+
+                # 2. Single UPDATE covering status + active_download
+                #    + rescue audit. Drop the rescue columns onto the
+                #    write list conditionally so the immutability
+                #    contract is enforced in SQL, not in Python.
+                sets = [
+                    "status = 'imported'",
+                    "active_download_state = NULL",
+                    "updated_at = %s",
+                ]
+                params: list[Any] = [now]
+                # Always clear unfindable_category — the rescue IS
+                # the resolution. (Stamps unfindable_categorised_at
+                # so the audit trail dates the clear.)
+                if current_category is not None:
+                    sets.append("unfindable_category = NULL")
+                    sets.append("unfindable_categorised_at = %s")
+                    params.append(now)
+                # Only stamp rescued_at + prior_unfindable_category
+                # on the FIRST rescue — one-shot capture.
+                if current_category is not None and not already_rescued:
+                    sets.append("rescued_at = %s")
+                    params.append(now)
+                    sets.append("prior_unfindable_category = %s")
+                    params.append(current_category)
+                for key, val in extra.items():
+                    sets.append(f"{key} = %s")
+                    params.append(val)
+                params.append(request_id)
+                cur.execute(
+                    f"UPDATE album_requests SET {', '.join(sets)} "
+                    "WHERE id = %s",
+                    params,
+                )
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
     def set_manual(
         self,
         request_id: int,
