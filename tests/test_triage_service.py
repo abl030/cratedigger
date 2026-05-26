@@ -351,6 +351,34 @@ class TestListTriage(unittest.TestCase):
         ids = sorted(r.request_meta.id for r in results)
         self.assertEqual(ids, [2, 3])
 
+    def test_list_includes_replaced_rows(self) -> None:
+        """Pins behavior: replaced rows (frozen audit) ARE included.
+
+        ``status='replaced'`` rows are Replace-action tombstones (see
+        ``CLAUDE.md`` invariant #6). Triage cohorts intentionally include
+        them so the operator can spot patterns across replacement
+        history — e.g. an MBID-shape that keeps tripping HTTP 4xx and
+        keeps getting replaced. ``lib/pipeline_db.py::list_triage_page``
+        docstring documents this contract; this test pins it.
+        """
+        db = self._seed_three()
+        # Replace request id=2 (the artist_absent unfindable). The old
+        # row flips to status='replaced' with unfindable_category still
+        # populated (frozen audit shape, mirrors lib/mbid_replace_service).
+        replaced_row = db.request(2)
+        assert replaced_row is not None
+        replaced_row["status"] = "replaced"
+        results_all = list_triage("all", db, page_size=10)
+        results_unfindable = list_triage("unfindable", db, page_size=10)
+        ids_all = sorted(r.request_meta.id for r in results_all)
+        ids_unfindable = sorted(
+            r.request_meta.id for r in results_unfindable)
+        self.assertIn(2, ids_all,
+                      "filter='all' must include replaced rows")
+        self.assertIn(2, ids_unfindable,
+                      "filter='unfindable' must include replaced rows "
+                      "whose unfindable_category remains populated")
+
     def test_filter_unfindable_with_subcategory(self) -> None:
         db = self._seed_three()
         results = list_triage(

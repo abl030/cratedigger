@@ -6685,6 +6685,17 @@ class PipelineDB:
         ``RequestMeta`` + ``UnfindableState``; the field-resolutions /
         search summaries / recent search_log entries come from the
         sibling bulk getters.
+
+        **Replaced rows are intentionally included.** Rows with
+        ``status='replaced'`` are frozen audit tombstones from the
+        operator's Replace action (see ``CLAUDE.md`` invariant #6).
+        Including them in cohort listings lets the operator spot
+        patterns across replacement history — e.g. an MBID-shape that
+        keeps tripping HTTP 4xx and keeps getting replaced. The
+        lineage chain (``replaces_request_id``) is read via
+        ``pipeline-cli show <id>`` for per-request audit detail.
+        ``tests/test_triage_service.py::test_list_includes_replaced_rows``
+        pins this contract.
         """
         select_cols = (
             "ar.id, ar.artist_name, ar.album_title, ar.year, ar.status, "
