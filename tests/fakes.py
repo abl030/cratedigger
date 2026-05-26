@@ -779,6 +779,13 @@ class FakePipelineDB:
         self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
         self._execute_queue: list[Any] = []
         self._execute_default: Any = None
+        # U15 triage N+1 guard: every triage-bound bulk getter increments
+        # its counter exactly once per call. ``list_triage`` is bounded
+        # to four entries (one page + three bulk getters) regardless of
+        # page size; the test asserts ``sum(query_counts.values()) <= 5``
+        # (extra headroom for the per-request compose path's request
+        # fetch).
+        self.query_counts: dict[str, int] = {}
 
     # --- Seeding ---
 
@@ -2044,6 +2051,235 @@ class FakePipelineDB:
             "status": row.status,
             "reason_code": row.reason_code,
             "attempts": row.attempts,
+        }
+
+    # --- Triage cohort (U15) ---------------------------------------------
+    #
+    # Mirrors the four new ``PipelineDB`` triage methods so the service
+    # layer can be exercised without a real Postgres. Each method bumps
+    # ``self.query_counts`` exactly once per invocation so the N+1 guard
+    # test can assert ``sum(query_counts.values()) <= 5`` across the
+    # cohort path.
+
+    def list_triage_page(
+        self,
+        *,
+        filter_spec: Any,
+        page_size: int,
+        after_request_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """In-memory mirror of ``PipelineDB.list_triage_page``."""
+        self.query_counts["list_triage_page"] = (
+            self.query_counts.get("list_triage_page", 0) + 1
+        )
+        kind = getattr(filter_spec, "kind", None)
+        unfindable_category = getattr(filter_spec, "unfindable_category", None)
+        field_name = getattr(filter_spec, "field_name", None)
+        reason_code = getattr(filter_spec, "reason_code", None)
+
+        def keep(row: dict[str, Any]) -> bool:
+            if kind == "unfindable":
+                if row.get("unfindable_category") is None:
+                    return False
+                if (unfindable_category is not None
+                        and row.get("unfindable_category") != unfindable_category):
+                    return False
+                return True
+            if kind == "data_quality":
+                rid = int(row["id"])
+                matched = False
+                for (resolution_rid, _fname), fr in self.field_resolutions.items():
+                    if resolution_rid != rid:
+                        continue
+                    if not fr.status.startswith("unresolved_"):
+                        continue
+                    if field_name is not None and fr.field_name != field_name:
+                        continue
+                    if reason_code is not None and fr.reason_code != reason_code:
+                        continue
+                    matched = True
+                    break
+                return matched
+            if kind == "search_not_converting":
+                summary = self._compute_search_summary(int(row["id"]))
+                return (summary is not None
+                        and summary["total_searches"] > 0
+                        and summary["found_count"] == 0)
+            if kind == "all":
+                return True
+            raise ValueError(f"unsupported triage filter kind: {kind!r}")
+
+        rows = sorted(
+            (r for r in self._requests.values() if keep(r)),
+            key=lambda r: int(r["id"]),
+        )
+        if after_request_id is not None:
+            rows = [r for r in rows if int(r["id"]) > int(after_request_id)]
+        rows = rows[: int(page_size)]
+        # Return projection mirroring the real SELECT list — kept
+        # deliberately narrow so tests can't accidentally rely on a
+        # column the production page query doesn't include.
+        projection_keys = (
+            "id", "artist_name", "album_title", "year", "status", "source",
+            "mb_release_id", "discogs_release_id", "release_group_year",
+            "is_va_compilation", "catalog_number", "failure_class",
+            "search_filetype_override", "unfindable_category",
+            "unfindable_categorised_at", "last_artist_probe_at",
+            "last_artist_probe_match_count", "rescued_at",
+            "prior_unfindable_category",
+        )
+        return [{k: r.get(k) for k in projection_keys} for r in rows]
+
+    def get_field_resolutions_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        """In-memory mirror of ``PipelineDB.get_field_resolutions_for_requests``."""
+        self.query_counts["get_field_resolutions_for_requests"] = (
+            self.query_counts.get("get_field_resolutions_for_requests", 0) + 1
+        )
+        wanted = {int(r) for r in request_ids}
+        out: dict[int, list[dict[str, Any]]] = {}
+        # Order by (request_id, field_name) to mirror the production
+        # ORDER BY clause.
+        for (rid, _fn), fr in sorted(
+            self.field_resolutions.items(), key=lambda kv: kv[0]
+        ):
+            if rid not in wanted:
+                continue
+            out.setdefault(rid, []).append({
+                "id": fr.id,
+                "request_id": fr.request_id,
+                "field_name": fr.field_name,
+                "resolved_at": fr.resolved_at,
+                "status": fr.status,
+                "reason_code": fr.reason_code,
+                "attempts": fr.attempts,
+            })
+        return out
+
+    def get_search_summaries_for_requests(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        """In-memory mirror of ``PipelineDB.get_search_summaries_for_requests``.
+
+        Aggregates ``self.search_logs`` against the same shape the
+        production view emits. Requests with zero rows in window are
+        omitted (the view excludes empty groups via ``GROUP BY``).
+        """
+        self.query_counts["get_search_summaries_for_requests"] = (
+            self.query_counts.get("get_search_summaries_for_requests", 0) + 1
+        )
+        out: dict[int, dict[str, Any]] = {}
+        for rid in request_ids:
+            summary = self._compute_search_summary(int(rid))
+            if summary is not None:
+                out[int(rid)] = summary
+        return out
+
+    def get_recent_search_log_for_requests(
+        self,
+        request_ids: list[int],
+        *,
+        per_request_limit: int,
+    ) -> dict[int, list[dict[str, Any]]]:
+        """In-memory mirror of ``PipelineDB.get_recent_search_log_for_requests``.
+
+        Walks ``self.search_logs`` newest-first and emits at most
+        ``per_request_limit`` rows per request id.
+        """
+        self.query_counts["get_recent_search_log_for_requests"] = (
+            self.query_counts.get("get_recent_search_log_for_requests", 0) + 1
+        )
+        wanted = {int(r) for r in request_ids}
+        out: dict[int, list[dict[str, Any]]] = {}
+        # Sort by (created_at, id) DESC so the most recent rows come
+        # first per request.
+        for entry in sorted(
+            self.search_logs,
+            key=lambda e: (e.created_at, e.id),
+            reverse=True,
+        ):
+            if entry.request_id not in wanted:
+                continue
+            bucket = out.setdefault(entry.request_id, [])
+            if len(bucket) >= int(per_request_limit):
+                continue
+            bucket.append({
+                "id": entry.id,
+                "request_id": entry.request_id,
+                "created_at": entry.created_at,
+                "plan_strategy": entry.plan_strategy,
+                "query": entry.query,
+                "outcome": entry.outcome,
+                "result_count": entry.result_count,
+                "rejection_reason": entry.rejection_reason,
+                "matcher_score_top1": entry.matcher_score_top1,
+            })
+        return out
+
+    def _compute_search_summary(
+        self, request_id: int,
+    ) -> dict[str, Any] | None:
+        """Compute one row of the ``request_search_summary`` view.
+
+        Mirrors the SQL aggregate against ``self.search_logs``. Returns
+        ``None`` when the request has zero rows — matches the view's
+        ``GROUP BY`` semantics (empty groups produce no row).
+        """
+        rows = [e for e in self.search_logs if e.request_id == int(request_id)]
+        if not rows:
+            return None
+        total = len(rows)
+        with_cands = sum(
+            1 for e in rows
+            if e.candidates is not None and e.candidates not in ("", "[]")
+        )
+        found = sum(1 for e in rows if e.outcome == "found")
+        near_cap = sum(
+            1 for e in rows
+            if (e.result_count is not None and e.result_count >= 950)
+        )
+        zero_results = sum(1 for e in rows if e.result_count == 0)
+        pre_filter_skips = sum(
+            int(e.pre_filter_skip_count or 0) for e in rows
+        )
+        # first_strategy_with_cands = earliest row that had candidates
+        # (mirrors the view's correlated subquery ASC ordering).
+        with_cands_sorted = sorted(
+            (e for e in rows
+             if e.candidates is not None and e.candidates not in ("", "[]")),
+            key=lambda e: (e.created_at, e.id),
+        )
+        first_strategy = (
+            with_cands_sorted[0].plan_strategy
+            if with_cands_sorted else None
+        )
+        # dominant_rejection_reason — mode of non-null rejection_reason values.
+        reason_counts: dict[str, int] = {}
+        for e in rows:
+            if e.rejection_reason is None:
+                continue
+            reason_counts[e.rejection_reason] = (
+                reason_counts.get(e.rejection_reason, 0) + 1
+            )
+        dominant = (
+            max(reason_counts.items(), key=lambda kv: kv[1])[0]
+            if reason_counts else None
+        )
+        last_search = max(rows, key=lambda e: (e.created_at, e.id)).created_at
+        return {
+            "request_id": int(request_id),
+            "total_searches": total,
+            "with_cands_count": with_cands,
+            "found_count": found,
+            "near_cap_count": near_cap,
+            "zero_results_count": zero_results,
+            "pre_filter_skips_total": pre_filter_skips,
+            "first_strategy_with_cands": first_strategy,
+            "dominant_rejection_reason": dominant,
+            "last_search_at": last_search,
         }
 
     def update_spectral_state(self, request_id: int,
