@@ -999,3 +999,9 @@ POST_ROUTES: dict[str, object] = {
     "/api/wrong-matches/converge": post_wrong_match_converge,
     "/api/wrong-matches/triage": post_wrong_match_triage,
 }
+
+# Human-readable descriptions for the route index (U18). Parallel to the
+# GET_ROUTES / POST_ROUTES dispatch tables above. Populated incrementally;
+# empty entries are intentional until U18 step 2.
+GET_DESCRIPTIONS: dict[str, str] = {}
+POST_DESCRIPTIONS: dict[str, str] = {}

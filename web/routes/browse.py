@@ -653,3 +653,9 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/discogs/master/(\d+)$"), get_discogs_master),
     (re.compile(r"^/api/discogs/release/(\d+)$"), get_discogs_release),
 ]
+
+# Human-readable descriptions for the route index (U18). Parallel to the
+# GET_ROUTES / GET_PATTERNS dispatch tables above. Populated incrementally;
+# empty entries are intentional until U18 step 2.
+GET_DESCRIPTIONS: dict[str, str] = {}
+PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []

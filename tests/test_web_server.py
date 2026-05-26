@@ -1087,6 +1087,54 @@ class TestRouteContractAudit(unittest.TestCase):
                          f"Stale route classifications: {sorted(self.CLASSIFIED_ROUTES - actual)}")
 
 
+class TestRouteDescriptionMechanism(unittest.TestCase):
+    """U18 step 1: structural test that the route-description dispatch tables exist.
+
+    Proves the registration plumbing mirrors the GET_ROUTES / POST_ROUTES /
+    GET_PATTERNS / POST_PATTERNS pattern in web/server.py. Contents are
+    populated in U18 step 2; empty is fine here.
+    """
+
+    def test_description_dispatch_tables_exist_with_correct_shapes(self):
+        import re
+        import web.server as srv
+
+        # All four class attributes must exist.
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_GET_DESCRIPTIONS"))
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_POST_DESCRIPTIONS"))
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_GET_PATTERN_DESCRIPTIONS"))
+        self.assertTrue(hasattr(srv.Handler, "_FUNC_POST_PATTERN_DESCRIPTIONS"))
+
+        get_desc = srv.Handler._FUNC_GET_DESCRIPTIONS
+        post_desc = srv.Handler._FUNC_POST_DESCRIPTIONS
+        get_pattern_desc = srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS
+        post_pattern_desc = srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS
+
+        # Dict shapes: path (str) → description (str).
+        self.assertIsInstance(get_desc, dict)
+        self.assertIsInstance(post_desc, dict)
+        for path, desc in get_desc.items():
+            self.assertIsInstance(path, str)
+            self.assertIsInstance(desc, str)
+        for path, desc in post_desc.items():
+            self.assertIsInstance(path, str)
+            self.assertIsInstance(desc, str)
+
+        # List-of-tuple shapes: (re.Pattern, str).
+        self.assertIsInstance(get_pattern_desc, list)
+        self.assertIsInstance(post_pattern_desc, list)
+        for entry in get_pattern_desc:
+            self.assertIsInstance(entry, tuple)
+            self.assertEqual(len(entry), 2)
+            self.assertIsInstance(entry[0], re.Pattern)
+            self.assertIsInstance(entry[1], str)
+        for entry in post_pattern_desc:
+            self.assertIsInstance(entry, tuple)
+            self.assertEqual(len(entry), 2)
+            self.assertIsInstance(entry[0], re.Pattern)
+            self.assertIsInstance(entry[1], str)
+
+
 class TestPipelineRouteContracts(_WebServerCase):
     """Contract tests for frontend-consumed pipeline GET routes."""
 
