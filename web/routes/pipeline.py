@@ -2374,6 +2374,181 @@ def get_beets_distance(
     h._json(payload, status=status)
 
 
+# --- U17: /api/triage HTTP endpoints --------------------------------------
+#
+# Two HTTP routes wrap the U15 triage service (``lib.triage_service``):
+#
+#   * ``GET /api/triage/<id>`` — per-request composition. Mirrors
+#     ``pipeline-cli triage show <id>`` (U16). Outcome → status:
+#       - 200: ``TriageResult`` payload (msgspec.to_builtins).
+#       - 400: non-int request id (h._error default).
+#       - 404: request_id has no album_requests row.
+#
+#   * ``GET /api/triage/list`` — cohort listing. Mirrors
+#     ``pipeline-cli triage list --filter=<spec>`` (U16). Outcome →
+#     status:
+#       - 200: ``{results, next_after, page_size, filter}`` payload.
+#       - 400: ``InvalidFilterError`` or non-int ``limit``/``after``.
+#
+# Both surfaces route through the same service entrypoints
+# (``compose_triage_for_request`` / ``list_triage``) so the CLI ⇄ API
+# symmetry rule holds — see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
+
+# Filter forms surfaced in the 400 body so operators can self-correct
+# without leaving the network response. Kept narrow to mirror the CLI's
+# ``_TRIAGE_VALID_FILTER_FORMS`` (the API echoes machine-parseable
+# tokens; the CLI's prose-form parenthetical lives only in CLI help).
+_TRIAGE_VALID_FILTER_FORMS_API: tuple[str, ...] = (
+    "all",
+    "unfindable",
+    "unfindable:<category>",
+    "data_quality",
+    "data_quality:<field>",
+    "data_quality:reason=<code>",
+    "search_not_converting",
+)
+
+# Page-size bounds for ``GET /api/triage/list``. Mirrors the convention
+# established by ``get_pipeline_search_plan_history`` (1..200): a hard
+# upper bound prevents an unbounded scan; the lower bound rules out the
+# nonsense ``limit=0`` request shape.
+_TRIAGE_LIST_MIN_LIMIT = 1
+_TRIAGE_LIST_MAX_LIMIT = 200
+_TRIAGE_LIST_DEFAULT_LIMIT = 50
+
+
+def get_triage_for_request(
+    h, params: dict[str, list[str]], req_id_str: str,
+) -> None:
+    """U17: ``GET /api/triage/<id>``.
+
+    Compose the per-request triage payload via
+    ``lib.triage_service.compose_triage_for_request``. The response
+    body is ``msgspec.to_builtins(TriageResult)`` — the JSON shape on
+    the wire IS the Struct shape verbatim, which is what makes
+    ``msgspec.convert(payload, type=TriageResult)`` round-trip on the
+    consumer side (frontend or CLI parity tests).
+
+    Status-code mapping (mirrors ``cmd_triage_show``'s exit codes):
+      * 200 — composition success.
+      * 400 — non-int request id (caught here; the service never sees
+              garbage).
+      * 404 — ``compose_triage_for_request`` returned ``None`` (no row).
+    """
+    from lib.triage_service import compose_triage_for_request
+
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    db = _server()._db()
+    result = compose_triage_for_request(request_id, db)
+    if result is None:
+        h._json(
+            {"error": "Not found", "request_id": request_id},
+            status=404,
+        )
+        return
+
+    payload = msgspec.to_builtins(result)
+    h._json(payload)
+
+
+def get_triage_list(
+    h, params: dict[str, list[str]],
+) -> None:
+    """U17: ``GET /api/triage/list``.
+
+    Cohort-filtered triage listing. Query string:
+      * ``filter`` — filter spec (default ``"all"``). Forms documented
+        in ``_TRIAGE_VALID_FILTER_FORMS_API`` and ``lib.triage_service
+        .parse_filter``.
+      * ``limit`` — int in ``[_TRIAGE_LIST_MIN_LIMIT,
+        _TRIAGE_LIST_MAX_LIMIT]``; defaults to
+        ``_TRIAGE_LIST_DEFAULT_LIMIT``.
+      * ``after`` — int >= 1; the ``next_after`` cursor from the
+        previous page. Omit for the first page.
+
+    Response shape (success):
+        ``{"results": [...], "next_after": <int|null>,
+           "page_size": <int>, "filter": <spec str>}``
+
+    ``next_after`` is ``None`` when ``len(results) < page_size`` (the
+    page exhausts the cohort); otherwise the last request id so
+    operators can keep paging.
+
+    Status-code mapping (mirrors ``cmd_triage_list``'s exit codes):
+      * 200 — success (empty results list is a valid cohort state).
+      * 400 — ``InvalidFilterError`` (parser rejects the spec) OR
+              non-int ``limit`` / ``after`` / out-of-range ``limit``.
+    """
+    from lib.triage_service import InvalidFilterError, list_triage
+
+    filter_spec = params.get("filter", ["all"])[0]
+    if filter_spec == "":
+        filter_spec = "all"
+
+    limit_raw = params.get("limit", [None])[0]
+    if limit_raw is None or limit_raw == "":
+        limit = _TRIAGE_LIST_DEFAULT_LIMIT
+    else:
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError):
+            h._error("limit must be an integer")
+            return
+    if not (_TRIAGE_LIST_MIN_LIMIT <= limit <= _TRIAGE_LIST_MAX_LIMIT):
+        h._error(
+            f"limit must be in [{_TRIAGE_LIST_MIN_LIMIT}, "
+            f"{_TRIAGE_LIST_MAX_LIMIT}]",
+            status=400,
+        )
+        return
+
+    after_raw = params.get("after", [None])[0]
+    after: int | None
+    if after_raw is None or after_raw == "":
+        after = None
+    else:
+        try:
+            after = int(after_raw)
+        except (TypeError, ValueError):
+            h._error("after must be an integer")
+            return
+        if after < 1:
+            h._error("after must be >= 1", status=400)
+            return
+
+    db = _server()._db()
+    try:
+        results = list_triage(
+            filter_spec, db, page_size=limit, after_request_id=after,
+        )
+    except InvalidFilterError as exc:
+        h._json(
+            {
+                "error": str(exc),
+                "valid_filters": list(_TRIAGE_VALID_FILTER_FORMS_API),
+            },
+            status=400,
+        )
+        return
+
+    next_after: int | None = None
+    if len(results) >= limit and results:
+        next_after = results[-1].request_meta.id
+
+    payload: dict[str, object] = {
+        "results": [msgspec.to_builtins(r) for r in results],
+        "next_after": next_after,
+        "page_size": limit,
+        "filter": filter_spec,
+    }
+    h._json(payload)
+
+
 GET_ROUTES: dict[str, object] = {
     "/api/pipeline/log": get_pipeline_log,
     "/api/pipeline/status": get_pipeline_status,
@@ -2386,6 +2561,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/import-jobs": get_import_jobs,
     "/api/import-jobs/timeline": get_import_jobs_timeline,
     "/api/pipeline/active-rgs": get_pipeline_active_rgs,
+    "/api/triage/list": get_triage_list,
 }
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
@@ -2405,6 +2581,7 @@ GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),
      get_pipeline_requests_by_rg),
     (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
+    (re.compile(r"^/api/triage/(\d+)$"), get_triage_for_request),
 ]
 
 POST_ROUTES: dict[str, object] = {
@@ -2433,7 +2610,16 @@ POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
 # GET_ROUTES / GET_PATTERNS / POST_ROUTES / POST_PATTERNS dispatch tables
 # above. Populated incrementally; empty entries are intentional until U18
 # step 2.
-GET_DESCRIPTIONS: dict[str, str] = {}
+GET_DESCRIPTIONS: dict[str, str] = {
+    "/api/triage/list": (
+        "Cohort triage listing — filter by unfindable category, "
+        "field-quality reason, or search-not-converting state."
+    ),
+}
 POST_DESCRIPTIONS: dict[str, str] = {}
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
+PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/triage/(\d+)$"),
+     "Per-request triage composition — unfindable categorisation, "
+     "field-resolution telemetry, search-log forensics."),
+]
 POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
