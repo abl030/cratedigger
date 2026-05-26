@@ -151,21 +151,3 @@ _.do_GET  # unused method (web/server.py:299)
 _.do_POST  # unused method (web/server.py:339)
 _.do_OPTIONS  # unused method (web/server.py:384)
 ALL_FAILURE_CLASSES  # exported for tests (lib/search_classification.py:48)
-# lib/triage_service.py — msgspec.Struct fields read via JSON serialization
-# (not attribute access) plus public service functions called from
-# wrappers shipped in U16 / U17 (CLI + HTTP); both wrappers post-date this
-# whitelist entry.
-last_artist_probe_at  # unused variable (lib/triage_service.py:189)
-last_artist_probe_match_count  # unused variable (lib/triage_service.py:190)
-prior_unfindable_category  # unused variable (lib/triage_service.py:192)
-resolved_at  # unused variable (lib/triage_service.py:202)
-with_cands_count  # unused variable (lib/triage_service.py:235)
-near_cap_count  # unused variable (lib/triage_service.py:237)
-zero_results_count  # unused variable (lib/triage_service.py:238)
-pre_filter_skips_total  # unused variable (lib/triage_service.py:239)
-first_strategy_with_cands  # unused variable (lib/triage_service.py:240)
-dominant_rejection_reason  # unused variable (lib/triage_service.py:241)
-last_search_at  # unused variable (lib/triage_service.py:242)
-recent_entries  # unused variable (lib/triage_service.py:243)
-compose_triage_for_request  # unused function (lib/triage_service.py:299)
-list_triage  # unused function (lib/triage_service.py:329)
