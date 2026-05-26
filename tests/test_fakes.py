@@ -3928,12 +3928,17 @@ class TestFakePipelineDBRescueCapture(unittest.TestCase):
             source="request",
             mb_release_id=f"m-rescue-{category or 'none'}",
         )
-        db.update_status(rid, "downloading", state_json="{}")
+        # Set the unfindable category while still wanted —
+        # ``set_unfindable_category`` is guarded by ``status='wanted'``
+        # in production (lost-update protection against concurrent
+        # rescue); the fake mirrors that guard so writes against
+        # already-downloading rows would silently no-op.
         if category is not None:
             ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
             db.set_unfindable_category(
                 rid, category=category, categorised_at=ts,
             )
+        db.update_status(rid, "downloading", state_json="{}")
         if rescued_at is not None or prior_category is not None:
             db._requests[rid]["rescued_at"] = rescued_at
             db._requests[rid]["prior_unfindable_category"] = prior_category

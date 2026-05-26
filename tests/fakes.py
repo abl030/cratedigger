@@ -2246,12 +2246,22 @@ class FakePipelineDB:
         match_count: int,
         observed_at: datetime,
     ) -> None:
-        """Mirror PipelineDB.record_artist_probe."""
+        """Mirror PipelineDB.record_artist_probe.
+
+        Mirrors the ``AND status='wanted'`` guard from production: if
+        the row has transitioned out of ``wanted`` (e.g. a concurrent
+        ``mark_imported_with_rescue`` flipped it to ``imported`` while
+        the probe was inflight), the write is a silent no-op. The call
+        is still recorded on ``record_artist_probe_calls`` because tests
+        need to see the attempt happened.
+        """
         self.record_artist_probe_calls.append(
             (request_id, int(match_count), observed_at),
         )
         row = self._requests.get(request_id)
         if row is None:
+            return
+        if row.get("status") != "wanted":
             return
         row["last_artist_probe_at"] = observed_at
         row["last_artist_probe_match_count"] = int(match_count)
@@ -2268,6 +2278,12 @@ class FakePipelineDB:
 
         Enforces the same 4-category vocabulary the production CHECK
         constraint guards. ``None`` clears the column.
+
+        Mirrors the ``AND status='wanted'`` guard from production: if a
+        concurrent rescue flipped the row out of ``wanted`` mid-probe,
+        the late verdict write is a silent no-op. The call is still
+        recorded on ``set_unfindable_category_calls`` so tests can see
+        the attempt happened.
         """
         valid = {
             "artist_absent",
@@ -2283,6 +2299,8 @@ class FakePipelineDB:
         )
         row = self._requests.get(request_id)
         if row is None:
+            return
+        if row.get("status") != "wanted":
             return
         row["unfindable_category"] = category
         row["unfindable_categorised_at"] = categorised_at

@@ -2076,6 +2076,14 @@ class PipelineDB:
         Two columns + ``updated_at``. Deliberately separate from
         ``set_unfindable_category`` so the probe-recorded-but-
         verdict-unchanged case stays explicit in the audit trail.
+
+        Guarded by ``status='wanted'``: detection runs the probe
+        against a wanted-cohort snapshot, then writes back. If the row
+        transitions out from under us mid-probe (e.g. a concurrent
+        rescue via ``mark_imported_with_rescue`` flips status to
+        ``imported``), this late write is a silent no-op rather than
+        clobbering the rescue's audit trail. The detection service is
+        exclusively for the wanted cohort by design (R20 / U13 plan).
         """
         self._execute(
             """
@@ -2083,7 +2091,7 @@ class PipelineDB:
             SET last_artist_probe_at = %s,
                 last_artist_probe_match_count = %s,
                 updated_at = %s
-            WHERE id = %s
+            WHERE id = %s AND status = 'wanted'
             """,
             (observed_at, int(match_count), observed_at, request_id),
         )
@@ -2106,6 +2114,17 @@ class PipelineDB:
         The DB CHECK constraint enforces the 4-category vocabulary; an
         unknown string raises ``IntegrityError`` here rather than
         silently writing garbage.
+
+        Guarded by ``status='wanted'``: same rationale as
+        ``record_artist_probe``. The detection service reads the
+        wanted-cohort, probes slskd (slow), then writes a verdict back.
+        If a concurrent ``mark_imported_with_rescue`` flipped the row
+        to ``imported`` mid-flight, this late write must be a silent
+        no-op — otherwise it would re-stamp ``unfindable_category`` and
+        ``unfindable_categorised_at`` on a row that's already been
+        rescued, leaving an incoherent ``status='imported' AND
+        unfindable_category='…'`` audit row. The guard makes the
+        lost-update race a benign no-op rather than corruption.
         """
         self._execute(
             """
@@ -2113,7 +2132,7 @@ class PipelineDB:
             SET unfindable_category = %s,
                 unfindable_categorised_at = %s,
                 updated_at = %s
-            WHERE id = %s
+            WHERE id = %s AND status = 'wanted'
             """,
             (category, categorised_at, categorised_at, request_id),
         )

@@ -624,6 +624,75 @@ class TestUnfindableDetectionService(unittest.TestCase):
         self.assertEqual(rids_processed[0], rid_due_never)
         self.assertIn(rid_due_a, rids_processed)
 
+    def test_rescue_race_late_writes_become_silent_noop(self) -> None:
+        """Detection's late writes do not clobber a concurrent rescue.
+
+        Adversarial race: the daily detection job reads a ``wanted``
+        row, fires slskd (slow), then writes ``record_artist_probe``
+        and ``set_unfindable_category``. In the slskd window,
+        ``mark_imported_with_rescue`` (U14) flips status to
+        ``imported`` and clears ``unfindable_category``. Without the
+        ``AND status='wanted'`` guard on both writers, detection's
+        late writes would re-stamp ``last_artist_probe_*`` and
+        ``unfindable_category='artist_absent'`` on top of the
+        rescued row, leaving an incoherent ``status='imported' AND
+        unfindable_category='…'`` audit trail.
+
+        With the guard, both writes are silent no-ops — rescue wins.
+        """
+        now = datetime.now(timezone.utc)
+        rid = _seed_wanted_request(
+            self.db,
+            last_artist_probe_at=now - timedelta(days=14),
+            last_artist_probe_match_count=0,
+        )
+
+        # Probe stub mutates the row in the slskd window — simulates
+        # a rescue (mark_imported_with_rescue) landing between read
+        # and write.
+        class _RaceProbe:
+            def __init__(self, db: FakePipelineDB, request_id: int) -> None:
+                self.db = db
+                self.request_id = request_id
+
+            def __call__(
+                self, _client: Any, *, artist_name: str, **_kw: Any,
+            ) -> ArtistProbeResult:
+                # Mid-probe rescue: status flips to imported,
+                # unfindable_category cleared, rescue stamp written.
+                self.db.update_request_fields(
+                    self.request_id,
+                    status="imported",
+                    unfindable_category=None,
+                    rescued_at=datetime.now(timezone.utc),
+                )
+                # Drop the recorder write so it doesn't pollute the
+                # service's own assertion targets.
+                self.db.update_request_fields_calls.pop()
+                return ArtistProbeResult(
+                    match_count=0, artist_observed=False,
+                )
+
+        probe = _RaceProbe(self.db, rid)
+        svc = self._service(_StubProbe(match_count=0), now=now)
+        # Swap in the race probe so the rescue fires inside the probe call.
+        svc._probe_runner = probe
+
+        svc.categorise_request(rid)
+
+        # The row is the rescued shape — detection's late writes were
+        # silent no-ops. status='imported', unfindable_category=NULL,
+        # last_artist_probe_match_count stays at its pre-race value
+        # (the detection's late record_artist_probe was a no-op).
+        row = self.db.request(rid)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["unfindable_category"])
+        self.assertIsNotNone(row["rescued_at"])
+        # The pre-race probe count (0) is preserved, not overwritten.
+        # last_artist_probe_at was last bumped 14 days ago at seed time.
+        self.assertEqual(row["last_artist_probe_match_count"], 0)
+        self.assertNotEqual(row["last_artist_probe_at"], now)
+
     def test_categorise_due_batch_isolates_per_row_crash(self) -> None:
         """A single bad row does not poison the rest of the batch."""
         rid_a = _seed_wanted_request(self.db, artist_name="Alpha")

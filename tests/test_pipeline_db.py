@@ -6808,16 +6808,21 @@ class TestMarkImportedWithRescue(unittest.TestCase):
             album_title="Rescue Album",
             source="request",
         )
-        # Move to downloading so the imported transition is the canonical one.
-        db._execute(
-            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
-            (rid,),
-        )
+        # Set the unfindable category WHILE the row is still wanted —
+        # ``set_unfindable_category`` is guarded by ``status='wanted'`` in
+        # production (lost-update protection against concurrent rescue),
+        # so a seed helper that flipped to downloading first would silently
+        # no-op the category write.
         if category is not None:
             ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
             db.set_unfindable_category(
                 rid, category=category, categorised_at=ts,
             )
+        # Move to downloading so the imported transition is the canonical one.
+        db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (rid,),
+        )
         if rescued_at is not None or prior_category is not None:
             db._execute(
                 "UPDATE album_requests "
