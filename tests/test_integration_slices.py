@@ -9536,13 +9536,18 @@ class TestRescueCaptureSlice(unittest.TestCase):
             album_title="Slice Album",
             source="request",
         )
-        self.db._execute(
-            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
-            (rid,),
-        )
+        # Set the unfindable category while still wanted —
+        # ``set_unfindable_category`` is guarded by ``status='wanted'``
+        # in production (lost-update protection against concurrent
+        # rescue); a setup that flipped to downloading first would
+        # silently no-op the category write.
         self.db.set_unfindable_category(
             rid, category=category,
             categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        )
+        self.db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (rid,),
         )
         return rid
 
