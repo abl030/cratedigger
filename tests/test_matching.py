@@ -966,5 +966,323 @@ class TestCandidateScorePreFilterRoundTrip(unittest.TestCase):
         self.assertEqual(decoded.matched_tracks, 4)
 
 
+# ---------------------------------------------------------------------------
+# U11 R22 / R26: classify_rejection_reason + matcher_score_top1_for pure
+# helpers, plus end-to-end coverage on check_for_match.
+# ---------------------------------------------------------------------------
+
+
+def _cand(
+    *,
+    matched: int = 0, total: int = 3, avg: float = 0.0,
+    file_count: int | None = None, pre_filter_skip: bool = False,
+    user: str = "u", dir_: str = "d", filetype: str = "flac",
+) -> CandidateScore:
+    """Builder for CandidateScore used by the U11 helper tables.
+
+    Defaults match the cheap zero-score sub-count-gate shape so each
+    subTest row only declares the fields it actually exercises.
+    """
+    return CandidateScore(
+        username=user, dir=dir_, filetype=filetype,
+        matched_tracks=matched, total_tracks=total, avg_ratio=avg,
+        missing_titles=[],
+        file_count=file_count if file_count is not None else matched,
+        pre_filter_skip=pre_filter_skip,
+    )
+
+
+class TestClassifyRejectionReason(unittest.TestCase):
+    """Pure helper table: dominant rejection reason for one matcher run.
+
+    Driven by ``check_for_match``; the helper takes the candidate list +
+    counters + match outcome and reports the operator-meaningful reason.
+    """
+
+    # (description, candidates, pre_filter_skip_count, matched,
+    #  cross_check_failure, expected_reason)
+    CASES = [
+        ("matched_returns_none",
+         [_cand(matched=3, total=3, avg=0.99, file_count=3)],
+         0, True, False, None),
+        ("no_candidates_no_skips_returns_none",
+         [], 0, False, False, None),
+        ("no_candidates_with_skip_count_returns_none",
+         # Pre-filter samples might be absent (sample cap exhausted)
+         # but if pre_filter_skip_count > 0 and zero scored emitted,
+         # the rejection reason is all_skipped_pre_filter.
+         [], 3, False, False, "all_skipped_pre_filter"),
+        ("all_pre_filter_skip_samples_only",
+         [_cand(pre_filter_skip=True, file_count=99),
+          _cand(pre_filter_skip=True, file_count=99)],
+         2, False, False, "all_skipped_pre_filter"),
+        ("strict_count_mismatch_when_top_dir_under_count",
+         # Best candidate had 2/3 expected files (sub-count gate)
+         [_cand(matched=0, total=3, avg=0.0, file_count=2)],
+         0, False, False, "strict_count_mismatch"),
+        ("strict_count_mismatch_dominant_over_skipped",
+         # Mix of sub-count + pre-filter samples; sub-count wins
+         # because there is a real scored candidate.
+         [_cand(matched=0, total=3, avg=0.0, file_count=2),
+          _cand(pre_filter_skip=True, file_count=99)],
+         1, False, False, "strict_count_mismatch"),
+        ("avg_ratio_low_when_full_count_but_partial_match",
+         # File count matches but only 2 of 3 titles passed the ratio.
+         [_cand(matched=2, total=3, avg=0.6, file_count=3)],
+         0, False, False, "avg_ratio_low"),
+        ("avg_ratio_low_dominant_picks_highest_scored",
+         # Two scored candidates: pick the highest matched_tracks.
+         [_cand(matched=2, total=3, avg=0.6, file_count=3),
+          _cand(matched=0, total=3, avg=0.0, file_count=2)],
+         0, False, False, "avg_ratio_low"),
+        ("cross_check_failure_dominates_even_full_strict_score",
+         # Strict-accept dir with 3/3 matched + cross-check failed.
+         # Without the flag this would classify as avg_ratio_low (false
+         # because 3==3) — but the matcher structurally rejected on
+         # title cross-check, so the explicit flag wins.
+         [_cand(matched=3, total=3, avg=0.95, file_count=3)],
+         0, False, True, "cross_check_failed"),
+        ("matched_true_overrides_cross_check_flag",
+         # Defensive — shouldn't happen in practice, but matched=True
+         # is the strongest signal.
+         [_cand(matched=3, total=3, avg=0.95, file_count=3)],
+         0, True, True, None),
+    ]
+
+    def test_classify(self):
+        from lib.matching import classify_rejection_reason
+        for (desc, cands, skip_count, matched, x_check, expected) in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    classify_rejection_reason(
+                        cands, skip_count, matched=matched,
+                        strict_accept_then_failed_cross_check=x_check,
+                    ),
+                    expected,
+                )
+
+
+class TestClassifyRejectionFromLogInputs(unittest.TestCase):
+    """U11 log-layer classifier: wraps ``classify_rejection_reason``
+    with the cross-check heuristic and outcome → classifier-applicable
+    routing. Drives ``cratedigger._log_search_result``.
+    """
+
+    # (description, candidates, pre_filter_skip_count, outcome, expected)
+    CASES = [
+        ("outcome_found_returns_none",
+         [_cand(matched=3, total=3, avg=0.95, file_count=3)],
+         0, "found", None),
+        ("outcome_no_results_returns_none",
+         [], 0, "no_results", None),
+        ("outcome_error_returns_none",
+         [], 0, "error", None),
+        ("outcome_empty_query_returns_none",
+         [], 0, "empty_query", None),
+        ("no_match_strict_count_mismatch",
+         [_cand(matched=0, total=3, avg=0.0, file_count=2)],
+         0, "no_match", "strict_count_mismatch"),
+        ("no_match_avg_ratio_low",
+         [_cand(matched=2, total=3, avg=0.6, file_count=3)],
+         0, "no_match", "avg_ratio_low"),
+        ("no_match_all_skipped_pre_filter",
+         [_cand(pre_filter_skip=True, file_count=99)],
+         1, "no_match", "all_skipped_pre_filter"),
+        ("no_match_with_full_strict_score_marks_cross_check",
+         # Strict-accept clear (3==3, file_count==3) but no_match →
+         # cross-check or ignored-users gate rejected. The log layer
+         # surfaces it as cross_check_failed because both shapes are
+         # equally "got close but rejected" from the operator's view.
+         [_cand(matched=3, total=3, avg=0.95, file_count=3)],
+         0, "no_match", "cross_check_failed"),
+        ("enqueue_failed_still_classifies_via_candidates",
+         # outcome=enqueue_failed exits past the matcher with the same
+         # candidate shape as no_match; treat it identically.
+         [_cand(matched=2, total=3, avg=0.6, file_count=3)],
+         0, "enqueue_failed", "avg_ratio_low"),
+        ("no_match_with_only_pre_filter_samples_and_no_skips_returns_none",
+         # Pathological: pre_filter samples in the blob but counter
+         # was 0 (caller bug). No scored candidates → None.
+         [_cand(pre_filter_skip=True, file_count=99)],
+         0, "no_match", None),
+    ]
+
+    def test_classifies(self):
+        from lib.matching import classify_rejection_from_log_inputs
+        for desc, cands, skip_count, outcome, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    classify_rejection_from_log_inputs(
+                        cands, skip_count, outcome,
+                    ),
+                    expected,
+                )
+
+
+class TestMatcherScoreTop1For(unittest.TestCase):
+    """Pure helper: top-1 (matched_tracks + avg_ratio) composite over
+    scored candidates. Pre-filter samples are excluded. ``None`` when
+    no scored candidate is present."""
+
+    def test_empty_returns_none(self):
+        from lib.matching import matcher_score_top1_for
+        self.assertIsNone(matcher_score_top1_for([]))
+
+    def test_only_pre_filter_skip_returns_none(self):
+        from lib.matching import matcher_score_top1_for
+        cands = [
+            _cand(pre_filter_skip=True, file_count=99),
+            _cand(pre_filter_skip=True, file_count=99),
+        ]
+        self.assertIsNone(matcher_score_top1_for(cands))
+
+    def test_picks_highest_composite_breaking_ties_on_avg_ratio(self):
+        from lib.matching import matcher_score_top1_for
+        cands = [
+            _cand(matched=2, total=3, avg=0.5, file_count=3),
+            _cand(matched=2, total=3, avg=0.95, file_count=3),
+            _cand(matched=1, total=3, avg=0.99, file_count=3),
+        ]
+        # 2 + 0.95 = 2.95
+        score = matcher_score_top1_for(cands)
+        assert score is not None
+        self.assertAlmostEqual(score, 2.95)
+
+    def test_excludes_pre_filter_skip_rows_from_ranking(self):
+        from lib.matching import matcher_score_top1_for
+        cands = [
+            _cand(matched=2, total=3, avg=0.6, file_count=3),
+            # The skip sample carries 0/0; if included it would not
+            # change the top, but this exercises the exclusion path.
+            _cand(pre_filter_skip=True, file_count=99),
+        ]
+        score = matcher_score_top1_for(cands)
+        assert score is not None
+        self.assertAlmostEqual(score, 2.6)
+
+
+class TestCheckForMatchRejectionReasonEndToEnd(unittest.TestCase):
+    """End-to-end: check_for_match populates MatchResult.rejection_reason
+    + matcher_score_top1 on every return path."""
+
+    def setUp(self) -> None:
+        self.cfg = _make_cfg()
+        self.ctx = _make_ctx(self.cfg, album_id=1, album_title="Cool Album")
+        self.username = "user1"
+        self.tracks = [
+            _track(1, "Alpha Distinct Token"),
+            _track(1, "Bravo Distinct Token"),
+            _track(1, "Charlie Distinct Token"),
+        ]
+
+    def _browse(self, file_dir: str, files: list[SlskdFile]) -> None:
+        self.ctx.folder_cache.setdefault(self.username, {})[file_dir] = {
+            "directory": file_dir,
+            "files": files,
+        }
+
+    def test_strict_accept_sets_none_reason_and_populates_score(self) -> None:
+        self._browse("dirA", [
+            _file("Alpha Distinct Token.flac"),
+            _file("Bravo Distinct Token.flac"),
+            _file("Charlie Distinct Token.flac"),
+        ])
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+        self.assertTrue(result.matched)
+        self.assertIsNone(result.rejection_reason)
+        # 3 matched + ratio ~1.0 → composite ~4.0
+        assert result.matcher_score_top1 is not None
+        self.assertGreater(result.matcher_score_top1, 3.5)
+
+    def test_sub_count_dir_marks_strict_count_mismatch(self) -> None:
+        # dirA has only 2 of 3 audio files → cheap zero-score candidate
+        # whose file_count < total_tracks → strict_count_mismatch.
+        self._browse("dirA", [
+            _file("Alpha Distinct Token.flac"),
+            _file("Bravo Distinct Token.flac"),
+        ])
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+        self.assertFalse(result.matched)
+        self.assertEqual(result.rejection_reason, "strict_count_mismatch")
+        # Top candidate scored 0; composite = 0.0.
+        self.assertEqual(result.matcher_score_top1, 0.0)
+
+    def test_partial_match_with_full_count_marks_avg_ratio_low(self) -> None:
+        partial_tracks = [
+            _track(1, "First Track Distinct Name"),
+            _track(1, "Second Track Distinct Name"),
+            _track(1, "QQQQQQQQQQQ"),
+        ]
+        self._browse("dirA", [
+            _file("First Track Distinct Name.flac"),
+            _file("Second Track Distinct Name.flac"),
+            _file("XXXXXXXXXXXXX.flac"),
+        ])
+        result = check_for_match(
+            partial_tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+        self.assertFalse(result.matched)
+        self.assertEqual(result.rejection_reason, "avg_ratio_low")
+        # 2 of 3 matched plus avg_ratio in (0, 1.0] → composite in (2.0, 3.0].
+        # The two matched filenames clear ratio at ~1.0, avg = 1.0, top1 = 3.0.
+        assert result.matcher_score_top1 is not None
+        self.assertGreater(result.matcher_score_top1, 2.0)
+        self.assertLessEqual(result.matcher_score_top1, 3.0)
+
+    def test_all_pre_filter_skipped_marks_all_skipped_pre_filter(self) -> None:
+        # Configure the asymmetric pre-filter: search_count > 2 * track_num
+        # AND only one codec → pre-filter skips before browse.
+        self.ctx.search_dir_audio_count = {
+            self.username: {"dirA": 30},
+        }
+        self.ctx.search_cache = {
+            1: {
+                self.username: {
+                    "mp3": ["dirA"],
+                },
+            },
+        }
+        result = check_for_match(
+            self.tracks, "mp3", ["dirA"], self.username, self.ctx,
+        )
+        self.assertFalse(result.matched)
+        self.assertEqual(result.rejection_reason, "all_skipped_pre_filter")
+        self.assertEqual(result.pre_filter_skip_count, 1)
+        # All scored candidates absent → top1 is None.
+        self.assertIsNone(result.matcher_score_top1)
+
+    def test_cross_check_failure_marks_cross_check_failed(self) -> None:
+        # Use the DI seam to force a cross-check rejection.
+        self._browse("dirX", [
+            _file("Alpha Distinct Token.flac"),
+            _file("Bravo Distinct Token.flac"),
+            _file("Charlie Distinct Token.flac"),
+        ])
+        result = check_for_match(
+            self.tracks, "flac", ["dirX"], self.username, self.ctx,
+            cross_check_fn=lambda *_a, **_k: False,
+        )
+        self.assertFalse(result.matched)
+        self.assertEqual(result.rejection_reason, "cross_check_failed")
+        # Score was full strict-accept before the cross-check rejection.
+        assert result.matcher_score_top1 is not None
+        self.assertGreater(result.matcher_score_top1, 3.5)
+
+    def test_broken_user_short_circuit_returns_none_reason(self) -> None:
+        # Broken-user fast-path emits no candidates and no pre-filter
+        # skip count → rejection_reason is None (upstream issue).
+        self.ctx.broken_user.append(self.username)
+        result = check_for_match(
+            self.tracks, "flac", ["dirA"], self.username, self.ctx,
+        )
+        self.assertFalse(result.matched)
+        self.assertIsNone(result.rejection_reason)
+        self.assertIsNone(result.matcher_score_top1)
+
+
 if __name__ == "__main__":
     unittest.main()

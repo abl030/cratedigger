@@ -1360,6 +1360,55 @@ class TestSearchLog(unittest.TestCase):
         self.assertEqual(history[0]["pre_filter_skip_count"], 0)
         self.assertEqual(history[1]["pre_filter_skip_count"], 42)
 
+    def test_log_search_persists_u11_forensics_columns(self):
+        """U11 R22-R27: every new forensics column round-trips on log_search.
+
+        Asserts ``rejection_reason``, ``result_count_uncapped``,
+        ``query_token_count``, ``query_distinct_token_count``,
+        ``expected_track_count``, ``matcher_score_top1``, and
+        ``query_template`` survive the INSERT and come back on the
+        SELECT * read.
+        """
+        self.db.log_search(
+            request_id=self.req_id,
+            query="*rtist Album",
+            outcome="no_match",
+            candidates=None,
+            rejection_reason="avg_ratio_low",
+            result_count_uncapped=1234,
+            query_token_count=2,
+            query_distinct_token_count=2,
+            expected_track_count=14,
+            matcher_score_top1=2.75,
+            query_template="{artist} {title}",
+        )
+        # Second row: defaults (kwargs omitted) write SQL NULL so we
+        # can also assert backwards-compat.
+        self.db.log_search(
+            request_id=self.req_id, query="q2",
+            outcome="no_results", candidates=None,
+        )
+        history = self.db.get_search_history(self.req_id)
+        # newest-first.
+        nulls = history[0]
+        self.assertIsNone(nulls["rejection_reason"])
+        self.assertIsNone(nulls["result_count_uncapped"])
+        self.assertIsNone(nulls["query_token_count"])
+        self.assertIsNone(nulls["query_distinct_token_count"])
+        self.assertIsNone(nulls["expected_track_count"])
+        self.assertIsNone(nulls["matcher_score_top1"])
+        self.assertIsNone(nulls["query_template"])
+        populated = history[1]
+        self.assertEqual(populated["rejection_reason"], "avg_ratio_low")
+        self.assertEqual(populated["result_count_uncapped"], 1234)
+        self.assertEqual(populated["query_token_count"], 2)
+        self.assertEqual(populated["query_distinct_token_count"], 2)
+        self.assertEqual(populated["expected_track_count"], 14)
+        score = populated["matcher_score_top1"]
+        assert isinstance(score, float)
+        self.assertAlmostEqual(score, 2.75, places=4)
+        self.assertEqual(populated["query_template"], "{artist} {title}")
+
     def test_log_search_candidates_decode_rejects_wrong_type(self):
         """Wire-boundary regression: msgspec.convert raises on type drift.
 
@@ -5570,6 +5619,32 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
         rows = self.db.get_search_history(self.req_id)
         self.assertEqual(rows, [])
 
+    def test_consumed_attempt_persists_u11_forensics_columns(self):
+        """U11: consumed-attempt rows surface R22-R27 from the input."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0,
+            outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            result_count_uncapped=873,
+            query_token_count=4,
+            query_distinct_token_count=3,
+            expected_track_count=10,
+            matcher_score_top1=1.5,
+            query_template="{artist} {title} FLAC",
+        ))
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["rejection_reason"], "strict_count_mismatch")
+        self.assertEqual(row["result_count_uncapped"], 873)
+        self.assertEqual(row["query_token_count"], 4)
+        self.assertEqual(row["query_distinct_token_count"], 3)
+        self.assertEqual(row["expected_track_count"], 10)
+        score = row["matcher_score_top1"]
+        assert isinstance(score, float)
+        self.assertAlmostEqual(score, 1.5, places=4)
+        self.assertEqual(row["query_template"], "{artist} {title} FLAC")
+
 
 @requires_postgres
 class TestRecordNonConsumingSearchAttempt(unittest.TestCase):
@@ -5624,6 +5699,102 @@ class TestRecordNonConsumingSearchAttempt(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["search_attempts"], 0)
         self.assertIsNone(req["next_retry_after"])
+
+    def test_non_consuming_attempt_persists_u11_forensics_columns(self):
+        """U11: pre-attempt rows surface R22-R27 from the input."""
+        self.db.record_non_consuming_search_attempt(
+            self.NonConsumingAttemptInput(
+                request_id=self.req_id,
+                outcome="error",
+                error_message="slskd 503",
+                apply_scheduler_attempt=True,
+                rejection_reason=None,
+                result_count_uncapped=None,
+                query_token_count=3,
+                query_distinct_token_count=3,
+                expected_track_count=12,
+                matcher_score_top1=None,
+                query_template="{artist} {title}",
+            )
+        )
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        # Pre-attempt: matcher never ran → score/reason/uncapped NULL.
+        self.assertIsNone(row["rejection_reason"])
+        self.assertIsNone(row["matcher_score_top1"])
+        self.assertIsNone(row["result_count_uncapped"])
+        # Token-counts + template + expected-track-count come from
+        # plan-context state that's known before slskd dispatch.
+        self.assertEqual(row["query_token_count"], 3)
+        self.assertEqual(row["query_distinct_token_count"], 3)
+        self.assertEqual(row["expected_track_count"], 12)
+        self.assertEqual(row["query_template"], "{artist} {title}")
+
+
+@requires_postgres
+class TestRequestSearchSummaryViewU11RoundTrip(unittest.TestCase):
+    """U11 R29: writing search_log rows with populated forensics columns
+    must surface through ``request_search_summary`` for the dominant
+    rejection-reason rollup.
+
+    Migration 031 defines ``request_search_summary`` with
+    ``MODE() WITHIN GROUP (ORDER BY rejection_reason)`` — the mode is
+    the most-frequent non-NULL reason. This test pins that contract:
+    five known rows with mixed reasons must roll up to the operator's
+    expected ``dominant_rejection_reason``.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="u11-summary-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _log(self, reason: str | None, outcome: str = "no_match") -> None:
+        self.db.log_search(
+            request_id=self.req_id,
+            query="q",
+            outcome=outcome,
+            candidates=[],
+            rejection_reason=reason,
+        )
+
+    def test_dominant_rejection_reason_rolls_up_from_recent_rows(self):
+        # 5 rows: 3 avg_ratio_low, 1 strict_count_mismatch, 1 NULL
+        # (e.g. found). Mode over non-NULL = avg_ratio_low.
+        self._log("avg_ratio_low")
+        self._log("avg_ratio_low")
+        self._log("strict_count_mismatch")
+        self._log("avg_ratio_low")
+        self._log(None, outcome="found")
+
+        cur = self.db._execute(
+            "SELECT total_searches, dominant_rejection_reason "
+            "FROM request_search_summary WHERE request_id = %s",
+            (self.req_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["total_searches"], 5)
+        self.assertEqual(row["dominant_rejection_reason"], "avg_ratio_low")
+
+    def test_all_null_reasons_produce_null_dominant(self):
+        # Every row's reason is NULL (e.g. all found / no_results).
+        self._log(None, outcome="found")
+        self._log(None, outcome="no_results")
+        cur = self.db._execute(
+            "SELECT dominant_rejection_reason "
+            "FROM request_search_summary WHERE request_id = %s",
+            (self.req_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertIsNone(row["dominant_rejection_reason"])
 
 
 @requires_postgres

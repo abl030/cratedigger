@@ -2477,6 +2477,51 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             {k: [r["outcome"] for r in v] for k, v in batch.items()},
             {1: ["no_match", "found"], 2: ["error"]})
 
+    def test_log_search_records_u11_forensics_kwargs(self):
+        """U11 R22-R27 mirror: every new kwarg must land on the
+        SearchLogRow and surface on the history dict."""
+        db = FakePipelineDB()
+        db.log_search(
+            1, query="*adiohead Kid A", outcome="no_match",
+            rejection_reason="avg_ratio_low",
+            result_count_uncapped=2025,
+            query_token_count=3,
+            query_distinct_token_count=3,
+            expected_track_count=10,
+            matcher_score_top1=2.95,
+            query_template="{artist} {title}",
+        )
+        history = db.get_search_history(1)
+        self.assertEqual(len(history), 1)
+        row = history[0]
+        self.assertEqual(row["rejection_reason"], "avg_ratio_low")
+        self.assertEqual(row["result_count_uncapped"], 2025)
+        self.assertEqual(row["query_token_count"], 3)
+        self.assertEqual(row["query_distinct_token_count"], 3)
+        self.assertEqual(row["expected_track_count"], 10)
+        score = row["matcher_score_top1"]
+        assert isinstance(score, float)
+        self.assertAlmostEqual(score, 2.95, places=4)
+        self.assertEqual(row["query_template"], "{artist} {title}")
+        # And the row dataclass preserves the raw values.
+        self.assertEqual(db.search_logs[0].rejection_reason, "avg_ratio_low")
+        self.assertEqual(db.search_logs[0].query_template, "{artist} {title}")
+
+    def test_log_search_defaults_omitted_u11_kwargs_to_none(self):
+        """Backwards-compat: callers that don't pass U11 kwargs get
+        NULL-shaped fields on the row (mirrors the real DB column
+        default for the migrated columns)."""
+        db = FakePipelineDB()
+        db.log_search(1, query="legacy", outcome="error")
+        row = db.get_search_history(1)[0]
+        self.assertIsNone(row["rejection_reason"])
+        self.assertIsNone(row["result_count_uncapped"])
+        self.assertIsNone(row["query_token_count"])
+        self.assertIsNone(row["query_distinct_token_count"])
+        self.assertIsNone(row["expected_track_count"])
+        self.assertIsNone(row["matcher_score_top1"])
+        self.assertIsNone(row["query_template"])
+
     def test_get_search_history_page_clamps_to_limit_and_seeds_cursor(self):
         """U1: cursor-paginated history mirrors PipelineDB semantics."""
         db = FakePipelineDB()

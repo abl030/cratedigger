@@ -166,6 +166,16 @@ class SearchLogRow:
     # the real column with default 0; mirror that here so test asserts
     # never see None on the field.
     pre_filter_skip_count: int = 0
+    # U11 forensics columns (R22-R27). All nullable in production;
+    # default ``None`` here so legacy / pre-attempt rows mirror the
+    # real DB ``NULL`` shape.
+    rejection_reason: str | None = None
+    result_count_uncapped: int | None = None
+    query_token_count: int | None = None
+    query_distinct_token_count: int | None = None
+    expected_track_count: int | None = None
+    matcher_score_top1: float | None = None
+    query_template: str | None = None
 
 
 @dataclass
@@ -3150,13 +3160,24 @@ class FakePipelineDB:
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
                    fanout_waves: int = 0,
-                   pre_filter_skip_count: int = 0) -> None:
+                   pre_filter_skip_count: int = 0,
+                   rejection_reason: str | None = None,
+                   result_count_uncapped: int | None = None,
+                   query_token_count: int | None = None,
+                   query_distinct_token_count: int | None = None,
+                   expected_track_count: int | None = None,
+                   matcher_score_top1: float | None = None,
+                   query_template: str | None = None) -> None:
         """Mirror PipelineDB.log_search wire boundary.
 
         ``candidates`` is encoded via ``msgspec.json.encode`` (same as the
         real DB writer) and stored as a JSON string so tests can decode it
         with ``msgspec.convert(json.loads(row.candidates), type=list[CandidateScore])``
         — the same path U7 will use to read the JSONB blob back.
+
+        U11 forensics kwargs (R22-R27) mirror the production signature.
+        Each defaults to ``None`` so legacy ``log_search`` calls in
+        tests stay backwards-compatible.
         """
         self._next_search_log_id += 1
         candidates_json: str | None = None
@@ -3179,6 +3200,13 @@ class FakePipelineDB:
             peers_browsed_lazy=peers_browsed_lazy,
             fanout_waves=fanout_waves,
             pre_filter_skip_count=pre_filter_skip_count,
+            rejection_reason=rejection_reason,
+            result_count_uncapped=result_count_uncapped,
+            query_token_count=query_token_count,
+            query_distinct_token_count=query_distinct_token_count,
+            expected_track_count=expected_track_count,
+            matcher_score_top1=matcher_score_top1,
+            query_template=query_template,
         ))
 
     def get_search_history(self,
@@ -3350,6 +3378,14 @@ class FakePipelineDB:
             "stale_reason": entry.stale_reason,
             "plan_cycle_snapshot": entry.plan_cycle_snapshot,
             "pre_filter_skip_count": entry.pre_filter_skip_count,
+            # U11 forensics columns. Same NULL semantics as production.
+            "rejection_reason": entry.rejection_reason,
+            "result_count_uncapped": entry.result_count_uncapped,
+            "query_token_count": entry.query_token_count,
+            "query_distinct_token_count": entry.query_distinct_token_count,
+            "expected_track_count": entry.expected_track_count,
+            "matcher_score_top1": entry.matcher_score_top1,
+            "query_template": entry.query_template,
         }
 
     # --- User cooldowns ---
@@ -3952,6 +3988,13 @@ class FakePipelineDB:
                 stale_reason=stale_reason,
                 plan_cycle_snapshot=attempt.cycle_count_snapshot,
                 pre_filter_skip_count=attempt.pre_filter_skip_count,
+                rejection_reason=attempt.rejection_reason,
+                result_count_uncapped=attempt.result_count_uncapped,
+                query_token_count=attempt.query_token_count,
+                query_distinct_token_count=attempt.query_distinct_token_count,
+                expected_track_count=attempt.expected_track_count,
+                matcher_score_top1=attempt.matcher_score_top1,
+                query_template=attempt.query_template,
             ))
 
             now = _utcnow()
@@ -4022,6 +4065,13 @@ class FakePipelineDB:
             cursor_update_status=CURSOR_UPDATE_UNCHANGED,
             plan_cycle_snapshot=cycle_snapshot,
             pre_filter_skip_count=attempt.pre_filter_skip_count,
+            rejection_reason=attempt.rejection_reason,
+            result_count_uncapped=attempt.result_count_uncapped,
+            query_token_count=attempt.query_token_count,
+            query_distinct_token_count=attempt.query_distinct_token_count,
+            expected_track_count=attempt.expected_track_count,
+            matcher_score_top1=attempt.matcher_score_top1,
+            query_template=attempt.query_template,
         ))
         if attempt.apply_scheduler_attempt:
             now = _utcnow()

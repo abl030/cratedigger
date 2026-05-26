@@ -587,6 +587,18 @@ class ConsumedAttemptInput:
     # no_results / error is True with `success=False`. Caller decides.
     apply_scheduler_attempt: bool = False
     scheduler_success: bool = False
+    # U11 forensics (R22-R27): the executor populates these from the
+    # SearchResult immediately before recording. All nullable so the
+    # executor can leave a column NULL when the upstream signal is
+    # genuinely absent (e.g. ``matcher_score_top1`` is NULL on
+    # ``outcome="no_results"`` because the matcher never ran).
+    rejection_reason: str | None = None
+    result_count_uncapped: int | None = None
+    query_token_count: int | None = None
+    query_distinct_token_count: int | None = None
+    expected_track_count: int | None = None
+    matcher_score_top1: float | None = None
+    query_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -617,6 +629,19 @@ class NonConsumingAttemptInput:
     # because the matcher rarely runs on pre-attempt failures, but
     # plumbed through so the column is consistently populated.
     pre_filter_skip_count: int = 0
+    # U11 forensics (R22-R27). Same shape / nullability as
+    # ``ConsumedAttemptInput``. Most pre-attempt failures only carry
+    # ``query_token_count`` / ``query_distinct_token_count`` /
+    # ``query_template`` / ``expected_track_count`` — the matcher
+    # never ran so ``rejection_reason`` / ``matcher_score_top1`` /
+    # ``result_count_uncapped`` are typically NULL.
+    rejection_reason: str | None = None
+    result_count_uncapped: int | None = None
+    query_token_count: int | None = None
+    query_distinct_token_count: int | None = None
+    expected_track_count: int | None = None
+    matcher_score_top1: float | None = None
+    query_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3383,7 +3408,14 @@ class PipelineDB:
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
                    fanout_waves: int = 0,
-                   pre_filter_skip_count: int = 0) -> None:
+                   pre_filter_skip_count: int = 0,
+                   rejection_reason: str | None = None,
+                   result_count_uncapped: int | None = None,
+                   query_token_count: int | None = None,
+                   query_distinct_token_count: int | None = None,
+                   expected_track_count: int | None = None,
+                   matcher_score_top1: float | None = None,
+                   query_template: str | None = None) -> None:
         """Record one search attempt for an album request.
 
         ``candidates`` is the top-N forensic ``CandidateScore`` list (already
@@ -3397,6 +3429,15 @@ class PipelineDB:
         aggregate count of dirs the matcher's asymmetric pre-filter
         rejected before browse. NOT NULL on the column; default 0 keeps
         pre-attempt / error rows uniformly populated.
+
+        ``rejection_reason`` (R22), ``result_count_uncapped`` (R23),
+        ``query_token_count`` / ``query_distinct_token_count`` (R24),
+        ``expected_track_count`` (R25), ``matcher_score_top1`` (R26),
+        and ``query_template`` (R27) are the U11 forensics columns
+        added in migration 027. All nullable; default ``None`` writes
+        SQL NULL so historical-style callers (and unit tests that only
+        exercise the candidate JSONB) stay backwards-compatible while
+        production callers populate every field.
         """
         candidates_json: str | None = None
         if candidates is not None:
@@ -3407,13 +3448,20 @@ class PipelineDB:
                 request_id, query, result_count, elapsed_s, outcome,
                 candidates, variant, final_state, browse_time_s, match_time_s,
                 peers_browsed, peers_browsed_lazy, fanout_waves,
-                pre_filter_skip_count
+                pre_filter_skip_count,
+                rejection_reason, result_count_uncapped,
+                query_token_count, query_distinct_token_count,
+                expected_track_count, matcher_score_top1, query_template
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s)
         """, (request_id, query, result_count, elapsed_s, outcome,
               candidates_json, variant, final_state, browse_time_s, match_time_s,
               peers_browsed, peers_browsed_lazy, fanout_waves,
-              pre_filter_skip_count))
+              pre_filter_skip_count,
+              rejection_reason, result_count_uncapped,
+              query_token_count, query_distinct_token_count,
+              expected_track_count, matcher_score_top1, query_template))
         self.conn.commit()
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:
@@ -5752,7 +5800,11 @@ class PipelineDB:
                         execution_stage, attempt_consumed,
                         cursor_update_status, stale_reason,
                         plan_cycle_snapshot,
-                        pre_filter_skip_count
+                        pre_filter_skip_count,
+                        rejection_reason, result_count_uncapped,
+                        query_token_count, query_distinct_token_count,
+                        expected_track_count, matcher_score_top1,
+                        query_template
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
@@ -5764,6 +5816,10 @@ class PipelineDB:
                         %s, %s,
                         %s, %s,
                         %s,
+                        %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
                         %s
                     )
                     RETURNING id
@@ -5795,6 +5851,13 @@ class PipelineDB:
                         stale_reason,
                         attempt.cycle_count_snapshot,
                         attempt.pre_filter_skip_count,
+                        attempt.rejection_reason,
+                        attempt.result_count_uncapped,
+                        attempt.query_token_count,
+                        attempt.query_distinct_token_count,
+                        attempt.expected_track_count,
+                        attempt.matcher_score_top1,
+                        attempt.query_template,
                     ),
                 )
                 log_row = cur.fetchone()
@@ -5914,12 +5977,20 @@ class PipelineDB:
                         plan_repeat_group, plan_generator_id,
                         execution_stage, attempt_consumed,
                         cursor_update_status, plan_cycle_snapshot,
-                        pre_filter_skip_count
+                        pre_filter_skip_count,
+                        rejection_reason, result_count_uncapped,
+                        query_token_count, query_distinct_token_count,
+                        expected_track_count, matcher_score_top1,
+                        query_template
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s,
                         %s, %s, %s,
                         %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s,
                         %s, %s,
                         %s, %s,
                         %s, %s,
@@ -5946,6 +6017,13 @@ class PipelineDB:
                         CURSOR_UPDATE_UNCHANGED,
                         cycle_snapshot,
                         attempt.pre_filter_skip_count,
+                        attempt.rejection_reason,
+                        attempt.result_count_uncapped,
+                        attempt.query_token_count,
+                        attempt.query_distinct_token_count,
+                        attempt.expected_track_count,
+                        attempt.matcher_score_top1,
+                        attempt.query_template,
                     ),
                 )
                 log_row = cur.fetchone()
