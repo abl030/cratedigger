@@ -20,6 +20,7 @@ from lib.search import (
     MAX_VA_TRACK_ARTIST_SLOTS,
     score_track_distinctiveness,
     GENERIC_TITLE_TOKENS,
+    query_template_for_strategy,
 )
 
 
@@ -1459,6 +1460,53 @@ class TestGenerateSearchPlanSlotMix(unittest.TestCase):
         # Excess omissions carry the strategy label the picker uses.
         for o in excess_omits:
             self.assertEqual(o["strategy"], "va_track_artist_excess")
+
+
+class TestQueryTemplateForStrategy(unittest.TestCase):
+    """U11 R27: ``query_template_for_strategy`` pure mapping.
+
+    Returns the operator-readable template shape for a plan strategy
+    label. Logged on every search_log row so triage can group searches
+    by shape without re-parsing the query text. Bumping the mapping is
+    a generator-output concern (the operator dashboard groups by these
+    labels), but it does NOT require a SEARCH_PLAN_GENERATOR_ID bump
+    because the helper is read-only on existing plan items.
+    """
+
+    # (description, plan_strategy, expected_template)
+    CASES = [
+        ("default", "default", "{artist} {title}"),
+        ("literal", "literal", "{artist} {title}"),
+        ("literal_flac", "literal_flac", "{artist} {title} FLAC"),
+        ("unwild_year", "unwild_year", "{artist} {title} {year}"),
+        ("unwild_rg_year", "unwild_rg_year", "{artist} {title} {rg_year}"),
+        ("catalog_number", "catalog_number", "{artist} {catno}"),
+        ("compilation_series", "compilation_series", "{title}"),
+        ("selftitled_artist_track_0",
+         "selftitled_artist_track_0", "{artist} {track_0}"),
+        ("selftitled_artist_track_0_flac",
+         "selftitled_artist_track_0_flac", "{artist} {track_0} FLAC"),
+        ("selftitled_artist_year",
+         "selftitled_artist_year", "{artist} {year}"),
+        ("track_0_artist", "track_0_artist", "{artist} {track_N}"),
+        ("track_3_artist", "track_3_artist", "{artist} {track_N}"),
+        ("va_track_artist_0",
+         "va_track_artist_0", "{track_artist} {track_N}"),
+        ("va_track_artist_2",
+         "va_track_artist_2", "{track_artist} {track_N}"),
+        # Unknown / unmapped strategy → echo the raw label so triage
+        # still surfaces it rather than silently collapsing to None.
+        ("unknown_strategy_passthrough", "made_up_label", "made_up_label"),
+        ("empty_strategy_returns_none", "", None),
+        ("none_returns_none", None, None),
+    ]
+
+    def test_template_mapping(self):
+        for desc, strategy, expected in self.CASES:
+            with self.subTest(desc=desc, strategy=strategy):
+                self.assertEqual(
+                    query_template_for_strategy(strategy), expected,
+                )
 
 
 if __name__ == "__main__":

@@ -397,11 +397,17 @@ def search_for_album(album, ctx):
     # legitimately slow searches and starving the pipeline — see
     # 2026-05-02 regression).
     final_state: str | None = None
+    # U11 R23: capture slskd's terminal ``responseCount`` so the
+    # search-log row records the uncapped response count. Diverges from
+    # ``len(search_results)`` when slskd hits responseLimit/fileLimit
+    # and truncates the harvested array. ``None`` when no poll succeeded.
+    response_count_terminal: int | None = None
     try:
         while True:
             state_resp = slskd.searches.state(search["id"], False)
             state = state_resp["state"]
             final_state = state
+            response_count_terminal = state_resp.get("responseCount", 0)
             if (
                 "Completed" in state
                 or ("InProgress" not in state and "Queued" not in state)
@@ -442,6 +448,7 @@ def search_for_album(album, ctx):
             result_count=0, elapsed_s=elapsed, outcome="no_results",
             variant_tag=variant_tag, final_state=final_state,
             plan_execution=plan_execution,
+            result_count_uncapped=response_count_terminal,
         )
 
     filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
@@ -462,6 +469,7 @@ def search_for_album(album, ctx):
         variant_tag=variant_tag,
         final_state=final_state,
         plan_execution=plan_execution,
+        result_count_uncapped=response_count_terminal,
     )
     # Reuse the same merge path as the parallel pipeline
     _merge_search_result(result, ctx)
@@ -557,12 +565,19 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
     watchdog_fired = False
     prev_count = 0
     last_progress_at = clock_fn()
+    # U11 R23: capture slskd's terminal ``responseCount`` so the
+    # search-log row records the uncapped response count slskd's
+    # writer tracked. May diverge from ``len(search_results)`` when
+    # slskd hits ``responseLimit`` / ``fileLimit`` and truncates the
+    # harvested array. ``None`` when no state poll ever succeeded.
+    response_count_terminal: int | None = None
     while True:
         try:
             state_resp = slskd_client.searches.state(search_id, False)
             state = state_resp["state"]
             final_state = state
             count = state_resp.get("responseCount", 0)
+            response_count_terminal = count
             if count > prev_count:
                 prev_count = count
                 last_progress_at = clock_fn()
@@ -633,6 +648,10 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
             result_count=0, elapsed_s=elapsed, outcome="no_results",
             variant_tag=variant_tag, final_state=final_state,
             watchdog_fired=watchdog_fired,
+            # U11 R23: zero responses is the operator-meaningful uncapped
+            # count here too — slskd state's ``responseCount`` is the
+            # source of truth even on the no_results path.
+            result_count_uncapped=response_count_terminal,
         )
 
     filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
@@ -652,6 +671,7 @@ def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client
         variant_tag=variant_tag,
         final_state=final_state,
         watchdog_fired=watchdog_fired,
+        result_count_uncapped=response_count_terminal,
     )
 
 
@@ -733,13 +753,29 @@ def _log_search_result(album, result, ctx) -> None:
     No new ``outcome='exhausted'`` rows are emitted by this seam; plan
     wrap on the final ordinal increments ``plan_cycle_count`` instead
     (the consumed-attempt write owns that bookkeeping).
+
+    U11 R22-R27: synthesises the forensics scalars on every write —
+    query token / distinct-token counts (computed from ``result.query``),
+    query template (mapped from ``plan_strategy``), expected track count
+    (taken from ``album.releases[0].track_count`` so a single-disc
+    request without a populated executor field still gets the column
+    populated), and the matcher-derived ``rejection_reason`` +
+    ``matcher_score_top1`` (computed from ``result.candidates`` via
+    :func:`lib.matching.classify_rejection_from_log_inputs` /
+    :func:`lib.matching.matcher_score_top1_for`). ``result.result_count_
+    uncapped`` is captured upstream from the slskd state response.
     """
     import json as _json
 
+    from lib.matching import (
+        classify_rejection_from_log_inputs,
+        matcher_score_top1_for,
+    )
     from lib.pipeline_db import (
         ConsumedAttemptInput,
         NonConsumingAttemptInput,
     )
+    from lib.search import query_template_for_strategy
 
     # Per-cycle watchdog instrumentation (issue #212). Every SearchResult
     # passes through here, so this is the single increment site for both
@@ -785,6 +821,39 @@ def _log_search_result(album, result, ctx) -> None:
     # from `_collect_search_results` for accepted searches.
     is_consumed = _is_consumed_outcome(result, plan_execution)
 
+    # U11 R24/R25/R26/R27: derive scalar forensics shared between the
+    # consumed and non-consuming write paths. All defensive against
+    # absent values — token counts only when ``result.query`` is set;
+    # ``expected_track_count`` only when the album exposes a release
+    # ``track_count``; ``query_template`` only when ``plan_execution``
+    # supplied a strategy label. R22 (``rejection_reason``) and R26
+    # (``matcher_score_top1``) compute off ``result.candidates`` via
+    # the shared pure helpers — same source of truth as the matcher.
+    query_text = result.query or ""
+    query_tokens = query_text.split() if query_text else []
+    query_token_count: int | None = len(query_tokens) if query_text else None
+    query_distinct_token_count: int | None = (
+        len({t.lower() for t in query_tokens}) if query_text else None
+    )
+    expected_track_count: int | None = None
+    if getattr(album, "releases", None):
+        first_release = album.releases[0]
+        track_count_attr = getattr(first_release, "track_count", None)
+        if isinstance(track_count_attr, int):
+            expected_track_count = track_count_attr
+    query_template: str | None = None
+    if plan_execution is not None:
+        query_template = query_template_for_strategy(
+            plan_execution.plan_strategy,
+        )
+    candidates_seq = result.candidates or ()
+    pre_filter_skip_count = getattr(result, "pre_filter_skip_count", 0) or 0
+    rejection_reason = classify_rejection_from_log_inputs(
+        list(candidates_seq), pre_filter_skip_count, outcome,
+    )
+    matcher_score_top1 = matcher_score_top1_for(list(candidates_seq))
+    result_count_uncapped = getattr(result, "result_count_uncapped", None)
+
     if is_consumed and plan_execution is not None:
         scheduler_success = (outcome == "found")
         try:
@@ -817,6 +886,13 @@ def _log_search_result(album, result, ctx) -> None:
                     pre_filter_skip_count=result.pre_filter_skip_count,
                     apply_scheduler_attempt=True,
                     scheduler_success=scheduler_success,
+                    rejection_reason=rejection_reason,
+                    result_count_uncapped=result_count_uncapped,
+                    query_token_count=query_token_count,
+                    query_distinct_token_count=query_distinct_token_count,
+                    expected_track_count=expected_track_count,
+                    matcher_score_top1=matcher_score_top1,
+                    query_template=query_template,
                 )
             )
         except Exception:
@@ -852,6 +928,13 @@ def _log_search_result(album, result, ctx) -> None:
                 final_state=result.final_state,
                 apply_scheduler_attempt=True,
                 pre_filter_skip_count=result.pre_filter_skip_count,
+                rejection_reason=rejection_reason,
+                result_count_uncapped=result_count_uncapped,
+                query_token_count=query_token_count,
+                query_distinct_token_count=query_distinct_token_count,
+                expected_track_count=expected_track_count,
+                matcher_score_top1=matcher_score_top1,
+                query_template=query_template,
             )
         )
     except Exception:

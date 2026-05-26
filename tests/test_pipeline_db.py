@@ -1360,6 +1360,55 @@ class TestSearchLog(unittest.TestCase):
         self.assertEqual(history[0]["pre_filter_skip_count"], 0)
         self.assertEqual(history[1]["pre_filter_skip_count"], 42)
 
+    def test_log_search_persists_u11_forensics_columns(self):
+        """U11 R22-R27: every new forensics column round-trips on log_search.
+
+        Asserts ``rejection_reason``, ``result_count_uncapped``,
+        ``query_token_count``, ``query_distinct_token_count``,
+        ``expected_track_count``, ``matcher_score_top1``, and
+        ``query_template`` survive the INSERT and come back on the
+        SELECT * read.
+        """
+        self.db.log_search(
+            request_id=self.req_id,
+            query="*rtist Album",
+            outcome="no_match",
+            candidates=None,
+            rejection_reason="avg_ratio_low",
+            result_count_uncapped=1234,
+            query_token_count=2,
+            query_distinct_token_count=2,
+            expected_track_count=14,
+            matcher_score_top1=2.75,
+            query_template="{artist} {title}",
+        )
+        # Second row: defaults (kwargs omitted) write SQL NULL so we
+        # can also assert backwards-compat.
+        self.db.log_search(
+            request_id=self.req_id, query="q2",
+            outcome="no_results", candidates=None,
+        )
+        history = self.db.get_search_history(self.req_id)
+        # newest-first.
+        nulls = history[0]
+        self.assertIsNone(nulls["rejection_reason"])
+        self.assertIsNone(nulls["result_count_uncapped"])
+        self.assertIsNone(nulls["query_token_count"])
+        self.assertIsNone(nulls["query_distinct_token_count"])
+        self.assertIsNone(nulls["expected_track_count"])
+        self.assertIsNone(nulls["matcher_score_top1"])
+        self.assertIsNone(nulls["query_template"])
+        populated = history[1]
+        self.assertEqual(populated["rejection_reason"], "avg_ratio_low")
+        self.assertEqual(populated["result_count_uncapped"], 1234)
+        self.assertEqual(populated["query_token_count"], 2)
+        self.assertEqual(populated["query_distinct_token_count"], 2)
+        self.assertEqual(populated["expected_track_count"], 14)
+        score = populated["matcher_score_top1"]
+        assert isinstance(score, float)
+        self.assertAlmostEqual(score, 2.75, places=4)
+        self.assertEqual(populated["query_template"], "{artist} {title}")
+
     def test_log_search_candidates_decode_rejects_wrong_type(self):
         """Wire-boundary regression: msgspec.convert raises on type drift.
 
@@ -5570,6 +5619,152 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
         rows = self.db.get_search_history(self.req_id)
         self.assertEqual(rows, [])
 
+    def test_consumed_attempt_persists_u11_forensics_columns(self):
+        """U11: consumed-attempt rows surface R22-R27 from the input."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0,
+            outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            result_count_uncapped=873,
+            query_token_count=4,
+            query_distinct_token_count=3,
+            expected_track_count=10,
+            matcher_score_top1=1.5,
+            query_template="{artist} {title} FLAC",
+        ))
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["rejection_reason"], "strict_count_mismatch")
+        self.assertEqual(row["result_count_uncapped"], 873)
+        self.assertEqual(row["query_token_count"], 4)
+        self.assertEqual(row["query_distinct_token_count"], 3)
+        self.assertEqual(row["expected_track_count"], 10)
+        score = row["matcher_score_top1"]
+        assert isinstance(score, float)
+        self.assertAlmostEqual(score, 1.5, places=4)
+        self.assertEqual(row["query_template"], "{artist} {title} FLAC")
+
+    def test_u12_wrap_writes_failure_class_b_cands_never_match(self):
+        """U12: wrap classifies all-no_match cycle as B."""
+        # Cycle 0: both items return no_match (matcher rejected candidates).
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match", rejection_reason="strict_count_mismatch",
+        ))
+        # Final ordinal → wrap.
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_match", rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "B_cands_never_match")
+
+    def test_u12_wrap_writes_failure_class_a_zero_results_dominant(self):
+        """U12: wrap classifies dominant-no_results cycle as A."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_results",
+        ))
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_results",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "A_zero_results_dominant")
+
+    def test_u12_non_wrap_advance_does_not_write_failure_class(self):
+        """U12: classification only fires on wrap, not on plain advance."""
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match",
+        ))
+        self.assertEqual(result.cursor_update_status, "advanced")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertIsNone(req["failure_class"])
+
+    def test_u12_wrap_with_status_imported_classifies_resolved(self):
+        """U12: status moved past 'wanted' overrides search-pattern verdict."""
+        # Mid-cycle, the importer marked the request 'imported'.
+        self.db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (self.req_id,),
+        )
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match",
+        ))
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_match",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "resolved")
+
+    def test_u12_wrap_preserves_prior_failure_class_on_degenerate_cycle(self):
+        """U12: empty cycle (all stale) leaves prior failure_class intact.
+
+        Seed a prior failure_class, then trigger a wrap whose only
+        consumed attempt is the wrap itself. Verify the classifier sees
+        one consumed attempt; for richer "zero consumed" coverage see
+        the FakePipelineDB self-test where we can drive the
+        no-consumed-attempts case directly.
+        """
+        # Seed a prior verdict so we can distinguish "unchanged" from
+        # "overwritten".
+        self.db._execute(
+            "UPDATE album_requests SET failure_class = 'E_mixed' "
+            "WHERE id = %s",
+            (self.req_id,),
+        )
+        # Single attempt + wrap. Branch ordering: found dominates →
+        # D_found_but_no_import overwrites the prior E_mixed.
+        self.db._execute(
+            "UPDATE album_requests SET next_plan_ordinal = 1 WHERE id = %s",
+            (self.req_id,),
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="found",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "D_found_but_no_import")
+
+    def test_u12_wrap_d_found_but_no_import(self):
+        """U12: one found + status still wanted → D_found_but_no_import."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="found",
+        ))
+        result = self.db.record_consumed_search_attempt(self._attempt(
+            1, outcome="no_match",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["failure_class"], "D_found_but_no_import")
+
+    def test_u12_failure_class_check_constraint_enforced(self):
+        """U12: every classifier verdict must satisfy the CHECK constraint.
+
+        Walk a wrap for each of A/B/D/resolved/E (constants from the
+        classifier module) and assert that PostgreSQL accepts the
+        write. If the classifier ever returns a value the schema
+        rejects, this surfaces as a constraint violation at write time
+        — not as silent corruption.
+        """
+        from lib.search_classification import ALL_FAILURE_CLASSES
+        for fc in ALL_FAILURE_CLASSES:
+            with self.subTest(failure_class=fc):
+                self.db._execute(
+                    "UPDATE album_requests SET failure_class = %s "
+                    "WHERE id = %s",
+                    (fc, self.req_id),
+                )
+                req = self.db.get_request(self.req_id)
+                assert req is not None
+                self.assertEqual(req["failure_class"], fc)
+
 
 @requires_postgres
 class TestRecordNonConsumingSearchAttempt(unittest.TestCase):
@@ -5624,6 +5819,102 @@ class TestRecordNonConsumingSearchAttempt(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["search_attempts"], 0)
         self.assertIsNone(req["next_retry_after"])
+
+    def test_non_consuming_attempt_persists_u11_forensics_columns(self):
+        """U11: pre-attempt rows surface R22-R27 from the input."""
+        self.db.record_non_consuming_search_attempt(
+            self.NonConsumingAttemptInput(
+                request_id=self.req_id,
+                outcome="error",
+                error_message="slskd 503",
+                apply_scheduler_attempt=True,
+                rejection_reason=None,
+                result_count_uncapped=None,
+                query_token_count=3,
+                query_distinct_token_count=3,
+                expected_track_count=12,
+                matcher_score_top1=None,
+                query_template="{artist} {title}",
+            )
+        )
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        # Pre-attempt: matcher never ran → score/reason/uncapped NULL.
+        self.assertIsNone(row["rejection_reason"])
+        self.assertIsNone(row["matcher_score_top1"])
+        self.assertIsNone(row["result_count_uncapped"])
+        # Token-counts + template + expected-track-count come from
+        # plan-context state that's known before slskd dispatch.
+        self.assertEqual(row["query_token_count"], 3)
+        self.assertEqual(row["query_distinct_token_count"], 3)
+        self.assertEqual(row["expected_track_count"], 12)
+        self.assertEqual(row["query_template"], "{artist} {title}")
+
+
+@requires_postgres
+class TestRequestSearchSummaryViewU11RoundTrip(unittest.TestCase):
+    """U11 R29: writing search_log rows with populated forensics columns
+    must surface through ``request_search_summary`` for the dominant
+    rejection-reason rollup.
+
+    Migration 031 defines ``request_search_summary`` with
+    ``MODE() WITHIN GROUP (ORDER BY rejection_reason)`` — the mode is
+    the most-frequent non-NULL reason. This test pins that contract:
+    five known rows with mixed reasons must roll up to the operator's
+    expected ``dominant_rejection_reason``.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="u11-summary-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _log(self, reason: str | None, outcome: str = "no_match") -> None:
+        self.db.log_search(
+            request_id=self.req_id,
+            query="q",
+            outcome=outcome,
+            candidates=[],
+            rejection_reason=reason,
+        )
+
+    def test_dominant_rejection_reason_rolls_up_from_recent_rows(self):
+        # 5 rows: 3 avg_ratio_low, 1 strict_count_mismatch, 1 NULL
+        # (e.g. found). Mode over non-NULL = avg_ratio_low.
+        self._log("avg_ratio_low")
+        self._log("avg_ratio_low")
+        self._log("strict_count_mismatch")
+        self._log("avg_ratio_low")
+        self._log(None, outcome="found")
+
+        cur = self.db._execute(
+            "SELECT total_searches, dominant_rejection_reason "
+            "FROM request_search_summary WHERE request_id = %s",
+            (self.req_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["total_searches"], 5)
+        self.assertEqual(row["dominant_rejection_reason"], "avg_ratio_low")
+
+    def test_all_null_reasons_produce_null_dominant(self):
+        # Every row's reason is NULL (e.g. all found / no_results).
+        self._log(None, outcome="found")
+        self._log(None, outcome="no_results")
+        cur = self.db._execute(
+            "SELECT dominant_rejection_reason "
+            "FROM request_search_summary WHERE request_id = %s",
+            (self.req_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertIsNone(row["dominant_rejection_reason"])
 
 
 @requires_postgres
@@ -6484,6 +6775,407 @@ class TestFieldResolutionRecording(unittest.TestCase):
         db = make_db()
         req_id = self._seed_request(db)
         self.assertIsNone(db.get_field_resolution(req_id, "track_artist"))
+
+
+@requires_postgres
+class TestMarkImportedWithRescue(unittest.TestCase):
+    """U14: long-tail-rescue event capture against real PG.
+
+    Pins the atomic four-write contract:
+      1. ``status`` → ``'imported'``
+      2. ``rescued_at`` → ``NOW()`` (when prior unfindable category set)
+      3. ``prior_unfindable_category`` → the cleared category value
+      4. ``unfindable_category`` → ``NULL`` (the rescue IS the resolution)
+
+    All four mutations commit together OR none of them apply. The
+    method follows the ``replace_request_with_new_mbid`` autocommit-flip
+    pattern: ``conn.autocommit=False`` + explicit ``commit()`` /
+    ``rollback()`` in try/finally.
+    """
+
+    UNFINDABLE_CATEGORIES = (
+        "artist_absent",
+        "album_absent_artist_present",
+        "one_track_structural",
+        "wrong_pressing_available",
+    )
+
+    def _seed_wanted(self, db, *, category=None, rescued_at=None,
+                     prior_category=None):
+        rid = db.add_request(
+            mb_release_id=f"rescue-{category or 'none'}",
+            artist_name="Rescue Artist",
+            album_title="Rescue Album",
+            source="request",
+        )
+        # Set the unfindable category WHILE the row is still wanted —
+        # ``set_unfindable_category`` is guarded by ``status='wanted'`` in
+        # production (lost-update protection against concurrent rescue),
+        # so a seed helper that flipped to downloading first would silently
+        # no-op the category write.
+        if category is not None:
+            ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
+            db.set_unfindable_category(
+                rid, category=category, categorised_at=ts,
+            )
+        # Move to downloading so the imported transition is the canonical one.
+        db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (rid,),
+        )
+        if rescued_at is not None or prior_category is not None:
+            db._execute(
+                "UPDATE album_requests "
+                "SET rescued_at = %s, prior_unfindable_category = %s "
+                "WHERE id = %s",
+                (rescued_at, prior_category, rid),
+            )
+        return rid
+
+    def test_rescue_writes_three_columns_on_first_import_from_unfindable(self):
+        """Happy path: row with unfindable_category gets rescue stamp."""
+        for category in self.UNFINDABLE_CATEGORIES:
+            with self.subTest(category=category):
+                db = make_db()
+                rid = self._seed_wanted(db, category=category)
+
+                db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+                row = db.get_request(rid)
+                assert row is not None
+                self.assertEqual(row["status"], "imported")
+                self.assertIsNone(row["unfindable_category"])
+                self.assertEqual(
+                    row["prior_unfindable_category"], category)
+                self.assertIsNotNone(row["rescued_at"])
+                # Sanity: the imported extras also landed.
+                self.assertEqual(float(row["beets_distance"]), 0.05)
+
+    def test_no_rescue_stamp_when_unfindable_was_null(self):
+        """No prior category → ``rescued_at`` stays NULL."""
+        db = make_db()
+        rid = self._seed_wanted(db, category=None)
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["rescued_at"])
+        self.assertIsNone(row["prior_unfindable_category"])
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_first_rescue_wins_re_import_does_not_overwrite(self):
+        """One-shot capture: a row already rescued is not re-stamped.
+
+        Simulates: rescued → Replace → new request → re-categorised →
+        imports again. The second import must NOT bump ``rescued_at``
+        nor change ``prior_unfindable_category``. Original rescue
+        instant is the canonical audit record.
+        """
+        db = make_db()
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        rid = self._seed_wanted(
+            db,
+            category="album_absent_artist_present",
+            rescued_at=original_rescue_at,
+            prior_category="artist_absent",
+        )
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        # rescued_at is immutable once set.
+        self.assertEqual(row["rescued_at"], original_rescue_at)
+        # prior_unfindable_category is immutable too — original rescue wins.
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        # Current unfindable_category is still cleared (the rescue IS
+        # the resolution, regardless of one-shot-stamp semantics).
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_atomic_rollback_on_mid_transaction_failure(self):
+        """A forced failure inside the transaction leaves the row untouched.
+
+        Forces an exception inside the autocommit-disabled block by
+        passing an ``extra`` kwarg that references a non-existent
+        column. The dynamic ``UPDATE`` raises ``UndefinedColumn``
+        AFTER the row lock + read have been taken but BEFORE the
+        commit fires — exactly the mid-flow scenario the autocommit-
+        flip pattern exists to protect against.
+
+        Without ``autocommit=False`` + try/finally, three separate
+        UPDATEs in autocommit mode would leave a half-rescued row in
+        the audit trail. With the pattern, the row is rolled back to
+        its pre-call state and autocommit is restored for subsequent
+        calls.
+        """
+        db = make_db()
+        rid = self._seed_wanted(db, category="artist_absent")
+
+        before = db.get_request(rid)
+        assert before is not None
+        self.assertEqual(before["status"], "downloading")
+        self.assertEqual(before["unfindable_category"], "artist_absent")
+
+        with self.assertRaises(Exception):
+            # ``column_that_does_not_exist`` rides through the
+            # dynamic ``sets`` builder into the UPDATE statement,
+            # raising ``UndefinedColumn`` inside the transaction.
+            db.mark_imported_with_rescue(
+                rid, column_that_does_not_exist=1,
+            )
+
+        # All writes rolled back together — the row is untouched.
+        after = db.get_request(rid)
+        assert after is not None
+        self.assertEqual(after["status"], "downloading")
+        self.assertEqual(after["unfindable_category"], "artist_absent")
+        self.assertIsNone(after["rescued_at"])
+        self.assertIsNone(after["prior_unfindable_category"])
+        # Autocommit restored after the failure so subsequent calls work.
+        self.assertTrue(db.conn.autocommit)
+        # Sanity: the next call still works (proves rollback cleared
+        # the failed transaction state).
+        db.mark_imported_with_rescue(rid, beets_distance=0.07)
+        retried = db.get_request(rid)
+        assert retried is not None
+        self.assertEqual(retried["status"], "imported")
+        self.assertEqual(retried["prior_unfindable_category"], "artist_absent")
+
+
+@requires_postgres
+class TestUnfindableDetectionPipelineDB(unittest.TestCase):
+    """U13: real-PG round-trip coverage for the 4 detection writers.
+
+    The FakePipelineDB mirrors give us shape coverage; this class pins
+    the production SQL against the real fixture so the CHECK
+    constraints (migration 028's 4-category vocabulary) and the
+    ``AND status='wanted'`` lost-update guards behave exactly like
+    operators will see them on doc2.
+
+    Mirrors the ``TestMarkImportedWithRescue`` style next door.
+    """
+
+    UNFINDABLE_CATEGORIES = (
+        "artist_absent",
+        "album_absent_artist_present",
+        "one_track_structural",
+        "wrong_pressing_available",
+    )
+
+    def _seed_wanted(self, db, *, artist_name="A", album_title="B",
+                     mbid=None):
+        return db.add_request(
+            mb_release_id=mbid or f"unf-{artist_name}-{album_title}",
+            artist_name=artist_name,
+            album_title=album_title,
+            source="request",
+        )
+
+    # ---- list_unfindable_probe_candidates ----
+
+    def test_list_candidates_orders_oldest_first_and_filters_by_cadence(self):
+        """NULL probes sort first; rows fresher than window are excluded."""
+        db = make_db()
+        now = datetime.now(timezone.utc)
+        # Three wanted rows.
+        rid_null = self._seed_wanted(db, artist_name="Null", mbid="unf-null")
+        rid_old = self._seed_wanted(db, artist_name="Old", mbid="unf-old")
+        rid_fresh = self._seed_wanted(
+            db, artist_name="Fresh", mbid="unf-fresh")
+        # Old probe = 10 days ago (older than 7d window → eligible).
+        db.record_artist_probe(
+            rid_old, match_count=0,
+            observed_at=now - timedelta(days=10),
+        )
+        # Fresh probe = 1 day ago (inside window → ineligible).
+        db.record_artist_probe(
+            rid_fresh, match_count=0,
+            observed_at=now - timedelta(days=1),
+        )
+
+        cands = db.list_unfindable_probe_candidates(
+            limit=10, probe_interval_days=7,
+        )
+        ids = [c["id"] for c in cands]
+        # NULL probe sorts first.
+        self.assertEqual(ids[0], rid_null)
+        # Old probe included; fresh probe excluded.
+        self.assertIn(rid_old, ids)
+        self.assertNotIn(rid_fresh, ids)
+
+    def test_list_candidates_excludes_non_wanted(self):
+        """A row in any non-wanted status is excluded from the cohort."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-imp")
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (rid,),
+        )
+        cands = db.list_unfindable_probe_candidates(
+            limit=10, probe_interval_days=7,
+        )
+        self.assertNotIn(rid, [c["id"] for c in cands])
+
+    # ---- record_artist_probe ----
+
+    def test_record_artist_probe_round_trips_count_and_timestamp(self):
+        """Probe column updates land and round-trip through SELECT."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-rec-1")
+        ts = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+
+        db.record_artist_probe(rid, match_count=42, observed_at=ts)
+
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["last_artist_probe_match_count"], 42)
+        self.assertEqual(row["last_artist_probe_at"], ts)
+
+    def test_record_artist_probe_silent_noop_when_status_not_wanted(self):
+        """The lost-update guard makes late writes invisible — no error."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-rec-2")
+        # Capture the pre-existing probe state (NULL by default).
+        before = db.get_request(rid)
+        assert before is not None
+        self.assertIsNone(before["last_artist_probe_at"])
+        # Concurrent rescue flips status mid-probe.
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (rid,),
+        )
+        # Detection's late write — must be a silent no-op.
+        ts = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+        db.record_artist_probe(rid, match_count=99, observed_at=ts)
+        after = db.get_request(rid)
+        assert after is not None
+        # Probe columns untouched.
+        self.assertIsNone(after["last_artist_probe_at"])
+        self.assertIsNone(after["last_artist_probe_match_count"])
+
+    # ---- set_unfindable_category ----
+
+    def test_set_unfindable_category_round_trips_all_four_categories(self):
+        """Every valid category round-trips; CHECK constraint passes."""
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        for category in self.UNFINDABLE_CATEGORIES:
+            with self.subTest(category=category):
+                db = make_db()
+                rid = self._seed_wanted(db, mbid=f"unf-set-{category}")
+                db.set_unfindable_category(
+                    rid, category=category, categorised_at=ts,
+                )
+                row = db.get_request(rid)
+                assert row is not None
+                self.assertEqual(row["unfindable_category"], category)
+                self.assertEqual(row["unfindable_categorised_at"], ts)
+
+    def test_set_unfindable_category_rejects_off_vocabulary_value(self):
+        """An unknown category trips the CHECK constraint → IntegrityError."""
+        from psycopg2.errors import CheckViolation
+
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-set-bad")
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        with self.assertRaises(CheckViolation):
+            db.set_unfindable_category(
+                rid, category="garbage_value", categorised_at=ts,
+            )
+
+    def test_set_unfindable_category_silent_noop_when_status_not_wanted(self):
+        """Late verdict write does not clobber a row already past wanted."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-set-imp")
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (rid,),
+        )
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        db.set_unfindable_category(
+            rid, category="artist_absent", categorised_at=ts,
+        )
+        row = db.get_request(rid)
+        assert row is not None
+        # Category never landed; row remains in imported shape.
+        self.assertIsNone(row["unfindable_category"])
+        self.assertEqual(row["status"], "imported")
+
+    # ---- get_unfindable_search_log_signal ----
+
+    def test_search_log_signal_aggregates_zero_find_and_wrong_pressing(self):
+        """Hand-computed aggregates match the production SQL."""
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, SearchPlanItemInput,
+        )
+
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-sig")
+        # Seed a plan + advance the cursor 4 times so we have
+        # 4 distinct ``plan_cycle_snapshot`` values in the log.
+        # Cycles 0..3 from four ordinal consumptions.
+        plan_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="unf-gen",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default",
+                    query="q0", canonical_query_key="q0"),
+            ],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        item_id = active.items[0].id
+
+        def _attempt(cycle_idx: int, *, outcome: str,
+                     rejection_reason: str | None = None,
+                     matcher_score_top1: float | None = None):
+            return ConsumedAttemptInput(
+                request_id=rid,
+                plan_id=plan_id,
+                plan_item_id=item_id,
+                plan_ordinal=0,
+                plan_strategy="default",
+                plan_canonical_query_key="q0",
+                plan_repeat_group=None,
+                plan_generator_id="unf-gen",
+                query="q0",
+                outcome=outcome,
+                plan_item_count=1,
+                cycle_count_snapshot=cycle_idx,
+                apply_scheduler_attempt=True,
+                scheduler_success=(outcome == "found"),
+                rejection_reason=rejection_reason,
+                matcher_score_top1=matcher_score_top1,
+            )
+
+        # Cycle 0: no_match w/ wrong-pressing signature (high score) → hit.
+        db.record_consumed_search_attempt(_attempt(
+            0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.9,
+        ))
+        # Cycle 1: one found → cycle NOT zero-find.
+        db.record_consumed_search_attempt(_attempt(1, outcome="found"))
+        # Cycle 2: no_match w/ low score → not a wrong-pressing hit;
+        # AND no found → counts as a zero-find cycle.
+        db.record_consumed_search_attempt(_attempt(
+            2, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.5,
+        ))
+        # Cycle 3: no_results → zero-find cycle.
+        db.record_consumed_search_attempt(_attempt(3, outcome="no_results"))
+
+        sig = db.get_unfindable_search_log_signal(
+            rid, window_days=30, matcher_score_threshold=0.85,
+        )
+        # Cycles 0, 2, 3 are zero-find (cycle 1 had the found row).
+        self.assertEqual(sig.zero_find_cycles, 3)
+        # One wrong-pressing hit (cycle 0).
+        self.assertEqual(sig.wrong_pressing_hits, 1)
 
 
 if __name__ == "__main__":

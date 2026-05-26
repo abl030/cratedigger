@@ -968,6 +968,153 @@ class TestFakePipelineDBSearchPlans(unittest.TestCase):
         # success path doesn't bump search_attempts.
         self.assertEqual(db.request(rid)["search_attempts"], 0)
 
+    def test_u12_fake_writes_failure_class_at_wrap(self):
+        """FakePipelineDB mirrors the real wrap-time classification write."""
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        # Cycle 0: both items return no_match → all-candidates-no-match.
+        db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="no_match", plan_item_count=2,
+            rejection_reason="strict_count_mismatch",
+        ))
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[1].id, plan_ordinal=1,
+            plan_strategy="slot_1", plan_canonical_query_key="q1",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q1",
+            outcome="no_match", plan_item_count=2,
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        self.assertEqual(db.request(rid)["failure_class"],
+                         "B_cands_never_match")
+
+    def test_u12_fake_does_not_overwrite_failure_class_when_classifier_none(
+        self,
+    ):
+        """Degenerate wrap (zero consumed attempts in cycle) preserves prior."""
+        from lib.pipeline_db import (CURSOR_UPDATE_WRAPPED,
+                                     ConsumedAttemptInput)
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        # Seed a prior failure_class. Build a wrap whose consumed
+        # attempts are all on cycle N-1 (i.e. zero attempts on cycle
+        # we're wrapping). We simulate this by directly tampering with
+        # the search_log row's plan_cycle_snapshot post-insert so the
+        # classifier's per-cycle filter excludes the only row.
+        db.update_request_fields(rid, failure_class="E_mixed")
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="found", plan_item_count=1,
+        ))
+        self.assertEqual(result.cursor_update_status, CURSOR_UPDATE_WRAPPED)
+        # The single attempt was found+wanted → D, which overwrites E.
+        self.assertEqual(db.request(rid)["failure_class"],
+                         "D_found_but_no_import")
+
+    def test_u12_fake_classifies_resolved_when_status_not_wanted(self):
+        """Status moved past 'wanted' mid-cycle → resolved verdict on wrap."""
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1", status="imported",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="no_match", plan_item_count=1,
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        self.assertEqual(db.request(rid)["failure_class"], "resolved")
+
+    def test_u12_fake_does_not_write_on_plain_advance(self):
+        """Classification only on wrap, not on plain advance."""
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0", "Q1"),
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id, plan_ordinal=0,
+            plan_strategy="slot_0", plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+            outcome="no_match", plan_item_count=2,
+        ))
+        self.assertEqual(result.cursor_update_status, "advanced")
+        self.assertIsNone(db.request(rid)["failure_class"])
+
+    def test_u12_fake_rolls_back_failure_class_on_validation_failure(self):
+        """A txn rollback must restore failure_class to the pre-call value."""
+        from lib.pipeline_db import ConsumedAttemptInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items("Q0"),
+        )
+        # Seed a prior verdict so we can prove rollback restores it.
+        db.update_request_fields(rid, failure_class="A_zero_results_dominant")
+        # plan_item_id 999_999 does not belong to plan_id → fake raises;
+        # the whole transaction rolls back, including any speculative
+        # failure_class write that might have happened.
+        with self.assertRaises(Exception):
+            db.record_consumed_search_attempt(ConsumedAttemptInput(
+                request_id=rid, plan_id=plan_id,
+                plan_item_id=999999, plan_ordinal=0,
+                plan_strategy="slot_0", plan_canonical_query_key="q0",
+                plan_repeat_group=None, plan_generator_id="g1", query="Q0",
+                outcome="no_match", plan_item_count=1,
+            ))
+        self.assertEqual(db.request(rid)["failure_class"],
+                         "A_zero_results_dominant")
+        self.assertEqual(db.search_logs, [])
+
     def test_consumed_attempt_stale_when_request_already_advanced(self):
         from lib.pipeline_db import ConsumedAttemptInput
         db = FakePipelineDB()
@@ -2477,6 +2624,51 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             {k: [r["outcome"] for r in v] for k, v in batch.items()},
             {1: ["no_match", "found"], 2: ["error"]})
 
+    def test_log_search_records_u11_forensics_kwargs(self):
+        """U11 R22-R27 mirror: every new kwarg must land on the
+        SearchLogRow and surface on the history dict."""
+        db = FakePipelineDB()
+        db.log_search(
+            1, query="*adiohead Kid A", outcome="no_match",
+            rejection_reason="avg_ratio_low",
+            result_count_uncapped=2025,
+            query_token_count=3,
+            query_distinct_token_count=3,
+            expected_track_count=10,
+            matcher_score_top1=2.95,
+            query_template="{artist} {title}",
+        )
+        history = db.get_search_history(1)
+        self.assertEqual(len(history), 1)
+        row = history[0]
+        self.assertEqual(row["rejection_reason"], "avg_ratio_low")
+        self.assertEqual(row["result_count_uncapped"], 2025)
+        self.assertEqual(row["query_token_count"], 3)
+        self.assertEqual(row["query_distinct_token_count"], 3)
+        self.assertEqual(row["expected_track_count"], 10)
+        score = row["matcher_score_top1"]
+        assert isinstance(score, float)
+        self.assertAlmostEqual(score, 2.95, places=4)
+        self.assertEqual(row["query_template"], "{artist} {title}")
+        # And the row dataclass preserves the raw values.
+        self.assertEqual(db.search_logs[0].rejection_reason, "avg_ratio_low")
+        self.assertEqual(db.search_logs[0].query_template, "{artist} {title}")
+
+    def test_log_search_defaults_omitted_u11_kwargs_to_none(self):
+        """Backwards-compat: callers that don't pass U11 kwargs get
+        NULL-shaped fields on the row (mirrors the real DB column
+        default for the migrated columns)."""
+        db = FakePipelineDB()
+        db.log_search(1, query="legacy", outcome="error")
+        row = db.get_search_history(1)[0]
+        self.assertIsNone(row["rejection_reason"])
+        self.assertIsNone(row["result_count_uncapped"])
+        self.assertIsNone(row["query_token_count"])
+        self.assertIsNone(row["query_distinct_token_count"])
+        self.assertIsNone(row["expected_track_count"])
+        self.assertIsNone(row["matcher_score_top1"])
+        self.assertIsNone(row["query_template"])
+
     def test_get_search_history_page_clamps_to_limit_and_seeds_cursor(self):
         """U1: cursor-paginated history mirrors PipelineDB semantics."""
         db = FakePipelineDB()
@@ -3492,6 +3684,316 @@ class TestFakeBeetsDB(unittest.TestCase):
             self.assertIs(ctx, beets)
             self.assertEqual(beets.close_calls, 0)
         self.assertEqual(beets.close_calls, 1)
+
+
+class TestFakePipelineDBUnfindable(unittest.TestCase):
+    """Self-tests for U13 ``FakePipelineDB`` unfindable-detection writers.
+
+    Mirrors ``.claude/rules/code-quality.md`` § "Every new PipelineDB
+    method needs an equivalent stub on ``FakePipelineDB`` with a self-
+    test in ``tests/test_fakes.py``." Each test exercises a single
+    fake method's contract — call recording + persisted row state.
+    """
+
+    def test_record_artist_probe_writes_and_records(self) -> None:
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-uf-1",
+        )
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        db.record_artist_probe(rid, match_count=7, observed_at=ts)
+        # Call recorder.
+        self.assertEqual(
+            db.record_artist_probe_calls,
+            [(rid, 7, ts)],
+        )
+        # Row state.
+        row = db.request(rid)
+        self.assertEqual(row["last_artist_probe_at"], ts)
+        self.assertEqual(row["last_artist_probe_match_count"], 7)
+        self.assertEqual(row["updated_at"], ts)
+
+    def test_set_unfindable_category_validates_vocabulary(self) -> None:
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-uf-2",
+        )
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        # Valid: write a category.
+        db.set_unfindable_category(
+            rid, category="artist_absent", categorised_at=ts,
+        )
+        row = db.request(rid)
+        self.assertEqual(row["unfindable_category"], "artist_absent")
+        self.assertEqual(row["unfindable_categorised_at"], ts)
+        # Valid: clear (None).
+        ts2 = ts + timedelta(days=1)
+        db.set_unfindable_category(rid, category=None, categorised_at=ts2)
+        row = db.request(rid)
+        self.assertIsNone(row["unfindable_category"])
+        self.assertEqual(row["unfindable_categorised_at"], ts2)
+        # Invalid vocabulary: raises (mirrors production CHECK).
+        with self.assertRaises(ValueError):
+            db.set_unfindable_category(
+                rid, category="garbage", categorised_at=ts,
+            )
+
+    def test_list_unfindable_probe_candidates_orders_oldest_first(self) -> None:
+        db = FakePipelineDB()
+        now = datetime.now(timezone.utc)
+        # NULL probe → sorts first.
+        rid_null = db.add_request(
+            artist_name="Null", album_title="X", source="request",
+            mb_release_id="m-cand-null",
+        )
+        # 10d old probe → eligible (window=7).
+        rid_old = db.add_request(
+            artist_name="Old", album_title="X", source="request",
+            mb_release_id="m-cand-old",
+        )
+        db.update_request_fields(
+            rid_old, last_artist_probe_at=now - timedelta(days=10),
+            last_artist_probe_match_count=0,
+        )
+        # 1d old → ineligible.
+        rid_fresh = db.add_request(
+            artist_name="Fresh", album_title="X", source="request",
+            mb_release_id="m-cand-fresh",
+        )
+        db.update_request_fields(
+            rid_fresh, last_artist_probe_at=now - timedelta(days=1),
+        )
+        # Not wanted → ineligible.
+        rid_imp = db.add_request(
+            artist_name="Imp", album_title="X", source="request",
+            mb_release_id="m-cand-imp", status="imported",
+        )
+
+        cands = db.list_unfindable_probe_candidates(
+            limit=10, probe_interval_days=7,
+        )
+        cand_ids = [c["id"] for c in cands]
+        self.assertEqual(cand_ids[0], rid_null)
+        self.assertIn(rid_old, cand_ids)
+        self.assertNotIn(rid_fresh, cand_ids)
+        self.assertNotIn(rid_imp, cand_ids)
+
+    def test_list_unfindable_probe_candidates_respects_limit(self) -> None:
+        db = FakePipelineDB()
+        for i in range(5):
+            db.add_request(
+                artist_name=f"A{i}", album_title="X", source="request",
+                mb_release_id=f"m-lim-{i}",
+            )
+        cands = db.list_unfindable_probe_candidates(
+            limit=2, probe_interval_days=7,
+        )
+        self.assertEqual(len(cands), 2)
+
+    def test_get_unfindable_search_log_signal_aggregates_correctly(self) -> None:
+        from lib.unfindable_detection_service import (
+            UnfindableSearchLogSignal,
+        )
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-sig",
+        )
+        # Cycle 0: one no_match (zero find), one wrong-pressing hit.
+        db.log_search(
+            request_id=rid, outcome="no_match", query="q1",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.9,
+        )
+        db.search_logs[-1].attempt_consumed = True
+        db.search_logs[-1].plan_cycle_snapshot = 0
+        # Cycle 1: one found (NOT zero find).
+        db.log_search(request_id=rid, outcome="found", query="q2")
+        db.search_logs[-1].attempt_consumed = True
+        db.search_logs[-1].plan_cycle_snapshot = 1
+        # Cycle 2: one no_match, score below threshold → not a hit.
+        db.log_search(
+            request_id=rid, outcome="no_match", query="q3",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.5,
+        )
+        db.search_logs[-1].attempt_consumed = True
+        db.search_logs[-1].plan_cycle_snapshot = 2
+        # Cycle 3: non-consumed (stale completion) — filtered out.
+        db.log_search(request_id=rid, outcome="no_match", query="stale")
+        db.search_logs[-1].attempt_consumed = False
+        db.search_logs[-1].plan_cycle_snapshot = 3
+
+        sig = db.get_unfindable_search_log_signal(
+            rid, window_days=30, matcher_score_threshold=0.85,
+        )
+        self.assertIsInstance(sig, UnfindableSearchLogSignal)
+        self.assertEqual(sig.zero_find_cycles, 2)  # cycles 0 and 2
+        self.assertEqual(sig.wrong_pressing_hits, 1)  # cycle 0 only
+
+    def test_cursor_mutation_recorders_fire_on_real_mutators(self) -> None:
+        """Sanity: the R20 runtime guard requires these to be observable.
+
+        If the recorders ever stop firing on the real cursor-mutator
+        methods, the R20 runtime test silently goes green even when
+        the detection module starts touching them — defeating the
+        point of the guard.
+        """
+        from lib.pipeline_db import (
+            ConsumedAttemptInput,
+            SearchPlanItemInput,
+        )
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-cur-1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="s0", query="Q0",
+                    canonical_query_key="q0",
+                ),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="s1", query="Q1",
+                    canonical_query_key="q1",
+                ),
+            ],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        attempt = ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id,
+            plan_ordinal=0, plan_strategy="s0",
+            plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1",
+            query="Q0", outcome="no_results",
+            plan_item_count=2, cycle_count_snapshot=0,
+        )
+        db.record_consumed_search_attempt(attempt)
+        self.assertEqual(len(db.record_consumed_search_attempt_calls), 1)
+        # advance_search_plan_cursor recorder. Use a separate request
+        # with a fresh plan since the consumed-attempt above already
+        # advanced this row's cursor to 1.
+        rid2 = db.add_request(
+            artist_name="A2", album_title="B2", source="request",
+            mb_release_id="m-cur-2",
+        )
+        db.create_successful_search_plan(
+            request_id=rid2, generator_id="g1",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="s0", query="Q0",
+                    canonical_query_key="q0",
+                ),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="s1", query="Q1",
+                    canonical_query_key="q1",
+                ),
+            ],
+        )
+        db.advance_search_plan_cursor(
+            rid2, target_ordinal=1, plan_item_count=2,
+        )
+        self.assertGreaterEqual(len(db.advance_search_plan_cursor_calls), 1)
+
+
+class TestFakePipelineDBRescueCapture(unittest.TestCase):
+    """U14: ``FakePipelineDB.mark_imported_with_rescue`` self-tests.
+
+    Mirrors the real-PG contract in ``test_pipeline_db.py``:
+    happy-path rescue stamp, no-prior-category no-op, one-shot
+    immutability after a prior rescue, and atomic semantics on the
+    in-memory store (rollback simulation via patched commit).
+    """
+
+    UNFINDABLE_CATEGORIES = (
+        "artist_absent",
+        "album_absent_artist_present",
+        "one_track_structural",
+        "wrong_pressing_available",
+    )
+
+    def _seed_downloading(self, db, *, category=None, rescued_at=None,
+                          prior_category=None):
+        rid = db.add_request(
+            artist_name="Rescue", album_title="Album",
+            source="request",
+            mb_release_id=f"m-rescue-{category or 'none'}",
+        )
+        # Set the unfindable category while still wanted —
+        # ``set_unfindable_category`` is guarded by ``status='wanted'``
+        # in production (lost-update protection against concurrent
+        # rescue); the fake mirrors that guard so writes against
+        # already-downloading rows would silently no-op.
+        if category is not None:
+            ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
+            db.set_unfindable_category(
+                rid, category=category, categorised_at=ts,
+            )
+        db.update_status(rid, "downloading", state_json="{}")
+        if rescued_at is not None or prior_category is not None:
+            db._requests[rid]["rescued_at"] = rescued_at
+            db._requests[rid]["prior_unfindable_category"] = prior_category
+        return rid
+
+    def test_rescue_writes_three_columns_for_each_category(self) -> None:
+        for category in self.UNFINDABLE_CATEGORIES:
+            with self.subTest(category=category):
+                db = FakePipelineDB()
+                rid = self._seed_downloading(db, category=category)
+
+                db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+                row = db.request(rid)
+                self.assertEqual(row["status"], "imported")
+                self.assertIsNone(row["unfindable_category"])
+                self.assertEqual(
+                    row["prior_unfindable_category"], category)
+                self.assertIsNotNone(row["rescued_at"])
+                # Imported-side extras still flow through.
+                self.assertEqual(row["beets_distance"], 0.05)
+                # status_history records the transition.
+                self.assertIn((rid, "imported"), db.status_history)
+
+    def test_no_rescue_stamp_when_unfindable_was_null(self) -> None:
+        db = FakePipelineDB()
+        rid = self._seed_downloading(db, category=None)
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.1)
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["rescued_at"])
+        self.assertIsNone(row["prior_unfindable_category"])
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_first_rescue_wins_re_import_is_a_noop_on_audit_columns(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        rid = self._seed_downloading(
+            db,
+            category="wrong_pressing_available",
+            rescued_at=original_rescue_at,
+            prior_category="artist_absent",
+        )
+
+        db.mark_imported_with_rescue(rid, beets_distance=0.05)
+
+        row = db.request(rid)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["rescued_at"], original_rescue_at)
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        # The current category is still cleared.
+        self.assertIsNone(row["unfindable_category"])
 
 
 if __name__ == "__main__":

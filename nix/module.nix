@@ -134,6 +134,18 @@
       --redis-port ${toString cfg.web.redis.port} "$@"
   '';
 
+  # Unfindable detection oneshot — see lib/unfindable_detection_service.py.
+  # Runs in its own process so the R20 cadence-never-changes invariant
+  # is structurally enforceable at the systemd level: this binary has
+  # no way to reach the regular 5-min plan loop's cursor mutators.
+  unfindableDetectionPkg = pkgs.writeShellScriptBin "cratedigger-unfindable" ''
+    export PATH="${runtimePath}:$PATH"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    ${coverageShellSetup}
+    exec ${pyRunner} ${src}/scripts/run_unfindable_detection.py \
+      --dsn "${cfg.pipelineDb.dsn}" "$@"
+  '';
+
   # [Quality Ranks] section — declarative mirror of QualityRankConfig.defaults().
   # Pinned by TestQualityRankConfigDefaults in tests/test_quality_decisions.py.
   qualityRanksSection = let
@@ -967,6 +979,56 @@ in {
         OnBootSec = cfg.timer.onBootSec;
         OnUnitInactiveSec = cfg.timer.onUnitInactiveSec;
         Persistent = true;
+      };
+    };
+
+    # Unfindable detection oneshot + daily timer. Lives in its own
+    # systemd unit, NOT inline in the 5-min cratedigger.service loop,
+    # because R20 ("the system never stops searching") forbids the
+    # regular search cadence from being throttled by detection state.
+    # The structural separation makes that invariant enforceable: this
+    # process shares no code path with the regular plan loop and
+    # cannot accidentally mutate plan cursors.
+    systemd.services.cratedigger-unfindable = {
+      description = "Cratedigger unfindable detection oneshot";
+      after = ["cratedigger-db-migrate.service" "network.target"];
+      requires = ["cratedigger-db-migrate.service"];
+      restartIfChanged = false;
+      path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq];
+      serviceConfig = {
+        Type = "oneshot";
+        User = cfg.user;
+        Group = cfg.group;
+        UMask = "0000";
+        # Same ExecStartPre shape as cratedigger.service: gate on
+        # slskd reachability when the operator has health-check
+        # enabled, then render the config. The detection job hits
+        # slskd just as much as the main loop does, so a slskd
+        # outage should fail the unit fast rather than write
+        # garbage probe-failed rows for every cohort member.
+        ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
+        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
+        WorkingDirectory = cfg.stateDir;
+        # Generous cap: a 100-row batch over a slow slskd is roughly
+        # 100 × ~30s = 50 min worst case. 2h gives headroom while
+        # still surfacing genuinely stuck runs.
+        TimeoutStartSec = "2h";
+      };
+    };
+
+    systemd.timers.cratedigger-unfindable = {
+      description = "Cratedigger unfindable detection daily timer";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = "daily";
+        Persistent = true;
+        # Jitter the daily fire so the detection batch does not
+        # collide with other midnight tasks on doc2 (logrotate,
+        # postgres autovacuum, etc.). Single-operator install — there
+        # is no fleet of NixOS deployments to spread across, the
+        # randomisation is purely a local cron-collision avoidance.
+        RandomizedDelaySec = "30min";
       };
     };
 

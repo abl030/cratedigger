@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+    from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
 import psycopg2
 import psycopg2.extras
@@ -47,6 +48,10 @@ from lib.quality import (
     should_cooldown,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.search_classification import (
+    SearchSummary as _SearchSummary,
+    classify_failure_class as _classify_failure_class,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +592,18 @@ class ConsumedAttemptInput:
     # no_results / error is True with `success=False`. Caller decides.
     apply_scheduler_attempt: bool = False
     scheduler_success: bool = False
+    # U11 forensics (R22-R27): the executor populates these from the
+    # SearchResult immediately before recording. All nullable so the
+    # executor can leave a column NULL when the upstream signal is
+    # genuinely absent (e.g. ``matcher_score_top1`` is NULL on
+    # ``outcome="no_results"`` because the matcher never ran).
+    rejection_reason: str | None = None
+    result_count_uncapped: int | None = None
+    query_token_count: int | None = None
+    query_distinct_token_count: int | None = None
+    expected_track_count: int | None = None
+    matcher_score_top1: float | None = None
+    query_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -617,6 +634,19 @@ class NonConsumingAttemptInput:
     # because the matcher rarely runs on pre-attempt failures, but
     # plumbed through so the column is consistently populated.
     pre_filter_skip_count: int = 0
+    # U11 forensics (R22-R27). Same shape / nullability as
+    # ``ConsumedAttemptInput``. Most pre-attempt failures only carry
+    # ``query_token_count`` / ``query_distinct_token_count`` /
+    # ``query_template`` / ``expected_track_count`` — the matcher
+    # never ran so ``rejection_reason`` / ``matcher_score_top1`` /
+    # ``result_count_uncapped`` are typically NULL.
+    rejection_reason: str | None = None
+    result_count_uncapped: int | None = None
+    query_token_count: int | None = None
+    query_distinct_token_count: int | None = None
+    expected_track_count: int | None = None
+    matcher_score_top1: float | None = None
+    query_template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1985,6 +2015,197 @@ class PipelineDB:
         )
         self.conn.commit()
 
+    # ---------- Unfindable detection (U13) ----------
+    #
+    # Three thin writers used by ``lib.unfindable_detection_service`` and
+    # nothing else. Each is a single statement; the autocommit-mode
+    # default of ``PipelineDB`` is the right boundary — there is no
+    # cross-statement invariant to protect (cursor / cycle state is
+    # explicitly NOT touched, per R20).
+
+    def list_unfindable_probe_candidates(
+        self,
+        *,
+        limit: int,
+        probe_interval_days: int,
+    ) -> list[dict[str, Any]]:
+        """Return wanted-cohort members eligible for a probe right now.
+
+        A row is eligible when:
+
+          * ``status = 'wanted'`` (only the unfindable cohort), AND
+          * ``last_artist_probe_at IS NULL`` (never probed), OR
+            ``last_artist_probe_at < now() - probe_interval_days``.
+
+        Ordered oldest-probe-first so the daily run picks up the most
+        overdue members first. ``NULL`` sorts before any timestamp via
+        ``NULLS FIRST`` so a freshly-added request is preferred over a
+        7d-old probed row.
+
+        Returns the minimal column set the service needs (request id,
+        artist_name, current_category, prior probe count) so the
+        per-row processing in the service is one DB round-trip per
+        candidate at most.
+        """
+        if limit <= 0:
+            return []
+        cur = self._execute(
+            """
+            SELECT id, artist_name, unfindable_category,
+                   last_artist_probe_at, last_artist_probe_match_count
+            FROM album_requests
+            WHERE status = 'wanted'
+              AND (last_artist_probe_at IS NULL
+                   OR last_artist_probe_at < (NOW() - %s * INTERVAL '1 day'))
+            ORDER BY last_artist_probe_at NULLS FIRST, id
+            LIMIT %s
+            """,
+            (int(probe_interval_days), int(limit)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def record_artist_probe(
+        self,
+        request_id: int,
+        *,
+        match_count: int,
+        observed_at: datetime,
+    ) -> None:
+        """Persist one artist-only probe observation.
+
+        Two columns + ``updated_at``. Deliberately separate from
+        ``set_unfindable_category`` so the probe-recorded-but-
+        verdict-unchanged case stays explicit in the audit trail.
+
+        Guarded by ``status='wanted'``: detection runs the probe
+        against a wanted-cohort snapshot, then writes back. If the row
+        transitions out from under us mid-probe (e.g. a concurrent
+        rescue via ``mark_imported_with_rescue`` flips status to
+        ``imported``), this late write is a silent no-op rather than
+        clobbering the rescue's audit trail. The detection service is
+        exclusively for the wanted cohort by design (R20 / U13 plan).
+        """
+        self._execute(
+            """
+            UPDATE album_requests
+            SET last_artist_probe_at = %s,
+                last_artist_probe_match_count = %s,
+                updated_at = %s
+            WHERE id = %s AND status = 'wanted'
+            """,
+            (observed_at, int(match_count), observed_at, request_id),
+        )
+        self.conn.commit()
+
+    def set_unfindable_category(
+        self,
+        request_id: int,
+        *,
+        category: str | None,
+        categorised_at: datetime,
+    ) -> None:
+        """Write ``unfindable_category`` + ``unfindable_categorised_at``.
+
+        ``category=None`` clears the column (re-categorisation downgrade).
+        Always stamps ``unfindable_categorised_at`` so operators can
+        see how fresh the categorisation is — even a clear is an
+        observation worth dating.
+
+        The DB CHECK constraint enforces the 4-category vocabulary; an
+        unknown string raises ``IntegrityError`` here rather than
+        silently writing garbage.
+
+        Guarded by ``status='wanted'``: same rationale as
+        ``record_artist_probe``. The detection service reads the
+        wanted-cohort, probes slskd (slow), then writes a verdict back.
+        If a concurrent ``mark_imported_with_rescue`` flipped the row
+        to ``imported`` mid-flight, this late write must be a silent
+        no-op — otherwise it would re-stamp ``unfindable_category`` and
+        ``unfindable_categorised_at`` on a row that's already been
+        rescued, leaving an incoherent ``status='imported' AND
+        unfindable_category='…'`` audit row. The guard makes the
+        lost-update race a benign no-op rather than corruption.
+        """
+        self._execute(
+            """
+            UPDATE album_requests
+            SET unfindable_category = %s,
+                unfindable_categorised_at = %s,
+                updated_at = %s
+            WHERE id = %s AND status = 'wanted'
+            """,
+            (category, categorised_at, categorised_at, request_id),
+        )
+        self.conn.commit()
+
+    def get_unfindable_search_log_signal(
+        self,
+        request_id: int,
+        *,
+        window_days: int,
+        matcher_score_threshold: float,
+    ) -> "UnfindableSearchLogSignal":
+        """Aggregate the search-log signal for the unfindable classifier.
+
+        Window-bounded so historical noise doesn't pin a verdict
+        forever. Computes two scalars in one pass:
+
+          * ``zero_find_cycles`` — of the distinct
+            ``plan_cycle_snapshot`` values seen for this request in the
+            window, how many cycles had zero rows with
+            ``outcome='found'``. Drives the
+            ``album_absent_artist_present`` rule.
+          * ``wrong_pressing_hits`` — count of rows with
+            ``rejection_reason='strict_count_mismatch'`` AND
+            ``matcher_score_top1 >= matcher_score_threshold``. Drives
+            the ``wrong_pressing_available`` rule.
+        """
+        # Import lazily to avoid a circular import via lib.quality.
+        from lib.unfindable_detection_service import UnfindableSearchLogSignal
+
+        cur = self._execute(
+            """
+            WITH window_rows AS (
+                SELECT *
+                FROM search_log
+                WHERE request_id = %s
+                  AND attempt_consumed = TRUE
+                  AND created_at > (NOW() - %s * INTERVAL '1 day')
+            ),
+            per_cycle AS (
+                SELECT plan_cycle_snapshot,
+                       SUM(CASE WHEN outcome = 'found' THEN 1 ELSE 0 END)
+                           AS found_count
+                FROM window_rows
+                WHERE plan_cycle_snapshot IS NOT NULL
+                GROUP BY plan_cycle_snapshot
+            )
+            SELECT
+                (SELECT COUNT(*) FROM per_cycle WHERE found_count = 0)::int
+                    AS zero_find_cycles,
+                (SELECT COUNT(*) FROM window_rows
+                 WHERE rejection_reason = 'strict_count_mismatch'
+                   AND matcher_score_top1 IS NOT NULL
+                   AND matcher_score_top1 >= %s)::int
+                    AS wrong_pressing_hits
+            """,
+            (
+                int(request_id),
+                int(window_days),
+                float(matcher_score_threshold),
+            ),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return UnfindableSearchLogSignal(
+                zero_find_cycles=0,
+                wrong_pressing_hits=0,
+            )
+        return UnfindableSearchLogSignal(
+            zero_find_cycles=int(row.get("zero_find_cycles") or 0),
+            wrong_pressing_hits=int(row.get("wrong_pressing_hits") or 0),
+        )
+
     def update_status(self, request_id, status, **extra):
         now = datetime.now(timezone.utc)
         sets = ["status = %s", "active_download_state = NULL", "updated_at = %s"]
@@ -1998,6 +2219,140 @@ class PipelineDB:
             params,
         )
         self.conn.commit()
+
+    def mark_imported_with_rescue(
+        self,
+        request_id: int,
+        **extra: Any,
+    ) -> None:
+        """Flip ``status`` to ``'imported'`` + capture long-tail-rescue audit
+        atomically. U14 / R21.
+
+        When a request transitions to ``imported`` and its
+        ``unfindable_category`` was non-NULL, this is the
+        long-tail-rescue moment (the archivist frame's entire payoff —
+        an "unfindable" request finally landed because a fresh peer
+        appeared). Four mutations commit together OR none of them
+        apply:
+
+          1. ``status`` → ``'imported'`` + ``active_download_state``
+             cleared (same shape as ``update_status``).
+          2. ``rescued_at`` → ``NOW()`` (only if the row was not
+             already rescued — first rescue wins).
+          3. ``prior_unfindable_category`` → the cleared category
+             value (only if the row was not already rescued).
+          4. ``unfindable_category`` → ``NULL`` (the rescue IS the
+             resolution; the category no longer applies, regardless
+             of one-shot-stamp semantics).
+
+        **One-shot capture semantics:** once ``rescued_at`` is
+        populated, it is immutable. A subsequent re-import (e.g. via
+        Replace → re-categorise → re-import) does NOT bump the
+        timestamp nor overwrite ``prior_unfindable_category``. The
+        original rescue instant is the canonical audit record;
+        downstream surfaces (web UI, reports) treat it as a "rescued
+        at" lineage marker, not a "last-import-touched" timestamp.
+        The current ``unfindable_category`` IS still cleared on every
+        call, because the rescue still IS the resolution.
+
+        **Atomicity contract:** ``PipelineDB`` is autocommit-mode by
+        default. Without a transaction boundary, three separate
+        UPDATEs would leave a crash window where (e.g.)
+        ``unfindable_category`` is cleared but ``rescued_at`` is not
+        yet written — observable corruption that lies about whether
+        a request was ever rescued. Follows the canonical
+        autocommit-flip pattern from ``replace_request_with_new_mbid``:
+        temporarily flip ``autocommit=False``, wrap explicit
+        ``commit()`` / ``rollback()`` in try/finally so a mid-flow
+        failure leaves the row in its original state.
+
+        ``**extra`` mirrors ``update_status`` — additional column
+        writes that ride along with the status flip (e.g.
+        ``beets_distance``, ``beets_scenario``, spectral fields).
+        Reserved keys (``status``, ``active_download_state``,
+        ``updated_at``, the four rescue columns) are not accepted —
+        they're managed by this method.
+        """
+        reserved = {
+            "status", "active_download_state", "updated_at",
+            "rescued_at", "prior_unfindable_category", "unfindable_category",
+            "unfindable_categorised_at",
+        }
+        bad = set(extra) & reserved
+        if bad:
+            raise ValueError(
+                "mark_imported_with_rescue: reserved kwargs not allowed: "
+                + ", ".join(sorted(bad))
+            )
+
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            now = datetime.now(timezone.utc)
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                # 1. Read the row's current rescue + categorisation
+                #    state under a row lock so the read-then-write is
+                #    serialised against concurrent operator actions on
+                #    the same id.
+                cur.execute(
+                    "SELECT unfindable_category, rescued_at, "
+                    "       prior_unfindable_category "
+                    "FROM album_requests WHERE id = %s FOR UPDATE",
+                    (request_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    # Mirror update_status's missing-row tolerance —
+                    # the caller's audit (download_log) will still
+                    # tell the story.
+                    self.conn.commit()
+                    return
+                current_category = row["unfindable_category"]
+                already_rescued = row["rescued_at"] is not None
+
+                # 2. Single UPDATE covering status + active_download
+                #    + rescue audit. Drop the rescue columns onto the
+                #    write list conditionally so the immutability
+                #    contract is enforced in SQL, not in Python.
+                sets = [
+                    "status = 'imported'",
+                    "active_download_state = NULL",
+                    "updated_at = %s",
+                ]
+                params: list[Any] = [now]
+                # Always clear unfindable_category — the rescue IS
+                # the resolution. (Stamps unfindable_categorised_at
+                # so the audit trail dates the clear.)
+                if current_category is not None:
+                    sets.append("unfindable_category = NULL")
+                    sets.append("unfindable_categorised_at = %s")
+                    params.append(now)
+                # Only stamp rescued_at + prior_unfindable_category
+                # on the FIRST rescue — one-shot capture.
+                if current_category is not None and not already_rescued:
+                    sets.append("rescued_at = %s")
+                    params.append(now)
+                    sets.append("prior_unfindable_category = %s")
+                    params.append(current_category)
+                for key, val in extra.items():
+                    sets.append(f"{key} = %s")
+                    params.append(val)
+                params.append(request_id)
+                cur.execute(
+                    f"UPDATE album_requests SET {', '.join(sets)} "
+                    "WHERE id = %s",
+                    params,
+                )
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
 
     def set_manual(
         self,
@@ -3383,7 +3738,14 @@ class PipelineDB:
                    peers_browsed: int = 0,
                    peers_browsed_lazy: int = 0,
                    fanout_waves: int = 0,
-                   pre_filter_skip_count: int = 0) -> None:
+                   pre_filter_skip_count: int = 0,
+                   rejection_reason: str | None = None,
+                   result_count_uncapped: int | None = None,
+                   query_token_count: int | None = None,
+                   query_distinct_token_count: int | None = None,
+                   expected_track_count: int | None = None,
+                   matcher_score_top1: float | None = None,
+                   query_template: str | None = None) -> None:
         """Record one search attempt for an album request.
 
         ``candidates`` is the top-N forensic ``CandidateScore`` list (already
@@ -3397,6 +3759,15 @@ class PipelineDB:
         aggregate count of dirs the matcher's asymmetric pre-filter
         rejected before browse. NOT NULL on the column; default 0 keeps
         pre-attempt / error rows uniformly populated.
+
+        ``rejection_reason`` (R22), ``result_count_uncapped`` (R23),
+        ``query_token_count`` / ``query_distinct_token_count`` (R24),
+        ``expected_track_count`` (R25), ``matcher_score_top1`` (R26),
+        and ``query_template`` (R27) are the U11 forensics columns
+        added in migration 027. All nullable; default ``None`` writes
+        SQL NULL so historical-style callers (and unit tests that only
+        exercise the candidate JSONB) stay backwards-compatible while
+        production callers populate every field.
         """
         candidates_json: str | None = None
         if candidates is not None:
@@ -3407,13 +3778,20 @@ class PipelineDB:
                 request_id, query, result_count, elapsed_s, outcome,
                 candidates, variant, final_state, browse_time_s, match_time_s,
                 peers_browsed, peers_browsed_lazy, fanout_waves,
-                pre_filter_skip_count
+                pre_filter_skip_count,
+                rejection_reason, result_count_uncapped,
+                query_token_count, query_distinct_token_count,
+                expected_track_count, matcher_score_top1, query_template
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s)
         """, (request_id, query, result_count, elapsed_s, outcome,
               candidates_json, variant, final_state, browse_time_s, match_time_s,
               peers_browsed, peers_browsed_lazy, fanout_waves,
-              pre_filter_skip_count))
+              pre_filter_skip_count,
+              rejection_reason, result_count_uncapped,
+              query_token_count, query_distinct_token_count,
+              expected_track_count, matcher_score_top1, query_template))
         self.conn.commit()
 
     def get_search_history(self, request_id: int) -> list[dict[str, object]]:
@@ -5673,7 +6051,7 @@ class PipelineDB:
             ) as cur:
                 cur.execute(
                     "SELECT active_plan_id, next_plan_ordinal, "
-                    "       plan_cycle_count "
+                    "       plan_cycle_count, status "
                     "FROM album_requests WHERE id = %s FOR UPDATE",
                     (attempt.request_id,),
                 )
@@ -5684,6 +6062,7 @@ class PipelineDB:
                 active_plan_id = row["active_plan_id"]
                 next_ordinal = int(row["next_plan_ordinal"])
                 cycle_count = int(row["plan_cycle_count"])
+                current_status = str(row["status"])
 
                 cur.execute(
                     """
@@ -5752,7 +6131,11 @@ class PipelineDB:
                         execution_stage, attempt_consumed,
                         cursor_update_status, stale_reason,
                         plan_cycle_snapshot,
-                        pre_filter_skip_count
+                        pre_filter_skip_count,
+                        rejection_reason, result_count_uncapped,
+                        query_token_count, query_distinct_token_count,
+                        expected_track_count, matcher_score_top1,
+                        query_template
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
@@ -5764,6 +6147,10 @@ class PipelineDB:
                         %s, %s,
                         %s, %s,
                         %s,
+                        %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
                         %s
                     )
                     RETURNING id
@@ -5795,6 +6182,13 @@ class PipelineDB:
                         stale_reason,
                         attempt.cycle_count_snapshot,
                         attempt.pre_filter_skip_count,
+                        attempt.rejection_reason,
+                        attempt.result_count_uncapped,
+                        attempt.query_token_count,
+                        attempt.query_distinct_token_count,
+                        attempt.expected_track_count,
+                        attempt.matcher_score_top1,
+                        attempt.query_template,
                     ),
                 )
                 log_row = cur.fetchone()
@@ -5856,6 +6250,54 @@ class PipelineDB:
                             (now, now, attempt.request_id),
                         )
 
+                    # U12: when the cursor just wrapped, classify the
+                    # cycle that completed (cycle_count, pre-increment)
+                    # and persist the verdict to
+                    # ``album_requests.failure_class``. Folded into
+                    # this transaction rather than a separate
+                    # ``update_failure_class`` call so the wrap and the
+                    # classification commit together — operators
+                    # cannot observe a cursor-advanced-but-unclassified
+                    # state, nor a classified-but-unwrapped state. The
+                    # classifier returns ``None`` for "no signal"
+                    # (degenerate cycle with zero consumed attempts);
+                    # in that case we leave the column alone so an
+                    # earlier verdict survives.
+                    if cursor_update_status == CURSOR_UPDATE_WRAPPED:
+                        cur.execute(
+                            """
+                            SELECT outcome, rejection_reason
+                            FROM search_log
+                            WHERE request_id = %s
+                              AND plan_cycle_snapshot = %s
+                              AND attempt_consumed = TRUE
+                            ORDER BY id
+                            """,
+                            (attempt.request_id, cycle_count),
+                        )
+                        summary_rows = cur.fetchall()
+                        summaries = [
+                            _SearchSummary(
+                                outcome=str(r["outcome"]),
+                                rejection_reason=(
+                                    str(r["rejection_reason"])
+                                    if r["rejection_reason"] is not None
+                                    else None
+                                ),
+                            )
+                            for r in summary_rows
+                        ]
+                        verdict = _classify_failure_class(
+                            summaries, current_status=current_status,
+                        )
+                        if verdict is not None:
+                            cur.execute(
+                                "UPDATE album_requests "
+                                "SET failure_class = %s, updated_at = %s "
+                                "WHERE id = %s",
+                                (verdict, now, attempt.request_id),
+                            )
+
             self.conn.commit()
             return ConsumedAttemptResult(
                 search_log_id=search_log_id,
@@ -5914,12 +6356,20 @@ class PipelineDB:
                         plan_repeat_group, plan_generator_id,
                         execution_stage, attempt_consumed,
                         cursor_update_status, plan_cycle_snapshot,
-                        pre_filter_skip_count
+                        pre_filter_skip_count,
+                        rejection_reason, result_count_uncapped,
+                        query_token_count, query_distinct_token_count,
+                        expected_track_count, matcher_score_top1,
+                        query_template
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s,
                         %s, %s, %s,
                         %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s,
                         %s, %s,
                         %s, %s,
                         %s, %s,
@@ -5946,6 +6396,13 @@ class PipelineDB:
                         CURSOR_UPDATE_UNCHANGED,
                         cycle_snapshot,
                         attempt.pre_filter_skip_count,
+                        attempt.rejection_reason,
+                        attempt.result_count_uncapped,
+                        attempt.query_token_count,
+                        attempt.query_distinct_token_count,
+                        attempt.expected_track_count,
+                        attempt.matcher_score_top1,
+                        attempt.query_template,
                     ),
                 )
                 log_row = cur.fetchone()

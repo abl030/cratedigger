@@ -83,6 +83,22 @@ class SearchResult:
     # to detect completions after mid-flight regeneration. None for
     # legacy / no-plan code paths.
     plan_execution: "PlanExecutionContext | None" = None
+    # U11 R23: uncapped result count from slskd's terminal state
+    # response. ``responseCount`` is what slskd's writer tracked;
+    # ``result_count`` is what our harvest call returned. The two
+    # diverge when slskd hit ``responseLimit`` / ``fileLimit`` and
+    # truncated the response array. ``None`` when the slskd state
+    # lookup failed before a terminal state was observed (pre-attempt /
+    # error paths).
+    result_count_uncapped: int | None = None
+    # NOTE: ``rejection_reason`` (U11 R22) and ``matcher_score_top1``
+    # (U11 R26) are NOT carried on SearchResult. The log site in
+    # ``cratedigger.py::_log_search_result`` reconstructs both from
+    # ``result.candidates`` via the pure helpers
+    # ``lib.matching.classify_rejection_from_log_inputs`` and
+    # ``lib.matching.matcher_score_top1_for`` — the single source of
+    # truth for both scalars. Adding them back to SearchResult would
+    # be dead duplication.
 
 
 @dataclass(frozen=True)
@@ -324,6 +340,59 @@ _STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC = (
     f"{_STRATEGY_SELFTITLED_ARTIST_TRACK_0}_flac"
 )
 _STRATEGY_SELFTITLED_ARTIST_YEAR = "selftitled_artist_year"
+
+
+# U11 R27: operator-readable template shape per plan strategy. Logged
+# on every search_log row so triage queries can group by query shape
+# without re-parsing the rendered text. Keys are the same strategy
+# labels emitted on ``SearchPlanItem.strategy``; the per-track strategy
+# families (``track_<idx>_artist`` and ``va_track_artist_<idx>``) collapse
+# their numeric suffix to ``track_N`` in the template because the slot
+# index is plan-position metadata, not part of the shape.
+_QUERY_TEMPLATE_BY_STRATEGY: dict[str, str] = {
+    _STRATEGY_DEFAULT: "{artist} {title}",
+    _STRATEGY_LITERAL: "{artist} {title}",
+    _STRATEGY_LITERAL_FLAC: "{artist} {title} FLAC",
+    _STRATEGY_UNWILD_YEAR: "{artist} {title} {year}",
+    _STRATEGY_UNWILD_RG_YEAR: "{artist} {title} {rg_year}",
+    _STRATEGY_CATALOG_NUMBER: "{artist} {catno}",
+    _STRATEGY_COMPILATION_SERIES: "{title}",
+    _STRATEGY_SELFTITLED_ARTIST_TRACK_0: "{artist} {track_0}",
+    _STRATEGY_SELFTITLED_ARTIST_TRACK_0_FLAC: "{artist} {track_0} FLAC",
+    _STRATEGY_SELFTITLED_ARTIST_YEAR: "{artist} {year}",
+}
+
+
+def query_template_for_strategy(strategy: str | None) -> str | None:
+    """Return the operator-readable template shape for ``strategy``.
+
+    Pure mapping — no I/O. Used by the search-log writer (U11 R27) to
+    persist a per-row template label so the operator dashboard can
+    group searches by shape (e.g. how often does the ``{artist} {title}
+    FLAC`` template find a match vs. ``{artist} {catno}``).
+
+    The numeric suffix on track-slot families (``track_<idx>_artist``
+    and ``va_track_artist_<idx>``) is collapsed to the family template
+    (``{artist} {track_N}`` / ``{track_artist} {track_N}``) because the
+    slot index is plan-position metadata, not part of the shape — the
+    operator wants to know "how do per-track queries perform" as one
+    bucket.
+
+    Unknown labels are echoed back rather than collapsed to ``None`` so
+    new strategies surface in triage even before this mapping catches
+    up. ``None`` / ``""`` input returns ``None`` so callers can pass the
+    raw column value without pre-checking.
+    """
+    if not strategy:
+        return None
+    template = _QUERY_TEMPLATE_BY_STRATEGY.get(strategy)
+    if template is not None:
+        return template
+    if strategy.startswith("track_") and strategy.endswith("_artist"):
+        return "{artist} {track_N}"
+    if strategy.startswith(_STRATEGY_VA_TRACK_ARTIST_PREFIX):
+        return "{track_artist} {track_N}"
+    return strategy
 
 
 # PR2 U8 R3 — bumped from 3 to 4 so the non-VA mix emits

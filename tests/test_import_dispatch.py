@@ -925,6 +925,119 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(db.download_logs[0].outcome, "failed")
 
 
+class TestImportDispatchRescueCapture(unittest.TestCase):
+    """U14: long-tail-rescue audit columns populated atomically on import.
+
+    When ``dispatch_import_core`` flips a request to ``imported`` and
+    that request was previously categorised unfindable, the importer
+    must capture the rescue event (``rescued_at``,
+    ``prior_unfindable_category``) in the same atomic write as the
+    status flip.
+
+    Verifies the wiring through ``apply_transition`` →
+    ``mark_imported_with_rescue`` on the FakePipelineDB; the real-PG
+    atomicity contract lives in
+    ``tests/test_pipeline_db.py::TestMarkImportedWithRescue`` and
+    ``tests/test_integration_slices.py::TestRescueCaptureSlice``.
+    """
+
+    _HARNESS_PATH = _HARNESS
+
+    def _dispatch_with_unfindable(self, *, prior_category, rescued_at=None,
+                                  prior_rescue_category=None):
+        """Drive a successful import on a previously-unfindable request."""
+        from lib.import_dispatch import dispatch_import_core
+        from datetime import datetime, timezone
+
+        ir = make_import_result(decision="import")
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+        ))
+        # Seed the row's unfindable state directly so the test starts
+        # from the "categorised, just finished downloading" shape.
+        if prior_category is not None:
+            db._requests[42]["unfindable_category"] = prior_category
+            db._requests[42]["unfindable_categorised_at"] = datetime(
+                2026, 5, 20, tzinfo=timezone.utc)
+        if rescued_at is not None:
+            db._requests[42]["rescued_at"] = rescued_at
+        if prior_rescue_category is not None:
+            db._requests[42]["prior_unfindable_category"] = (
+                prior_rescue_category)
+        cfg = CratediggerConfig(
+            beets_harness_path=self._HARNESS_PATH,
+            pipeline_db_enabled=True,
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with patch_dispatch_externals(), \
+                 patch("lib.import_dispatch.parse_import_result",
+                       return_value=ir):
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Rescue Artist - Album",
+                    beets_harness_path=self._HARNESS_PATH,
+                    db=db,  # type: ignore[arg-type]
+                    dl_info=DownloadInfo(filetype="mp3"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="u1",
+                                     filename="01 - T.mp3")],
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return db
+
+    def test_import_captures_rescue_when_unfindable_category_was_set(self):
+        for category in (
+            "artist_absent",
+            "album_absent_artist_present",
+            "one_track_structural",
+            "wrong_pressing_available",
+        ):
+            with self.subTest(category=category):
+                db = self._dispatch_with_unfindable(prior_category=category)
+                row = db.request(42)
+                self.assertEqual(row["status"], "imported")
+                self.assertIsNone(row["unfindable_category"])
+                self.assertEqual(
+                    row["prior_unfindable_category"], category)
+                self.assertIsNotNone(row["rescued_at"])
+
+    def test_import_without_prior_unfindable_does_not_stamp_rescue(self):
+        db = self._dispatch_with_unfindable(prior_category=None)
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["rescued_at"])
+        self.assertIsNone(row["prior_unfindable_category"])
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_re_import_after_prior_rescue_does_not_overwrite_audit_columns(
+        self,
+    ):
+        """One-shot capture — first rescue wins forever."""
+        from datetime import datetime, timezone
+
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        db = self._dispatch_with_unfindable(
+            prior_category="album_absent_artist_present",
+            rescued_at=original_rescue_at,
+            prior_rescue_category="artist_absent",
+        )
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["rescued_at"], original_rescue_at)
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        # The current (later) category still gets cleared.
+        self.assertIsNone(row["unfindable_category"])
+
+
 class TestOverrideMinBitrate(unittest.TestCase):
     """Seam tests — subprocess arg wiring for --override-min-bitrate.
 

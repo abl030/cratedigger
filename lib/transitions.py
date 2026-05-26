@@ -451,5 +451,14 @@ def apply_transition(
     # All other transitions: use update_status
     all_extra: dict[str, object] = dict(extra)
     all_extra.update(transition_fields)
+    # → imported is the long-tail-rescue capture seam (U14 / R21).
+    # Routing through ``mark_imported_with_rescue`` makes the status
+    # flip atomic with rescue-audit writes when the row had been
+    # categorised unfindable. When it hadn't, the method behaves
+    # like update_status (status + extras), just inside an explicit
+    # transaction. No "import without rescue check" parallel path.
+    if to_status == "imported":
+        cast(Any, db.mark_imported_with_rescue)(request_id, **all_extra)
+        return True
     db.update_status(request_id, to_status, **all_extra)
     return True

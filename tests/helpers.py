@@ -88,6 +88,19 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "active_plan_id": None,
         "next_plan_ordinal": 0,
         "plan_cycle_count": 0,
+        # Migration 028 / U12 — failure_class materialised at plan-wrap.
+        "failure_class": None,
+        # Migration 028 / U13 — unfindable detection state. All nullable;
+        # the four-category taxonomy is populated by the daily detection
+        # job (lib/unfindable_detection_service.py).
+        "unfindable_category": None,
+        "unfindable_categorised_at": None,
+        "last_artist_probe_at": None,
+        "last_artist_probe_match_count": None,
+        # Migration 028 / U14 — long-tail-rescue audit fields. Populated
+        # when an unfindable-categorised request finally imports.
+        "rescued_at": None,
+        "prior_unfindable_category": None,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.

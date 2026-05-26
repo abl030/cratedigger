@@ -1496,5 +1496,46 @@ class TestSearchPlanServiceAdvance(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_INVALID_TARGET)
 
 
+class TestSearchPlanServiceU12NoServiceWrap(unittest.TestCase):
+    """U12 contract: operator-driven service paths never materialise
+    ``failure_class``.
+
+    Classification only happens at natural cycle wraps inside
+    ``record_consumed_search_attempt`` (the executor path). The
+    operator's ``advance_for_request`` is forward-only — it cannot
+    wrap the cursor by construction (``target > current_ordinal`` is
+    asserted before the DB write). Tests here pin that contract so a
+    future refactor that grows operator-side wrap capability won't
+    silently start writing ``failure_class`` from the wrong code path.
+    """
+
+    def setUp(self):
+        self.db = FakePipelineDB()
+        self.cfg = CratediggerConfig()
+        self.svc = SearchPlanService(self.db, self.cfg)
+        _seed_request(self.db, id=42, artist_name="X", album_title="Y")
+        from lib.pipeline_db import SearchPlanItemInput
+        self.db.create_successful_search_plan(
+            request_id=42, generator_id=SEARCH_PLAN_GENERATOR_ID,
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default", query="Q0",
+                    canonical_query_key="q0"),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="default", query="Q1",
+                    canonical_query_key="q1"),
+            ],
+        )
+
+    def test_advance_for_request_does_not_write_failure_class(self):
+        from lib.search_plan_service import RESULT_ADVANCED
+        result = self.svc.advance_for_request(42, to_ordinal=1)
+        self.assertEqual(result.outcome, RESULT_ADVANCED)
+        # No classification happened — failure_class is None until a
+        # natural wrap inside ``record_consumed_search_attempt``
+        # writes it.
+        self.assertIsNone(self.db.request(42)["failure_class"])
+
+
 if __name__ == "__main__":
     unittest.main()

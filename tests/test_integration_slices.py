@@ -2989,6 +2989,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0].username, "good_peer")
         self.assertEqual(decoded[0].matched_tracks, 2)
         self.assertEqual(decoded[0].total_tracks, 2)
+        # U11 R25: expected_track_count is sourced from
+        # ``album.releases[0].track_count`` (the request's first release
+        # record, populated by AlbumRecord.from_db_row in production).
+        # The album fixture above uses ``ReleaseRecord(..., track_count=2)``
+        # so the log row should carry 2. This pin guards the exact
+        # threading path through cratedigger.py::_log_search_result so a
+        # future refactor of the AlbumRecord shape doesn't silently
+        # NULL the column.
+        self.assertEqual(row.expected_track_count, 2)
 
     def test_unwild_variant_at_threshold(self):
         """Plan-item with strategy='unwild' produces an unwild query (post-U5).
@@ -9146,6 +9155,473 @@ class TestVaPlanRoundTripsThroughDB(unittest.TestCase):
             "with per-track artists populated, the VA branch must not "
             "fall back to the no_track_artists_resolved omission path",
         )
+
+
+class TestPlanWrapClassificationSlice(unittest.TestCase):
+    """U12: drive a real cursor-wrap through the system end-to-end.
+
+    Exercises the real ``classify_failure_class`` pure function plus
+    the real wrap-time write path inside FakePipelineDB's
+    ``record_consumed_search_attempt`` (which mirrors the production
+    implementation in ``lib.pipeline_db``). Walks across multi-cycle
+    transitions to prove:
+
+    1. Within one cycle wrap, the cursor advance, cycle increment, and
+       failure_class write all land together.
+    2. A subsequent cycle re-classifies based on its own searches, not
+       the prior cycle's.
+    3. A rollback (validation failure mid-wrap) leaves all three
+       fields at their pre-call values — no partial mutation.
+    """
+
+    def _items(self, *queries: str):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(
+                ordinal=i, strategy=f"slot_{i}", query=q,
+                canonical_query_key=f"q{i}",
+            )
+            for i, q in enumerate(queries)
+        ]
+
+    def _build_attempt(
+        self, db, rid, plan_id, ordinal, *, outcome,
+        rejection_reason=None, plan_item_count=2,
+    ):
+        from lib.pipeline_db import ConsumedAttemptInput
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        # Snapshot the cycle count at "executor selection time" so
+        # mid-cycle regeneration races are detectable. Tests walking
+        # multiple cycles must reflect the live cycle here, not 0.
+        cycle_snapshot = int(db.request(rid)["plan_cycle_count"])
+        return ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[ordinal].id,
+            plan_ordinal=ordinal,
+            plan_strategy=active.items[ordinal].strategy,
+            plan_canonical_query_key=(
+                active.items[ordinal].canonical_query_key),
+            plan_repeat_group=None, plan_generator_id="g1",
+            query=active.items[ordinal].query,
+            outcome=outcome, rejection_reason=rejection_reason,
+            plan_item_count=plan_item_count,
+            cycle_count_snapshot=cycle_snapshot,
+        )
+
+    def _setup_request_with_plan(self, n_items=2):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=self._items(*[f"Q{i}" for i in range(n_items)]),
+        )
+        return db, rid, plan_id
+
+    def test_wrap_writes_failure_class_and_increments_cycle_together(self):
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        # First slot: no_match advances cursor without classifying.
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+        ))
+        req = db.request(rid)
+        self.assertEqual(req["next_plan_ordinal"], 1)
+        self.assertEqual(req["plan_cycle_count"], 0)
+        self.assertIsNone(req["failure_class"])
+        # Second slot: no_match → wrap → all-no_match cycle → B.
+        # The cursor reset to 0, cycle++ to 1, and failure_class=
+        # 'B_cands_never_match' all observable in the same row update.
+        result = db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_match",
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = db.request(rid)
+        self.assertEqual(req["next_plan_ordinal"], 0)
+        self.assertEqual(req["plan_cycle_count"], 1)
+        self.assertEqual(req["failure_class"], "B_cands_never_match")
+
+    def test_second_cycle_reclassifies_independently(self):
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        # Cycle 0: all-no_match → B.
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+        ))
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_match",
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(db.request(rid)["failure_class"],
+                         "B_cands_never_match")
+        # Cycle 1: both no_results → A. The classifier sees ONLY cycle
+        # 1's rows (plan_cycle_snapshot=1), proving the per-cycle
+        # filter doesn't pollute new verdicts with old data.
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_results",
+        ))
+        result = db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_results",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        req = db.request(rid)
+        self.assertEqual(req["plan_cycle_count"], 2)
+        self.assertEqual(req["failure_class"], "A_zero_results_dominant")
+
+    def test_rollback_preserves_failure_class_cursor_and_cycle_together(self):
+        """Atomicity: validation failure mid-wrap leaves all three intact."""
+        from lib.pipeline_db import ConsumedAttemptInput
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        # Establish a prior verdict + advance the cursor so we can
+        # detect any partial mutation on rollback.
+        db.update_request_fields(
+            rid,
+            failure_class="E_mixed",
+            next_plan_ordinal=1,
+        )
+        pre = dict(db.request(rid))
+        # Try to wrap with an invalid plan_item_id. Fakes raise, real
+        # PG raises a FK violation. Either way the txn must roll back
+        # cleanly.
+        with self.assertRaises(Exception):
+            db.record_consumed_search_attempt(ConsumedAttemptInput(
+                request_id=rid, plan_id=plan_id,
+                plan_item_id=999999, plan_ordinal=1,
+                plan_strategy="slot_1", plan_canonical_query_key="q1",
+                plan_repeat_group=None, plan_generator_id="g1",
+                query="Q1", outcome="found", plan_item_count=2,
+            ))
+        post = db.request(rid)
+        self.assertEqual(post["failure_class"], pre["failure_class"])
+        self.assertEqual(post["next_plan_ordinal"], pre["next_plan_ordinal"])
+        self.assertEqual(post["plan_cycle_count"], pre["plan_cycle_count"])
+        # No log row landed either — strict log-or-nothing invariant.
+        self.assertEqual(db.search_logs, [])
+
+    def test_resolved_verdict_when_status_moves_mid_cycle(self):
+        """Mid-cycle status change → 'resolved' on the next wrap."""
+        db, rid, plan_id = self._setup_request_with_plan(n_items=2)
+        db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+        ))
+        # Importer drops in mid-cycle and flips status.
+        db.update_request_fields(rid, status="imported")
+        result = db.record_consumed_search_attempt(self._build_attempt(
+            db, rid, plan_id, 1, outcome="no_match",
+            rejection_reason="avg_ratio_low",
+        ))
+        self.assertEqual(result.cursor_update_status, "wrapped")
+        self.assertEqual(db.request(rid)["failure_class"], "resolved")
+
+
+class TestUnfindableDetectionSlice(unittest.TestCase):
+    """U13: end-to-end probe → classify → write through the real service.
+
+    Uses the production ``run_artist_probe`` helper against the
+    ``FakeSlskdAPI.searches`` surface seeded with realistic artist-only
+    response shapes (catalog match, no match, partial match). The
+    service exercises the production
+    ``classify_unfindable_from_state`` decision and the production
+    ``FakePipelineDB`` writers — no shortcuts past the boundary.
+
+    Anchors the four-category contract end-to-end in one slice so any
+    future refactor that breaks the probe → classify → write chain
+    surfaces here before per-layer tests.
+    """
+
+    @staticmethod
+    def _seed_artist(db: "FakePipelineDB", artist: str, **overrides: Any) -> int:
+        rid = db.add_request(
+            artist_name=artist,
+            album_title=f"{artist} - Album",
+            source="request",
+            mb_release_id=f"mb-{artist.replace(' ', '_')}",
+        )
+        # Default tracks: 8 (enough to defang one_track_structural).
+        track_count = overrides.pop("track_count", 8)
+        if track_count > 0:
+            db.set_tracks(rid, [
+                {"disc_number": 1, "track_number": i + 1,
+                 "title": f"T{i}"}
+                for i in range(track_count)
+            ])
+        if overrides:
+            db.update_request_fields(rid, **overrides)
+            db.update_request_fields_calls.pop()
+        return rid
+
+    @staticmethod
+    def _seed_slskd_search(
+        slskd: "FakeSlskdAPI",
+        *,
+        search_id: int,
+        responses: list[dict[str, Any]],
+    ) -> None:
+        slskd.searches.add_search(
+            search_id=search_id, state="Completed",
+            responses=responses, response_count=len(responses),
+        )
+        slskd.searches.search_text_id_sequence.append(search_id)
+
+    def test_end_to_end_artist_absent(self) -> None:
+        """Catalog-empty probe → artist_absent verdict written."""
+        from datetime import datetime, timedelta, timezone
+
+        from lib.unfindable_detection_service import (
+            CATEGORY_ARTIST_ABSENT,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(
+            db, "Unknown Indie Band",
+            last_artist_probe_at=(
+                datetime.now(timezone.utc) - timedelta(days=14)),
+            last_artist_probe_match_count=0,
+        )
+        # Empty responses → match_count=0, no fuzzy match.
+        self._seed_slskd_search(slskd, search_id=101, responses=[])
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category, CATEGORY_ARTIST_ABSENT)
+        self.assertEqual(db.request(rid)["unfindable_category"],
+                         CATEGORY_ARTIST_ABSENT)
+
+    def test_end_to_end_one_track_structural(self) -> None:
+        from lib.unfindable_detection_service import (
+            CATEGORY_ONE_TRACK_STRUCTURAL,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(db, "Single Track Artist", track_count=1)
+        # Even a "catalog match" probe doesn't change the verdict —
+        # the structural rule dominates.
+        self._seed_slskd_search(
+            slskd, search_id=201,
+            responses=[
+                {"username": "peerA", "files": [
+                    {"filename": "Single Track Artist - song.mp3"},
+                ]},
+            ] * 10,
+        )
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category,
+                         CATEGORY_ONE_TRACK_STRUCTURAL)
+
+    def test_end_to_end_album_absent_artist_present(self) -> None:
+        """Probe sees artist (>= threshold + fuzzy) + zero-find cycles.
+
+        Builds the search-log history that drives the classifier's
+        zero-find-cycles signal, then the probe surfaces the artist.
+        """
+        from lib.unfindable_detection_service import (
+            ARTIST_MATCH_THRESHOLD,
+            CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT,
+            REQUIRED_ZERO_FIND_CYCLES,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(db, "Known Artist")
+        # M cycles of all-no_match consumed attempts → zero finds.
+        for cycle in range(REQUIRED_ZERO_FIND_CYCLES):
+            db.log_search(
+                request_id=rid, outcome="no_match",
+                query=f"q{cycle}",
+            )
+            db.search_logs[-1].plan_cycle_snapshot = cycle
+            db.search_logs[-1].attempt_consumed = True
+
+        # Catalog match: many responses, artist name in filenames.
+        responses = [
+            {"username": f"peer{i}", "files": [
+                {"filename": f"/Known-Artist/album_{i}/track.flac"},
+            ]}
+            for i in range(ARTIST_MATCH_THRESHOLD + 5)
+        ]
+        self._seed_slskd_search(slskd, search_id=301, responses=responses)
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category,
+                         CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT)
+
+    def test_end_to_end_wrong_pressing_available(self) -> None:
+        from lib.unfindable_detection_service import (
+            CATEGORY_WRONG_PRESSING_AVAILABLE,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+            WRONG_PRESSING_MIN_HITS,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(db, "WP Artist")
+        # Seed the strict_count_mismatch signature in search-log.
+        for i in range(WRONG_PRESSING_MIN_HITS):
+            db.log_search(
+                request_id=rid, outcome="no_match", query=f"q{i}",
+                rejection_reason="strict_count_mismatch",
+                matcher_score_top1=0.9,
+            )
+            db.search_logs[-1].attempt_consumed = True
+            db.search_logs[-1].plan_cycle_snapshot = 0
+        # Probe is empty — wrong-pressing dominates anyway.
+        self._seed_slskd_search(slskd, search_id=401, responses=[])
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category,
+                         CATEGORY_WRONG_PRESSING_AVAILABLE)
+
+
+# ---------------------------------------------------------------------------
+# U14. Long-tail-rescue capture — integration slice (real PG atomicity)
+# ---------------------------------------------------------------------------
+
+
+class TestRescueCaptureSlice(unittest.TestCase):
+    """U14 integration slice: real-PG ``mark_imported_with_rescue`` atomicity.
+
+    The unit-level tests in ``test_pipeline_db.py`` already pin the
+    happy paths and one-shot semantics against the real PG fixture.
+    This slice nails down the contract that matters operationally:
+    a forced mid-flow failure must roll back ALL four writes
+    together, leaving the row indistinguishable from the pre-call
+    state. Without the autocommit-flip + try/finally pattern, three
+    separate UPDATEs would leave a half-rescued row in the audit
+    trail forever.
+
+    Covers AE6 (rescue capture round-trips through the real DB).
+    """
+
+    def setUp(self):
+        import psycopg2
+        from lib.pipeline_db import PipelineDB
+        self._psycopg2 = psycopg2
+        self.db = PipelineDB(_u7_test_dsn())
+        self.addCleanup(self.db.close)
+        self._mbids: list[str] = []
+
+    def tearDown(self):
+        if self._mbids:
+            conn = self._psycopg2.connect(_u7_test_dsn())
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM album_requests WHERE mb_release_id = ANY(%s)",
+                        (self._mbids,),
+                    )
+            finally:
+                conn.close()
+
+    def _seed(self, *, mbid: str, category: str) -> int:
+        from datetime import datetime, timezone
+
+        self._mbids.append(mbid)
+        rid = self.db.add_request(
+            mb_release_id=mbid,
+            artist_name="Rescue Slice",
+            album_title="Slice Album",
+            source="request",
+        )
+        # Set the unfindable category while still wanted —
+        # ``set_unfindable_category`` is guarded by ``status='wanted'``
+        # in production (lost-update protection against concurrent
+        # rescue); a setup that flipped to downloading first would
+        # silently no-op the category write.
+        self.db.set_unfindable_category(
+            rid, category=category,
+            categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        )
+        self.db._execute(
+            "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
+            (rid,),
+        )
+        return rid
+
+    def test_round_trip_rescue_capture_writes_all_four_columns(self):
+        """End-to-end: categorised row + import → all four writes land."""
+        rid = self._seed(mbid="slice-happy-rescue", category="artist_absent")
+
+        self.db.mark_imported_with_rescue(rid, beets_distance=0.07)
+
+        row = self.db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["prior_unfindable_category"], "artist_absent")
+        self.assertIsNone(row["unfindable_category"])
+        self.assertIsNotNone(row["rescued_at"])
+        self.assertEqual(float(row["beets_distance"]), 0.07)
+
+    def test_mid_flow_failure_rolls_back_all_four_writes_together(self):
+        """A forced UPDATE failure must leave the row in its original state.
+
+        Forces an exception inside the autocommit-disabled
+        transaction by passing an extra kwarg that references a
+        non-existent column; ``UndefinedColumn`` raises AFTER the row
+        lock has been taken and BEFORE the commit fires — the exact
+        mid-flow scenario the autocommit-flip pattern protects
+        against. Without ``conn.autocommit=False`` + try/finally
+        rollback the partial UPDATEs would leave observable
+        corruption (e.g. ``unfindable_category`` cleared but
+        ``rescued_at`` NULL — a row that lies about whether it was
+        ever rescued).
+        """
+        rid = self._seed(
+            mbid="slice-atomic-rollback", category="wrong_pressing_available",
+        )
+
+        before = self.db.get_request(rid)
+        assert before is not None
+        self.assertEqual(before["status"], "downloading")
+        self.assertEqual(
+            before["unfindable_category"], "wrong_pressing_available")
+
+        with self.assertRaises(Exception):
+            self.db.mark_imported_with_rescue(
+                rid, column_that_does_not_exist=1,
+            )
+
+        after = self.db.get_request(rid)
+        assert after is not None
+        # Status untouched.
+        self.assertEqual(after["status"], "downloading")
+        # Category untouched.
+        self.assertEqual(
+            after["unfindable_category"], "wrong_pressing_available")
+        # Rescue columns NEVER landed.
+        self.assertIsNone(after["rescued_at"])
+        self.assertIsNone(after["prior_unfindable_category"])
+        # The connection is autocommit-restored so subsequent calls work.
+        self.assertTrue(self.db.conn.autocommit)
+        # Sanity: the next call still works.
+        self.db.mark_imported_with_rescue(rid, beets_distance=0.07)
+        retried = self.db.get_request(rid)
+        assert retried is not None
+        self.assertEqual(retried["status"], "imported")
+        self.assertEqual(
+            retried["prior_unfindable_category"], "wrong_pressing_available")
 
 
 if __name__ == "__main__":
