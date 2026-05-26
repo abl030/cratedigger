@@ -789,7 +789,111 @@ the `RandomizedDelaySec=30min` jitter.
 
 ## PR4 — Operator surface
 
-Standard flake bump + rebuild. No backfill. New `/api/triage/*` and
-`/api/_index` endpoints come online; existing endpoints unchanged.
+Deploy date: 2026-05-26.
 
-(Procedure documented when PR4 lands.)
+Standard flake bump + rebuild. No backfill, no new migrations — every
+schema dependency landed in PR1's 027–032 sequence. New
+`/api/triage/*` and `/api/_index` endpoints come online; existing
+endpoints unchanged. `cratedigger-web.service` restarts on
+`nixos-rebuild switch`; `cratedigger.service` 5-min timer is
+untouched (search loop behaviour is identical).
+
+Deploy steps (executed):
+
+```bash
+# 1. Merge PR #381 to main (GitHub "Create a merge commit")
+gh pr merge 381 --merge --delete-branch
+
+# 2. On doc1 — bump flake input
+cd ~/nixosconfig
+nix flake update cratedigger-src
+git add flake.lock
+git commit -m "cratedigger: bump to PR #381 (PR4 — operator triage surface + /api/_index)"
+git push
+
+# 3. Rebuild doc2
+ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+```
+
+`cratedigger-db-migrate.service` ran clean as a no-op (no new
+migration files). `cratedigger-web`, `cratedigger-importer`, and
+`cratedigger-import-preview-worker` restarted on the new closure.
+
+### Post-deploy verification (executed 2026-05-26)
+
+- `curl https://music.ablz.au/api/_index | jq 'length'` → 62 routes
+  registered, all with non-empty descriptions (audit passes).
+- `curl 'https://music.ablz.au/api/triage/list?filter=data_quality:status=unresolved_4xx_client&limit=200' | jq '.results | length'`
+  → 75 — exact match to #374's reported sticky-4xx cohort count.
+- `curl 'https://music.ablz.au/api/triage/list?filter=unfindable&limit=200' | jq '.results | length'`
+  → 197 (80 `album_absent_artist_present` + 117 `one_track_structural`),
+  matching PR3's detection output.
+- Per-request: `curl https://music.ablz.au/api/triage/17` returns the
+  full `TriageResult` envelope (request_meta + unfindable + 4
+  field_quality entries + search_forensics with 40 searches).
+- CLI parity: `pipeline-cli triage list --filter=data_quality:status=unresolved_4xx_client --limit=3 --json`
+  emits the same envelope shape the API returns
+  (`{filter, next_after, page_size, results}`) with production-shape
+  values (`status='unresolved_4xx_client'`, `reason_code='http_400'`).
+- `pipeline-cli routes --json` self-documents `triage show / triage list / routes`.
+
+### Operator workflow
+
+```bash
+# Sticky 4xx cohort (#374) — operators investigating
+# deprecated/malformed/410'd MBIDs
+pipeline-cli triage list --filter=data_quality:status=unresolved_4xx_client
+
+# Per-request triage envelope
+pipeline-cli triage show 17
+
+# Cohort listings by unfindable taxonomy
+pipeline-cli triage list --filter=unfindable:album_absent_artist_present
+pipeline-cli triage list --filter=unfindable:wrong_pressing_available
+
+# Two-form data-quality filter:
+#   data_quality:status=<status>  — by resolver status bucket (the cohort key)
+#   data_quality:reason=<code>    — by HTTP code (e.g. http_400)
+#   data_quality:<field>          — by tracked field (release_group_year etc.)
+pipeline-cli triage list --filter=data_quality:reason=http_400
+pipeline-cli triage list --filter=data_quality:release_group_year
+
+# Self-documenting surfaces
+curl https://music.ablz.au/api/_index | jq
+pipeline-cli routes --json
+```
+
+### Known scope deferrals (post-PR4 follow-up)
+
+- **Operator actions** (`triage replace`, `triage skip`, `triage ban`)
+  — PR4 surfaces the #374 cohort as a query only. Concrete actions
+  reuse `lib/mbid_replace_service.py` and `unfindable_category` writes
+  but are not exposed yet. The triage envelope tells the operator
+  what to do; the operator runs the existing `pipeline-cli replace` /
+  `pipeline-cli set-quality ban-source` commands manually.
+- **Replaced-row inclusion in cohorts is pinned**: `status='replaced'`
+  audit rows are intentionally returned by `filter=all`/`unfindable`
+  so operators can spot patterns across replacement history. Pinned
+  by `tests/test_triage_service.py::TestListTriage::test_list_includes_replaced_rows`
+  and the `lib/pipeline_db.py::list_triage_page` docstring.
+
+### Review summary
+
+PR #381 went through `ce-code-review` with 8 reviewer personas
+(correctness, testing, maintainability, project-standards,
+api-contract, performance, agent-native, learnings-researcher).
+22 findings surfaced; 21 applied in `8b9a217`; 1 pinned by test
+(replaced-row policy) in `eb005bb`.
+
+The headline finding (P1, correctness) was that
+`data_quality:reason=<code>` filter targeted the wrong column — the
+#374 cohort's `unresolved_4xx_client` bucket lives in the `status`
+column per `lib/field_resolver_service.py::_classify_lookup_exception`,
+while `reason_code` carries the concrete HTTP code (`http_400`,
+`http_410`, etc.). Test fixtures had faked the wrong shape so green
+tests masked a workflow that returned zero rows in production. The
+fix added a new `data_quality:status=<status>` filter form
+(additive — kept `reason=` for HTTP-code filtering) and rewrote
+fixtures across `test_triage_service.py`, `test_pipeline_cli.py`,
+`test_web_server.py` to production shape. Confirmed live on
+2026-05-26 against the real cohort of 75 stuck requests.
