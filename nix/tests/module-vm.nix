@@ -131,5 +131,22 @@ pkgs.testers.nixosTest {
     machine.wait_for_unit("cratedigger-web.service")
     machine.wait_for_open_port(8085)
     machine.succeed("curl -sf http://127.0.0.1:8085/ > /dev/null")
+
+    # U13: cratedigger-unfindable.service + .timer exist and are
+    # ordered correctly. Structural assertions only — we do NOT fire
+    # the unit because slskd is not available in the VM. This guards
+    # the module against future deployments that forget to render the
+    # detection unit, or render it without the migrate dependency.
+    machine.succeed("systemctl cat cratedigger-unfindable.service > /dev/null")
+    machine.succeed("systemctl cat cratedigger-unfindable.timer > /dev/null")
+    # After= must include the db-migrate unit so the detection job never
+    # runs against an un-migrated schema.
+    machine.succeed("systemctl show -p After cratedigger-unfindable.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Requires cratedigger-unfindable.service | grep -q cratedigger-db-migrate.service")
+    # Timer is enabled (wantedBy timers.target) — the daily fire is
+    # not opt-in. ``systemctl is-enabled`` returns "enabled" for units
+    # wired into timers.target.
+    enabled = machine.succeed("systemctl is-enabled cratedigger-unfindable.timer").strip()
+    assert enabled == "enabled", f"unfindable timer not enabled: {enabled}"
   '';
 }

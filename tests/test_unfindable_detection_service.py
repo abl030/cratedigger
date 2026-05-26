@@ -746,23 +746,71 @@ _CURSOR_MUTATION_BANNED_NAMES: frozenset[str] = frozenset({
     "advance_search_plan_cursor",
     "record_consumed_search_attempt",
     "record_non_consuming_search_attempt",
+    # failure_class is the third wrap-only column (U12). Detection
+    # must never read or write it — wrap-time classification is the
+    # exclusive owner. Mirror the cursor columns here so a typo like
+    # ``db.update_request_fields(rid, failure_class=...)`` trips the
+    # structural guard rather than silently surfacing in production.
+    "failure_class",
+    "update_failure_class",
 })
 
 
 def _walk_names(tree: ast.AST) -> set[str]:
-    """Return every Name / Attribute identifier in the AST."""
+    """Return every Name / Attribute / keyword identifier in the AST.
+
+    Includes ``ast.keyword`` nodes so a kwarg like
+    ``db.update_request_fields(rid, next_plan_ordinal=0)`` trips the
+    structural guard. Without this branch, banned column names used as
+    keyword arguments would be invisible to the AST walk (they're
+    keyword arg names, not Name/Attribute nodes).
+    """
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             found.add(node.id)
         elif isinstance(node, ast.Attribute):
             found.add(node.attr)
+        elif isinstance(node, ast.keyword) and node.arg is not None:
+            # Keyword arg name — catches ``foo(next_plan_ordinal=0)``.
+            # ``node.arg`` is None for ``**kwargs``-style splats.
+            found.add(node.arg)
         elif isinstance(node, ast.alias):
             # Imports — catch ``from X import advance_for_request``.
             found.add(node.name.split(".")[-1])
             if node.asname:
                 found.add(node.asname)
     return found
+
+
+class TestWalkNamesAstHelper(unittest.TestCase):
+    """Meta-test: ``_walk_names`` must visit keyword-argument names.
+
+    Before this guard, the AST walk only inspected ``ast.Name``,
+    ``ast.Attribute``, and ``ast.alias`` nodes — keyword argument
+    names like ``foo(next_plan_ordinal=0)`` would slip through
+    because the column name is on an ``ast.keyword`` node, not a
+    Name/Attribute. A typo like
+    ``db.update_request_fields(rid, next_plan_ordinal=0)`` in
+    detection would have passed the structural guard. The keyword
+    branch closes that hole; this meta-test pins it so a future
+    refactor of ``_walk_names`` can't silently drop the branch.
+    """
+
+    def test_walk_names_includes_keyword_arg_names(self) -> None:
+        src = "update_request_fields(rid, next_plan_ordinal=0)"
+        tree = ast.parse(src)
+        names = _walk_names(tree)
+        self.assertIn("next_plan_ordinal", names)
+        # Also covers the other banned column names — synthetic source
+        # covers every kwarg-shaped banned name so the structural
+        # guard is robust regardless of which one is mis-used.
+        for banned in ("plan_cycle_count", "failure_class"):
+            with self.subTest(banned=banned):
+                t = ast.parse(
+                    f"update_request_fields(rid, {banned}=0)",
+                )
+                self.assertIn(banned, _walk_names(t))
 
 
 class TestR20CursorIsolation(unittest.TestCase):

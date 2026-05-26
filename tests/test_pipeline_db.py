@@ -6945,5 +6945,238 @@ class TestMarkImportedWithRescue(unittest.TestCase):
         self.assertEqual(retried["prior_unfindable_category"], "artist_absent")
 
 
+@requires_postgres
+class TestUnfindableDetectionPipelineDB(unittest.TestCase):
+    """U13: real-PG round-trip coverage for the 4 detection writers.
+
+    The FakePipelineDB mirrors give us shape coverage; this class pins
+    the production SQL against the real fixture so the CHECK
+    constraints (migration 028's 4-category vocabulary) and the
+    ``AND status='wanted'`` lost-update guards behave exactly like
+    operators will see them on doc2.
+
+    Mirrors the ``TestMarkImportedWithRescue`` style next door.
+    """
+
+    UNFINDABLE_CATEGORIES = (
+        "artist_absent",
+        "album_absent_artist_present",
+        "one_track_structural",
+        "wrong_pressing_available",
+    )
+
+    def _seed_wanted(self, db, *, artist_name="A", album_title="B",
+                     mbid=None):
+        return db.add_request(
+            mb_release_id=mbid or f"unf-{artist_name}-{album_title}",
+            artist_name=artist_name,
+            album_title=album_title,
+            source="request",
+        )
+
+    # ---- list_unfindable_probe_candidates ----
+
+    def test_list_candidates_orders_oldest_first_and_filters_by_cadence(self):
+        """NULL probes sort first; rows fresher than window are excluded."""
+        db = make_db()
+        now = datetime.now(timezone.utc)
+        # Three wanted rows.
+        rid_null = self._seed_wanted(db, artist_name="Null", mbid="unf-null")
+        rid_old = self._seed_wanted(db, artist_name="Old", mbid="unf-old")
+        rid_fresh = self._seed_wanted(
+            db, artist_name="Fresh", mbid="unf-fresh")
+        # Old probe = 10 days ago (older than 7d window → eligible).
+        db.record_artist_probe(
+            rid_old, match_count=0,
+            observed_at=now - timedelta(days=10),
+        )
+        # Fresh probe = 1 day ago (inside window → ineligible).
+        db.record_artist_probe(
+            rid_fresh, match_count=0,
+            observed_at=now - timedelta(days=1),
+        )
+
+        cands = db.list_unfindable_probe_candidates(
+            limit=10, probe_interval_days=7,
+        )
+        ids = [c["id"] for c in cands]
+        # NULL probe sorts first.
+        self.assertEqual(ids[0], rid_null)
+        # Old probe included; fresh probe excluded.
+        self.assertIn(rid_old, ids)
+        self.assertNotIn(rid_fresh, ids)
+
+    def test_list_candidates_excludes_non_wanted(self):
+        """A row in any non-wanted status is excluded from the cohort."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-imp")
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (rid,),
+        )
+        cands = db.list_unfindable_probe_candidates(
+            limit=10, probe_interval_days=7,
+        )
+        self.assertNotIn(rid, [c["id"] for c in cands])
+
+    # ---- record_artist_probe ----
+
+    def test_record_artist_probe_round_trips_count_and_timestamp(self):
+        """Probe column updates land and round-trip through SELECT."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-rec-1")
+        ts = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+
+        db.record_artist_probe(rid, match_count=42, observed_at=ts)
+
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["last_artist_probe_match_count"], 42)
+        self.assertEqual(row["last_artist_probe_at"], ts)
+
+    def test_record_artist_probe_silent_noop_when_status_not_wanted(self):
+        """The lost-update guard makes late writes invisible — no error."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-rec-2")
+        # Capture the pre-existing probe state (NULL by default).
+        before = db.get_request(rid)
+        assert before is not None
+        self.assertIsNone(before["last_artist_probe_at"])
+        # Concurrent rescue flips status mid-probe.
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (rid,),
+        )
+        # Detection's late write — must be a silent no-op.
+        ts = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+        db.record_artist_probe(rid, match_count=99, observed_at=ts)
+        after = db.get_request(rid)
+        assert after is not None
+        # Probe columns untouched.
+        self.assertIsNone(after["last_artist_probe_at"])
+        self.assertIsNone(after["last_artist_probe_match_count"])
+
+    # ---- set_unfindable_category ----
+
+    def test_set_unfindable_category_round_trips_all_four_categories(self):
+        """Every valid category round-trips; CHECK constraint passes."""
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        for category in self.UNFINDABLE_CATEGORIES:
+            with self.subTest(category=category):
+                db = make_db()
+                rid = self._seed_wanted(db, mbid=f"unf-set-{category}")
+                db.set_unfindable_category(
+                    rid, category=category, categorised_at=ts,
+                )
+                row = db.get_request(rid)
+                assert row is not None
+                self.assertEqual(row["unfindable_category"], category)
+                self.assertEqual(row["unfindable_categorised_at"], ts)
+
+    def test_set_unfindable_category_rejects_off_vocabulary_value(self):
+        """An unknown category trips the CHECK constraint → IntegrityError."""
+        from psycopg2.errors import CheckViolation
+
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-set-bad")
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        with self.assertRaises(CheckViolation):
+            db.set_unfindable_category(
+                rid, category="garbage_value", categorised_at=ts,
+            )
+
+    def test_set_unfindable_category_silent_noop_when_status_not_wanted(self):
+        """Late verdict write does not clobber a row already past wanted."""
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-set-imp")
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (rid,),
+        )
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        db.set_unfindable_category(
+            rid, category="artist_absent", categorised_at=ts,
+        )
+        row = db.get_request(rid)
+        assert row is not None
+        # Category never landed; row remains in imported shape.
+        self.assertIsNone(row["unfindable_category"])
+        self.assertEqual(row["status"], "imported")
+
+    # ---- get_unfindable_search_log_signal ----
+
+    def test_search_log_signal_aggregates_zero_find_and_wrong_pressing(self):
+        """Hand-computed aggregates match the production SQL."""
+        from lib.pipeline_db import (
+            ConsumedAttemptInput, SearchPlanItemInput,
+        )
+
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-sig")
+        # Seed a plan + advance the cursor 4 times so we have
+        # 4 distinct ``plan_cycle_snapshot`` values in the log.
+        # Cycles 0..3 from four ordinal consumptions.
+        plan_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="unf-gen",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default",
+                    query="q0", canonical_query_key="q0"),
+            ],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        item_id = active.items[0].id
+
+        def _attempt(cycle_idx: int, *, outcome: str,
+                     rejection_reason: str | None = None,
+                     matcher_score_top1: float | None = None):
+            return ConsumedAttemptInput(
+                request_id=rid,
+                plan_id=plan_id,
+                plan_item_id=item_id,
+                plan_ordinal=0,
+                plan_strategy="default",
+                plan_canonical_query_key="q0",
+                plan_repeat_group=None,
+                plan_generator_id="unf-gen",
+                query="q0",
+                outcome=outcome,
+                plan_item_count=1,
+                cycle_count_snapshot=cycle_idx,
+                apply_scheduler_attempt=True,
+                scheduler_success=(outcome == "found"),
+                rejection_reason=rejection_reason,
+                matcher_score_top1=matcher_score_top1,
+            )
+
+        # Cycle 0: no_match w/ wrong-pressing signature (high score) → hit.
+        db.record_consumed_search_attempt(_attempt(
+            0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.9,
+        ))
+        # Cycle 1: one found → cycle NOT zero-find.
+        db.record_consumed_search_attempt(_attempt(1, outcome="found"))
+        # Cycle 2: no_match w/ low score → not a wrong-pressing hit;
+        # AND no found → counts as a zero-find cycle.
+        db.record_consumed_search_attempt(_attempt(
+            2, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.5,
+        ))
+        # Cycle 3: no_results → zero-find cycle.
+        db.record_consumed_search_attempt(_attempt(3, outcome="no_results"))
+
+        sig = db.get_unfindable_search_log_signal(
+            rid, window_days=30, matcher_score_threshold=0.85,
+        )
+        # Cycles 0, 2, 3 are zero-find (cycle 1 had the found row).
+        self.assertEqual(sig.zero_find_cycles, 3)
+        # One wrong-pressing hit (cycle 0).
+        self.assertEqual(sig.wrong_pressing_hits, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

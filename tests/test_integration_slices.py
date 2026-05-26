@@ -2989,6 +2989,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(decoded[0].username, "good_peer")
         self.assertEqual(decoded[0].matched_tracks, 2)
         self.assertEqual(decoded[0].total_tracks, 2)
+        # U11 R25: expected_track_count is sourced from
+        # ``album.releases[0].track_count`` (the request's first release
+        # record, populated by AlbumRecord.from_db_row in production).
+        # The album fixture above uses ``ReleaseRecord(..., track_count=2)``
+        # so the log row should carry 2. This pin guards the exact
+        # threading path through cratedigger.py::_log_search_result so a
+        # future refactor of the AlbumRecord shape doesn't silently
+        # NULL the column.
+        self.assertEqual(row.expected_track_count, 2)
 
     def test_unwild_variant_at_threshold(self):
         """Plan-item with strategy='unwild' produces an unwild query (post-U5).
