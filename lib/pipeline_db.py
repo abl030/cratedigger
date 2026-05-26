@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
+    from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
 import psycopg2
 import psycopg2.extras
@@ -2013,6 +2014,182 @@ class PipelineDB:
             params,
         )
         self.conn.commit()
+
+    # ---------- Unfindable detection (U13) ----------
+    #
+    # Three thin writers used by ``lib.unfindable_detection_service`` and
+    # nothing else. Each is a single statement; the autocommit-mode
+    # default of ``PipelineDB`` is the right boundary — there is no
+    # cross-statement invariant to protect (cursor / cycle state is
+    # explicitly NOT touched, per R20).
+
+    def list_unfindable_probe_candidates(
+        self,
+        *,
+        limit: int,
+        probe_interval_days: int,
+    ) -> list[dict[str, Any]]:
+        """Return wanted-cohort members eligible for a probe right now.
+
+        A row is eligible when:
+
+          * ``status = 'wanted'`` (only the unfindable cohort), AND
+          * ``last_artist_probe_at IS NULL`` (never probed), OR
+            ``last_artist_probe_at < now() - probe_interval_days``.
+
+        Ordered oldest-probe-first so the daily run picks up the most
+        overdue members first. ``NULL`` sorts before any timestamp via
+        ``NULLS FIRST`` so a freshly-added request is preferred over a
+        7d-old probed row.
+
+        Returns the minimal column set the service needs (request id,
+        artist_name, current_category, prior probe count) so the
+        per-row processing in the service is one DB round-trip per
+        candidate at most.
+        """
+        if limit <= 0:
+            return []
+        cur = self._execute(
+            """
+            SELECT id, artist_name, unfindable_category,
+                   last_artist_probe_at, last_artist_probe_match_count
+            FROM album_requests
+            WHERE status = 'wanted'
+              AND (last_artist_probe_at IS NULL
+                   OR last_artist_probe_at < (NOW() - %s * INTERVAL '1 day'))
+            ORDER BY last_artist_probe_at NULLS FIRST, id
+            LIMIT %s
+            """,
+            (int(probe_interval_days), int(limit)),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def record_artist_probe(
+        self,
+        request_id: int,
+        *,
+        match_count: int,
+        observed_at: datetime,
+    ) -> None:
+        """Persist one artist-only probe observation.
+
+        Two columns + ``updated_at``. Deliberately separate from
+        ``set_unfindable_category`` so the probe-recorded-but-
+        verdict-unchanged case stays explicit in the audit trail.
+        """
+        self._execute(
+            """
+            UPDATE album_requests
+            SET last_artist_probe_at = %s,
+                last_artist_probe_match_count = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (observed_at, int(match_count), observed_at, request_id),
+        )
+        self.conn.commit()
+
+    def set_unfindable_category(
+        self,
+        request_id: int,
+        *,
+        category: str | None,
+        categorised_at: datetime,
+    ) -> None:
+        """Write ``unfindable_category`` + ``unfindable_categorised_at``.
+
+        ``category=None`` clears the column (re-categorisation downgrade).
+        Always stamps ``unfindable_categorised_at`` so operators can
+        see how fresh the categorisation is — even a clear is an
+        observation worth dating.
+
+        The DB CHECK constraint enforces the 4-category vocabulary; an
+        unknown string raises ``IntegrityError`` here rather than
+        silently writing garbage.
+        """
+        self._execute(
+            """
+            UPDATE album_requests
+            SET unfindable_category = %s,
+                unfindable_categorised_at = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (category, categorised_at, categorised_at, request_id),
+        )
+        self.conn.commit()
+
+    def get_unfindable_search_log_signal(
+        self,
+        request_id: int,
+        *,
+        window_days: int,
+        matcher_score_threshold: float,
+    ) -> "UnfindableSearchLogSignal":
+        """Aggregate the search-log signal for the unfindable classifier.
+
+        Window-bounded so historical noise doesn't pin a verdict
+        forever. Computes three scalars in one pass:
+
+          * ``cycles_observed`` — distinct ``plan_cycle_snapshot``
+            values seen for this request in the window.
+          * ``zero_find_cycles`` — of those, how many cycles had zero
+            rows with ``outcome='found'``. Drives the
+            ``album_absent_artist_present`` rule.
+          * ``wrong_pressing_hits`` — count of rows with
+            ``rejection_reason='strict_count_mismatch'`` AND
+            ``matcher_score_top1 >= matcher_score_threshold``. Drives
+            the ``wrong_pressing_available`` rule.
+        """
+        # Import lazily to avoid a circular import via lib.quality.
+        from lib.unfindable_detection_service import UnfindableSearchLogSignal
+
+        cur = self._execute(
+            """
+            WITH window_rows AS (
+                SELECT *
+                FROM search_log
+                WHERE request_id = %s
+                  AND attempt_consumed = TRUE
+                  AND created_at > (NOW() - %s * INTERVAL '1 day')
+            ),
+            per_cycle AS (
+                SELECT plan_cycle_snapshot,
+                       SUM(CASE WHEN outcome = 'found' THEN 1 ELSE 0 END)
+                           AS found_count
+                FROM window_rows
+                WHERE plan_cycle_snapshot IS NOT NULL
+                GROUP BY plan_cycle_snapshot
+            )
+            SELECT
+                (SELECT COUNT(*) FROM per_cycle)::int
+                    AS cycles_observed,
+                (SELECT COUNT(*) FROM per_cycle WHERE found_count = 0)::int
+                    AS zero_find_cycles,
+                (SELECT COUNT(*) FROM window_rows
+                 WHERE rejection_reason = 'strict_count_mismatch'
+                   AND matcher_score_top1 IS NOT NULL
+                   AND matcher_score_top1 >= %s)::int
+                    AS wrong_pressing_hits
+            """,
+            (
+                int(request_id),
+                int(window_days),
+                float(matcher_score_threshold),
+            ),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return UnfindableSearchLogSignal(
+                cycles_observed=0,
+                zero_find_cycles=0,
+                wrong_pressing_hits=0,
+            )
+        return UnfindableSearchLogSignal(
+            cycles_observed=int(row.get("cycles_observed") or 0),
+            zero_find_cycles=int(row.get("zero_find_cycles") or 0),
+            wrong_pressing_hits=int(row.get("wrong_pressing_hits") or 0),
+        )
 
     def update_status(self, request_id, status, **extra):
         now = datetime.now(timezone.utc)

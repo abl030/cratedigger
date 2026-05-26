@@ -9310,5 +9310,180 @@ class TestPlanWrapClassificationSlice(unittest.TestCase):
         self.assertEqual(db.request(rid)["failure_class"], "resolved")
 
 
+class TestUnfindableDetectionSlice(unittest.TestCase):
+    """U13: end-to-end probe → classify → write through the real service.
+
+    Uses the production ``run_artist_probe`` helper against the
+    ``FakeSlskdAPI.searches`` surface seeded with realistic artist-only
+    response shapes (catalog match, no match, partial match). The
+    service exercises the production
+    ``classify_unfindable_from_state`` decision and the production
+    ``FakePipelineDB`` writers — no shortcuts past the boundary.
+
+    Anchors the four-category contract end-to-end in one slice so any
+    future refactor that breaks the probe → classify → write chain
+    surfaces here before per-layer tests.
+    """
+
+    @staticmethod
+    def _seed_artist(db: "FakePipelineDB", artist: str, **overrides: Any) -> int:
+        rid = db.add_request(
+            artist_name=artist,
+            album_title=f"{artist} - Album",
+            source="request",
+            mb_release_id=f"mb-{artist.replace(' ', '_')}",
+        )
+        # Default tracks: 8 (enough to defang one_track_structural).
+        track_count = overrides.pop("track_count", 8)
+        if track_count > 0:
+            db.set_tracks(rid, [
+                {"disc_number": 1, "track_number": i + 1,
+                 "title": f"T{i}"}
+                for i in range(track_count)
+            ])
+        if overrides:
+            db.update_request_fields(rid, **overrides)
+            db.update_request_fields_calls.pop()
+        return rid
+
+    @staticmethod
+    def _seed_slskd_search(
+        slskd: "FakeSlskdAPI",
+        *,
+        search_id: int,
+        responses: list[dict[str, Any]],
+    ) -> None:
+        slskd.searches.add_search(
+            search_id=search_id, state="Completed",
+            responses=responses, response_count=len(responses),
+        )
+        slskd.searches.search_text_id_sequence.append(search_id)
+
+    def test_end_to_end_artist_absent(self) -> None:
+        """Catalog-empty probe → artist_absent verdict written."""
+        from datetime import datetime, timedelta, timezone
+
+        from lib.unfindable_detection_service import (
+            CATEGORY_ARTIST_ABSENT,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(
+            db, "Unknown Indie Band",
+            last_artist_probe_at=(
+                datetime.now(timezone.utc) - timedelta(days=14)),
+            last_artist_probe_match_count=0,
+        )
+        # Empty responses → match_count=0, no fuzzy match.
+        self._seed_slskd_search(slskd, search_id=101, responses=[])
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category, CATEGORY_ARTIST_ABSENT)
+        self.assertEqual(db.request(rid)["unfindable_category"],
+                         CATEGORY_ARTIST_ABSENT)
+
+    def test_end_to_end_one_track_structural(self) -> None:
+        from lib.unfindable_detection_service import (
+            CATEGORY_ONE_TRACK_STRUCTURAL,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(db, "Single Track Artist", track_count=1)
+        # Even a "catalog match" probe doesn't change the verdict —
+        # the structural rule dominates.
+        self._seed_slskd_search(
+            slskd, search_id=201,
+            responses=[
+                {"username": "peerA", "files": [
+                    {"filename": "Single Track Artist - song.mp3"},
+                ]},
+            ] * 10,
+        )
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category,
+                         CATEGORY_ONE_TRACK_STRUCTURAL)
+
+    def test_end_to_end_album_absent_artist_present(self) -> None:
+        """Probe sees artist (>= threshold + fuzzy) + zero-find cycles.
+
+        Builds the search-log history that drives the classifier's
+        zero-find-cycles signal, then the probe surfaces the artist.
+        """
+        from lib.unfindable_detection_service import (
+            ARTIST_MATCH_THRESHOLD,
+            CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT,
+            REQUIRED_ZERO_FIND_CYCLES,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(db, "Known Artist")
+        # M cycles of all-no_match consumed attempts → zero finds.
+        for cycle in range(REQUIRED_ZERO_FIND_CYCLES):
+            db.log_search(
+                request_id=rid, outcome="no_match",
+                query=f"q{cycle}",
+            )
+            db.search_logs[-1].plan_cycle_snapshot = cycle
+            db.search_logs[-1].attempt_consumed = True
+
+        # Catalog match: many responses, artist name in filenames.
+        responses = [
+            {"username": f"peer{i}", "files": [
+                {"filename": f"/Known-Artist/album_{i}/track.flac"},
+            ]}
+            for i in range(ARTIST_MATCH_THRESHOLD + 5)
+        ]
+        self._seed_slskd_search(slskd, search_id=301, responses=responses)
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category,
+                         CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT)
+
+    def test_end_to_end_wrong_pressing_available(self) -> None:
+        from lib.unfindable_detection_service import (
+            CATEGORY_WRONG_PRESSING_AVAILABLE,
+            RESULT_CATEGORISED,
+            UnfindableDetectionService,
+            WRONG_PRESSING_MIN_HITS,
+        )
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        rid = self._seed_artist(db, "WP Artist")
+        # Seed the strict_count_mismatch signature in search-log.
+        for i in range(WRONG_PRESSING_MIN_HITS):
+            db.log_search(
+                request_id=rid, outcome="no_match", query=f"q{i}",
+                rejection_reason="strict_count_mismatch",
+                matcher_score_top1=0.9,
+            )
+            db.search_logs[-1].attempt_consumed = True
+            db.search_logs[-1].plan_cycle_snapshot = 0
+        # Probe is empty — wrong-pressing dominates anyway.
+        self._seed_slskd_search(slskd, search_id=401, responses=[])
+
+        svc = UnfindableDetectionService(db, slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_CATEGORISED)
+        self.assertEqual(result.new_category,
+                         CATEGORY_WRONG_PRESSING_AVAILABLE)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3686,5 +3686,224 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(beets.close_calls, 1)
 
 
+class TestFakePipelineDBUnfindable(unittest.TestCase):
+    """Self-tests for U13 ``FakePipelineDB`` unfindable-detection writers.
+
+    Mirrors ``.claude/rules/code-quality.md`` § "Every new PipelineDB
+    method needs an equivalent stub on ``FakePipelineDB`` with a self-
+    test in ``tests/test_fakes.py``." Each test exercises a single
+    fake method's contract — call recording + persisted row state.
+    """
+
+    def test_record_artist_probe_writes_and_records(self) -> None:
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-uf-1",
+        )
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        db.record_artist_probe(rid, match_count=7, observed_at=ts)
+        # Call recorder.
+        self.assertEqual(
+            db.record_artist_probe_calls,
+            [(rid, 7, ts)],
+        )
+        # Row state.
+        row = db.request(rid)
+        self.assertEqual(row["last_artist_probe_at"], ts)
+        self.assertEqual(row["last_artist_probe_match_count"], 7)
+        self.assertEqual(row["updated_at"], ts)
+
+    def test_set_unfindable_category_validates_vocabulary(self) -> None:
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-uf-2",
+        )
+        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        # Valid: write a category.
+        db.set_unfindable_category(
+            rid, category="artist_absent", categorised_at=ts,
+        )
+        row = db.request(rid)
+        self.assertEqual(row["unfindable_category"], "artist_absent")
+        self.assertEqual(row["unfindable_categorised_at"], ts)
+        # Valid: clear (None).
+        ts2 = ts + timedelta(days=1)
+        db.set_unfindable_category(rid, category=None, categorised_at=ts2)
+        row = db.request(rid)
+        self.assertIsNone(row["unfindable_category"])
+        self.assertEqual(row["unfindable_categorised_at"], ts2)
+        # Invalid vocabulary: raises (mirrors production CHECK).
+        with self.assertRaises(ValueError):
+            db.set_unfindable_category(
+                rid, category="garbage", categorised_at=ts,
+            )
+
+    def test_list_unfindable_probe_candidates_orders_oldest_first(self) -> None:
+        db = FakePipelineDB()
+        now = datetime.now(timezone.utc)
+        # NULL probe → sorts first.
+        rid_null = db.add_request(
+            artist_name="Null", album_title="X", source="request",
+            mb_release_id="m-cand-null",
+        )
+        # 10d old probe → eligible (window=7).
+        rid_old = db.add_request(
+            artist_name="Old", album_title="X", source="request",
+            mb_release_id="m-cand-old",
+        )
+        db.update_request_fields(
+            rid_old, last_artist_probe_at=now - timedelta(days=10),
+            last_artist_probe_match_count=0,
+        )
+        # 1d old → ineligible.
+        rid_fresh = db.add_request(
+            artist_name="Fresh", album_title="X", source="request",
+            mb_release_id="m-cand-fresh",
+        )
+        db.update_request_fields(
+            rid_fresh, last_artist_probe_at=now - timedelta(days=1),
+        )
+        # Not wanted → ineligible.
+        rid_imp = db.add_request(
+            artist_name="Imp", album_title="X", source="request",
+            mb_release_id="m-cand-imp", status="imported",
+        )
+
+        cands = db.list_unfindable_probe_candidates(
+            limit=10, probe_interval_days=7,
+        )
+        cand_ids = [c["id"] for c in cands]
+        self.assertEqual(cand_ids[0], rid_null)
+        self.assertIn(rid_old, cand_ids)
+        self.assertNotIn(rid_fresh, cand_ids)
+        self.assertNotIn(rid_imp, cand_ids)
+
+    def test_list_unfindable_probe_candidates_respects_limit(self) -> None:
+        db = FakePipelineDB()
+        for i in range(5):
+            db.add_request(
+                artist_name=f"A{i}", album_title="X", source="request",
+                mb_release_id=f"m-lim-{i}",
+            )
+        cands = db.list_unfindable_probe_candidates(
+            limit=2, probe_interval_days=7,
+        )
+        self.assertEqual(len(cands), 2)
+
+    def test_get_unfindable_search_log_signal_aggregates_correctly(self) -> None:
+        from lib.unfindable_detection_service import (
+            UnfindableSearchLogSignal,
+        )
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-sig",
+        )
+        # Cycle 0: one no_match (zero find), one wrong-pressing hit.
+        db.log_search(
+            request_id=rid, outcome="no_match", query="q1",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.9,
+        )
+        db.search_logs[-1].attempt_consumed = True
+        db.search_logs[-1].plan_cycle_snapshot = 0
+        # Cycle 1: one found (NOT zero find).
+        db.log_search(request_id=rid, outcome="found", query="q2")
+        db.search_logs[-1].attempt_consumed = True
+        db.search_logs[-1].plan_cycle_snapshot = 1
+        # Cycle 2: one no_match, score below threshold → not a hit.
+        db.log_search(
+            request_id=rid, outcome="no_match", query="q3",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.5,
+        )
+        db.search_logs[-1].attempt_consumed = True
+        db.search_logs[-1].plan_cycle_snapshot = 2
+        # Cycle 3: non-consumed (stale completion) — filtered out.
+        db.log_search(request_id=rid, outcome="no_match", query="stale")
+        db.search_logs[-1].attempt_consumed = False
+        db.search_logs[-1].plan_cycle_snapshot = 3
+
+        sig = db.get_unfindable_search_log_signal(
+            rid, window_days=30, matcher_score_threshold=0.85,
+        )
+        self.assertIsInstance(sig, UnfindableSearchLogSignal)
+        self.assertEqual(sig.cycles_observed, 3)  # cycles 0, 1, 2
+        self.assertEqual(sig.zero_find_cycles, 2)  # cycles 0 and 2
+        self.assertEqual(sig.wrong_pressing_hits, 1)  # cycle 0 only
+
+    def test_cursor_mutation_recorders_fire_on_real_mutators(self) -> None:
+        """Sanity: the R20 runtime guard requires these to be observable.
+
+        If the recorders ever stop firing on the real cursor-mutator
+        methods, the R20 runtime test silently goes green even when
+        the detection module starts touching them — defeating the
+        point of the guard.
+        """
+        from lib.pipeline_db import (
+            ConsumedAttemptInput,
+            SearchPlanItemInput,
+        )
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="m-cur-1",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="s0", query="Q0",
+                    canonical_query_key="q0",
+                ),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="s1", query="Q1",
+                    canonical_query_key="q1",
+                ),
+            ],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        attempt = ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id,
+            plan_item_id=active.items[0].id,
+            plan_ordinal=0, plan_strategy="s0",
+            plan_canonical_query_key="q0",
+            plan_repeat_group=None, plan_generator_id="g1",
+            query="Q0", outcome="no_results",
+            plan_item_count=2, cycle_count_snapshot=0,
+        )
+        db.record_consumed_search_attempt(attempt)
+        self.assertEqual(len(db.record_consumed_search_attempt_calls), 1)
+        # advance_search_plan_cursor recorder. Use a separate request
+        # with a fresh plan since the consumed-attempt above already
+        # advanced this row's cursor to 1.
+        rid2 = db.add_request(
+            artist_name="A2", album_title="B2", source="request",
+            mb_release_id="m-cur-2",
+        )
+        db.create_successful_search_plan(
+            request_id=rid2, generator_id="g1",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="s0", query="Q0",
+                    canonical_query_key="q0",
+                ),
+                SearchPlanItemInput(
+                    ordinal=1, strategy="s1", query="Q1",
+                    canonical_query_key="q1",
+                ),
+            ],
+        )
+        db.advance_search_plan_cursor(
+            rid2, target_ordinal=1, plan_item_count=2,
+        )
+        self.assertGreaterEqual(len(db.advance_search_plan_cursor_calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

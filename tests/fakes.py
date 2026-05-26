@@ -717,6 +717,21 @@ class FakePipelineDB:
         # can assert what was written without relying on MagicMock
         # introspection.
         self.update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
+        # U13 unfindable detection writers. The R20 runtime guard
+        # asserts these recorders fire while the cursor-mutation
+        # recorders (``record_consumed_search_attempt_calls``,
+        # ``advance_search_plan_cursor_calls``) stay empty.
+        self.record_artist_probe_calls: list[
+            tuple[int, int, datetime]] = []
+        self.set_unfindable_category_calls: list[
+            tuple[int, str | None, datetime]] = []
+        # Cursor-mutation recorders. The R20 runtime guard asserts
+        # these stay empty after a detection run. We instrument both
+        # cursor writers and the operator-driven advance.
+        self.record_consumed_search_attempt_calls: list[Any] = []
+        self.record_non_consuming_search_attempt_calls: list[Any] = []
+        self.advance_search_plan_cursor_calls: list[
+            tuple[int, int, int]] = []
         # Keyed by (mb_release_id, snapshot_fingerprint) — content-addressed
         # after migration 021. Each row also has a surrogate ``id``; the
         # parallel ``_evidence_by_id`` dict mirrors load-by-id lookups.
@@ -2132,6 +2147,146 @@ class FakePipelineDB:
             row.update(fields)
             row["updated_at"] = _utcnow()
 
+    # --- Unfindable detection (U13) ---
+    #
+    # Each fake mirrors the production PipelineDB writer's contract:
+    # one statement, no cursor mutation, autocommit-safe. Tests assert
+    # against the persisted row state (and per-method call recorders
+    # for the R20 cursor-isolation runtime guard).
+
+    def list_unfindable_probe_candidates(
+        self,
+        *,
+        limit: int,
+        probe_interval_days: int,
+    ) -> list[dict[str, Any]]:
+        """Mirror PipelineDB.list_unfindable_probe_candidates.
+
+        Pulls ``status='wanted'`` rows whose ``last_artist_probe_at``
+        is NULL or older than ``probe_interval_days``, oldest first
+        (NULL sorts before any timestamp).
+        """
+        if limit <= 0:
+            return []
+        cutoff = _utcnow() - timedelta(days=int(probe_interval_days))
+        eligible: list[dict[str, Any]] = []
+        for row in self._requests.values():
+            if row.get("status") != "wanted":
+                continue
+            last = row.get("last_artist_probe_at")
+            if last is not None:
+                last_dt = _as_datetime(last)
+                if last_dt > cutoff:
+                    continue
+            eligible.append({
+                "id": row["id"],
+                "artist_name": row.get("artist_name"),
+                "unfindable_category": row.get("unfindable_category"),
+                "last_artist_probe_at": row.get("last_artist_probe_at"),
+                "last_artist_probe_match_count": row.get(
+                    "last_artist_probe_match_count"),
+            })
+
+        def _sort_key(r: dict[str, Any]) -> tuple[int, datetime, int]:
+            ts = r["last_artist_probe_at"]
+            if ts is None:
+                return (0, datetime.min.replace(tzinfo=timezone.utc),
+                        int(r["id"]))
+            return (1, _as_datetime(ts), int(r["id"]))
+        eligible.sort(key=_sort_key)
+        return eligible[: int(limit)]
+
+    def record_artist_probe(
+        self,
+        request_id: int,
+        *,
+        match_count: int,
+        observed_at: datetime,
+    ) -> None:
+        """Mirror PipelineDB.record_artist_probe."""
+        self.record_artist_probe_calls.append(
+            (request_id, int(match_count), observed_at),
+        )
+        row = self._requests.get(request_id)
+        if row is None:
+            return
+        row["last_artist_probe_at"] = observed_at
+        row["last_artist_probe_match_count"] = int(match_count)
+        row["updated_at"] = observed_at
+
+    def set_unfindable_category(
+        self,
+        request_id: int,
+        *,
+        category: str | None,
+        categorised_at: datetime,
+    ) -> None:
+        """Mirror PipelineDB.set_unfindable_category.
+
+        Enforces the same 4-category vocabulary the production CHECK
+        constraint guards. ``None`` clears the column.
+        """
+        valid = {
+            "artist_absent",
+            "album_absent_artist_present",
+            "one_track_structural",
+            "wrong_pressing_available",
+        }
+        if category is not None and category not in valid:
+            raise ValueError(
+                f"set_unfindable_category: invalid category {category!r}")
+        self.set_unfindable_category_calls.append(
+            (request_id, category, categorised_at),
+        )
+        row = self._requests.get(request_id)
+        if row is None:
+            return
+        row["unfindable_category"] = category
+        row["unfindable_categorised_at"] = categorised_at
+        row["updated_at"] = categorised_at
+
+    def get_unfindable_search_log_signal(
+        self,
+        request_id: int,
+        *,
+        window_days: int,
+        matcher_score_threshold: float,
+    ) -> Any:
+        """Mirror PipelineDB.get_unfindable_search_log_signal.
+
+        Walks ``self.search_logs`` once, applies the same window + filters
+        the production SQL applies, and returns the aggregated struct.
+        """
+        from lib.unfindable_detection_service import UnfindableSearchLogSignal
+
+        cutoff = _utcnow() - timedelta(days=int(window_days))
+        cycles: dict[int, int] = {}  # plan_cycle_snapshot -> found count
+        wrong_pressing_hits = 0
+        for entry in self.search_logs:
+            if entry.request_id != request_id:
+                continue
+            if entry.attempt_consumed is not True:
+                continue
+            if entry.created_at <= cutoff:
+                continue
+            cycle = entry.plan_cycle_snapshot
+            if cycle is not None:
+                found_inc = 1 if entry.outcome == "found" else 0
+                cycles[int(cycle)] = cycles.get(int(cycle), 0) + found_inc
+            if (
+                entry.rejection_reason == "strict_count_mismatch"
+                and entry.matcher_score_top1 is not None
+                and entry.matcher_score_top1 >= float(matcher_score_threshold)
+            ):
+                wrong_pressing_hits += 1
+        cycles_observed = len(cycles)
+        zero_find_cycles = sum(1 for v in cycles.values() if v == 0)
+        return UnfindableSearchLogSignal(
+            cycles_observed=cycles_observed,
+            zero_find_cycles=zero_find_cycles,
+            wrong_pressing_hits=wrong_pressing_hits,
+        )
+
     # --- Session lifecycle ---
 
     def close(self) -> None:
@@ -2214,6 +2369,16 @@ class FakePipelineDB:
             # Migration 028 / U12 — failure_class is materialised at
             # plan-wrap; NULL until the first cycle completes.
             "failure_class": None,
+            # Migration 028 / U13 — unfindable detection state. All
+            # nullable; the daily detection job populates the four-
+            # category taxonomy via the dedicated systemd unit.
+            "unfindable_category": None,
+            "unfindable_categorised_at": None,
+            "last_artist_probe_at": None,
+            "last_artist_probe_match_count": None,
+            # Migration 028 / U14 — long-tail-rescue audit columns.
+            "rescued_at": None,
+            "prior_unfindable_category": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.
@@ -3710,6 +3875,10 @@ class FakePipelineDB:
                 "(advance is forward-only; use regenerate for backward "
                 "intent)")
         row["next_plan_ordinal"] = target_ordinal
+        # Cursor-mutation recorder for the U13 R20 runtime guard.
+        self.advance_search_plan_cursor_calls.append(
+            (request_id, previous_ordinal, int(target_ordinal)),
+        )
         return (int(active_plan_id), previous_ordinal, target_ordinal)
 
     def list_wanted_for_plan_reconciliation(
@@ -3911,6 +4080,8 @@ class FakePipelineDB:
         self,
         attempt: ConsumedAttemptInput,
     ) -> ConsumedAttemptResult:
+        # Cursor-mutation recorder for the U13 R20 runtime guard.
+        self.record_consumed_search_attempt_calls.append(attempt)
         row = self._requests.get(attempt.request_id)
         if row is None:
             raise ValueError(f"request {attempt.request_id} not found")
@@ -4075,6 +4246,12 @@ class FakePipelineDB:
         self,
         attempt: NonConsumingAttemptInput,
     ) -> int:
+        # Cursor-adjacent recorder for the U13 R20 runtime guard. This
+        # method does not advance the cursor itself, but it does write
+        # ``search_log`` with plan context — the detection job must not
+        # call it either (the probe is its own slskd surface and never
+        # touches ``search_log``).
+        self.record_non_consuming_search_attempt_calls.append(attempt)
         row = self._requests.get(attempt.request_id)
         if row is None:
             raise ValueError(f"request {attempt.request_id} not found")
