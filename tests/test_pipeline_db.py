@@ -2201,7 +2201,10 @@ class TestRetryLogic(unittest.TestCase):
         delta2 = (retry2 - now).total_seconds()
         self.assertGreater(delta2, delta1)
 
-    def test_backoff_caps_at_six_hours(self):
+    def test_backoff_caps_at_four_hours(self):
+        # BACKOFF_MAX_MINUTES = 60 * 4 per lib/pipeline_db.py (was 6h
+        # until commit 1d84037 lowered it to raise steady-state search
+        # frequency from ~4 to ~6 searches/release/day).
         for _ in range(6):
             self.db.record_attempt(self.req_id, "search")
 
@@ -2211,8 +2214,8 @@ class TestRetryLogic(unittest.TestCase):
         assert retry_at is not None
 
         delta = (retry_at - datetime.now(timezone.utc)).total_seconds()
-        self.assertLessEqual(delta, 6 * 60 * 60 + 5)
-        self.assertGreater(delta, 5 * 60 * 60)
+        self.assertLessEqual(delta, 4 * 60 * 60 + 5)
+        self.assertGreater(delta, 3 * 60 * 60)
 
 
 @requires_postgres
