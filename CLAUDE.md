@@ -455,12 +455,21 @@ ORDER BY updated_at DESC LIMIT 10
 SQL
 ```
 
-From doc1, use the same CLI over SSH without sudo by loading doc2's
-world-readable PG dotenv and mapping it to libpq's `PGPASSWORD`:
+From doc1, run the CLI over SSH by sourcing doc2's sops-managed PG dotenv
+inside a `sudo bash -c` (the secret is `-r-------- root root`, so a plain
+`. /run/secrets/cratedigger-pgpass` in a user shell will get
+`permission denied` and `pipeline-cli` will then fail with
+`fe_sendauth: no password supplied`). `sudo` is NOPASSWD for `wheel` on
+doc2, so this is non-interactive:
 
 ```bash
-ssh doc2 'set -a; . /run/secrets/cratedigger-pgpass; set +a; export PGPASSWORD="${PGPASSWORD:-${PIPELINE_DB_PASSWORD:-${POSTGRES_PASSWORD:-}}}"; pipeline-cli query --json "SELECT 1 AS ok"'
+ssh doc2 'sudo bash -c "set -a; . /run/secrets/cratedigger-pgpass; set +a; export PGPASSWORD=\${PGPASSWORD:-\${PIPELINE_DB_PASSWORD:-\${POSTGRES_PASSWORD:-}}}; pipeline-cli query --json \"SELECT 1 AS ok\""'
 ```
+
+Note the escaped `\$` and `\"` — they are evaluated inside the inner
+`bash -c`, not by the outer ssh-side shell. For multi-line SQL, prefer
+`pipeline-cli query - <<'SQL' ... SQL` *inside* the `sudo bash -c` body, or
+write the query to a temp file and pass it as an argument.
 
 `pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD".
 
