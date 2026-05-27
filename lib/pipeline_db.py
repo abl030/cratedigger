@@ -6985,21 +6985,3 @@ class PipelineDB:
         finally:
             self.conn.autocommit = old_autocommit
 
-    def delete_youtube_album_mapping(
-        self,
-        release_group_identifier: str,
-        source: str,
-    ) -> int:
-        """Drop the matrix for ``(release_group_identifier, source)``.
-
-        Returns the count of deleted rows (0 when nothing was cached).
-        Used by the operator-triggered refresh path before an upsert.
-        """
-        cur = self._execute(
-            """
-            DELETE FROM youtube_album_mappings
-            WHERE release_group_identifier = %s AND source = %s
-            """,
-            (release_group_identifier, source),
-        )
-        return cur.rowcount

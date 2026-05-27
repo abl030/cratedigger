@@ -7303,25 +7303,6 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             ["MPREb_c"],
         )
 
-    def test_delete_returns_count_and_clears_rows(self):
-        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
-            self._row(yt_browse_id="MPREb_a"),
-            self._row(yt_browse_id="MPREb_b"),
-            self._row(yt_browse_id="MPREb_c"),
-        ])
-
-        deleted = self.db.delete_youtube_album_mapping("rg-1", "mb")
-
-        self.assertEqual(deleted, 3)
-        self.assertEqual(
-            self.db.get_youtube_album_mapping("rg-1", "mb"), [])
-
-    def test_delete_returns_zero_when_nothing_cached(self):
-        self.assertEqual(
-            self.db.delete_youtube_album_mapping("rg-1", "mb"),
-            0,
-        )
-
     def test_upsert_preserves_nullable_fields(self):
         """yt_audio_playlist_id + yt_year are NULLable per migration 034."""
         self.db.upsert_youtube_album_mapping("rg-1", "mb", [

@@ -2049,10 +2049,10 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
     """Self-test for FakePipelineDB youtube_album_mappings CRUD (U4).
 
     Mirrors the real ``PipelineDB.get_youtube_album_mapping`` /
-    ``upsert_youtube_album_mapping`` / ``delete_youtube_album_mapping``
-    surface. Backing store is keyed by ``(release_group_identifier,
-    source)`` so a single MB release-group or Discogs master maps to
-    the full per-sibling matrix the resolver produced.
+    ``upsert_youtube_album_mapping`` surface. Backing store is keyed by
+    ``(release_group_identifier, source)`` so a single MB release-group
+    or Discogs master maps to the full per-sibling matrix the resolver
+    produced.
     """
 
     def _row(self, **overrides: Any) -> dict[str, Any]:
@@ -2157,26 +2157,6 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
             [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-1", "discogs")],
             ["MPREb_c"],
         )
-
-    def test_delete_returns_count_and_clears_rows(self):
-        db = FakePipelineDB()
-        db.upsert_youtube_album_mapping("rg-1", "mb", [
-            self._row(yt_browse_id="MPREb_a"),
-            self._row(yt_browse_id="MPREb_b"),
-            self._row(yt_browse_id="MPREb_c"),
-        ])
-
-        deleted = db.delete_youtube_album_mapping("rg-1", "mb")
-
-        self.assertEqual(deleted, 3)
-        self.assertEqual(db.get_youtube_album_mapping("rg-1", "mb"), [])
-
-    def test_delete_returns_zero_when_nothing_cached(self):
-        db = FakePipelineDB()
-
-        deleted = db.delete_youtube_album_mapping("rg-1", "mb")
-
-        self.assertEqual(deleted, 0)
 
     def test_seed_helper_populates_state(self):
         db = FakePipelineDB()

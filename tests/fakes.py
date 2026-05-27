@@ -2804,19 +2804,6 @@ class FakePipelineDB:
             (release_group_identifier, source)
         ] = [copy.deepcopy(r) for r in rows]
 
-    def delete_youtube_album_mapping(
-        self,
-        release_group_identifier: str,
-        source: str,
-    ) -> int:
-        """Drop the matrix for ``(release_group_identifier, source)``.
-
-        Returns the count of deleted rows (0 when nothing was cached).
-        """
-        existing = self._youtube_album_mappings.pop(
-            (release_group_identifier, source), [])
-        return len(existing)
-
     # --- Session lifecycle ---
 
     def close(self) -> None:
