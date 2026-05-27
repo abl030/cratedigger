@@ -395,6 +395,31 @@ def resolve_youtube_album(
             started=started,
         )
 
+    # Step 0.5: speculative cache lookup before auto-widen.
+    #
+    # The normal flow runs the mirror-side auto-widen first to resolve
+    # the release-group identifier, then reads the cache. That means a
+    # mirror outage breaks resolves even for release groups whose
+    # matrix is already cached. When the caller already passed an
+    # rg-MBID (or Discogs master-id), the cache is keyed on exactly
+    # that value — we can answer without touching the mirror at all.
+    #
+    # When the caller passed a release-level identifier (the common
+    # case), this speculative lookup misses and we fall through to the
+    # auto-widen below. The cost is one extra indexed PG query per
+    # release-level resolve — sub-millisecond.
+    if not refresh:
+        speculative = pdb.get_youtube_album_mapping(identifier, source_label)
+        if speculative is not None:
+            return _final(
+                outcome="ok",
+                release_group_identifier=identifier,
+                source=source_label,
+                from_cache=True,
+                youtube_releases=_rows_to_youtube_releases(speculative),
+                started=started,
+            )
+
     # Step 1+2: auto-widen via leaf-then-group fallback.
     if source_label == "mb":
         widen = _resolve_mb_group(

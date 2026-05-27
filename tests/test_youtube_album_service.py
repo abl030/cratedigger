@@ -986,6 +986,176 @@ class TestCacheBehavior(unittest.TestCase):
             pdb.get_youtube_album_mapping("resolved-to-empty", "mb"), [])
 
 
+class TestSpeculativePreWidenCacheLookup(unittest.TestCase):
+    """Resolves a release-group-level identifier against the durable
+    cache BEFORE the mirror auto-widen runs. Without this, a MB/Discogs
+    mirror outage breaks resolves even for release groups whose matrix
+    is already cached — finding #7 from the ce-code-review.
+    """
+
+    def _seeded_pdb(self, rg: str, source: str) -> FakePipelineDB:
+        pdb = FakePipelineDB()
+        pdb.upsert_youtube_album_mapping(rg, source, [
+            {
+                "yt_browse_id": "MPREb-cached",
+                "yt_audio_playlist_id": "OLAK5uy-cached",
+                "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy-cached",
+                "yt_year": 1996,
+                "yt_track_count": 2,
+                "yt_tracks": [
+                    {"title": "Intro", "artists": [{"name": "Dr. Octagon"}],
+                     "length_seconds": 60.0, "track_number": 1,
+                     "disc_number": 1, "video_id": "vid-a"},
+                    {"title": "3000", "artists": [{"name": "Dr. Octagon"}],
+                     "length_seconds": 180.0, "track_number": 2,
+                     "disc_number": 1, "video_id": "vid-b"},
+                ],
+                "distances": [
+                    {"mbid": MB_REL_A, "outcome": "ok", "distance": 0.05,
+                     "components": {"tracks": 0.05}, "matched_tracks": 2,
+                     "total_local_tracks": 2, "total_mb_tracks": 2,
+                     "extra_local_tracks": 0, "extra_mb_tracks": 0,
+                     "error_message": None},
+                ],
+            },
+        ])
+        return pdb
+
+    def _exploder(self, *_a: Any, **_kw: Any) -> Any:
+        raise AssertionError(
+            "mirror lookup invoked despite speculative cache hit")
+
+    def test_mb_rg_input_serves_from_cache_without_touching_mirror(self) -> None:
+        rg = MB_RG
+        pdb = self._seeded_pdb(rg, "mb")
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=pdb,
+            mb_get_release=self._exploder,
+            mb_get_release_group_releases=self._exploder,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+
+        self.assertEqual(result.outcome, "ok")
+        self.assertTrue(result.from_cache)
+        self.assertEqual(result.release_group_identifier, rg)
+        self.assertEqual(result.source, "mb")
+        self.assertEqual(len(result.youtube_releases), 1)
+        self.assertEqual(
+            result.youtube_releases[0].yt_browse_id, "MPREb-cached")
+
+    def test_discogs_master_input_serves_from_cache_without_touching_mirror(self) -> None:
+        master = "12345"
+        pdb = self._seeded_pdb(master, "discogs")
+
+        result = resolve_youtube_album(
+            master,
+            pdb=pdb,
+            mb_get_release=_empty_lookup(),
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=self._exploder,
+            discogs_get_master_releases=self._exploder,
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+
+        self.assertEqual(result.outcome, "ok")
+        self.assertTrue(result.from_cache)
+        self.assertEqual(result.release_group_identifier, master)
+        self.assertEqual(result.source, "discogs")
+
+    def test_refresh_true_bypasses_speculative_cache(self) -> None:
+        """With refresh=True the speculative cache must NOT short-circuit;
+        the mirror is consulted normally so the fresh re-fetch happens.
+        """
+        rg = MB_RG
+        pdb = self._seeded_pdb(rg, "mb")
+        # Mirror is reachable this time — we WANT it to be called.
+        mb_leaf = _LookupSpy({rg: None})
+        mb_group = _LookupSpy({
+            rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
+        })
+        combined = _LookupSpy({MB_REL_A: _ok_mb_release(
+            mbid=MB_REL_A, rg=rg, year=1996)})
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Dr. Octagonecologyst",
+            [_yt_search_album_result("MPREb-refreshed")],
+        )
+        yt.set_album(
+            "MPREb-refreshed",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-refreshed",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="1996",
+                tracks=_yt_tracks(["Intro", "3000"]),
+            ),
+        )
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=pdb,
+            mb_get_release=combined,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=None,
+            refresh=True,
+        )
+
+        self.assertEqual(result.outcome, "ok")
+        self.assertFalse(result.from_cache)
+        # Mirror DID get called on refresh.
+        self.assertGreater(
+            len(mb_leaf.calls) + len(mb_group.calls) + len(combined.calls), 0)
+        # Cache was overwritten with the fresh matrix.
+        self.assertEqual(
+            result.youtube_releases[0].yt_browse_id, "MPREb-refreshed")
+
+    def test_release_level_input_falls_through_to_auto_widen(self) -> None:
+        """A release-level MBID is not the cache key (rg_id is), so the
+        speculative lookup misses cleanly and the normal auto-widen
+        path runs. Verifies the speculative check doesn't break the
+        common case.
+        """
+        rg = MB_RG
+        # Cache is populated under the RG key, not the release key.
+        pdb = self._seeded_pdb(rg, "mb")
+        # Leaf returns the release pointing at the cached RG.
+        mb_leaf = _LookupSpy({
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        mb_group = _LookupSpy({
+            rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
+        })
+
+        result = resolve_youtube_album(
+            MB_REL_A,  # release-level input
+            pdb=pdb,
+            mb_get_release=mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+
+        self.assertEqual(result.outcome, "ok")
+        # Auto-widen ran (leaf hit), and then the rg-level cache served.
+        self.assertTrue(result.from_cache)
+        self.assertEqual(result.release_group_identifier, rg)
+
+
 class TestJitterBetweenSiblingGetAlbumCalls(unittest.TestCase):
     """Finding #2: 1-3s jitter between consecutive ``get_album`` calls.
 
