@@ -2666,6 +2666,196 @@ class TestCmdBeetsDistance(unittest.TestCase):
         self.assertEqual(payload["components"]["album"], 0.0)
 
 
+class TestCmdYoutubeAlbum(unittest.TestCase):
+    """``pipeline-cli youtube-album`` wraps
+    ``lib.youtube_album_service.resolve_youtube_album``. Counterpart of
+    ``GET /api/youtube-album`` (U8). Service-layer correctness lives in
+    ``tests.test_youtube_album_service``; here we pin the exit-code
+    mapping and the matrix-text output shape per the CLI ⇄ API
+    symmetry rule.
+
+    Outcome → exit code MUST come from
+    ``lib.youtube_album_service.OUTCOME_EXIT_CODE`` (single source of
+    truth shared with the U8 route)."""
+
+    IDENT = "44438bf9-26d9-4460-9b4f-1a1b015e37a1"
+
+    def _make_result(
+        self, *,
+        outcome: str,
+        youtube_releases: Any = None,
+        error_message: Any = None,
+        from_cache: bool = False,
+        release_group_identifier: Any = "rg-uuid",
+        source: Any = "mb",
+        duration_ms: Any = 42,
+    ):
+        from lib.youtube_album_service import YoutubeAlbumResolverResult
+        return YoutubeAlbumResolverResult(
+            outcome=outcome,
+            release_group_identifier=release_group_identifier,
+            source=source,
+            from_cache=from_cache,
+            youtube_releases=youtube_releases or [],
+            error_message=error_message,
+            duration_ms=duration_ms,
+        )
+
+    def _make_ok_matrix(self):
+        from lib.beets_distance import SyntheticItem
+        from lib.youtube_album_service import (
+            ResolvedDistance, ResolvedYoutubeRelease,
+        )
+        synth = [
+            SyntheticItem(
+                title="Track A", artist="Artist", album="Album",
+                albumartist="Artist", track=1, tracktotal=1, disc=1,
+                disctotal=1, length=180.0,
+            ),
+        ]
+        return [
+            ResolvedYoutubeRelease(
+                yt_browse_id="MPREb_xxx",
+                yt_audio_playlist_id="OLAK5uy_yyy",
+                yt_url="https://music.youtube.com/playlist?list=OLAK5uy_yyy",
+                year=2014, track_count=1, tracks=synth,
+                distances=[
+                    ResolvedDistance(
+                        mbid=self.IDENT, outcome="ok", distance=0.05,
+                        components={"album": 0.0, "artist": 0.05},
+                        matched_tracks=1, total_local_tracks=1,
+                        total_mb_tracks=1, extra_local_tracks=0,
+                        extra_mb_tracks=0,
+                    ),
+                ],
+            ),
+        ]
+
+    def _run(self, *, outcome: Any = None, result: Any = None,
+             refresh: bool = False, json_out: bool = False):
+        if result is None:
+            assert outcome is not None, "must pass outcome= or result="
+            result = self._make_result(outcome=outcome)
+        args = SimpleNamespace(
+            identifier=self.IDENT, refresh=refresh, json=json_out,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch(
+                "scripts.pipeline_cli.resolve_youtube_album",
+                return_value=result,
+            ) as mock_resolve:
+                rc = pipeline_cli.cmd_youtube_album(MagicMock(), args)
+        return rc, stdout.getvalue(), mock_resolve
+
+    def test_exit_code_mapping_uses_service_module_dict(self):
+        """The CLI must import ``OUTCOME_EXIT_CODE`` from the service
+        module — not redefine its own copy. PR #381 lesson: outcome
+        vocabulary from one source. We assert the mapping is sourced
+        from the service module by checking the attribute lookup."""
+        from lib import youtube_album_service as svc
+        # The CLI module must reference the service's exit-code dict.
+        # Verifying the import alias keeps the contract.
+        self.assertIs(
+            pipeline_cli.OUTCOME_EXIT_CODE,
+            svc.OUTCOME_EXIT_CODE,
+        )
+
+    def test_exit_0_on_ok_text_mode_shows_matrix(self):
+        result = self._make_result(
+            outcome="ok", youtube_releases=self._make_ok_matrix())
+        rc, out, _ = self._run(result=result)
+        self.assertEqual(rc, 0)
+        # Matrix view: one line per YT release, indented sub-lines per
+        # MBID with the distance.
+        self.assertIn("MPREb_xxx", out)
+        self.assertIn(self.IDENT, out)
+        # Distance is rendered.
+        self.assertIn("0.05", out)
+
+    def test_exit_0_on_ok_json_mode(self):
+        result = self._make_result(
+            outcome="ok", youtube_releases=self._make_ok_matrix())
+        rc, out, _ = self._run(result=result, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "ok")
+        self.assertEqual(payload["source"], "mb")
+        self.assertEqual(payload["release_group_identifier"], "rg-uuid")
+        self.assertFalse(payload["from_cache"])
+        self.assertEqual(payload["duration_ms"], 42)
+        self.assertEqual(len(payload["youtube_releases"]), 1)
+        yt_rel = payload["youtube_releases"][0]
+        self.assertEqual(yt_rel["yt_browse_id"], "MPREb_xxx")
+        self.assertEqual(len(yt_rel["distances"]), 1)
+        self.assertAlmostEqual(
+            yt_rel["distances"][0]["distance"], 0.05, places=4)
+
+    def test_exit_2_on_not_found(self):
+        rc, _, _ = self._run(outcome="not_found")
+        self.assertEqual(rc, 2)
+
+    def test_exit_3_on_mb_no_release_group(self):
+        rc, _, _ = self._run(outcome="mb_no_release_group")
+        self.assertEqual(rc, 3)
+
+    def test_exit_5_on_unresolved_4xx_client_mentions_throttle(self):
+        result = self._make_result(
+            outcome="unresolved_4xx_client",
+            error_message="YT user error: rate limited (429)",
+        )
+        rc, out, _ = self._run(result=result)
+        self.assertEqual(rc, 5)
+        # Operator should see why: throttling / 4xx in the output.
+        self.assertIn("unresolved_4xx_client", out)
+
+    def test_exit_5_on_unresolved_timeout(self):
+        rc, _, _ = self._run(outcome="unresolved_timeout")
+        self.assertEqual(rc, 5)
+
+    def test_exit_5_on_youtube_parse_failed(self):
+        result = self._make_result(
+            outcome="youtube_parse_failed",
+            error_message="YT parse failed: 'tracks'",
+        )
+        rc, out, _ = self._run(result=result)
+        self.assertEqual(rc, 5)
+        # Parse failure mention so operator may want to bump ytmusicapi.
+        self.assertIn("youtube_parse_failed", out)
+
+    def test_refresh_flag_forwarded_to_service(self):
+        rc, _, mock_resolve = self._run(outcome="ok", refresh=True)
+        self.assertEqual(rc, 0)
+        # The resolve call took refresh=True.
+        _, kwargs = mock_resolve.call_args
+        self.assertIs(kwargs.get("refresh"), True)
+
+    def test_refresh_default_false(self):
+        rc, _, mock_resolve = self._run(outcome="ok")
+        self.assertEqual(rc, 0)
+        _, kwargs = mock_resolve.call_args
+        self.assertIs(kwargs.get("refresh"), False)
+
+    def test_json_mode_emits_all_result_fields(self):
+        result = self._make_result(
+            outcome="ok", youtube_releases=self._make_ok_matrix())
+        rc, out, _ = self._run(result=result, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        # All YoutubeAlbumResolverResult fields must round-trip.
+        for field in ("outcome", "release_group_identifier", "source",
+                      "from_cache", "youtube_releases", "error_message",
+                      "duration_ms"):
+            self.assertIn(field, payload)
+
+    def test_identifier_passed_through_positional(self):
+        rc, _, mock_resolve = self._run(outcome="not_found")
+        self.assertEqual(rc, 2)
+        # First positional arg to resolve_youtube_album is the identifier.
+        args, _ = mock_resolve.call_args
+        self.assertEqual(args[0], self.IDENT)
+
+
 class TestCmdSearchPlanHistory(unittest.TestCase):
     """``pipeline-cli search-plan history`` wraps
     ``SearchPlanService.history_for_request``. Counterpart of the API
