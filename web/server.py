@@ -43,6 +43,7 @@ from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
 from web.routes import imports as _imports_routes
 from web.routes import pipeline as _pipeline_routes
+from web.routes import youtube as _youtube_routes
 
 _db_dsn = None
 
@@ -220,6 +221,7 @@ class Handler(BaseHTTPRequestHandler):
         **_pipeline_routes.GET_ROUTES,
         **_library_routes.GET_ROUTES,
         **_imports_routes.GET_ROUTES,
+        **_youtube_routes.GET_ROUTES,
     }
 
     _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
@@ -227,16 +229,19 @@ class Handler(BaseHTTPRequestHandler):
         *_labels_routes.GET_PATTERNS,
         *_pipeline_routes.GET_PATTERNS,
         *_library_routes.GET_PATTERNS,
+        *_youtube_routes.GET_PATTERNS,
     ]
 
     _FUNC_POST_ROUTES: dict[str, object] = {
         **_pipeline_routes.POST_ROUTES,
         **_library_routes.POST_ROUTES,
         **_imports_routes.POST_ROUTES,
+        **_youtube_routes.POST_ROUTES,
     }
 
     _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
         *getattr(_pipeline_routes, "POST_PATTERNS", []),
+        *_youtube_routes.POST_PATTERNS,
     ]
 
     # Description tables (U18): human-readable strings for the route index,
@@ -249,12 +254,14 @@ class Handler(BaseHTTPRequestHandler):
         **_pipeline_routes.GET_DESCRIPTIONS,
         **_library_routes.GET_DESCRIPTIONS,
         **_imports_routes.GET_DESCRIPTIONS,
+        **_youtube_routes.GET_DESCRIPTIONS,
     }
 
     _FUNC_POST_DESCRIPTIONS: dict[str, str] = {
         **_pipeline_routes.POST_DESCRIPTIONS,
         **_library_routes.POST_DESCRIPTIONS,
         **_imports_routes.POST_DESCRIPTIONS,
+        **_youtube_routes.POST_DESCRIPTIONS,
     }
 
     _FUNC_GET_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
@@ -262,6 +269,7 @@ class Handler(BaseHTTPRequestHandler):
         *_labels_routes.PATTERN_DESCRIPTIONS,
         *_pipeline_routes.PATTERN_DESCRIPTIONS,
         *_library_routes.PATTERN_DESCRIPTIONS,
+        *_youtube_routes.PATTERN_DESCRIPTIONS,
     ]
 
     _FUNC_POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [

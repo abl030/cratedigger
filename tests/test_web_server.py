@@ -23,6 +23,16 @@ from urllib.error import HTTPError
 import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Eager import: lib.beets_distance pins the real ``beets`` package
+# (see lib/beets_distance.py:49-55) — we must trigger it *before* the
+# next two ``sys.path.insert`` calls add ``lib/`` ahead of site-
+# packages, otherwise downstream imports of lib.youtube_album_service
+# (which imports lib.beets_distance lazily inside the route handler)
+# fail with "cannot import name 'library' from 'beets'" because
+# ``beets`` would resolve to ``lib/beets.py``.
+import lib.beets_distance  # noqa: F401,E402
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
@@ -1078,6 +1088,12 @@ class TestRouteContractAudit(unittest.TestCase):
         # service as ``pipeline-cli triage`` (U16) per CLI ⇄ API symmetry.
         "/api/triage/list",
         r"^/api/triage/(\d+)$",
+        # U8: YouTube Music album resolver. Wraps
+        # ``lib.youtube_album_service.resolve_youtube_album`` — same
+        # service as ``pipeline-cli youtube-album`` (U7) per
+        # CLI ⇄ API symmetry. Outcome → HTTP status from
+        # ``OUTCOME_HTTP_STATUS`` (single source of truth).
+        "/api/youtube-album",
     }
 
     def test_all_web_routes_are_classified_for_contract_coverage(self):
@@ -9975,6 +9991,279 @@ class TestTriageRouteContracts(_WebServerCase):
             "/api/triage/list?filter=all&after=not-an-int")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+
+
+class TestYoutubeRouteContracts(_WebServerCase):
+    """U8 contract for ``GET /api/youtube-album?identifier=<id>``.
+
+    Mirrors the CLI surface ``pipeline-cli youtube-album`` (U7); the
+    route is the HTTP adapter wrapping
+    ``lib.youtube_album_service.resolve_youtube_album``. The
+    service-layer behaviour is the authority — these tests pin the
+    HTTP-side contract: required response fields, the
+    ``OUTCOME_HTTP_STATUS`` mapping (re-exported from the service),
+    400 on missing ``identifier``, and the ``?refresh=true`` query
+    forwarded to the service as ``refresh=True``.
+
+    The service is patched at the route module's import site
+    (``web.routes.youtube.resolve_youtube_album``) with fixture
+    ``YoutubeAlbumResolverResult`` instances — production-shaped per
+    the contract-test-mocks-must-mirror-production-shape rule (real
+    typed Structs, not bare dicts).
+    """
+
+    REQUIRED_FIELDS = {
+        "outcome",
+        "release_group_identifier",
+        "source",
+        "from_cache",
+        "youtube_releases",
+        "error_message",
+        "duration_ms",
+    }
+
+    REQUIRED_RELEASE_FIELDS = {
+        "yt_browse_id",
+        "yt_audio_playlist_id",
+        "yt_url",
+        "year",
+        "track_count",
+        "tracks",
+        "distances",
+    }
+
+    REQUIRED_DISTANCE_FIELDS = {
+        "mbid",
+        "outcome",
+        "distance",
+        "components",
+        "matched_tracks",
+        "total_local_tracks",
+        "total_mb_tracks",
+        "error_message",
+    }
+
+    UUID_A = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    UUID_B = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+
+    def setUp(self) -> None:
+        self.mock_db.reset_mock()
+        from lib.youtube_album_service import (
+            ResolvedDistance,
+            ResolvedYoutubeRelease,
+            YoutubeAlbumResolverResult,
+        )
+        from lib.beets_distance import SyntheticItem
+        self._Result = YoutubeAlbumResolverResult
+        self._Release = ResolvedYoutubeRelease
+        self._Distance = ResolvedDistance
+        self._SyntheticItem = SyntheticItem
+
+    def _ok_result(self, *, from_cache: bool = False,
+                   error_message: str | None = None):
+        """Production-shaped ``ok`` result with one YT release × one MB
+        sibling — exercises every required field on the wire."""
+        track = self._SyntheticItem(
+            title="Reckoner", artist="Radiohead", album="In Rainbows",
+            albumartist="Radiohead", track=8, tracktotal=10,
+            disc=1, disctotal=1, length=290.0,
+        )
+        distance = self._Distance(
+            mbid=self.UUID_A,
+            outcome="ok",
+            distance=0.05,
+            components={"album": 0.0, "artist": 0.0, "tracks": 0.05},
+            matched_tracks=10,
+            total_local_tracks=10,
+            total_mb_tracks=10,
+            error_message=None,
+        )
+        release = self._Release(
+            yt_browse_id="MPREb_aaa",
+            yt_audio_playlist_id="OLAK5uy_aaa",
+            yt_url="https://music.youtube.com/playlist?list=OLAK5uy_aaa",
+            year=2007,
+            track_count=10,
+            tracks=[track],
+            distances=[distance],
+        )
+        return self._Result(
+            outcome="ok",
+            release_group_identifier="rg-1234",
+            source="mb",
+            from_cache=from_cache,
+            youtube_releases=[release],
+            error_message=error_message,
+            duration_ms=42,
+        )
+
+    def _bare_result(self, outcome: str, *,
+                     error_message: str | None = None):
+        """Outcome-only result (no matrix) for failure-mode tests."""
+        return self._Result(
+            outcome=outcome,
+            release_group_identifier=None,
+            source=None,
+            from_cache=False,
+            youtube_releases=[],
+            error_message=error_message,
+            duration_ms=12,
+        )
+
+    def _patch_service(self, return_value):
+        return patch(
+            "web.routes.youtube.resolve_youtube_album",
+            return_value=return_value,
+        )
+
+    def test_status_mapping_is_imported_from_service(self):
+        """``web.routes.youtube`` must re-export ``OUTCOME_HTTP_STATUS``
+        from ``lib.youtube_album_service`` — single source of truth per
+        the PR #381 lesson."""
+        from web.routes import youtube as route_mod
+        from lib import youtube_album_service as svc_mod
+        self.assertIs(
+            route_mod.OUTCOME_HTTP_STATUS,
+            svc_mod.OUTCOME_HTTP_STATUS,
+        )
+
+    def test_ok_returns_200_with_required_fields(self):
+        with self._patch_service(self._ok_result()):
+            status, data = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS,
+                                "youtube-album ok response")
+        self.assertEqual(data["outcome"], "ok")
+        self.assertEqual(data["source"], "mb")
+        self.assertFalse(data["from_cache"])
+        self.assertEqual(len(data["youtube_releases"]), 1)
+        _assert_required_fields(
+            self, data["youtube_releases"][0],
+            self.REQUIRED_RELEASE_FIELDS,
+            "youtube_releases[0] entry",
+        )
+        self.assertEqual(len(data["youtube_releases"][0]["distances"]), 1)
+        _assert_required_fields(
+            self, data["youtube_releases"][0]["distances"][0],
+            self.REQUIRED_DISTANCE_FIELDS,
+            "distances[0] entry",
+        )
+
+    def test_ok_from_cache_with_error_message_still_200(self):
+        """AE6: cache fallback path — service returns ``ok`` with
+        ``from_cache=True`` and a non-empty ``error_message`` (the YT
+        upstream failed but the cache served a useful result). The
+        route returns 200 because the matrix is real."""
+        with self._patch_service(self._ok_result(
+                from_cache=True,
+                error_message="YT 429 — served from cache")):
+            status, data = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["from_cache"])
+        self.assertEqual(data["error_message"],
+                         "YT 429 — served from cache")
+
+    def test_missing_identifier_returns_400(self):
+        status, data = self._get("/api/youtube-album")
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            data.get("error"),
+            "identifier query parameter is required",
+        )
+
+    def test_empty_identifier_returns_400(self):
+        status, data = self._get("/api/youtube-album?identifier=")
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            data.get("error"),
+            "identifier query parameter is required",
+        )
+
+    def test_not_found_returns_404(self):
+        with self._patch_service(self._bare_result(
+                "not_found",
+                error_message="identifier 'nope' is neither MB nor Discogs")):
+            status, data = self._get(
+                "/api/youtube-album?identifier=nope")
+        self.assertEqual(status, 404)
+        self.assertEqual(data["outcome"], "not_found")
+
+    def test_mb_no_release_group_returns_422(self):
+        with self._patch_service(self._bare_result(
+                "mb_no_release_group",
+                error_message="MB release has no release_group_id")):
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 422)
+
+    def test_unresolved_4xx_client_returns_503(self):
+        with self._patch_service(self._bare_result(
+                "unresolved_4xx_client",
+                error_message="YT 429 throttled")):
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 503)
+
+    def test_unresolved_mirror_unavailable_returns_503(self):
+        with self._patch_service(self._bare_result(
+                "unresolved_mirror_unavailable",
+                error_message="YT 503")):
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 503)
+
+    def test_unresolved_timeout_returns_503(self):
+        with self._patch_service(self._bare_result(
+                "unresolved_timeout",
+                error_message="requests.Timeout")):
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 503)
+
+    def test_youtube_parse_failed_returns_503(self):
+        with self._patch_service(self._bare_result(
+                "youtube_parse_failed",
+                error_message="ytmusicapi parse error")):
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 503)
+
+    def test_refresh_true_is_forwarded_to_service(self):
+        """AE5: ``?refresh=true`` must reach the service as
+        ``refresh=True`` so the cache bypass actually happens."""
+        with self._patch_service(self._ok_result()) as mock_resolve:
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}&refresh=true")
+        self.assertEqual(status, 200)
+        self.assertEqual(mock_resolve.call_count, 1)
+        kwargs = mock_resolve.call_args.kwargs
+        self.assertIs(kwargs["refresh"], True)
+
+    def test_refresh_omitted_defaults_to_false(self):
+        with self._patch_service(self._ok_result()) as mock_resolve:
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 200)
+        kwargs = mock_resolve.call_args.kwargs
+        self.assertIs(kwargs["refresh"], False)
+
+    def test_refresh_false_string_is_not_truthy(self):
+        with self._patch_service(self._ok_result()) as mock_resolve:
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}&refresh=false")
+        self.assertEqual(status, 200)
+        kwargs = mock_resolve.call_args.kwargs
+        self.assertIs(kwargs["refresh"], False)
+
+    def test_identifier_is_forwarded_to_service(self):
+        with self._patch_service(self._ok_result()) as mock_resolve:
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 200)
+        # First positional arg is the identifier.
+        self.assertEqual(mock_resolve.call_args.args[0], self.UUID_A)
 
 
 if __name__ == "__main__":
