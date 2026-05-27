@@ -31,7 +31,9 @@ real ``compute_beets_distance``.
 from __future__ import annotations
 
 import logging
+import random
 import time
+import urllib.error
 from typing import Any, Callable, Optional
 
 import msgspec
@@ -46,6 +48,23 @@ from lib.beets_distance import (
     compute_beets_distance as _default_distance_fn,
 )
 from lib.release_identity import detect_release_source
+
+
+# Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
+# ``web/discogs.py`` raise on miss / mirror outage. ``HTTPError`` and
+# ``URLError`` come from ``urllib`` (MB adapter); ``requests.HTTPError``
+# and ``requests.RequestException`` come from any future Discogs adapter
+# changeover. ``ValueError`` covers ``int()`` coercion failures on Discogs
+# IDs (e.g. when the operator pastes a UUID into the Discogs path). All
+# get treated as "leaf miss" — the auto-widen falls through to the group
+# path.
+_AUTO_WIDEN_MISS_EXCS: tuple[type[BaseException], ...] = (
+    urllib.error.HTTPError,
+    urllib.error.URLError,
+    requests.HTTPError,
+    requests.RequestException,
+    ValueError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +143,25 @@ def _cached_get_album(
         except Exception:  # noqa: BLE001
             pass
     return album
+
+
+# Jitter range between consecutive ``get_album`` calls. Mirrors the
+# Key Technical Decisions doc (1-3s) and the YT scraping guidance —
+# small randomized pauses reduce the chance of being throttled when
+# expanding a release group with N siblings. Service injects the
+# sleep function so tests can pass a no-op.
+_JITTER_MIN_SECONDS = 1.0
+_JITTER_MAX_SECONDS = 3.0
+
+
+def _default_jitter_sleep_fn(seconds: float) -> None:
+    """Default sleep used between YT calls. Tests pass ``lambda _: None``."""
+    time.sleep(seconds)
+
+
+def _jitter(sleep_fn: Callable[[float], None]) -> None:
+    """Sleep a uniform-random duration in ``[1.0, 3.0]`` seconds."""
+    sleep_fn(random.uniform(_JITTER_MIN_SECONDS, _JITTER_MAX_SECONDS))
 
 
 # ---------------------------------------------------------------------------
@@ -259,12 +297,18 @@ def resolve_youtube_album(
     distance_fn: DistanceFn = _default_distance_fn,
     cache: Optional[BeetsDistanceCache] = None,
     refresh: bool = False,
+    sleep_fn: Callable[[float], None] = _default_jitter_sleep_fn,
 ) -> YoutubeAlbumResolverResult:
     """Resolve a release identifier to the YT Music distance matrix.
 
     See module docstring for the full flow. ``cache`` is for the
     upstream HTTP responses (Redis adapter, ``None`` = no caching). The
     durable cache is ``pdb.youtube_album_mappings``.
+
+    ``sleep_fn`` is the jitter hook injected between consecutive YT
+    ``get_album`` calls. Production defaults to ``time.sleep``; tests
+    pass ``lambda _: None`` so they don't pay the 1-3s pause per
+    sibling.
     """
     started = time.monotonic()
 
@@ -367,6 +411,10 @@ def resolve_youtube_album(
             other_browse_id = other.get("browseId")
             if not other_browse_id or other_browse_id in yt_album_responses:
                 continue
+            # Jitter between consecutive ``get_album`` calls — 1-3s
+            # randomized pause to avoid YT throttling on large release
+            # groups. The first ``get_album`` (seed) doesn't sleep.
+            _jitter(sleep_fn)
             # Per-sibling get_album failures don't abort the whole resolve;
             # exclude the broken sibling instead.
             try:
@@ -509,6 +557,44 @@ def _classify_source(identifier: str) -> Optional[str]:
     return None
 
 
+def _safe_leaf_lookup(
+    lookup: Callable[[str], Optional[dict]],
+    identifier: str,
+) -> Optional[dict]:
+    """Call a leaf lookup, treating HTTP / URL / value errors as a miss.
+
+    Real adapters (``web.mb.get_release`` / ``web.discogs.get_release``)
+    raise ``urllib.error.HTTPError`` on 404 and ``URLError`` on transport
+    failure; the Discogs adapter additionally raises ``ValueError`` if
+    ``int(identifier)`` fails (e.g. when the operator pastes a UUID into
+    the Discogs path). All those shapes mean "this identifier isn't a
+    release at this leaf" — auto-widen falls through to the group path.
+    """
+    try:
+        return lookup(identifier)
+    except _AUTO_WIDEN_MISS_EXCS as exc:
+        log.debug(
+            "youtube_album_service: leaf lookup raised %s for %r — treating as miss",
+            type(exc).__name__, identifier,
+        )
+        return None
+
+
+def _safe_group_lookup(
+    lookup: Callable[[str], Optional[dict]],
+    identifier: str,
+) -> Optional[dict]:
+    """Call a release-group / master lookup with the same miss tolerance."""
+    try:
+        return lookup(identifier)
+    except _AUTO_WIDEN_MISS_EXCS as exc:
+        log.debug(
+            "youtube_album_service: group lookup raised %s for %r — treating as miss",
+            type(exc).__name__, identifier,
+        )
+        return None
+
+
 def _resolve_mb_group(
     identifier: str,
     mb_get_release: MBLookup,
@@ -520,19 +606,25 @@ def _resolve_mb_group(
     neither path resolves; ``failure_outcome`` is ``"not_found"`` or
     ``"mb_no_release_group"`` so the caller can surface the precise
     failure.
+
+    Adapter errors (``urllib.error.HTTPError`` on 404,
+    ``urllib.error.URLError`` on transport failure) are caught and treated
+    as a leaf miss — passing a release-group MBID through ``web.mb.get_release``
+    will 404 because RG MBIDs aren't releases, and we want to fall
+    through to the group path rather than 500.
     """
-    leaf = mb_get_release(identifier)
+    leaf = _safe_leaf_lookup(mb_get_release, identifier)
     if leaf:
         rg_id = leaf.get("release_group_id")
         if not rg_id:
             return None, ["mb_no_release_group"]
-        group = mb_get_release_group_releases(rg_id)
+        group = _safe_group_lookup(mb_get_release_group_releases, rg_id)
         if not group:
             return None, ["not_found"]
         return rg_id, list(group.get("releases") or [])
 
     # Leaf miss → treat identifier as RG MBID.
-    group = mb_get_release_group_releases(identifier)
+    group = _safe_group_lookup(mb_get_release_group_releases, identifier)
     if not group:
         return None, ["not_found"]
     return identifier, list(group.get("releases") or [])
@@ -545,19 +637,21 @@ def _resolve_discogs_group(
 ) -> tuple[Optional[str], list[Any]]:
     """Resolve a Discogs identifier to ``(master_id, sibling_summaries)``.
 
-    Same shape as ``_resolve_mb_group``.
+    Same shape as ``_resolve_mb_group``. Adapter raises (HTTPError /
+    URLError / ValueError from ``int()`` coercion) are caught and
+    treated as a leaf miss so the auto-widen falls through cleanly.
     """
-    leaf = discogs_get_release(identifier)
+    leaf = _safe_leaf_lookup(discogs_get_release, identifier)
     if leaf:
         master_id = leaf.get("release_group_id")
         if not master_id:
             return None, ["mb_no_release_group"]
-        group = discogs_get_master_releases(master_id)
+        group = _safe_group_lookup(discogs_get_master_releases, master_id)
         if not group:
             return None, ["not_found"]
         return master_id, list(group.get("releases") or [])
 
-    group = discogs_get_master_releases(identifier)
+    group = _safe_group_lookup(discogs_get_master_releases, identifier)
     if not group:
         return None, ["not_found"]
     return identifier, list(group.get("releases") or [])

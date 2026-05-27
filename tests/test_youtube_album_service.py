@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import unittest
 from typing import Any, Callable, Optional
+from unittest.mock import patch
 
 import requests
 from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
@@ -220,6 +221,30 @@ class _LookupSpy:
 def _empty_lookup() -> _LookupSpy:
     """Lookup that always returns None (404 simulation)."""
     return _LookupSpy({})
+
+
+# Tests pass this in place of the production ``time.sleep`` so the
+# jitter helper between consecutive ``get_album`` calls doesn't
+# actually pause the suite by 1-3s per YT sibling.
+def _noop_sleep(_seconds: float) -> None:
+    return None
+
+
+# Module-level patch: the default ``sleep_fn`` on
+# ``resolve_youtube_album`` is ``time.sleep`` via
+# ``_default_jitter_sleep_fn``. Replacing the module's ``time.sleep``
+# binding with a no-op means tests that don't explicitly pass
+# ``sleep_fn=`` still skip the 1-3s pauses. ``time.sleep`` is a leaf
+# seam per the mock-audit allowlist.
+_TIME_SLEEP_PATCH = patch("lib.youtube_album_service.time.sleep", lambda _s: None)
+
+
+def setUpModule() -> None:
+    _TIME_SLEEP_PATCH.start()
+
+
+def tearDownModule() -> None:
+    _TIME_SLEEP_PATCH.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +570,200 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         self.assertEqual(yt.search_calls, [])
         self.assertEqual(yt.get_album_calls, [])
 
+    def test_mb_leaf_raises_http_error_falls_through_to_group_path(self) -> None:
+        """Finding #1: passing an MB release-group MBID through
+        ``web.mb.get_release`` raises ``urllib.error.HTTPError`` because
+        RG MBIDs aren't releases. The resolver must catch and fall
+        through to the group-releases endpoint, not 500.
+        """
+        import urllib.error
+
+        rg = MB_RG
+
+        def _raising_mb_leaf(identifier: str) -> Optional[dict]:
+            # AE3 mirrors the live behaviour: web.mb.get_release raises
+            # urllib.error.HTTPError when handed a non-release MBID.
+            raise urllib.error.HTTPError(
+                f"http://mb-mirror/release/{identifier}",
+                404, "Not Found", {}, None,  # type: ignore[arg-type]
+            )
+
+        mb_group = _LookupSpy({
+            rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
+        })
+        # The mb_get_release sibling lookup also gets the raising
+        # contract — when the resolver re-uses it for per-sibling
+        # fetches, the leaf-miss-tolerant path treats raises as misses.
+        # Successful sibling fetches must still return real records,
+        # so we wrap with a per-identifier dispatch.
+        sibling_records = {
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        }
+        leaf_calls: list[str] = []
+
+        def _dispatching_mb_leaf(identifier: str) -> Optional[dict]:
+            leaf_calls.append(identifier)
+            if identifier == rg:
+                # The RG MBID raises like the real adapter.
+                raise urllib.error.HTTPError(
+                    f"http://mb-mirror/release/{identifier}",
+                    404, "Not Found", {}, None,  # type: ignore[arg-type]
+                )
+            return sibling_records.get(identifier)
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Dr. Octagonecologyst",
+            [_yt_search_album_result("MPREb-seed", year="1996", track_count=2)],
+        )
+        yt.set_album(
+            "MPREb-seed",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-seed",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="1996",
+                tracks=_yt_tracks(["Intro", "3000"]),
+                other_versions=[],
+            ),
+        )
+
+        # Confirm the assertion above: _raising_mb_leaf actually raises.
+        with self.assertRaises(urllib.error.HTTPError):
+            _raising_mb_leaf(rg)
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=_dispatching_mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        # The resolver fell through to the group path cleanly.
+        self.assertEqual(result.outcome, "ok",
+                         msg=f"expected ok fall-through, got "
+                             f"{result.outcome}: {result.error_message}")
+        self.assertEqual(result.release_group_identifier, rg)
+        # The leaf was tried (raised) AND the group fetch succeeded.
+        self.assertIn(rg, leaf_calls)
+        self.assertEqual(mb_group.calls, [rg])
+
+    def test_mb_group_lookup_raises_url_error_falls_through_to_not_found(self) -> None:
+        """When the group-level fetch raises (mirror down), the auto-widen
+        treats it as a miss and returns not_found rather than 500.
+        """
+        import urllib.error
+
+        rg = MB_RG_MISSING
+
+        def _raising_mb_leaf(identifier: str) -> Optional[dict]:
+            raise urllib.error.HTTPError(
+                f"http://mb-mirror/release/{identifier}",
+                404, "Not Found", {}, None,  # type: ignore[arg-type]
+            )
+
+        def _raising_group(rg_id: str) -> Optional[dict]:
+            raise urllib.error.URLError("mirror unreachable")
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=_raising_mb_leaf,
+            mb_get_release_group_releases=_raising_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(result.outcome, "not_found")
+
+    def test_discogs_leaf_raises_value_error_falls_through_cleanly(self) -> None:
+        """The Discogs adapter does ``int(d)`` on the identifier; a UUID
+        pasted into the Discogs path would raise ``ValueError``. The
+        resolver must treat that as a miss, not a 500.
+        """
+        master_id = "999"
+
+        def _raising_discogs_leaf(_identifier: str) -> Optional[dict]:
+            raise ValueError("invalid literal for int()")
+
+        discogs_master = _LookupSpy({
+            master_id: {
+                "title": "Album",
+                "type": "Album",
+                "releases": [
+                    {"id": "100", "title": "Album",
+                     "date": "2000", "country": "US", "status": "Official",
+                     "track_count": 2, "format": "CD", "media_count": 1},
+                ],
+            },
+        })
+        per_id = {
+            "100": {
+                "id": "100",
+                "title": "Album",
+                "artist_name": "Dr. Octagon",
+                "artist_id": "1",
+                "release_group_id": master_id,
+                "date": "2000",
+                "year": 2000,
+                "country": "US",
+                "status": "Official",
+                "tracks": [
+                    {"disc_number": 1, "track_number": 1,
+                     "title": "Intro", "length_seconds": 60.0},
+                ],
+            },
+        }
+
+        def _dispatching_leaf(identifier: str) -> Optional[dict]:
+            if identifier == master_id:
+                raise ValueError("invalid literal for int()")
+            return per_id.get(identifier)
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Album",
+            [_yt_search_album_result("MPREb-master", year="2000", track_count=1)],
+        )
+        yt.set_album(
+            "MPREb-master",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-master",
+                title="Album",
+                artists=[{"name": "Dr. Octagon"}],
+                year="2000",
+                tracks=_yt_tracks(["Intro"]),
+                other_versions=[],
+            ),
+        )
+
+        # Confirm the leaf raises on the master_id.
+        with self.assertRaises(ValueError):
+            _raising_discogs_leaf(master_id)
+
+        result = resolve_youtube_album(
+            master_id,
+            pdb=FakePipelineDB(),
+            mb_get_release=_empty_lookup(),
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=_dispatching_leaf,
+            discogs_get_master_releases=discogs_master,
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(result.outcome, "ok",
+                         msg=f"expected ok fall-through, got "
+                             f"{result.outcome}: {result.error_message}")
+        self.assertEqual(result.source, "discogs")
+        self.assertEqual(result.release_group_identifier, master_id)
+
 
 # ---------------------------------------------------------------------------
 # Empty / not-found / mb_no_release_group
@@ -682,6 +901,105 @@ class TestCacheBehavior(unittest.TestCase):
         self.assertEqual(r2.outcome, "ok")
         self.assertFalse(r2.from_cache)
         self.assertGreater(len(yt2.search_calls), 0)
+
+
+class TestJitterBetweenSiblingGetAlbumCalls(unittest.TestCase):
+    """Finding #2: 1-3s jitter between consecutive ``get_album`` calls.
+
+    The seed ``get_album`` doesn't jitter (it's the first YT call after
+    search); each additional sibling fetch sleeps once before the
+    request. For N total YT siblings, ``sleep_fn`` is called N-1 times.
+    """
+
+    def _resolve_with_n_siblings(
+        self, *, n_siblings: int,
+        sleep_fn: Callable[[float], None],
+    ) -> YoutubeAlbumResolverResult:
+        rg = MB_RG
+        mb_leaf = _LookupSpy({
+            rg: None,
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        mb_group = _LookupSpy({rg: _ok_mb_rg_releases((MB_REL_A, 1996))})
+
+        seed_browse = "MPREb-seed"
+        other_versions = [
+            _yt_other_version(f"MPREb-other-{i}", year="2008")
+            for i in range(n_siblings - 1)
+        ]
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Dr. Octagonecologyst",
+            [_yt_search_album_result(seed_browse)],
+        )
+        yt.set_album(
+            seed_browse,
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-seed",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="1996",
+                tracks=_yt_tracks(["Intro", "3000"]),
+                other_versions=other_versions,
+            ),
+        )
+        for i in range(n_siblings - 1):
+            yt.set_album(
+                f"MPREb-other-{i}",
+                FakeYTMusic.make_album_fixture(
+                    audio_playlist_id=f"OLAK5uy-other-{i}",
+                    title="Dr. Octagonecologyst",
+                    artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                    year="2008",
+                    tracks=_yt_tracks(["Intro", "3000"]),
+                ),
+            )
+
+        return resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=None,
+            sleep_fn=sleep_fn,
+        )
+
+    def test_jitter_fires_once_per_extra_sibling(self) -> None:
+        # 4 YT siblings (seed + 3 others) → 3 jitter sleeps.
+        sleeps: list[float] = []
+
+        def _spy(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        r = self._resolve_with_n_siblings(n_siblings=4, sleep_fn=_spy)
+        self.assertEqual(r.outcome, "ok",
+                         msg=f"expected ok, got {r.outcome}: {r.error_message}")
+        self.assertEqual(len(r.youtube_releases), 4)
+        # Seed get_album is the first YT call after search; only the 3
+        # subsequent get_albums pay the jitter.
+        self.assertEqual(len(sleeps), 3,
+                         msg=f"expected 3 jitter sleeps (N-1 for N=4 siblings), "
+                             f"got {len(sleeps)} (durations={sleeps})")
+        # Each sleep duration in the 1-3s band per Key Technical Decisions.
+        for d in sleeps:
+            self.assertGreaterEqual(d, 1.0)
+            self.assertLessEqual(d, 3.0)
+
+    def test_single_sibling_resolve_does_not_jitter(self) -> None:
+        # When there are no other_versions, only the seed get_album
+        # runs and no jitter sleep fires.
+        sleeps: list[float] = []
+        r = self._resolve_with_n_siblings(
+            n_siblings=1, sleep_fn=lambda s: sleeps.append(s))
+        self.assertEqual(r.outcome, "ok")
+        self.assertEqual(len(r.youtube_releases), 1)
+        self.assertEqual(sleeps, [],
+                         msg="single-sibling resolve must not jitter")
 
 
 # ---------------------------------------------------------------------------
