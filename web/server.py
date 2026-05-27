@@ -272,8 +272,16 @@ class Handler(BaseHTTPRequestHandler):
         *_youtube_routes.PATTERN_DESCRIPTIONS,
     ]
 
+    # POST pattern descriptions mirror the dispatch table — spread each
+    # route module's ``POST_PATTERN_DESCRIPTIONS`` (with getattr so the
+    # absence isn't an error). Finding #21: the YT module's list wasn't
+    # merged before, leaving its (empty) description list out of the
+    # symmetric pattern-description table.
     _FUNC_POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
         *getattr(_pipeline_routes, "POST_PATTERN_DESCRIPTIONS", []),
+        *getattr(_library_routes, "POST_PATTERN_DESCRIPTIONS", []),
+        *getattr(_imports_routes, "POST_PATTERN_DESCRIPTIONS", []),
+        *getattr(_youtube_routes, "POST_PATTERN_DESCRIPTIONS", []),
     ]
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002

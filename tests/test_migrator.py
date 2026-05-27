@@ -2551,13 +2551,25 @@ class TestYoutubeAlbumMappingsSchema(unittest.TestCase):
         self.assertIn("timestamp", cols["resolved_at"][1])
 
     def test_source_check_constraint_rejects_unknown(self):
-        # 'mb' and 'discogs' are allowed; anything else is rejected.
-        rid = self._query("""
+        # Both 'mb' and 'discogs' are allowed; anything else is rejected.
+        # Finding #26: the prior test only exercised 'mb' — we also
+        # assert a successful 'discogs' insert before the rejection
+        # case so both legitimate branches of the CHECK are covered.
+        rid_mb = self._query("""
             INSERT INTO youtube_album_mappings
               (release_group_identifier, source, yt_browse_id, yt_url,
                yt_track_count, yt_tracks, distances)
             VALUES ('rg-allowed', 'mb', 'MPREb_abc', 'https://music.example/',
                     10, '[]'::jsonb, '[]'::jsonb)
+            RETURNING id
+        """)[0][0]
+        rid_discogs = self._query("""
+            INSERT INTO youtube_album_mappings
+              (release_group_identifier, source, yt_browse_id, yt_url,
+               yt_track_count, yt_tracks, distances)
+            VALUES ('master-allowed', 'discogs', 'MPREb_dis',
+                    'https://music.example/2', 5,
+                    '[]'::jsonb, '[]'::jsonb)
             RETURNING id
         """)[0][0]
         try:
@@ -2571,7 +2583,23 @@ class TestYoutubeAlbumMappingsSchema(unittest.TestCase):
                 """)
         finally:
             self._exec("DELETE FROM youtube_album_mappings WHERE id = %s",
-                       (rid,))
+                       (rid_mb,))
+            self._exec("DELETE FROM youtube_album_mappings WHERE id = %s",
+                       (rid_discogs,))
+
+    def test_idx_yam_release_group_index_exists(self):
+        """Migration 034 creates ``idx_yam_release_group`` to keep the
+        planner's choice stable as the table grows. Finding #27.
+        """
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'youtube_album_mappings'
+              AND indexname = 'idx_yam_release_group'
+        """)
+        self.assertEqual(len(rows), 1,
+                         msg="idx_yam_release_group must exist on "
+                             "youtube_album_mappings (created by 034)")
 
     def test_unique_natural_key(self):
         # Same (release_group_identifier, source, yt_browse_id) tuple

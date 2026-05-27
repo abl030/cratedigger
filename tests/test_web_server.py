@@ -10041,6 +10041,8 @@ class TestYoutubeRouteContracts(_WebServerCase):
         "matched_tracks",
         "total_local_tracks",
         "total_mb_tracks",
+        "extra_local_tracks",
+        "extra_mb_tracks",
         "error_message",
     }
 
@@ -10126,12 +10128,18 @@ class TestYoutubeRouteContracts(_WebServerCase):
         construction time and crashes when the Session class is not a
         real type).
 
-        Yields the ``resolve_youtube_album`` mock so callers can assert
-        on ``call_count`` / ``call_args``.
+        ``_build_youtube_client`` returns ``(yt_client, session)`` so the
+        route can close the session in ``finally`` (finding #18 — Session
+        leak). The test stub mimics that shape; the fake session exposes
+        a no-op ``close()`` method.
         """
+        class _FakeSession:
+            def close(self) -> None:
+                return None
+
         with patch(
             "web.routes.youtube._build_youtube_client",
-            return_value=object(),
+            return_value=(object(), _FakeSession()),
         ), patch(
             "web.routes.youtube._RedisYoutubeCache",
             return_value=object(),
@@ -10215,9 +10223,12 @@ class TestYoutubeRouteContracts(_WebServerCase):
         self.assertEqual(status, 404)
         self.assertEqual(data["outcome"], "not_found")
 
-    def test_mb_no_release_group_returns_422(self):
+    def test_no_release_group_returns_422(self):
+        # Service outcome renamed from ``mb_no_release_group`` to
+        # ``no_release_group`` per ce-code-review finding #12 — the old
+        # name was MB-specific but the Discogs path also produced it.
         with self._patch_service(self._bare_result(
-                "mb_no_release_group",
+                "no_release_group",
                 error_message="MB release has no release_group_id")):
             status, _ = self._get(
                 f"/api/youtube-album?identifier={self.UUID_A}")

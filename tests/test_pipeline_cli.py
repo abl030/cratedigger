@@ -2740,12 +2740,19 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
             identifier=self.IDENT, refresh=refresh, json=json_out,
         )
         stdout = io.StringIO()
+        # cmd_youtube_album's first arg is the PipelineDB instance; the
+        # resolve_youtube_album call is mocked out so the DB is never
+        # touched, but per the project mock-audit rule (CLAUDE.md §
+        # "MOCKS: leaf-seam only") we still use FakePipelineDB instead
+        # of MagicMock so the wrapper test stays consistent with how
+        # production passes ``db`` through (finding #28).
+        from tests.fakes import FakePipelineDB
         with redirect_stdout(stdout):
             with patch(
                 "scripts.pipeline_cli.resolve_youtube_album",
                 return_value=result,
             ) as mock_resolve:
-                rc = pipeline_cli.cmd_youtube_album(MagicMock(), args)
+                rc = pipeline_cli.cmd_youtube_album(FakePipelineDB(), args)
         return rc, stdout.getvalue(), mock_resolve
 
     def test_exit_code_mapping_uses_service_module_dict(self):
@@ -2795,8 +2802,11 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         rc, _, _ = self._run(outcome="not_found")
         self.assertEqual(rc, 2)
 
-    def test_exit_3_on_mb_no_release_group(self):
-        rc, _, _ = self._run(outcome="mb_no_release_group")
+    def test_exit_3_on_no_release_group(self):
+        # Service outcome renamed (finding #12) — used to be
+        # ``mb_no_release_group`` but the Discogs path produced it too,
+        # which was misleading.
+        rc, _, _ = self._run(outcome="no_release_group")
         self.assertEqual(rc, 3)
 
     def test_exit_5_on_unresolved_4xx_client_mentions_throttle(self):

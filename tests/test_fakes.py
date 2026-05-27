@@ -2068,7 +2068,7 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
                  "artists": [{"name": "Artist"}]},
             ],
             "distances": [
-                {"mb_release_id": "mb-1", "distance": 0.05, "error": None},
+                {"mbid": "mb-1", "distance": 0.05, "error": None},
             ],
         }
         row.update(overrides)

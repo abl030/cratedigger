@@ -2073,7 +2073,12 @@ def cmd_beets_distance(db, args):
 
 class _RedisYoutubeCache:
     """Adapt ``web/cache.py``'s Redis client to the ``BeetsDistanceCache``
-    protocol, keyed under ``youtube:album:<key>``.
+    protocol.
+
+    The service-side keys already carry the ``youtube:album:`` /
+    ``youtube:search:`` namespace; this adapter does NOT prefix them
+    again (review finding #17 — the old ``_NAMESPACE`` wrapper produced
+    ``youtube:album:youtube:album:<browse_id>`` keys).
 
     Mirrors ``_RedisFingerprintCache`` in ``web/routes/pipeline.py`` —
     bytes get/set with a long sentinel TTL (cache lives forever absent
@@ -2082,8 +2087,6 @@ class _RedisYoutubeCache:
     in-process accelerator.
     """
 
-    _NAMESPACE = "youtube:album:"
-
     def __init__(self) -> None:
         try:
             from web import cache as _cache_mod
@@ -2091,14 +2094,11 @@ class _RedisYoutubeCache:
         except Exception:
             self._redis = None
 
-    def _ns(self, key: str) -> str:
-        return f"{self._NAMESPACE}{key}"
-
     def get(self, key: str):
         if self._redis is None:
             return None
         try:
-            raw = self._redis.get(self._ns(key))  # type: ignore[union-attr]
+            raw = self._redis.get(key)  # type: ignore[union-attr]
         except Exception:
             return None
         if raw is None:
@@ -2114,7 +2114,7 @@ class _RedisYoutubeCache:
             return
         try:
             self._redis.setex(  # type: ignore[union-attr]
-                self._ns(key), ttl_seconds, value)
+                key, ttl_seconds, value)
         except Exception:
             pass
 
@@ -2175,7 +2175,7 @@ def cmd_youtube_album(db, args):
     Exit codes (from ``lib.youtube_album_service.OUTCOME_EXIT_CODE``):
       * 0 — ``ok``
       * 2 — ``not_found``
-      * 3 — ``mb_no_release_group``
+      * 3 — ``no_release_group``
       * 5 — ``unresolved_4xx_client`` / ``unresolved_mirror_unavailable``
             / ``unresolved_timeout`` / ``youtube_parse_failed`` /
             ``transient``

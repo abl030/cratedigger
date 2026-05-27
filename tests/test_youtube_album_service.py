@@ -26,7 +26,8 @@ from lib.beets_distance import (
     compute_beets_distance,
 )
 from lib.youtube_album_service import (
-    SERVICE_OUTCOMES,
+    OUTCOME_EXIT_CODE,
+    OUTCOME_HTTP_STATUS,
     ResolvedDistance,
     ResolvedYoutubeRelease,
     YoutubeAlbumResolverResult,
@@ -254,24 +255,33 @@ def tearDownModule() -> None:
 
 
 class TestServiceOutcomeContract(unittest.TestCase):
-    """Pin the service-level outcome frozenset — wire contract for CLI + API."""
+    """Pin the service-level outcome vocabulary — wire contract for CLI + API.
+
+    Per ce-code-review finding #16, the previous ``SERVICE_OUTCOMES``
+    frozenset was a third source of truth that duplicated the two
+    ``OUTCOME_*`` dicts. We now assert the dicts agree on their keyset,
+    which is the actual contract the CLI / route adapters depend on.
+    """
+
+    EXPECTED_OUTCOMES = {
+        "ok",
+        "not_found",
+        "no_release_group",
+        "unresolved_4xx_client",
+        "unresolved_mirror_unavailable",
+        "unresolved_timeout",
+        "youtube_parse_failed",
+        "transient",
+    }
 
     def test_outcome_set_is_stable(self) -> None:
+        self.assertEqual(set(OUTCOME_HTTP_STATUS), self.EXPECTED_OUTCOMES)
+        self.assertEqual(set(OUTCOME_EXIT_CODE), self.EXPECTED_OUTCOMES)
+        # The two dicts must be aligned — adapters branch on outcome
+        # and look up in both dicts, so a missing entry on either side
+        # is a 500/exit-1 fallback bug waiting to happen.
         self.assertEqual(
-            set(SERVICE_OUTCOMES),
-            {
-                "ok",
-                "not_found",
-                "mb_no_release_group",
-                "unresolved_4xx_client",
-                "unresolved_mirror_unavailable",
-                "unresolved_timeout",
-                "youtube_parse_failed",
-                "transient",
-            },
-        )
-        # Frozenset (immutable) prevents accidental mutation downstream.
-        self.assertIsInstance(SERVICE_OUTCOMES, frozenset)
+            set(OUTCOME_HTTP_STATUS), set(OUTCOME_EXIT_CODE))
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +778,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Empty / not-found / mb_no_release_group
+# Empty / not-found / no_release_group
 # ---------------------------------------------------------------------------
 
 
@@ -797,7 +807,7 @@ class TestEmptyAndNotFound(unittest.TestCase):
         self.assertEqual(result.outcome, "ok")
         self.assertEqual(result.youtube_releases, [])
 
-    def test_mb_no_release_group_at_input(self) -> None:
+    def test_no_release_group_at_input(self) -> None:
         """Leaf returns a release but it has no release_group_id."""
         mbid = MB_NO_RG
         mb_leaf = _LookupSpy({
@@ -822,7 +832,7 @@ class TestEmptyAndNotFound(unittest.TestCase):
             distance_fn=_canned_distance(),
             cache=None,
         )
-        self.assertEqual(result.outcome, "mb_no_release_group")
+        self.assertEqual(result.outcome, "no_release_group")
 
 
 # ---------------------------------------------------------------------------
@@ -1786,8 +1796,11 @@ class TestYoutubeAlbumResolverIntegrationSlice(unittest.TestCase):
         d_match = original_by_mbid[MB_REL_A].distance
         d_mismatch = original_by_mbid[MB_REL_B].distance
         assert d_match is not None and d_mismatch is not None
-        self.assertLess(d_match, d_mismatch + 0.0001,
-                        msg=f"expected matching pair to score <= mismatched pair, "
+        # Strict comparison (finding #20) — admitting a tie via the
+        # 0.0001 slop allowed beets to return identical scores on
+        # matching and mismatched pairs without the test catching it.
+        self.assertLess(d_match, d_mismatch,
+                        msg=f"expected matching pair to score < mismatched pair, "
                             f"got matching={d_match} mismatched={d_mismatch}")
 
         reissue = by_browse["MPREb-reissue"]
@@ -1796,7 +1809,7 @@ class TestYoutubeAlbumResolverIntegrationSlice(unittest.TestCase):
         d_reissue_match = reissue_by_mbid[MB_REL_B].distance
         d_reissue_mismatch = reissue_by_mbid[MB_REL_A].distance
         assert d_reissue_match is not None and d_reissue_mismatch is not None
-        self.assertLess(d_reissue_match, d_reissue_mismatch + 0.0001)
+        self.assertLess(d_reissue_match, d_reissue_mismatch)
 
 
 # ---------------------------------------------------------------------------

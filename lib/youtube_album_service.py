@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 import urllib.error
 from typing import Any, Callable, Optional
@@ -47,7 +48,7 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance as _default_distance_fn,
 )
-from lib.release_identity import detect_release_source
+from lib.release_identity import detect_release_source, normalize_release_id
 
 
 # Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
@@ -178,40 +179,37 @@ def _jitter(sleep_fn: Callable[[float], None]) -> None:
 # ---------------------------------------------------------------------------
 
 
-SERVICE_OUTCOMES: frozenset[str] = frozenset({
-    "ok",
-    "not_found",
-    "mb_no_release_group",
-    "unresolved_4xx_client",
-    "unresolved_mirror_unavailable",
-    "unresolved_timeout",
-    "youtube_parse_failed",
-    "transient",
-})
-"""Service-level outcomes. Per-pair outcomes (``ok``,
-``wrong_release_group``, ``mb_lookup_failed``, ``mb_no_release_group``,
-``no_audio``, ``empty_items_override``, ``invalid_input``,
-``distance_failed``) flow through from ``compute_beets_distance``
-verbatim inside ``ResolvedDistance.outcome``."""
-
-
 OUTCOME_HTTP_STATUS: dict[str, int] = {
     "ok": 200,
     "not_found": 404,
-    "mb_no_release_group": 422,
+    "no_release_group": 422,
     "unresolved_4xx_client": 503,
     "unresolved_mirror_unavailable": 503,
     "unresolved_timeout": 503,
     "youtube_parse_failed": 503,
     "transient": 503,
 }
-"""Service outcome → HTTP status. U8 imports this directly."""
+"""Service outcome → HTTP status. U8 imports this directly.
+
+The outcome set is pinned by the test
+``test_outcome_set_is_stable`` which asserts
+``set(OUTCOME_HTTP_STATUS) == set(OUTCOME_EXIT_CODE)`` — keep these
+two dicts in sync. Per-pair outcomes (``ok``, ``wrong_release_group``,
+``mb_lookup_failed``, ``mb_no_release_group``, ``no_audio``,
+``empty_items_override``, ``invalid_input``, ``distance_failed``) flow
+through from ``compute_beets_distance`` verbatim inside
+``ResolvedDistance.outcome`` — they are NOT service-level outcomes.
+
+``no_release_group`` (renamed from ``mb_no_release_group``) covers
+both the MB leaf-with-no-release-group case AND the Discogs
+leaf-with-no-master case (R12 / U2). The MB-specific name was
+misleading because the Discogs path was also using it."""
 
 
 OUTCOME_EXIT_CODE: dict[str, int] = {
     "ok": 0,
     "not_found": 2,
-    "mb_no_release_group": 3,
+    "no_release_group": 3,
     "unresolved_4xx_client": 5,
     "unresolved_mirror_unavailable": 5,
     "unresolved_timeout": 5,
@@ -271,6 +269,64 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
     duration_ms: Optional[int] = None
 
 
+# ---------------------------------------------------------------------------
+# Persisted JSONB shapes — wire-boundary structs for the durable cache.
+# ---------------------------------------------------------------------------
+#
+# ``youtube_album_mappings.yt_tracks`` and ``.distances`` are JSONB
+# columns. Per the wire-boundary rule in ``.claude/rules/code-quality.md``,
+# anything that crosses JSON gets a typed Struct and validates at the
+# decode site — we cannot rely on Pyright seeing into ``dict.get()``.
+# ``msgspec.convert`` is the read-side detector for malformed rows.
+
+
+class PersistedTrack(msgspec.Struct, kw_only=True):
+    """One persisted track inside ``yt_tracks`` JSONB."""
+
+    title: Optional[str] = None
+    artists: Optional[list[dict[str, Any]]] = None
+    length_seconds: Optional[float] = None
+    track_number: Optional[int] = None
+    disc_number: Optional[int] = None
+    video_id: Optional[str] = None
+
+
+class PersistedDistance(msgspec.Struct, kw_only=True):
+    """One persisted per-pair distance inside ``distances`` JSONB."""
+
+    mbid: Optional[str] = None
+    outcome: Optional[str] = None
+    distance: Optional[float] = None
+    components: Optional[dict[str, float]] = None
+    matched_tracks: Optional[int] = None
+    total_local_tracks: Optional[int] = None
+    total_mb_tracks: Optional[int] = None
+    extra_local_tracks: Optional[int] = None
+    extra_mb_tracks: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
+    """One persisted row in ``youtube_album_mappings``.
+
+    Outer columns (``id``, ``release_group_identifier``, ``source``,
+    ``resolved_at``) aren't carried here — the read path
+    (``get_youtube_album_mapping``) keys by
+    ``(release_group_identifier, source)`` so those fields are
+    redundant. JSONB columns are decoded via ``msgspec.convert``;
+    everything else is row metadata.
+    """
+
+    yt_browse_id: Optional[str] = None
+    yt_audio_playlist_id: Optional[str] = None
+    yt_url: Optional[str] = None
+    yt_year: Optional[int] = None
+    yt_track_count: Optional[int] = None
+    album_title: Optional[str] = None
+    yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list)
+    distances: list[PersistedDistance] = msgspec.field(default_factory=list)
+
+
 # Type aliases for clarity.
 MBLookup = Callable[[str], Optional[dict]]
 """``mb_get_release(id) -> slim release dict | None`` (web/mb.py shape)."""
@@ -307,6 +363,7 @@ def resolve_youtube_album(
     cache: Optional[BeetsDistanceCache] = None,
     refresh: bool = False,
     sleep_fn: Callable[[float], None] = _default_jitter_sleep_fn,
+    deadline_seconds: int = 60,
 ) -> YoutubeAlbumResolverResult:
     """Resolve a release identifier to the YT Music distance matrix.
 
@@ -318,8 +375,16 @@ def resolve_youtube_album(
     ``get_album`` calls. Production defaults to ``time.sleep``; tests
     pass ``lambda _: None`` so they don't pay the 1-3s pause per
     sibling.
+
+    ``deadline_seconds`` is a soft deadline. After each external call
+    we check ``time.monotonic() - started`` against this budget; on
+    breach the service returns the partial matrix collected so far with
+    ``outcome="ok"`` and an ``error_message`` describing the breach.
+    The deadline is "best effort" — we never abort a call mid-flight,
+    only skip the next one.
     """
     started = time.monotonic()
+    identifier = normalize_release_id(identifier)
 
     source_label = _classify_source(identifier)
     if source_label is None:
@@ -332,22 +397,21 @@ def resolve_youtube_album(
 
     # Step 1+2: auto-widen via leaf-then-group fallback.
     if source_label == "mb":
-        rg_id, sibling_summaries = _resolve_mb_group(
+        widen = _resolve_mb_group(
             identifier, mb_get_release, mb_get_release_group_releases)
     else:
-        rg_id, sibling_summaries = _resolve_discogs_group(
+        widen = _resolve_discogs_group(
             identifier, discogs_get_release, discogs_get_master_releases)
 
-    if rg_id is None:
-        # `sibling_summaries` here actually carries the failure outcome
-        # the helper produced ("not_found" or "mb_no_release_group").
-        failure = (sibling_summaries or ["not_found"])[0]
+    if widen.rg_id is None:
         return _final(
-            outcome=failure if isinstance(failure, str) else "not_found",
+            outcome=widen.failure_outcome or "not_found",
             error_message=f"could not resolve identifier {identifier!r} to a "
                           f"release group",
             started=started,
         )
+    rg_id = widen.rg_id
+    sibling_summaries = widen.sibling_summaries
 
     # Step 3: cache-first read.
     #
@@ -408,6 +472,11 @@ def resolve_youtube_album(
     yt_failure: Optional[tuple[str, str]] = None
     seed_browse_id: Optional[str] = None
     yt_album_responses: dict[str, dict] = {}
+    deadline_message: Optional[str] = None
+
+    def _deadline_breached() -> bool:
+        return (time.monotonic() - started) > float(deadline_seconds)
+
     try:
         search_results = _cached_search(
             yt_client, cache, query, "albums", 10, refresh=refresh)
@@ -427,6 +496,15 @@ def resolve_youtube_album(
             yt_client, cache, seed_browse_id, refresh=refresh)
         yt_album_responses[seed_browse_id] = seed_album
         for other in seed_album.get("other_versions") or []:
+            if _deadline_breached():
+                deadline_message = (
+                    f"deadline exceeded after "
+                    f"{len(yt_album_responses)} YT siblings; "
+                    f"returning partial matrix"
+                )
+                log.warning(
+                    "youtube_album_service: %s", deadline_message)
+                break
             other_browse_id = other.get("browseId")
             if not other_browse_id or other_browse_id in yt_album_responses:
                 continue
@@ -488,6 +566,11 @@ def resolve_youtube_album(
             started=started,
         )
 
+    # If we exited the YT loop because of a deadline breach but with
+    # at least the seed in hand, fall through and synthesize the
+    # partial matrix; the deadline message is attached at the final
+    # return below.
+
     # Step 9-10: synthesize items per YT sibling and score N×M.
     youtube_releases: list[ResolvedYoutubeRelease] = []
     persistable_rows: list[dict[str, Any]] = []
@@ -498,12 +581,21 @@ def resolve_youtube_album(
             # An empty track list defeats scoring; skip the sibling so the
             # matrix doesn't carry a row with no data to compare against.
             continue
+        # ``raw_tracks`` is paired by index with ``synth_items`` — a
+        # malformed entry that was filtered out of ``_synthesize_items``
+        # would break this pairing, but ``_synthesize_items`` accepts
+        # every entry the YT API returns (only the per-entry ``isinstance``
+        # check skips non-dict rows, which is also enforced here).
+        raw_tracks = [
+            t for t in (album_resp.get("tracks") or []) if isinstance(t, dict)
+        ]
         distances = _score_against_siblings(
             synth_items, sibling_ids, rg_id, distance_fn, pdb,
             mb_get_release if source_label == "mb" else discogs_get_release,
         )
         yt_url = _compose_url(browse_id, album_resp.get("audioPlaylistId"))
         year = _parse_year(album_resp.get("year"))
+        album_title = str(album_resp.get("title") or "")
         yt_rel = ResolvedYoutubeRelease(
             yt_browse_id=browse_id,
             yt_audio_playlist_id=album_resp.get("audioPlaylistId"),
@@ -515,23 +607,35 @@ def resolve_youtube_album(
             distances=distances,
         )
         youtube_releases.append(yt_rel)
+        # Pair ``video_id`` by list index, not by track-number lookup —
+        # YT payloads occasionally carry duplicate ``trackNumber`` values
+        # (e.g. multiple "track 1" entries on a multi-disc album, or
+        # 0-indexed payloads) and looking up by number drops the wrong
+        # videoId. Indexed pairing is unambiguous.
+        persistable_tracks: list[dict[str, Any]] = []
+        for synth_i, si in enumerate(synth_items):
+            raw = raw_tracks[synth_i] if synth_i < len(raw_tracks) else {}
+            persistable_tracks.append({
+                "title": si.title,
+                "artists": [{"name": si.artist}],
+                "length_seconds": si.length,
+                "track_number": si.track,
+                "disc_number": si.disc,
+                "video_id": raw.get("videoId"),
+            })
         persistable_rows.append({
             "yt_browse_id": browse_id,
             "yt_audio_playlist_id": album_resp.get("audioPlaylistId"),
             "yt_url": yt_url,
             "yt_year": year,
             "yt_track_count": yt_rel.track_count,
-            "yt_tracks": [
-                {
-                    "title": si.title,
-                    "artists": [{"name": si.artist}],
-                    "length_seconds": si.length,
-                    "track_number": si.track,
-                    "disc_number": si.disc,
-                    "video_id": _video_id_for_track(album_resp, si.track),
-                }
-                for si in synth_items
-            ],
+            # ``album_title`` is persisted per row so the cache-fallback
+            # ``_rows_to_youtube_releases`` can rehydrate ``SyntheticItem.album``
+            # — without it, cached rows always returned the lossy
+            # ``album=""`` placeholder (review finding #15). Stored at the
+            # row scope (not per track) since it's a row-level fact.
+            "album_title": album_title,
+            "yt_tracks": persistable_tracks,
             "distances": [
                 {
                     "mbid": d.mbid,
@@ -557,6 +661,7 @@ def resolve_youtube_album(
         source=source_label,
         from_cache=False,
         youtube_releases=youtube_releases,
+        error_message=deadline_message,
         started=started,
     )
 
@@ -580,6 +685,22 @@ def _classify_source(identifier: str) -> Optional[str]:
     if source == "discogs":
         return "discogs"
     return None
+
+
+class _GroupResolution(msgspec.Struct, kw_only=True):
+    """Result of leaf-then-group auto-widen.
+
+    Replaces the overloaded ``tuple[Optional[str], list[Any]]`` return
+    shape where ``list[Any]`` was either the sibling summaries (on
+    success) or a single-element list carrying the failure outcome (on
+    failure). Two-way overloads on container shape are a smell — this
+    Struct names each axis explicitly so the caller can branch on
+    ``failure_outcome`` instead of reverse-engineering the list.
+    """
+
+    rg_id: Optional[str] = None
+    sibling_summaries: list[Any] = msgspec.field(default_factory=list)
+    failure_outcome: Optional[str] = None
 
 
 def _safe_leaf_lookup(
@@ -624,13 +745,12 @@ def _resolve_mb_group(
     identifier: str,
     mb_get_release: MBLookup,
     mb_get_release_group_releases: MBRGReleases,
-) -> tuple[Optional[str], list[Any]]:
-    """Resolve an MB identifier to ``(rg_id, sibling_summaries)``.
+) -> _GroupResolution:
+    """Resolve an MB identifier to a typed group result.
 
-    Leaf-then-group fallback. Returns ``(None, [failure_outcome])`` if
-    neither path resolves; ``failure_outcome`` is ``"not_found"`` or
-    ``"mb_no_release_group"`` so the caller can surface the precise
-    failure.
+    Leaf-then-group fallback. ``failure_outcome`` is populated when
+    neither path resolves; the caller checks ``rg_id is None`` to
+    branch.
 
     Adapter errors (``urllib.error.HTTPError`` on 404,
     ``urllib.error.URLError`` on transport failure) are caught and treated
@@ -642,44 +762,58 @@ def _resolve_mb_group(
     if leaf:
         rg_id = leaf.get("release_group_id")
         if not rg_id:
-            return None, ["mb_no_release_group"]
+            return _GroupResolution(failure_outcome="no_release_group")
         group = _safe_group_lookup(mb_get_release_group_releases, rg_id)
         if not group:
-            return None, ["not_found"]
-        return rg_id, list(group.get("releases") or [])
+            return _GroupResolution(failure_outcome="not_found")
+        return _GroupResolution(
+            rg_id=rg_id,
+            sibling_summaries=list(group.get("releases") or []),
+        )
 
     # Leaf miss → treat identifier as RG MBID.
     group = _safe_group_lookup(mb_get_release_group_releases, identifier)
     if not group:
-        return None, ["not_found"]
-    return identifier, list(group.get("releases") or [])
+        return _GroupResolution(failure_outcome="not_found")
+    return _GroupResolution(
+        rg_id=identifier,
+        sibling_summaries=list(group.get("releases") or []),
+    )
 
 
 def _resolve_discogs_group(
     identifier: str,
     discogs_get_release: DiscogsLookup,
     discogs_get_master_releases: DiscogsMasterReleases,
-) -> tuple[Optional[str], list[Any]]:
-    """Resolve a Discogs identifier to ``(master_id, sibling_summaries)``.
+) -> _GroupResolution:
+    """Resolve a Discogs identifier to a typed group result.
 
-    Same shape as ``_resolve_mb_group``. Adapter raises (HTTPError /
-    URLError / ValueError from ``int()`` coercion) are caught and
-    treated as a leaf miss so the auto-widen falls through cleanly.
+    Same shape as ``_resolve_mb_group``. The Discogs leaf-failure outcome
+    is ``"no_release_group"`` since Discogs has no concept of release
+    groups — the analogous concept is a master, but the failure
+    semantically means "the upstream release doesn't point at a
+    group / master we can widen to".
     """
     leaf = _safe_leaf_lookup(discogs_get_release, identifier)
     if leaf:
         master_id = leaf.get("release_group_id")
         if not master_id:
-            return None, ["mb_no_release_group"]
+            return _GroupResolution(failure_outcome="no_release_group")
         group = _safe_group_lookup(discogs_get_master_releases, master_id)
         if not group:
-            return None, ["not_found"]
-        return master_id, list(group.get("releases") or [])
+            return _GroupResolution(failure_outcome="not_found")
+        return _GroupResolution(
+            rg_id=master_id,
+            sibling_summaries=list(group.get("releases") or []),
+        )
 
     group = _safe_group_lookup(discogs_get_master_releases, identifier)
     if not group:
-        return None, ["not_found"]
-    return identifier, list(group.get("releases") or [])
+        return _GroupResolution(failure_outcome="not_found")
+    return _GroupResolution(
+        rg_id=identifier,
+        sibling_summaries=list(group.get("releases") or []),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -775,16 +909,17 @@ def _pick_yt_seed(
             continue
         if not r.get("browseId"):
             continue
-        year_dist = (
-            abs(_parse_year(r.get("year")) - mb_year)
-            if (mb_year is not None and _parse_year(r.get("year")) is not None)
-            else 9999
-        ) if mb_year is not None else 0
-        # Cast _parse_year(...) None → 9999 so the comparison stays
-        # bounded.
+        # Compute year proximity once. ``_parse_year`` normalises both
+        # int and str forms; ``None`` (missing or unparseable year on
+        # the YT side) is bumped to a large sentinel so the comparison
+        # stays bounded but still loses to any real match.
         yt_year_parsed = _parse_year(r.get("year"))
-        if mb_year is not None and yt_year_parsed is None:
+        if mb_year is None:
+            year_dist = 0
+        elif yt_year_parsed is None:
             year_dist = 9999
+        else:
+            year_dist = abs(yt_year_parsed - mb_year)
         track_dist = abs(_safe_int(r.get("trackCount"), 0) - mb_track_count)
         score = (year_dist, track_dist)
         if best_score is None or score < best_score:
@@ -857,6 +992,25 @@ def _safe_float(raw: Any, default: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_track_number(idx: int, raw_tn: Any, *, zero_indexed: bool) -> int:
+    """Return a 1-indexed track number from a YT payload entry.
+
+    The YT API mostly emits 1-indexed ``trackNumber``, but some payloads
+    are 0-indexed (the first track reports ``trackNumber == 0``). Beets's
+    ``assign_items`` is 1-indexed, so the resolver normalises before
+    storage. ``zero_indexed`` is detected once on the first track and
+    propagated to every subsequent track in the same payload — without
+    that flag, a 1-indexed payload that happens to repeat
+    ``trackNumber: 1`` on multiple discs would false-fire the heuristic.
+    """
+    if isinstance(raw_tn, int):
+        if zero_indexed:
+            return raw_tn + 1
+        return raw_tn
+    # Missing / non-int trackNumber falls back to positional.
+    return idx + 1
+
+
 def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
     """Build a ``SyntheticItem`` list from a ``ytmusicapi.get_album`` response.
 
@@ -875,6 +1029,19 @@ def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
     )
     tracks = album_resp.get("tracks") or []
     total = len(tracks)
+
+    # Detect 0-indexed payload on the first usable track only. Without
+    # this flag we'd misclassify a 1-indexed payload that legitimately
+    # repeats ``trackNumber: 1`` (e.g. duplicate or malformed entries)
+    # as 0-indexed.
+    zero_indexed = False
+    for t in tracks:
+        if isinstance(t, dict):
+            raw_first = t.get("trackNumber")
+            if isinstance(raw_first, int) and raw_first == 0:
+                zero_indexed = True
+            break
+
     out: list[SyntheticItem] = []
     for idx, t in enumerate(tracks):
         if not isinstance(t, dict):
@@ -886,26 +1053,9 @@ def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
             if t_artists and isinstance(t_artists[0], dict)
             else albumartist
         )
-        # ytmusicapi sometimes returns ``trackNumber`` 0-indexed; if so the
-        # first track will be 0 and shift everything by 1. Beets's
-        # ``assign_items`` uses 1-indexed track positions for fingerprint
-        # matching, so we normalise: when the very first track reports
-        # ``trackNumber == 0`` we treat the column as 0-indexed.
         raw_tn = t.get("trackNumber")
-        if isinstance(raw_tn, int):
-            track_num = raw_tn
-        else:
-            track_num = idx + 1
-        if idx == 0 and track_num == 0:
-            # 0-indexed payload — shift all subsequent values by 1 via
-            # the closure below.
-            track_num = 1
-        elif idx > 0 and track_num == idx:
-            # When the first track was 0-indexed (i.e. idx0 reported 0),
-            # subsequent tracks will report idx as their value. Bump to
-            # idx+1 so we match the typical 1-indexed convention.
-            # (No-op when the payload is already 1-indexed.)
-            track_num = idx + 1
+        track_num = _normalize_track_number(
+            idx, raw_tn, zero_indexed=zero_indexed)
         length = _safe_float(t.get("duration_seconds"), 0.0)
         out.append(SyntheticItem(
             title=title,
@@ -987,89 +1137,103 @@ def _compose_url(browse_id: str, audio_playlist_id: Any) -> str:
     return f"https://music.youtube.com/browse/{browse_id}"
 
 
-def _video_id_for_track(album_resp: dict, track_number: int) -> Optional[str]:
-    """Best-effort lookup of the videoId for a given track number."""
-    for t in album_resp.get("tracks") or []:
-        if isinstance(t, dict) and int(t.get("trackNumber") or 0) == track_number:
-            return t.get("videoId")
-    return None
+_HTTP_CODE_RE = re.compile(r"\bHTTP\s+(\d{3})\b")
 
 
 def _classify_server_error(exc: Exception) -> str:
     """Map a ``YTMusicServerError`` message to 4xx vs 5xx outcome.
 
     ``ytmusicapi`` doesn't carry the HTTP status as a typed attribute on
-    the exception — we string-match on the message it produces (which
-    typically contains "Server returned HTTP <code>"). 429 is treated as
-    4xx for the purposes of this mapping (rate-limit / captcha).
+    the exception — we regex-extract it from the message (which the
+    library emits as ``"Server returned HTTP NNN: ..."``). 429 is
+    treated as 4xx for the purposes of this mapping (rate-limit /
+    captcha).
+
+    Previously this scanned for substrings like ``"500"`` in the message,
+    which false-fires when the error body contains a stray digit triplet
+    (e.g. ``"HTTP 200 OK, but body had error 500-ish content"``). The
+    regex pins the ``HTTP <code>`` shape so composite messages can't
+    mis-classify the outcome.
     """
     msg = str(exc)
-    # The library emits "Server returned HTTP NNN" — pull the digits out.
-    for code_str in ("400", "401", "403", "404", "429"):
-        if code_str in msg:
-            return "unresolved_4xx_client"
-    for code_str in ("500", "502", "503", "504"):
-        if code_str in msg:
-            return "unresolved_mirror_unavailable"
-    # Default for unparseable / unknown server-side messages: assume the
-    # mirror is unavailable rather than blaming the caller.
+    m = _HTTP_CODE_RE.search(msg)
+    if m is None:
+        # Default for unparseable / unknown server-side messages: assume
+        # the mirror is unavailable rather than blaming the caller.
+        return "unresolved_mirror_unavailable"
+    code = int(m.group(1))
+    if code in (400, 401, 403, 404, 429):
+        return "unresolved_4xx_client"
+    if 500 <= code < 600:
+        return "unresolved_mirror_unavailable"
     return "unresolved_mirror_unavailable"
 
 
 def _rows_to_youtube_releases(
     rows: list[dict],
 ) -> list[ResolvedYoutubeRelease]:
-    """Deserialize cached DB rows back into typed structs."""
+    """Deserialize cached DB rows back into typed structs.
+
+    Wire-boundary decode via ``msgspec.convert``: every JSONB row is
+    validated against ``PersistedYoutubeRow`` before we touch its
+    fields. Malformed JSONB (drifted shape, schema change, manual
+    insert) raises ``msgspec.ValidationError`` at this seam rather
+    than silently producing a ``SyntheticItem`` with garbage values.
+
+    The ``album`` field on each ``SyntheticItem`` is rehydrated from
+    the row-level ``album_title`` field — older cached rows
+    (pre-album_title) fall back to an empty string. New writes
+    always include it.
+    """
     out: list[ResolvedYoutubeRelease] = []
-    for row in rows:
-        tracks_raw = row.get("yt_tracks") or []
+    for raw_row in rows:
+        # ``msgspec.convert`` validates the JSONB shape; bare dicts /
+        # decoded JSON are accepted, ``DictRow`` rows from psycopg2 are
+        # also accepted via ``dict(row)`` upstream.
+        row = msgspec.convert(raw_row, type=PersistedYoutubeRow)
+        album_title = row.album_title or ""
+        total_local = len(row.yt_tracks)
         synth_tracks: list[SyntheticItem] = []
-        total_local = len(tracks_raw)
-        for t in tracks_raw:
-            if not isinstance(t, dict):
-                continue
-            artists = t.get("artists") or []
+        for t in row.yt_tracks:
+            artists = t.artists or []
             primary_artist = (
                 str(artists[0].get("name") or "")
                 if artists and isinstance(artists[0], dict)
                 else ""
             )
             synth_tracks.append(SyntheticItem(
-                title=str(t.get("title") or ""),
+                title=t.title or "",
                 artist=primary_artist,
-                album="",  # not persisted per-track; recoverable from row
+                album=album_title,
                 albumartist=primary_artist,
-                track=int(t.get("track_number") or 0),
+                track=t.track_number or 0,
                 tracktotal=total_local,
-                disc=int(t.get("disc_number") or 1),
+                disc=t.disc_number or 1,
                 disctotal=1,
-                length=float(t.get("length_seconds") or 0.0),
+                length=t.length_seconds or 0.0,
             ))
 
-        distances_raw = row.get("distances") or []
         distances: list[ResolvedDistance] = []
-        for d in distances_raw:
-            if not isinstance(d, dict):
-                continue
+        for d in row.distances:
             distances.append(ResolvedDistance(
-                mbid=str(d.get("mbid") or ""),
-                outcome=str(d.get("outcome") or ""),
-                distance=d.get("distance"),
-                components=d.get("components"),
-                matched_tracks=d.get("matched_tracks"),
-                total_local_tracks=d.get("total_local_tracks"),
-                total_mb_tracks=d.get("total_mb_tracks"),
-                extra_local_tracks=d.get("extra_local_tracks"),
-                extra_mb_tracks=d.get("extra_mb_tracks"),
-                error_message=d.get("error_message"),
+                mbid=d.mbid or "",
+                outcome=d.outcome or "",
+                distance=d.distance,
+                components=d.components,
+                matched_tracks=d.matched_tracks,
+                total_local_tracks=d.total_local_tracks,
+                total_mb_tracks=d.total_mb_tracks,
+                extra_local_tracks=d.extra_local_tracks,
+                extra_mb_tracks=d.extra_mb_tracks,
+                error_message=d.error_message,
             ))
 
         out.append(ResolvedYoutubeRelease(
-            yt_browse_id=str(row.get("yt_browse_id") or ""),
-            yt_audio_playlist_id=row.get("yt_audio_playlist_id"),
-            yt_url=str(row.get("yt_url") or ""),
-            year=row.get("yt_year"),
-            track_count=int(row.get("yt_track_count") or 0),
+            yt_browse_id=row.yt_browse_id or "",
+            yt_audio_playlist_id=row.yt_audio_playlist_id,
+            yt_url=row.yt_url or "",
+            year=row.yt_year,
+            track_count=row.yt_track_count or 0,
             tracks=synth_tracks,
             distances=distances,
         ))

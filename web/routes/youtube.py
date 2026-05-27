@@ -47,6 +47,7 @@ __all__ = [
     "GET_DESCRIPTIONS",
     "POST_DESCRIPTIONS",
     "PATTERN_DESCRIPTIONS",
+    "POST_PATTERN_DESCRIPTIONS",
     "OUTCOME_HTTP_STATUS",
     "get_youtube_album",
 ]
@@ -54,7 +55,12 @@ __all__ = [
 
 class _RedisYoutubeCache:
     """Adapt ``web/cache.py``'s Redis client to the
-    ``BeetsDistanceCache`` protocol, keyed under ``youtube:album:<key>``.
+    ``BeetsDistanceCache`` protocol.
+
+    The service-side keys already carry the ``youtube:album:`` /
+    ``youtube:search:`` namespace; this adapter does NOT prefix them
+    again (review finding #17 — the old ``_NAMESPACE`` wrapper produced
+    ``youtube:album:youtube:album:<browse_id>`` keys).
 
     Mirrors ``_RedisFingerprintCache`` in ``web/routes/pipeline.py``
     (and ``scripts/pipeline_cli.py::_RedisYoutubeCache`` on the CLI
@@ -63,8 +69,6 @@ class _RedisYoutubeCache:
     work without the in-process accelerator.
     """
 
-    _NAMESPACE = "youtube:album:"
-
     def __init__(self) -> None:
         try:
             from web import cache as _cache_mod
@@ -72,14 +76,11 @@ class _RedisYoutubeCache:
         except Exception:
             self._redis = None
 
-    def _ns(self, key: str) -> str:
-        return f"{self._NAMESPACE}{key}"
-
     def get(self, key: str):
         if self._redis is None:
             return None
         try:
-            raw = self._redis.get(self._ns(key))  # type: ignore[union-attr]
+            raw = self._redis.get(key)  # type: ignore[union-attr]
         except Exception:
             return None
         if raw is None:
@@ -95,7 +96,7 @@ class _RedisYoutubeCache:
             return
         try:
             self._redis.setex(  # type: ignore[union-attr]
-                self._ns(key), ttl_seconds, value)
+                key, ttl_seconds, value)
         except Exception:
             pass
 
@@ -109,7 +110,11 @@ def _build_youtube_client():
     pay for unused HTTP machinery. Mirrors
     ``scripts/pipeline_cli.py::_build_youtube_client``.
 
-    The session binds a default ``(connect, read)`` timeout of
+    Returns a ``(yt_client, session)`` tuple so the caller can close
+    the session in a ``finally`` block — without that, every YT route
+    invocation leaks a TCP connection pool (finding #18).
+
+    The session also binds a default ``(connect, read)`` timeout of
     ``(5, 30)`` so unresponsive YT endpoints can't pin a worker
     forever (finding #4). ``requests`` exposes no Session-level
     timeout config; ``functools.partial`` on ``session.request`` is
@@ -143,7 +148,7 @@ def _build_youtube_client():
     # still override this default.
     session.request = partial(  # type: ignore[method-assign]
         session.request, timeout=(5, 30))
-    return YTMusic(requests_session=session, language="en")
+    return YTMusic(requests_session=session, language="en"), session
 
 
 def _server():
@@ -179,7 +184,7 @@ def get_youtube_album(h, params: dict[str, list[str]]) -> None:
       * 200 — ``ok``
       * 400 — missing / empty ``identifier`` query parameter
       * 404 — ``not_found``
-      * 422 — ``mb_no_release_group``
+      * 422 — ``no_release_group``
       * 503 — ``unresolved_4xx_client`` / ``unresolved_mirror_unavailable``
               / ``unresolved_timeout`` / ``youtube_parse_failed`` /
               ``transient``
@@ -198,7 +203,7 @@ def get_youtube_album(h, params: dict[str, list[str]]) -> None:
 
     refresh = _parse_bool(params.get("refresh", [None])[0])
 
-    yt = _build_youtube_client()
+    yt, session = _build_youtube_client()
     cache = _RedisYoutubeCache()
 
     # Lazy-import compute_beets_distance to mirror the CLI's lazy
@@ -207,20 +212,30 @@ def get_youtube_album(h, params: dict[str, list[str]]) -> None:
     from lib.beets_distance import compute_beets_distance
 
     s = _server()
-    result = resolve_youtube_album(
-        identifier,
-        pdb=s._db(),
-        mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
-        mb_get_release_group_releases=mb_api.get_release_group_releases,
-        discogs_get_release=lambda d: discogs_api.get_release(
-            int(d), fresh=False),
-        discogs_get_master_releases=lambda m: discogs_api.get_master_releases(
-            int(m)),
-        yt_client=yt,
-        distance_fn=compute_beets_distance,
-        cache=cache,
-        refresh=refresh,
-    )
+    try:
+        result = resolve_youtube_album(
+            identifier,
+            pdb=s._db(),
+            mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
+            mb_get_release_group_releases=mb_api.get_release_group_releases,
+            discogs_get_release=lambda d: discogs_api.get_release(
+                int(d), fresh=False),
+            discogs_get_master_releases=lambda m: discogs_api.get_master_releases(
+                int(m)),
+            yt_client=yt,
+            distance_fn=compute_beets_distance,
+            cache=cache,
+            refresh=refresh,
+        )
+    finally:
+        # Close the requests.Session to release its connection pool.
+        # Without this, every YT route invocation leaks a pool (finding
+        # #18). ``Session.close`` is idempotent and safe to call after
+        # ``YTMusic`` is done with the session.
+        try:
+            session.close()
+        except Exception:
+            pass
 
     status = OUTCOME_HTTP_STATUS.get(result.outcome, 500)
     payload = msgspec.to_builtins(result)
@@ -252,5 +267,10 @@ GET_DESCRIPTIONS: dict[str, str] = {
 }
 
 POST_DESCRIPTIONS: dict[str, str] = {}
+
+# POST routes register no pattern-based handlers, but server.py merges
+# this list into ``_FUNC_POST_PATTERN_DESCRIPTIONS`` so the description
+# table stays symmetric with the dispatch table (finding #21).
+POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
 
 PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []

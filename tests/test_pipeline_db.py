@@ -7212,7 +7212,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
                  "artists": [{"name": "Artist"}]},
             ],
             "distances": [
-                {"mb_release_id": "mb-1", "distance": 0.05, "error": None},
+                {"mbid": "mb-1", "distance": 0.05, "error": None},
             ],
         }
         row.update(overrides)
@@ -7269,8 +7269,11 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         # JSONB columns deserialize back into native Python lists/dicts.
         self.assertEqual(
             got[0]["yt_tracks"][0]["title"], "Track 1")
+        # Per ce-code-review finding #25 the field is ``mbid``, not
+        # ``mb_release_id`` — aligns with the service-side
+        # ``ResolvedDistance.mbid`` wire contract.
         self.assertEqual(
-            got[0]["distances"][0]["mb_release_id"], "mb-1")
+            got[0]["distances"][0]["mbid"], "mb-1")
 
     def test_get_orders_rows_by_yt_browse_id(self):
         self.db.upsert_youtube_album_mapping("rg-1", "mb", [
