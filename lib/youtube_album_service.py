@@ -237,7 +237,6 @@ def _jitter(
 OUTCOME_HTTP_STATUS: dict[str, int] = {
     "ok": 200,
     "not_found": 404,
-    "no_release_group": 422,
     "unresolved_4xx_client": 503,
     "unresolved_mirror_unavailable": 503,
     "unresolved_timeout": 503,
@@ -255,16 +254,16 @@ two dicts in sync. Per-pair outcomes (``ok``, ``wrong_release_group``,
 through from ``compute_beets_distance`` verbatim inside
 ``ResolvedDistance.outcome`` — they are NOT service-level outcomes.
 
-``no_release_group`` (renamed from ``mb_no_release_group``) covers
-both the MB leaf-with-no-release-group case AND the Discogs
-leaf-with-no-master case (R12 / U2). The MB-specific name was
-misleading because the Discogs path was also using it."""
+Orphan releases (Discogs releases with no master, legacy MB releases
+with no release group) used to surface as ``no_release_group``; they
+now resolve as one-element matrices via ``_GroupResolution.is_orphan``
+— see #384. The ``no_release_group`` outcome is no longer emitted at
+the service level."""
 
 
 OUTCOME_EXIT_CODE: dict[str, int] = {
     "ok": 0,
     "not_found": 2,
-    "no_release_group": 3,
     "unresolved_4xx_client": 5,
     "unresolved_mirror_unavailable": 5,
     "unresolved_timeout": 5,
@@ -547,6 +546,12 @@ def resolve_youtube_album(
         )
     rg_id = widen.rg_id
     sibling_summaries = widen.sibling_summaries
+    # For orphan releases (no MB release-group / no Discogs master), the
+    # per-pair distance call passes ``mb_release_group_id=None`` so
+    # ``compute_beets_distance`` skips its cross-RG guardrail — there's
+    # nothing to compare against. ``rg_id`` still keys the persistence
+    # cache (using the leaf's own identifier).
+    distance_rg_id: Optional[str] = None if widen.is_orphan else rg_id
 
     # Step 3: cache-first read.
     #
@@ -744,7 +749,7 @@ def resolve_youtube_album(
             # matrix doesn't carry a row with no data to compare against.
             continue
         distances = _score_against_siblings(
-            synth_items, sibling_ids, rg_id, distance_fn, pdb,
+            synth_items, sibling_ids, distance_rg_id, distance_fn, pdb,
             mb_get_release if source_label == "mb" else discogs_get_release,
             deadline_breached=_deadline_breached,
         )
@@ -879,11 +884,20 @@ class _GroupResolution(msgspec.Struct, kw_only=True):
     failure). Two-way overloads on container shape are a smell — this
     Struct names each axis explicitly so the caller can branch on
     ``failure_outcome`` instead of reverse-engineering the list.
+
+    ``is_orphan=True`` flags the leaf-has-no-rg case (Discogs release
+    with no master, legacy MB release without a release group). The
+    resolver treats the leaf as its own pseudo-sibling — ``rg_id``
+    carries the leaf's own identifier, ``sibling_summaries`` has one
+    entry pointing back at it, and the per-pair distance call passes
+    ``mb_release_group_id=None`` so ``compute_beets_distance``'s
+    cross-RG guardrail is skipped.
     """
 
     rg_id: Optional[str] = None
     sibling_summaries: list[Any] = msgspec.field(default_factory=list)
     failure_outcome: Optional[str] = None
+    is_orphan: bool = False
 
 
 def _safe_leaf_lookup(
@@ -957,7 +971,15 @@ def _resolve_mb_group(
     if leaf:
         rg_id = leaf.get("release_group_id")
         if not rg_id:
-            return _GroupResolution(failure_outcome="no_release_group")
+            # Orphan release: legacy MB row without a release group. Treat
+            # the leaf as its own one-element matrix — sibling enumeration
+            # isn't possible, but YT search + N×1 scoring still is. See
+            # ``_GroupResolution`` docstring.
+            return _GroupResolution(
+                rg_id=identifier,
+                sibling_summaries=[{"id": identifier}],
+                is_orphan=True,
+            )
         group = _safe_group_lookup(mb_get_release_group_releases, rg_id)
         if not group:
             return _GroupResolution(failure_outcome="not_found")
@@ -983,17 +1005,24 @@ def _resolve_discogs_group(
 ) -> _GroupResolution:
     """Resolve a Discogs identifier to a typed group result.
 
-    Same shape as ``_resolve_mb_group``. The Discogs leaf-failure outcome
-    is ``"no_release_group"`` since Discogs has no concept of release
-    groups — the analogous concept is a master, but the failure
-    semantically means "the upstream release doesn't point at a
-    group / master we can widen to".
+    Same shape as ``_resolve_mb_group``. Orphan Discogs releases (no
+    master record — small labels routinely skip the master step) are
+    handled the same way: the leaf becomes its own one-element matrix
+    via ``is_orphan=True``. The long-tail archival case these were
+    built for explicitly includes orphan pressings.
     """
     leaf = _safe_leaf_lookup(discogs_get_release, identifier)
     if leaf:
         master_id = leaf.get("release_group_id")
         if not master_id:
-            return _GroupResolution(failure_outcome="no_release_group")
+            # Orphan Discogs release: no master record. Score against the
+            # leaf alone — sibling enumeration via the master is not
+            # possible, but YT search + N×1 distance is.
+            return _GroupResolution(
+                rg_id=identifier,
+                sibling_summaries=[{"id": identifier}],
+                is_orphan=True,
+            )
         group = _safe_group_lookup(discogs_get_master_releases, master_id)
         if not group:
             return _GroupResolution(failure_outcome="not_found")
@@ -1269,7 +1298,7 @@ def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
 def _score_against_siblings(
     synth_items: list[SyntheticItem],
     sibling_mbids: list[str],
-    rg_id: str,
+    mb_release_group_id: Optional[str],
     distance_fn: DistanceFn,
     pdb: Any,
     mb_fetcher: Callable[[str], Optional[dict]],
@@ -1277,11 +1306,13 @@ def _score_against_siblings(
 ) -> list[ResolvedDistance]:
     """Run ``distance_fn`` for every sibling MBID and collect typed results.
 
-    Each call passes ``items_override=synth`` and ``mb_release_group_id=rg``
-    so the cross-RG guardrail fires in the override path (R17 / U2
-    contract). Per-pair failures are preserved as the entry's outcome
-    rather than aborting the matrix — including ``mb_lookup_failed`` for
-    siblings the local mirror doesn't carry.
+    Each call passes ``items_override=synth`` and the caller-supplied
+    ``mb_release_group_id`` so the cross-RG guardrail fires in the
+    override path (R17 / U2 contract). ``None`` is passed for orphan
+    releases — the guardrail is skipped and the single-element matrix
+    flows through. Per-pair failures are preserved as the entry's
+    outcome rather than aborting the matrix — including
+    ``mb_lookup_failed`` for siblings the local mirror doesn't carry.
 
     Round 2 P1-3: an optional ``deadline_breached`` callback breaks the
     scoring loop early when the resolver's soft deadline is exhausted,
@@ -1305,7 +1336,7 @@ def _score_against_siblings(
             r = distance_fn(
                 mbid=mbid,
                 items_override=synth_items,
-                mb_release_group_id=rg_id,
+                mb_release_group_id=mb_release_group_id,
                 pdb=pdb,
                 mb_get_release=mb_fetcher,
                 cache=None,

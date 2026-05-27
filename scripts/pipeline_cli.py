@@ -2182,7 +2182,6 @@ def cmd_youtube_album(db, args):
     Exit codes (from ``lib.youtube_album_service.OUTCOME_EXIT_CODE``):
       * 0 — ``ok``
       * 2 — ``not_found``
-      * 3 — ``no_release_group``
       * 5 — ``unresolved_4xx_client`` / ``unresolved_mirror_unavailable``
             / ``unresolved_timeout`` / ``youtube_parse_failed`` /
             ``transient``

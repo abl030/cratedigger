@@ -411,9 +411,15 @@ def compute_beets_distance(
       1. (Replace mode) download_log row must exist;
       2. (Replace mode) request row for that log must exist;
       3. MB release for ``mbid`` must be fetchable;
-      4. MB release must belong to a release group;
+      4. (only when the caller's RG is set) MB release must belong to a
+         release group — a no-RG candidate can't satisfy step 5 anyway,
+         so step 4 is the early-exit. When the caller has no RG to
+         compare against (Replace-mode legacy row, or Override-mode
+         orphan scoring), step 4 is skipped and the no-RG candidate
+         flows through;
       5. that release group MUST equal the caller-known RG (request's
          in Replace mode, ``mb_release_group_id`` in Override mode).
+         Skipped when the caller's RG is None.
 
     Only after all five does the function touch the filesystem (and only
     in Replace mode).
@@ -519,8 +525,12 @@ def compute_beets_distance(
         )
     candidate_rg = mb_release.get("release_group_id")
 
-    # 4. MB release must have a release group (legacy / non-MB rows fail here).
-    if not candidate_rg:
+    # 4. MB release must have a release group — but only when the caller
+    # has an RG to compare against. With no caller RG, step 5 is skipped
+    # too, so the no-RG candidate is the caller's responsibility (used
+    # by the YouTube resolver to score orphan releases — Discogs releases
+    # with no master, or legacy MB releases without a release-group).
+    if request_rg and not candidate_rg:
         return _result(
             "mb_no_release_group",
             error=f"MB release {mbid} has no release_group_id",

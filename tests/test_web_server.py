@@ -10235,17 +10235,6 @@ class TestYoutubeRouteContracts(_WebServerCase):
         self.assertEqual(status, 404)
         self.assertEqual(data["outcome"], "not_found")
 
-    def test_no_release_group_returns_422(self):
-        # Service outcome renamed from ``mb_no_release_group`` to
-        # ``no_release_group`` per ce-code-review finding #12 — the old
-        # name was MB-specific but the Discogs path also produced it.
-        with self._patch_service(self._bare_result(
-                "no_release_group",
-                error_message="MB release has no release_group_id")):
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
-        self.assertEqual(status, 422)
-
     def test_unresolved_4xx_client_returns_503(self):
         with self._patch_service(self._bare_result(
                 "unresolved_4xx_client",

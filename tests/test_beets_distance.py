@@ -711,7 +711,12 @@ class TestComputeBeetsDistanceWithItemsOverride(unittest.TestCase):
         self.assertIsNone(r.folder_path)
 
     def test_mb_no_release_group_in_override_path(self) -> None:
-        """MB release lacks release_group_id → mb_no_release_group, no IO."""
+        """MB release lacks release_group_id → mb_no_release_group, no IO.
+
+        Step 4 still fires when the caller supplies an RG to compare
+        against — the candidate without an RG would fail step 5
+        anyway, and step 4 gives the more specific error.
+        """
         mb = _ok_mb_release(mbid="rel-x")
         mb["release_group_id"] = None
         items = _synth_items(["A", "B"])
@@ -725,6 +730,31 @@ class TestComputeBeetsDistanceWithItemsOverride(unittest.TestCase):
         self.assertEqual(r.outcome, "mb_no_release_group")
         self.assertIsNone(r.distance)
         self.assertIsNone(r.folder_path)
+
+    def test_orphan_candidate_succeeds_when_caller_rg_is_null(self) -> None:
+        """Issue #384: candidate has no release_group_id AND caller passes
+        ``mb_release_group_id=None`` → distance is computed.
+
+        Step 4's hard-fail is narrowed: with no caller-supplied RG, the
+        cross-RG guardrail (step 5) would skip anyway, so step 4 has
+        nothing to early-exit on. This is the path the YouTube resolver
+        uses for orphan releases (Discogs releases with no master,
+        legacy MB releases without a release group).
+        """
+        mb = _ok_mb_release(mbid="rel-orphan")
+        mb["release_group_id"] = None  # orphan release
+        items = _synth_items(["Intro", "3000"])
+        r = compute_beets_distance(
+            mbid="rel-orphan",
+            items_override=items,
+            mb_release_group_id=None,  # opt out — orphan scoring contract
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: mb,
+        )
+        self.assertEqual(r.outcome, "ok", msg=r.error_message)
+        self.assertIsNotNone(r.distance)
+        self.assertIsNone(r.candidate_release_group_id)
+        self.assertIsNone(r.request_release_group_id)
 
     # ---------- Empty items list ---------- #
 

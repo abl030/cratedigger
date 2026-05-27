@@ -266,7 +266,6 @@ class TestServiceOutcomeContract(unittest.TestCase):
     EXPECTED_OUTCOMES = {
         "ok",
         "not_found",
-        "no_release_group",
         "unresolved_4xx_client",
         "unresolved_mirror_unavailable",
         "unresolved_timeout",
@@ -290,7 +289,6 @@ class TestServiceOutcomeContract(unittest.TestCase):
         # HTTP status mapping — fixed at the route boundary.
         self.assertEqual(OUTCOME_HTTP_STATUS["ok"], 200)
         self.assertEqual(OUTCOME_HTTP_STATUS["not_found"], 404)
-        self.assertEqual(OUTCOME_HTTP_STATUS["no_release_group"], 422)
         self.assertEqual(OUTCOME_HTTP_STATUS["unresolved_4xx_client"], 503)
         self.assertEqual(OUTCOME_HTTP_STATUS["unresolved_mirror_unavailable"], 503)
         self.assertEqual(OUTCOME_HTTP_STATUS["unresolved_timeout"], 503)
@@ -299,7 +297,6 @@ class TestServiceOutcomeContract(unittest.TestCase):
         # Exit code mapping — fixed at the CLI boundary.
         self.assertEqual(OUTCOME_EXIT_CODE["ok"], 0)
         self.assertEqual(OUTCOME_EXIT_CODE["not_found"], 2)
-        self.assertEqual(OUTCOME_EXIT_CODE["no_release_group"], 3)
         self.assertEqual(OUTCOME_EXIT_CODE["unresolved_4xx_client"], 5)
         self.assertEqual(OUTCOME_EXIT_CODE["unresolved_mirror_unavailable"], 5)
         self.assertEqual(OUTCOME_EXIT_CODE["unresolved_timeout"], 5)
@@ -886,7 +883,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Empty / not-found / no_release_group
+# Empty / not-found / orphan-release matrix
 # ---------------------------------------------------------------------------
 
 
@@ -915,20 +912,76 @@ class TestEmptyAndNotFound(unittest.TestCase):
         self.assertEqual(result.outcome, "ok")
         self.assertEqual(result.youtube_releases, [])
 
-    def test_no_release_group_at_input(self) -> None:
-        """Leaf returns a release but it has no release_group_id."""
+
+class TestOrphanReleaseResolvesAsOneElementMatrix(unittest.TestCase):
+    """Issue #384: orphan releases (no MB release-group / no Discogs master).
+
+    These were previously short-circuiting on ``no_release_group`` and
+    emitting no YT search. Now the leaf is treated as its own
+    one-element pseudo-sibling: YT search uses ``artist + title`` from
+    the leaf, scoring runs as N×1, and the cache key is the leaf's own
+    identifier. The ``no_release_group`` outcome is no longer emitted
+    at service level.
+    """
+
+    def test_mb_orphan_release_resolves_via_leaf_as_pseudo_sibling(self) -> None:
+        """MB release with ``release_group_id=None`` → YT search runs."""
         mbid = MB_NO_RG
-        mb_leaf = _LookupSpy({
-            mbid: {
-                "id": mbid,
-                "title": "Whatever",
-                "artist_name": "X",
-                "artist_id": None,
-                "release_group_id": None,
-                "year": None,
-                "tracks": [],
-            },
-        })
+        orphan_leaf = {
+            "id": mbid,
+            "title": "Orphan EP",
+            "artist_name": "Long Tail Band",
+            "artist_id": None,
+            "release_group_id": None,
+            "year": 1998,
+            "tracks": [
+                {"disc_number": 1, "track_number": 1,
+                 "title": "Side A", "length_seconds": 180.0},
+                {"disc_number": 1, "track_number": 2,
+                 "title": "Side B", "length_seconds": 200.0},
+            ],
+        }
+        mb_leaf = _LookupSpy({mbid: orphan_leaf})
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Long Tail Band Orphan EP",
+            [_yt_search_album_result("MPREb-orphan", year="1998",
+                                     track_count=2)],
+        )
+        yt.set_album(
+            "MPREb-orphan",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-orphan",
+                title="Orphan EP",
+                artists=[{"name": "Long Tail Band", "id": "UCy"}],
+                year="1998",
+                tracks=_yt_tracks(["Side A", "Side B"]),
+            ),
+        )
+
+        # Capture the mb_release_group_id distance_fn receives — must be
+        # None so compute_beets_distance skips its cross-RG guardrail
+        # for the orphan candidate.
+        seen_rgs: list[Any] = []
+
+        def _spy_distance(*, mbid: str, mb_release_group_id: Any,
+                          **_: Any) -> BeetsDistanceResult:
+            seen_rgs.append(mb_release_group_id)
+            return BeetsDistanceResult(
+                outcome="ok",
+                distance=0.08,
+                matched_tracks=2,
+                total_local_tracks=2,
+                total_mb_tracks=2,
+                extra_local_tracks=0,
+                extra_mb_tracks=0,
+                components={"tracks": 0.04, "album": 0.04},
+                candidate_mbid=mbid,
+                candidate_release_group_id=None,
+                request_release_group_id=None,
+            )
+
         result = resolve_youtube_album(
             mbid,
             pdb=FakePipelineDB(),
@@ -936,11 +989,106 @@ class TestEmptyAndNotFound(unittest.TestCase):
             mb_get_release_group_releases=_empty_lookup(),
             discogs_get_release=_empty_lookup(),
             discogs_get_master_releases=_empty_lookup(),
-            yt_client=FakeYTMusic(),
-            distance_fn=_canned_distance(),
+            yt_client=yt,
+            distance_fn=_spy_distance,
             cache=None,
         )
-        self.assertEqual(result.outcome, "no_release_group")
+        self.assertEqual(result.outcome, "ok",
+                         msg=f"orphan should resolve to ok, got "
+                             f"{result.outcome}: {result.error_message}")
+        self.assertEqual(result.source, "mb")
+        self.assertEqual(result.release_group_identifier, mbid,
+                         msg="orphan rg_id should be the leaf's own MBID")
+        self.assertEqual(len(result.youtube_releases), 1)
+        yt_rel = result.youtube_releases[0]
+        self.assertEqual(yt_rel.yt_browse_id, "MPREb-orphan")
+        # One distance entry, scored against the leaf MBID.
+        self.assertEqual(len(yt_rel.distances), 1)
+        self.assertEqual(yt_rel.distances[0].mbid, mbid)
+        self.assertEqual(yt_rel.distances[0].outcome, "ok")
+        # The cross-RG guardrail was opted out of — distance_fn saw None.
+        self.assertEqual(seen_rgs, [None])
+
+    def test_discogs_orphan_release_resolves_via_leaf_as_pseudo_sibling(self) -> None:
+        """Discogs release with ``master_id=None`` (no master record).
+
+        This is the actual operator-encountered failure case from #384
+        (Gelbison Discogs releases 3928913 and 14564055).
+        """
+        discogs_id = "3928913"
+        orphan_leaf = {
+            "id": discogs_id,
+            "title": "Metal Detector",
+            "artist_name": "Gelbison",
+            "artist_id": None,
+            "release_group_id": None,  # no master
+            "year": 2003,
+            "tracks": [
+                {"disc_number": 1, "track_number": 1,
+                 "title": "Track 1", "length_seconds": 200.0},
+            ],
+        }
+        discogs_leaf = _LookupSpy({discogs_id: orphan_leaf})
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Gelbison Metal Detector",
+            [_yt_search_album_result("MPREb-gelb", year="2003",
+                                     track_count=1)],
+        )
+        yt.set_album(
+            "MPREb-gelb",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-gelb",
+                title="Metal Detector",
+                artists=[{"name": "Gelbison", "id": "UCz"}],
+                year="2003",
+                tracks=_yt_tracks(["Track 1"]),
+            ),
+        )
+
+        seen_rgs: list[Any] = []
+
+        def _spy_distance(*, mbid: str, mb_release_group_id: Any,
+                          **_: Any) -> BeetsDistanceResult:
+            seen_rgs.append(mb_release_group_id)
+            return BeetsDistanceResult(
+                outcome="ok",
+                distance=0.05,
+                matched_tracks=1,
+                total_local_tracks=1,
+                total_mb_tracks=1,
+                extra_local_tracks=0,
+                extra_mb_tracks=0,
+                components={"tracks": 0.02, "album": 0.03},
+                candidate_mbid=mbid,
+                candidate_release_group_id=None,
+                request_release_group_id=None,
+            )
+
+        result = resolve_youtube_album(
+            discogs_id,
+            pdb=FakePipelineDB(),
+            mb_get_release=_empty_lookup(),
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=discogs_leaf,
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_spy_distance,
+            cache=None,
+        )
+        self.assertEqual(result.outcome, "ok",
+                         msg=f"discogs orphan should resolve to ok, got "
+                             f"{result.outcome}: {result.error_message}")
+        self.assertEqual(result.source, "discogs")
+        self.assertEqual(result.release_group_identifier, discogs_id,
+                         msg="orphan rg_id should be the leaf's own release ID")
+        self.assertEqual(len(result.youtube_releases), 1)
+        # One distance entry pointing back at the leaf release ID.
+        yt_rel = result.youtube_releases[0]
+        self.assertEqual(len(yt_rel.distances), 1)
+        self.assertEqual(yt_rel.distances[0].mbid, discogs_id)
+        self.assertEqual(seen_rgs, [None])
 
 
 # ---------------------------------------------------------------------------

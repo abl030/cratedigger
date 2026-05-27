@@ -184,7 +184,6 @@ def get_youtube_album(h, params: dict[str, list[str]]) -> None:
       * 200 — ``ok``
       * 400 — missing / empty ``identifier`` query parameter
       * 404 — ``not_found``
-      * 422 — ``no_release_group``
       * 503 — ``unresolved_4xx_client`` / ``unresolved_mirror_unavailable``
               / ``unresolved_timeout`` / ``youtube_parse_failed`` /
               ``transient``

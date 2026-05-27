@@ -2825,13 +2825,6 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         rc, _, _ = self._run(outcome="not_found")
         self.assertEqual(rc, 2)
 
-    def test_exit_3_on_no_release_group(self):
-        # Service outcome renamed (finding #12) — used to be
-        # ``mb_no_release_group`` but the Discogs path produced it too,
-        # which was misleading.
-        rc, _, _ = self._run(outcome="no_release_group")
-        self.assertEqual(rc, 3)
-
     def test_exit_5_on_unresolved_4xx_client_mentions_throttle(self):
         result = self._make_result(
             outcome="unresolved_4xx_client",
