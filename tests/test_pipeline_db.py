@@ -7206,6 +7206,10 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_abc",
             "yt_year": 2020,
             "yt_track_count": 10,
+            # Album-level facts the service writes alongside the row
+            # (migration 036). Round 2 P0-1 + maintainability-5.
+            "album_title": "Test Album",
+            "album_artist": "Test Album Artist",
             "yt_tracks": [
                 {"title": "Track 1", "video_id": "v1",
                  "length_seconds": 200, "track_number": 1, "disc_number": 1,
@@ -7274,6 +7278,37 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         # ``ResolvedDistance.mbid`` wire contract.
         self.assertEqual(
             got[0]["distances"][0]["mbid"], "mb-1")
+
+    def test_upsert_round_trip_preserves_every_field(self):
+        """Rule A (``.claude/rules/test-fidelity.md``): every key in the
+        input dict must round-trip through real PostgreSQL.
+
+        Round 2 P0-1: ``album_title`` (and now ``album_artist``) were
+        silently dropped because the INSERT column list didn't include
+        them and ``psycopg2.extras.execute_values`` ignores extra dict
+        keys. The Fake-based test stored the dict verbatim and never
+        flagged the divergence. This test does — if a future field
+        drifts between the row dict and the INSERT column list, the
+        for-loop below fails naming the offending key.
+        """
+        rows_in = [self._row(
+            yt_browse_id="MPREb_roundtrip",
+            yt_audio_playlist_id="OLAK5uy_roundtrip",
+            yt_url="https://music.youtube.com/playlist?list=OLAK5uy_roundtrip",
+            yt_year=1996,
+            yt_track_count=12,
+            album_title="The Roundtrip Sessions",
+            album_artist="Various Artists",
+        )]
+        self.db.upsert_youtube_album_mapping("rg-rt", "mb", rows_in)
+        rows_out = self.db.get_youtube_album_mapping("rg-rt", "mb")
+        assert rows_out is not None
+        self.assertEqual(len(rows_out), 1)
+        for key in rows_in[0]:
+            self.assertEqual(
+                rows_out[0].get(key), rows_in[0][key],
+                msg=f"field {key} was dropped at the PG boundary",
+            )
 
     def test_get_orders_rows_by_yt_browse_id(self):
         self.db.upsert_youtube_album_mapping("rg-1", "mb", [

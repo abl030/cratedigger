@@ -6906,10 +6906,12 @@ class PipelineDB:
     ) -> Optional[list[dict[str, Any]]]:
         """Return all cached rows for the ``(release_group_identifier, source)`` pair.
 
-        Ordered by ``yt_browse_id`` ASC for deterministic output (the
-        underlying UNIQUE index already covers the prefix). JSONB
-        columns are deserialised by psycopg2 into native Python
-        ``list`` / ``dict``.
+        Reads from two tables: the main ``youtube_album_mappings``
+        (row per YT sibling) and the ``youtube_album_empty_resolutions``
+        marker (one row per ``(rg, source)`` pair whose YT search
+        returned zero albums). JSONB columns are deserialised by
+        psycopg2 into native Python ``list`` / ``dict``; outer rows
+        are ordered by ``yt_browse_id`` ASC for deterministic output.
 
         Returns ``None`` when the pair has never been resolved, and an
         empty list when it has been resolved to an empty matrix (AE2 —
@@ -6921,19 +6923,16 @@ class PipelineDB:
         and re-polled YT on every resolve for empty-search release
         groups, defeating R14.
 
-        The presence check uses a single SELECT — there's no second
-        round trip to ``schema_migrations`` or a separate "exists"
-        marker. We rely on the row's natural-key uniqueness: a write
-        of ``rows=[]`` inserts a sentinel zero-row deletion (DELETE +
-        empty INSERT) that leaves no rows but DOES create the
-        ``(rg, source)`` association in a separate
-        ``youtube_album_empty_resolutions`` marker (see
-        ``upsert_youtube_album_mapping``).
+        Implementation: if ``youtube_album_mappings`` has any rows, we
+        return them. Otherwise we probe the marker table — a row there
+        means "resolved-to-empty" (return ``[]``); absence means "never
+        resolved" (return ``None``).
         """
         cur = self._execute(
             """
             SELECT id, release_group_identifier, source, yt_browse_id,
                    yt_audio_playlist_id, yt_url, yt_year, yt_track_count,
+                   album_title, album_artist,
                    yt_tracks, distances, resolved_at
             FROM youtube_album_mappings
             WHERE release_group_identifier = %s AND source = %s
@@ -7004,7 +7003,8 @@ class PipelineDB:
                         INSERT INTO youtube_album_mappings
                             (release_group_identifier, source, yt_browse_id,
                              yt_audio_playlist_id, yt_url, yt_year,
-                             yt_track_count, yt_tracks, distances)
+                             yt_track_count, album_title, album_artist,
+                             yt_tracks, distances)
                         VALUES %s
                         """,
                         [
@@ -7016,6 +7016,8 @@ class PipelineDB:
                                 row["yt_url"],
                                 row.get("yt_year"),
                                 row["yt_track_count"],
+                                row.get("album_title"),
+                                row.get("album_artist"),
                                 psycopg2.extras.Json(row["yt_tracks"]),
                                 psycopg2.extras.Json(row["distances"]),
                             )

@@ -283,6 +283,29 @@ class TestServiceOutcomeContract(unittest.TestCase):
         self.assertEqual(
             set(OUTCOME_HTTP_STATUS), set(OUTCOME_EXIT_CODE))
 
+    def test_outcome_values_pin_the_status_and_exit_code(self) -> None:
+        """Round 2 T-4: also pin the VALUES, not just the key set. A
+        regression that quietly remapped ``unresolved_timeout`` from
+        503 → 500 would slip past the keyset-only assertion."""
+        # HTTP status mapping — fixed at the route boundary.
+        self.assertEqual(OUTCOME_HTTP_STATUS["ok"], 200)
+        self.assertEqual(OUTCOME_HTTP_STATUS["not_found"], 404)
+        self.assertEqual(OUTCOME_HTTP_STATUS["no_release_group"], 422)
+        self.assertEqual(OUTCOME_HTTP_STATUS["unresolved_4xx_client"], 503)
+        self.assertEqual(OUTCOME_HTTP_STATUS["unresolved_mirror_unavailable"], 503)
+        self.assertEqual(OUTCOME_HTTP_STATUS["unresolved_timeout"], 503)
+        self.assertEqual(OUTCOME_HTTP_STATUS["youtube_parse_failed"], 503)
+        self.assertEqual(OUTCOME_HTTP_STATUS["transient"], 503)
+        # Exit code mapping — fixed at the CLI boundary.
+        self.assertEqual(OUTCOME_EXIT_CODE["ok"], 0)
+        self.assertEqual(OUTCOME_EXIT_CODE["not_found"], 2)
+        self.assertEqual(OUTCOME_EXIT_CODE["no_release_group"], 3)
+        self.assertEqual(OUTCOME_EXIT_CODE["unresolved_4xx_client"], 5)
+        self.assertEqual(OUTCOME_EXIT_CODE["unresolved_mirror_unavailable"], 5)
+        self.assertEqual(OUTCOME_EXIT_CODE["unresolved_timeout"], 5)
+        self.assertEqual(OUTCOME_EXIT_CODE["youtube_parse_failed"], 5)
+        self.assertEqual(OUTCOME_EXIT_CODE["transient"], 5)
+
 
 # ---------------------------------------------------------------------------
 # Happy paths
@@ -664,9 +687,15 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         self.assertIn(rg, leaf_calls)
         self.assertEqual(mb_group.calls, [rg])
 
-    def test_mb_group_lookup_raises_url_error_falls_through_to_not_found(self) -> None:
-        """When the group-level fetch raises (mirror down), the auto-widen
-        treats it as a miss and returns not_found rather than 500.
+    def test_mb_group_lookup_raises_url_error_surfaces_mirror_unavailable(self) -> None:
+        """Round 2 P1-1: mirror outage on the group-level fetch must
+        surface as ``unresolved_mirror_unavailable`` — NOT ``not_found``.
+
+        Previously every URLError was swallowed as a "leaf miss," the
+        auto-widen fell through, and the resolver fabricated rg_id from
+        the operator's input. The narrowed contract: only HTTPError(404)
+        is a miss; URLError without a status (transport failure) and
+        5xx HTTPErrors propagate as outages.
         """
         import urllib.error
 
@@ -692,7 +721,86 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
             distance_fn=_canned_distance(),
             cache=None,
         )
-        self.assertEqual(result.outcome, "not_found")
+        self.assertEqual(result.outcome, "unresolved_mirror_unavailable")
+        # The original outage exception text is carried in the error
+        # message so the operator sees what actually went wrong.
+        assert result.error_message is not None
+        self.assertIn("mirror unreachable", result.error_message)
+
+    def test_mb_leaf_raises_5xx_surfaces_mirror_unavailable(self) -> None:
+        """Round 2 P1-1: a 5xx from the leaf must propagate. Previously
+        every HTTPError fell through as "miss"; now only 404 does.
+        """
+        import urllib.error
+
+        rg = MB_RG
+
+        def _raising_500(_identifier: str) -> Optional[dict]:
+            raise urllib.error.HTTPError(
+                "http://mb-mirror/", 503, "Service Unavailable",
+                {}, None,  # type: ignore[arg-type]
+            )
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=_raising_500,
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(result.outcome, "unresolved_mirror_unavailable")
+
+    def test_mb_leaf_raises_timeout_surfaces_unresolved_timeout(self) -> None:
+        """Round 2 P1-1: ``requests.Timeout`` must surface as
+        ``unresolved_timeout`` rather than being swallowed.
+        """
+        import requests as _requests
+
+        rg = MB_RG
+
+        def _raising_timeout(_identifier: str) -> Optional[dict]:
+            raise _requests.Timeout("connect timeout")
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=_raising_timeout,
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(result.outcome, "unresolved_timeout")
+
+    def test_mb_leaf_raises_socket_timeout_surfaces_unresolved_timeout(self) -> None:
+        """Round 2 P1-1: ``socket.timeout`` (transport-level) also maps
+        to ``unresolved_timeout``.
+        """
+        import socket as _socket
+
+        rg = MB_RG
+
+        def _raising(_identifier: str) -> Optional[dict]:
+            raise _socket.timeout("transport timeout")
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=_raising,
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(result.outcome, "unresolved_timeout")
 
     def test_discogs_leaf_raises_value_error_falls_through_cleanly(self) -> None:
         """The Discogs adapter does ``int(d)`` on the identifier; a UUID
@@ -1049,26 +1157,77 @@ class TestSpeculativePreWidenCacheLookup(unittest.TestCase):
         self.assertEqual(
             result.youtube_releases[0].yt_browse_id, "MPREb-cached")
 
-    def test_discogs_master_input_serves_from_cache_without_touching_mirror(self) -> None:
+    def test_discogs_input_skips_speculative_cache_and_auto_widens(self) -> None:
+        """Round 2 P1-2: Discogs release-ids and master-ids share the
+        integer namespace, so the speculative cache must NOT fire for
+        ``source='discogs'`` — otherwise a cached ``master-12345``
+        matrix would be served for an unrelated ``release-12345``.
+
+        The auto-widen runs unconditionally for Discogs; the mirror IS
+        consulted (and the post-widen cache read can still serve from
+        the cache after the rg_id is properly established).
+        """
         master = "12345"
         pdb = self._seeded_pdb(master, "discogs")
+
+        # Mirror responds normally — we WANT auto-widen to run so the
+        # rg_id is established from the mirror, not assumed from input.
+        discogs_leaf = _LookupSpy({master: None})  # not a release
+        discogs_master = _LookupSpy({
+            master: {
+                "title": "Album", "type": "Album",
+                "releases": [{"id": "100", "title": "Album"}],
+            },
+        })
 
         result = resolve_youtube_album(
             master,
             pdb=pdb,
             mb_get_release=_empty_lookup(),
             mb_get_release_group_releases=_empty_lookup(),
-            discogs_get_release=self._exploder,
-            discogs_get_master_releases=self._exploder,
+            discogs_get_release=discogs_leaf,
+            discogs_get_master_releases=discogs_master,
             yt_client=FakeYTMusic(),
             distance_fn=_canned_distance(),
             cache=None,
         )
 
+        # Mirror WAS consulted — the speculative cache did NOT
+        # short-circuit. After auto-widen returns master as the rg_id
+        # the normal cache read can still serve from cache (and does).
+        self.assertGreater(
+            len(discogs_leaf.calls) + len(discogs_master.calls), 0,
+            msg="speculative cache short-circuited Discogs input — "
+                "P1-2 regression",
+        )
         self.assertEqual(result.outcome, "ok")
+        # Cache was hit at the normal post-widen read; matrix served.
         self.assertTrue(result.from_cache)
         self.assertEqual(result.release_group_identifier, master)
         self.assertEqual(result.source, "discogs")
+
+    def test_discogs_input_never_short_circuits_even_with_cache_hit(self) -> None:
+        """Even when the seeded matrix would match the input verbatim,
+        Discogs must NOT speculative-cache because of the release/master
+        integer-namespace collision."""
+        master = "12345"
+        pdb = self._seeded_pdb(master, "discogs")
+
+        # If the speculative cache short-circuits, the exploder would
+        # never be reached — but P1-2 requires auto-widen to run for
+        # Discogs, so the exploder MUST raise.
+        with self.assertRaises(AssertionError):
+            resolve_youtube_album(
+                master,
+                pdb=pdb,
+                mb_get_release=_empty_lookup(),
+                mb_get_release_group_releases=_empty_lookup(),
+                discogs_get_release=self._exploder,
+                discogs_get_master_releases=self._exploder,
+                yt_client=FakeYTMusic(),
+                distance_fn=_canned_distance(),
+                cache=None,
+            )
 
     def test_refresh_true_bypasses_speculative_cache(self) -> None:
         """With refresh=True the speculative cache must NOT short-circuit;
@@ -1077,7 +1236,11 @@ class TestSpeculativePreWidenCacheLookup(unittest.TestCase):
         rg = MB_RG
         pdb = self._seeded_pdb(rg, "mb")
         # Mirror is reachable this time — we WANT it to be called.
-        mb_leaf = _LookupSpy({rg: None})
+        # Round 2 T-8 cleanup: ``combined`` plays both leaf + post-widen
+        # release-fetch roles; there's no separate ``mb_leaf`` spy.
+        # Earlier versions declared one but never wired it through to
+        # ``mb_get_release=``, which gave a false-positive impression
+        # of a 3-prong mirror check.
         mb_group = _LookupSpy({
             rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
         })
@@ -1116,7 +1279,7 @@ class TestSpeculativePreWidenCacheLookup(unittest.TestCase):
         self.assertFalse(result.from_cache)
         # Mirror DID get called on refresh.
         self.assertGreater(
-            len(mb_leaf.calls) + len(mb_group.calls) + len(combined.calls), 0)
+            len(mb_group.calls) + len(combined.calls), 0)
         # Cache was overwritten with the fresh matrix.
         self.assertEqual(
             result.youtube_releases[0].yt_browse_id, "MPREb-refreshed")
@@ -1238,10 +1401,12 @@ class TestJitterBetweenSiblingGetAlbumCalls(unittest.TestCase):
         self.assertEqual(len(sleeps), 3,
                          msg=f"expected 3 jitter sleeps (N-1 for N=4 siblings), "
                              f"got {len(sleeps)} (durations={sleeps})")
-        # Each sleep duration in the 1-3s band per Key Technical Decisions.
+        # Default jitter band is 0.5-1.5s per round 2 P2-4 (was 1-3s;
+        # tightened so cumulative jitter on a 10-sibling cold resolve
+        # is bounded at ~15s instead of ~30s).
         for d in sleeps:
-            self.assertGreaterEqual(d, 1.0)
-            self.assertLessEqual(d, 3.0)
+            self.assertGreaterEqual(d, 0.5)
+            self.assertLessEqual(d, 1.5)
 
     def test_single_sibling_resolve_does_not_jitter(self) -> None:
         # When there are no other_versions, only the seed get_album
@@ -1253,6 +1418,82 @@ class TestJitterBetweenSiblingGetAlbumCalls(unittest.TestCase):
         self.assertEqual(len(r.youtube_releases), 1)
         self.assertEqual(sleeps, [],
                          msg="single-sibling resolve must not jitter")
+
+    def test_jitter_range_is_configurable(self) -> None:
+        """Round 2 P2-4: ``jitter_range`` is operator-configurable so a
+        future operator could widen it (or pin it to zero for tests).
+        """
+        rg = MB_RG
+        mb_leaf = _LookupSpy({
+            rg: None,
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        mb_group = _LookupSpy({rg: _ok_mb_rg_releases((MB_REL_A, 1996))})
+
+        seed_browse = "MPREb-seed"
+        yt = FakeYTMusic()
+        yt.set_search("Dr. Octagon Dr. Octagonecologyst",
+                      [_yt_search_album_result(seed_browse)])
+        yt.set_album(
+            seed_browse,
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-seed",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="1996",
+                tracks=_yt_tracks(["Intro", "3000"]),
+                other_versions=[_yt_other_version("MPREb-x", year="2008")],
+            ),
+        )
+        yt.set_album(
+            "MPREb-x",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-x",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="2008",
+                tracks=_yt_tracks(["Intro", "3000"]),
+            ),
+        )
+
+        sleeps: list[float] = []
+        # Operator-passed band: 5.0-5.0 (effectively pinned at 5s).
+        r = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=None,
+            sleep_fn=lambda s: sleeps.append(s),
+            jitter_range=(5.0, 5.0),
+        )
+        self.assertEqual(r.outcome, "ok")
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(sleeps[0], 5.0,
+                         msg="jitter_range=(5.0, 5.0) should produce "
+                             "exactly 5s sleeps")
+
+    def test_cumulative_jitter_surfaced_in_error_message(self) -> None:
+        """Round 2 P2-4: cumulative jitter is visible to the operator
+        on the ``error_message`` field so they can see how much of the
+        resolve was anti-throttle pause.
+        """
+        sleeps: list[float] = []
+        r = self._resolve_with_n_siblings(
+            n_siblings=3,
+            sleep_fn=lambda s: sleeps.append(s),
+        )
+        self.assertEqual(r.outcome, "ok")
+        self.assertIsNotNone(r.error_message)
+        assert r.error_message is not None
+        self.assertIn("jitter=", r.error_message)
+        # Format: "jitter=X.XXs cumulative". Should match how much we slept.
+        total = sum(sleeps)
+        self.assertIn(f"{total:.2f}s", r.error_message)
 
 
 class TestPayloadCoercionResilience(unittest.TestCase):
@@ -1326,6 +1567,199 @@ class TestPayloadCoercionResilience(unittest.TestCase):
         # Tracks were synthesised — _safe_int defaulted the bogus
         # values but didn't crash the resolve.
         self.assertEqual(len(result.youtube_releases[0].tracks), 2)
+
+
+# ---------------------------------------------------------------------------
+# _safe_int / _safe_float branch tables (round 2 P2-3)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeInt(unittest.TestCase):
+    """``_safe_int`` is exercised indirectly via the resolver's
+    happy path, but every branch deserves a direct unit test
+    (round 2 P2-3) — without one, a future regression that loosens
+    the ``bool`` rejection or breaks the str-coercion fallback would
+    only surface as a downstream resolve failure, hard to localise.
+    """
+
+    CASES = [
+        # (description, raw, default, expected)
+        ("None returns default", None, 99, 99),
+        ("True is rejected as garbage (bool subclass guard)",
+         True, 99, 99),
+        ("False is rejected as garbage", False, 99, 99),
+        ("native int passes through", 7, 99, 7),
+        ("integer-string coerces", "01", 99, 1),
+        ("negative integer-string coerces", "-3", 99, -3),
+        ("float input coerces via int()", 3.9, 99, 3),
+        ("garbage string returns default", "abc", 99, 99),
+        ("empty string returns default", "", 99, 99),
+        ("dict returns default", {"x": 1}, 99, 99),
+        ("list returns default", [1, 2], 99, 99),
+    ]
+
+    def test_branch_table(self) -> None:
+        from lib.youtube_album_service import _safe_int
+        for desc, raw, default, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(_safe_int(raw, default), expected)
+
+
+class TestSafeFloat(unittest.TestCase):
+    """Branch-table for ``_safe_float`` (round 2 P2-3)."""
+
+    CASES = [
+        # (description, raw, default, expected)
+        ("None returns default", None, 1.5, 1.5),
+        ("True is rejected as garbage", True, 1.5, 1.5),
+        ("False is rejected as garbage", False, 1.5, 1.5),
+        ("int passes through as float", 7, 1.5, 7.0),
+        ("float passes through", 3.14, 1.5, 3.14),
+        ("float-string coerces", "2.5", 1.5, 2.5),
+        ("integer-string coerces to float", "10", 1.5, 10.0),
+        ("garbage string returns default", "abc", 1.5, 1.5),
+        ("empty string returns default", "", 1.5, 1.5),
+        ("dict returns default", {"x": 1}, 1.5, 1.5),
+        ("list returns default", [1.0], 1.5, 1.5),
+    ]
+
+    def test_branch_table(self) -> None:
+        from lib.youtube_album_service import _safe_float
+        for desc, raw, default, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(_safe_float(raw, default), expected)
+
+    def test_nan_and_inf_pass_through_as_float(self) -> None:
+        """``float('nan')`` / ``float('inf')`` are valid Python floats;
+        ``_safe_float`` does not screen them. This is intentional — the
+        downstream consumer (``SyntheticItem.length``) treats them as
+        ordinary numeric values, and beets' distance compares numerically.
+        If we ever need to reject them we'd add an explicit ``math.isnan``
+        check; for now this test documents the current contract.
+        """
+        import math
+        from lib.youtube_album_service import _safe_float
+        self.assertTrue(math.isnan(_safe_float(float("nan"), 0.0)))
+        self.assertTrue(math.isinf(_safe_float(float("inf"), 0.0)))
+
+
+# ---------------------------------------------------------------------------
+# Scoring-loop deadline (round 2 P1-3)
+# ---------------------------------------------------------------------------
+
+
+class TestScoringLoopDeadline(unittest.TestCase):
+    """Round 2 P1-3: ``deadline_seconds`` previously only fired between
+    YT ``get_album`` calls — one slow ``distance_fn`` invocation could
+    overshoot the budget. The deadline is now also checked between
+    scoring iterations; remaining unscored siblings are returned as a
+    partial matrix with the deadline message in ``error_message``.
+    """
+
+    def _resolve_with_slow_distance(
+        self, *, sleeps: list[float],
+    ) -> tuple[YoutubeAlbumResolverResult, list[str]]:
+        """Build a resolve with a fake monotonic clock that ticks
+        ``sleeps[i]`` seconds on iteration ``i`` of the scoring loop.
+        ``deadline_seconds=10`` so a single tick of 11s breaches the
+        deadline.
+
+        Returns ``(result, observed_distance_calls)`` so tests can
+        assert which siblings got scored before the deadline fired.
+        """
+        rg = MB_RG
+        mb_leaf = _LookupSpy({
+            rg: None,
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+            MB_REL_B: _ok_mb_release(mbid=MB_REL_B, rg=rg, year=2008),
+        })
+        # Two siblings → two scoring iterations.
+        mb_group = _LookupSpy({
+            rg: _ok_mb_rg_releases((MB_REL_A, 1996), (MB_REL_B, 2008))
+        })
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Dr. Octagonecologyst",
+            [_yt_search_album_result("MPREb-seed")],
+        )
+        yt.set_album(
+            "MPREb-seed",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-seed",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="1996",
+                tracks=_yt_tracks(["Intro", "3000"]),
+                other_versions=[],
+            ),
+        )
+
+        # Fake monotonic that returns ``0.0`` then walks ``sleeps``;
+        # subsequent calls (e.g. ``_final``'s duration computation)
+        # repeat the last value so we never run out of ticks.
+        timeline = [0.0] + list(sleeps)
+        state = {"i": 0}
+
+        def _fake_monotonic() -> float:
+            i = state["i"]
+            if i >= len(timeline) - 1:
+                return timeline[-1]
+            v = timeline[i]
+            state["i"] = i + 1
+            return v
+
+        # Distance fn that records how many times it was invoked.
+        calls: list[str] = []
+
+        def _slow_distance(*, mbid: str, **_: Any) -> BeetsDistanceResult:
+            calls.append(mbid)
+            return BeetsDistanceResult(
+                outcome="ok", distance=0.1,
+                matched_tracks=2, total_local_tracks=2, total_mb_tracks=2,
+                extra_local_tracks=0, extra_mb_tracks=0,
+                components={"tracks": 0.05},
+                candidate_mbid=mbid,
+                candidate_release_group_id=rg,
+                request_release_group_id=rg,
+            )
+
+        with patch("lib.youtube_album_service.time.monotonic",
+                   _fake_monotonic):
+            result = resolve_youtube_album(
+                rg,
+                pdb=FakePipelineDB(),
+                mb_get_release=mb_leaf,
+                mb_get_release_group_releases=mb_group,
+                discogs_get_release=_empty_lookup(),
+                discogs_get_master_releases=_empty_lookup(),
+                yt_client=yt,
+                distance_fn=_slow_distance,
+                cache=None,
+                deadline_seconds=10,
+                sleep_fn=lambda _: None,
+            )
+        return result, calls
+
+    def test_deadline_breach_inside_scoring_loop_returns_partial_matrix(self) -> None:
+        # First monotonic call inside the scoring loop returns 11s — past
+        # the 10s deadline; the scoring loop must break before scoring
+        # the second sibling.
+        result, observed = self._resolve_with_slow_distance(sleeps=[11.0, 11.0])
+        # Still ok (we have a partial matrix), with deadline_message
+        # attached so the operator sees what happened.
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNotNone(result.error_message)
+        assert result.error_message is not None
+        self.assertIn("deadline", result.error_message.lower())
+
+    def test_deadline_not_breached_scoring_loop_runs_to_completion(self) -> None:
+        # Monotonic always returns 0 — well under the deadline; both
+        # siblings get scored.
+        result, observed = self._resolve_with_slow_distance(sleeps=[0.0, 0.0, 0.0])
+        self.assertEqual(result.outcome, "ok")
+        # Both siblings scored — no early break.
+        self.assertEqual(len(observed), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -2030,6 +2464,90 @@ class TestResultStructShape(unittest.TestCase):
         self.assertEqual(decoded.outcome, "ok")
         self.assertEqual(decoded.youtube_releases[0].yt_browse_id, "MPREb-x")
         self.assertEqual(decoded.youtube_releases[0].distances[0].mbid, MB_REL_A)
+
+
+class TestPersistedYoutubeRowBoundary(unittest.TestCase):
+    """Round 2 P2-1 — wire-boundary contract for the ``Persisted*``
+    Structs (``PersistedYoutubeRow`` / ``PersistedTrack`` /
+    ``PersistedDistance``). The point of declaring these as
+    ``msgspec.Struct`` (per ``.claude/rules/code-quality.md`` §
+    "Wire-boundary types") is that ``msgspec.convert`` rejects
+    malformed JSONB at the read seam — but the rule explicitly owes a
+    RED test demonstrating that rejection. Without these tests an
+    accidental loosening of the Struct (e.g. ``str`` → ``Optional[str]
+    = None``) would silently shrink the protection without anyone
+    noticing.
+
+    Each test feeds a deliberately-malformed dict to
+    ``_rows_to_youtube_releases`` and asserts ``msgspec.ValidationError``
+    fires at the boundary.
+    """
+
+    def _minimum_valid_row(self) -> dict[str, Any]:
+        """A dict that satisfies the required fields of
+        ``PersistedYoutubeRow`` — used as the baseline; each test
+        mutates one field into garbage to trip ``msgspec.convert``.
+        """
+        return {
+            "yt_browse_id": "MPREb_x",
+            "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_x",
+            "yt_track_count": 10,
+            "yt_audio_playlist_id": "OLAK5uy_x",
+            "yt_year": 2020,
+            "album_title": "Album",
+            "album_artist": "Artist",
+            "yt_tracks": [],
+            "distances": [],
+        }
+
+    def test_missing_required_field_raises_validation_error(self) -> None:
+        from lib.youtube_album_service import _rows_to_youtube_releases
+        bad = self._minimum_valid_row()
+        del bad["yt_browse_id"]  # required
+        with self.assertRaises(msgspec.ValidationError):
+            _rows_to_youtube_releases([bad])
+
+    def test_wrong_type_for_required_int_raises_validation_error(self) -> None:
+        from lib.youtube_album_service import _rows_to_youtube_releases
+        bad = self._minimum_valid_row()
+        bad["yt_track_count"] = "not an int"
+        with self.assertRaises(msgspec.ValidationError):
+            _rows_to_youtube_releases([bad])
+
+    def test_wrong_type_for_required_str_raises_validation_error(self) -> None:
+        from lib.youtube_album_service import _rows_to_youtube_releases
+        bad = self._minimum_valid_row()
+        bad["yt_url"] = 12345  # required str
+        with self.assertRaises(msgspec.ValidationError):
+            _rows_to_youtube_releases([bad])
+
+    def test_malformed_nested_track_raises_validation_error(self) -> None:
+        from lib.youtube_album_service import _rows_to_youtube_releases
+        bad = self._minimum_valid_row()
+        # track_number must be Optional[int] — a string isn't an int.
+        bad["yt_tracks"] = [{
+            "title": "x", "track_number": "not an int", "disc_number": 1,
+        }]
+        with self.assertRaises(msgspec.ValidationError):
+            _rows_to_youtube_releases([bad])
+
+    def test_malformed_nested_distance_raises_validation_error(self) -> None:
+        from lib.youtube_album_service import _rows_to_youtube_releases
+        bad = self._minimum_valid_row()
+        # matched_tracks must be Optional[int].
+        bad["distances"] = [{
+            "mbid": "x", "outcome": "ok", "matched_tracks": "two",
+        }]
+        with self.assertRaises(msgspec.ValidationError):
+            _rows_to_youtube_releases([bad])
+
+    def test_well_shaped_row_passes_boundary_decode(self) -> None:
+        """Smoke test that the baseline row IS accepted — guards against
+        the RED tests accidentally passing for an unrelated reason."""
+        from lib.youtube_album_service import _rows_to_youtube_releases
+        rels = _rows_to_youtube_releases([self._minimum_valid_row()])
+        self.assertEqual(len(rels), 1)
+        self.assertEqual(rels[0].yt_browse_id, "MPREb_x")
 
 
 class _DictCache:

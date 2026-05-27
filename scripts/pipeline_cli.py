@@ -2127,6 +2127,13 @@ def _build_youtube_client():
     CLI's startup cost stays low and the rest of the script doesn't
     pay for unused HTTP machinery.
 
+    Returns ``(yt_client, session)`` so the caller can close the
+    session in a ``finally`` block — without that, every CLI
+    invocation leaks the requests Session's connection pool. Round 2
+    P2-2: the web-route side already paired finding #18's close in a
+    ``finally``; this brings the CLI surface into parity per the
+    CLI ⇄ API symmetry rule.
+
     The session binds a default ``(connect, read)`` timeout of
     ``(5, 30)`` so an unresponsive YT endpoint can't pin the CLI
     invocation forever (finding #4). ``requests`` exposes no
@@ -2158,7 +2165,7 @@ def _build_youtube_client():
     })
     session.request = partial(  # type: ignore[method-assign]
         session.request, timeout=(5, 30))
-    return YTMusic(requests_session=session, language="en")
+    return YTMusic(requests_session=session, language="en"), session
 
 
 def cmd_youtube_album(db, args):
@@ -2185,23 +2192,33 @@ def cmd_youtube_album(db, args):
     from web import mb as mb_api
     from web import discogs as discogs_api
 
-    yt = _build_youtube_client()
+    yt, session = _build_youtube_client()
     cache = _RedisYoutubeCache()
 
-    result = resolve_youtube_album(
-        args.identifier,
-        pdb=db,
-        mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
-        mb_get_release_group_releases=mb_api.get_release_group_releases,
-        discogs_get_release=lambda d: discogs_api.get_release(
-            int(d), fresh=False),
-        discogs_get_master_releases=lambda m: discogs_api.get_master_releases(
-            int(m)),
-        yt_client=yt,
-        distance_fn=compute_beets_distance,
-        cache=cache,
-        refresh=bool(getattr(args, "refresh", False)),
-    )
+    try:
+        result = resolve_youtube_album(
+            args.identifier,
+            pdb=db,
+            mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
+            mb_get_release_group_releases=mb_api.get_release_group_releases,
+            discogs_get_release=lambda d: discogs_api.get_release(
+                int(d), fresh=False),
+            discogs_get_master_releases=lambda m: discogs_api.get_master_releases(
+                int(m)),
+            yt_client=yt,
+            distance_fn=compute_beets_distance,
+            cache=cache,
+            refresh=bool(getattr(args, "refresh", False)),
+        )
+    finally:
+        # Close the requests Session even when the resolver raises so
+        # the connection pool doesn't leak. Mirrors the web-route side
+        # (finding #18). Round 2 P2-2 — closes the CLI ⇄ API symmetry
+        # gap.
+        try:
+            session.close()
+        except Exception:
+            pass
 
     if getattr(args, "json", False):
         print(msgspec.json.encode(result).decode())

@@ -2746,9 +2746,32 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         # "MOCKS: leaf-seam only") we still use FakePipelineDB instead
         # of MagicMock so the wrapper test stays consistent with how
         # production passes ``db`` through (finding #28).
+        #
+        # ``_build_youtube_client`` is patched too so the test never
+        # constructs a real ``YTMusic`` (which would try to hit the
+        # network). The patch returns a (yt, session) tuple where the
+        # session is a class with a counting ``close()`` — round 2
+        # P2-2 asserts the CLI closes the session in its ``finally``.
         from tests.fakes import FakePipelineDB
+
+        class _FakeSession:
+            close_calls = 0
+
+            def close(self) -> None:
+                type(self).close_calls += 1
+                return None
+
+        _FakeSession.close_calls = 0
+        self._last_session_cls = _FakeSession
+
         with redirect_stdout(stdout):
             with patch(
+                "scripts.pipeline_cli._build_youtube_client",
+                return_value=(object(), _FakeSession()),
+            ), patch(
+                "scripts.pipeline_cli._RedisYoutubeCache",
+                return_value=object(),
+            ), patch(
                 "scripts.pipeline_cli.resolve_youtube_album",
                 return_value=result,
             ) as mock_resolve:
@@ -2864,6 +2887,62 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         # First positional arg to resolve_youtube_album is the identifier.
         args, _ = mock_resolve.call_args
         self.assertEqual(args[0], self.IDENT)
+
+    def test_session_close_called_on_happy_path(self):
+        """Round 2 P2-2: the CLI's ``finally`` block must call
+        ``session.close()`` so the requests connection pool is
+        released even on success. Mirror of the web-route test —
+        closes the CLI ⇄ API symmetry gap (maintainability-7).
+        """
+        rc, _, _ = self._run(outcome="ok")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._last_session_cls.close_calls, 1,
+            msg="CLI must call session.close() exactly once on "
+                "happy-path resolves (round 2 P2-2 / CLI symmetry)",
+        )
+
+    def test_session_close_called_when_service_raises(self):
+        """If ``resolve_youtube_album`` raises mid-CLI, the
+        ``finally`` clause still releases the session so the
+        connection pool isn't leaked.
+        """
+        from tests.fakes import FakePipelineDB
+
+        class _FakeSession:
+            close_calls = 0
+
+            def close(self) -> None:
+                type(self).close_calls += 1
+                return None
+
+        _FakeSession.close_calls = 0
+
+        args = SimpleNamespace(
+            identifier=self.IDENT, refresh=False, json=False,
+        )
+
+        def _raising_resolver(*_a, **_kw):
+            raise RuntimeError("simulated mid-CLI failure")
+
+        with patch(
+            "scripts.pipeline_cli._build_youtube_client",
+            return_value=(object(), _FakeSession()),
+        ), patch(
+            "scripts.pipeline_cli._RedisYoutubeCache",
+            return_value=object(),
+        ), patch(
+            "scripts.pipeline_cli.resolve_youtube_album",
+            side_effect=_raising_resolver,
+        ):
+            with self.assertRaises(RuntimeError):
+                pipeline_cli.cmd_youtube_album(FakePipelineDB(), args)
+
+        self.assertEqual(
+            _FakeSession.close_calls, 1,
+            msg="CLI must close the session even when the resolver "
+                "raises mid-call (round 2 P2-2)",
+        )
 
 
 class TestCmdSearchPlanHistory(unittest.TestCase):

@@ -2545,6 +2545,11 @@ class TestYoutubeAlbumMappingsSchema(unittest.TestCase):
         self.assertEqual(cols["yt_url"], ("NO", "text"))
         self.assertEqual(cols["yt_year"], ("YES", "integer"))
         self.assertEqual(cols["yt_track_count"], ("NO", "integer"))
+        # Migration 036 added the album-level columns so the cache
+        # round-trip preserves SyntheticItem.album / albumartist
+        # fidelity (round 2 P0-1, maintainability-5).
+        self.assertEqual(cols["album_title"], ("YES", "text"))
+        self.assertEqual(cols["album_artist"], ("YES", "text"))
         self.assertEqual(cols["yt_tracks"], ("NO", "jsonb"))
         self.assertEqual(cols["distances"], ("NO", "jsonb"))
         self.assertEqual(cols["resolved_at"][0], "NO")
@@ -2698,16 +2703,79 @@ class TestYoutubeAlbumEmptyResolutionsSchema(unittest.TestCase):
                 "WHERE release_group_identifier = 'rg-empty-x'")
 
     def test_source_check_constraint_rejects_unknown(self):
-        with self.assertRaises(psycopg2.errors.CheckViolation):
-            self._exec("""
-                INSERT INTO youtube_album_empty_resolutions
-                  (release_group_identifier, source)
-                VALUES ('rg-bad', 'tidal')
-            """)
+        # Round 2 T-6: round 1 #26's lesson ("cover both legitimate
+        # branches of the CHECK") didn't propagate into the sibling
+        # table's test. Insert both 'mb' AND 'discogs' positives before
+        # the negative case so a future migration that accidentally
+        # drops one of them fails this test.
+        self._exec("""
+            INSERT INTO youtube_album_empty_resolutions
+              (release_group_identifier, source) VALUES ('rg-ok-mb', 'mb')
+        """)
+        self._exec("""
+            INSERT INTO youtube_album_empty_resolutions
+              (release_group_identifier, source) VALUES ('rg-ok-dis', 'discogs')
+        """)
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO youtube_album_empty_resolutions
+                      (release_group_identifier, source)
+                    VALUES ('rg-bad', 'tidal')
+                """)
+        finally:
+            self._exec(
+                "DELETE FROM youtube_album_empty_resolutions "
+                "WHERE release_group_identifier IN ('rg-ok-mb', 'rg-ok-dis')")
 
     def test_records_applied_version_035(self):
         rows = self._query(
             "SELECT version FROM schema_migrations WHERE version = 35"
+        )
+        self.assertEqual(len(rows), 1)
+
+
+@requires_postgres
+class TestYoutubeAlbumMappingsAlbumTitleSchema(unittest.TestCase):
+    """Migration 036 adds ``album_title`` and ``album_artist`` columns to
+    ``youtube_album_mappings`` so the cache round-trip preserves the
+    album-level facts the resolver writes. Round 2 review P0-1 (album_title
+    silently dropped at the DB boundary) + maintainability-5 (album_artist
+    lossy on rehydration). Both columns are NULLable to admit pre-036
+    rows (none yet on this branch — feature has never shipped).
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_album_title_and_album_artist_columns_exist_nullable_text(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'youtube_album_mappings'
+              AND column_name IN ('album_title', 'album_artist')
+        """)
+        cols = {r[0]: (r[1], r[2]) for r in rows}
+        self.assertEqual(cols.get("album_title"), ("YES", "text"))
+        self.assertEqual(cols.get("album_artist"), ("YES", "text"))
+
+    def test_records_applied_version_036(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 36"
         )
         self.assertEqual(len(rows), 1)
 

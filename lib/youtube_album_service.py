@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+import socket
 import time
 import urllib.error
 from typing import Any, Callable, Optional
@@ -52,20 +53,53 @@ from lib.release_identity import detect_release_source, normalize_release_id
 
 
 # Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
-# ``web/discogs.py`` raise on miss / mirror outage. ``HTTPError`` and
-# ``URLError`` come from ``urllib`` (MB adapter); ``requests.HTTPError``
-# and ``requests.RequestException`` come from any future Discogs adapter
-# changeover. ``ValueError`` covers ``int()`` coercion failures on Discogs
-# IDs (e.g. when the operator pastes a UUID into the Discogs path). All
-# get treated as "leaf miss" — the auto-widen falls through to the group
-# path.
+# ``web/discogs.py`` raise on miss / mirror outage.
+#
+# Round 2 P1-1: this tuple used to catch every ``URLError`` /
+# ``requests.RequestException`` and swallow it as "leaf miss," which
+# misclassified mirror outages, transport timeouts, and 5xx responses
+# as 404. The resolver then fabricated a release-group identifier from
+# the operator's input — producing wrong matrices keyed to a missing
+# release. The narrowed contract:
+#
+# * ``HTTPError(404)`` (urllib) and ``HTTPError`` (requests) with
+#   ``response.status_code == 404`` are **the only** "leaf miss"
+#   signal — see ``_is_leaf_miss``.
+# * ``ValueError`` keeps its place because the Discogs adapter does
+#   ``int(identifier)`` and a UUID pasted into the Discogs path raises
+#   ``ValueError`` — semantically "not a release at this leaf."
+# * Every other ``URLError`` / ``RequestException`` / ``Timeout``
+#   propagates up to the top-level handler in ``resolve_youtube_album``
+#   which classifies it as ``unresolved_mirror_unavailable`` /
+#   ``unresolved_timeout`` rather than silently fabricating data.
 _AUTO_WIDEN_MISS_EXCS: tuple[type[BaseException], ...] = (
     urllib.error.HTTPError,
-    urllib.error.URLError,
     requests.HTTPError,
-    requests.RequestException,
     ValueError,
 )
+
+
+def _is_leaf_miss(exc: BaseException) -> bool:
+    """Return True when ``exc`` is a real 404 (or equivalent), False otherwise.
+
+    A 404 means "this identifier isn't a release at this leaf" — fall
+    through to the group path. Anything else (transport failure, 5xx,
+    URLError without an HTTP status) is a mirror / network outage that
+    must propagate so the resolver returns ``unresolved_*`` instead of
+    fabricating the rg_id from the input.
+
+    ``ValueError`` is treated as a leaf miss unconditionally (Discogs
+    ``int()`` coercion failure on a UUID); see the docstring on
+    ``_AUTO_WIDEN_MISS_EXCS`` for the rationale.
+    """
+    if isinstance(exc, ValueError):
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 404
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        return getattr(resp, "status_code", None) == 404
+    return False
 
 log = logging.getLogger(__name__)
 
@@ -160,8 +194,16 @@ def _cached_get_album(
 # small randomized pauses reduce the chance of being throttled when
 # expanding a release group with N siblings. Service injects the
 # sleep function so tests can pass a no-op.
-_JITTER_MIN_SECONDS = 1.0
-_JITTER_MAX_SECONDS = 3.0
+#
+# Round 2 P2-4: defaults shrunk from 1.0-3.0s to 0.5-1.5s. The
+# previous 1-3s range added up to 30s of pure jitter on a 10-sibling
+# cold resolve, which is operator-perceptible latency on top of the
+# 60s deadline. Tighten the band; operators who want the old behaviour
+# can pass ``jitter_range`` explicitly. The cumulative jitter is also
+# logged so operators see how much of a resolve's wall-clock is the
+# anti-throttle pause vs real network work.
+_JITTER_MIN_SECONDS_DEFAULT = 0.5
+_JITTER_MAX_SECONDS_DEFAULT = 1.5
 
 
 def _default_jitter_sleep_fn(seconds: float) -> None:
@@ -169,9 +211,22 @@ def _default_jitter_sleep_fn(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _jitter(sleep_fn: Callable[[float], None]) -> None:
-    """Sleep a uniform-random duration in ``[1.0, 3.0]`` seconds."""
-    sleep_fn(random.uniform(_JITTER_MIN_SECONDS, _JITTER_MAX_SECONDS))
+def _jitter(
+    sleep_fn: Callable[[float], None],
+    *,
+    min_seconds: float = _JITTER_MIN_SECONDS_DEFAULT,
+    max_seconds: float = _JITTER_MAX_SECONDS_DEFAULT,
+) -> float:
+    """Sleep a uniform-random duration; return the sleep we requested.
+
+    Returning the sleep duration lets the caller accumulate it for
+    operator observability — see ``cumulative_jitter`` in the
+    resolver's main loop. Tests that pass ``lambda _: None`` get the
+    same return value, so cumulative accounting stays test-stable.
+    """
+    seconds = random.uniform(min_seconds, max_seconds)
+    sleep_fn(seconds)
+    return seconds
 
 
 # ---------------------------------------------------------------------------
@@ -281,14 +336,22 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
 
 
 class PersistedTrack(msgspec.Struct, kw_only=True):
-    """One persisted track inside ``yt_tracks`` JSONB."""
+    """One persisted track inside ``yt_tracks`` JSONB.
+
+    Round 2 P3: the ``video_id`` field was written into JSONB but
+    never read off the typed Struct after the round 1 indexed-pairing
+    fix. Removed entirely (and dropped from the writer below) so the
+    Struct contract matches what we actually consume — no dead fields
+    masquerading as wire shape. Pre-round-2 rows still carry
+    ``video_id`` in their JSONB; ``msgspec.convert`` ignores extra
+    keys, so those rows decode cleanly even after the field's gone.
+    """
 
     title: Optional[str] = None
     artists: Optional[list[dict[str, Any]]] = None
     length_seconds: Optional[float] = None
     track_number: Optional[int] = None
     disc_number: Optional[int] = None
-    video_id: Optional[str] = None
 
 
 class PersistedDistance(msgspec.Struct, kw_only=True):
@@ -317,12 +380,24 @@ class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
     everything else is row metadata.
     """
 
-    yt_browse_id: Optional[str] = None
+    # Required-on-the-wire fields: the writer always populates them
+    # (round 2 maintainability-2). Declaring them ``str``/``int`` makes
+    # ``msgspec.convert`` reject malformed JSONB rows at the wire seam
+    # rather than silently producing default-valued objects downstream.
+    yt_browse_id: str
+    yt_url: str
+    yt_track_count: int
+    # Genuinely optional: ``yt_audio_playlist_id`` and ``yt_year`` are
+    # documented NULLable in migration 034.
     yt_audio_playlist_id: Optional[str] = None
-    yt_url: Optional[str] = None
     yt_year: Optional[int] = None
-    yt_track_count: Optional[int] = None
+    # Album-level facts persisted alongside the row so the cache
+    # rehydration in ``_rows_to_youtube_releases`` produces SyntheticItem
+    # values structurally identical to the fresh-resolve path. Both are
+    # nullable to allow legacy rows written before migration 036 (none
+    # in production yet, but the column is nullable per the migration).
     album_title: Optional[str] = None
+    album_artist: Optional[str] = None
     yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list)
     distances: list[PersistedDistance] = msgspec.field(default_factory=list)
 
@@ -363,6 +438,8 @@ def resolve_youtube_album(
     cache: Optional[BeetsDistanceCache] = None,
     refresh: bool = False,
     sleep_fn: Callable[[float], None] = _default_jitter_sleep_fn,
+    jitter_range: tuple[float, float] = (
+        _JITTER_MIN_SECONDS_DEFAULT, _JITTER_MAX_SECONDS_DEFAULT),
     deadline_seconds: int = 60,
 ) -> YoutubeAlbumResolverResult:
     """Resolve a release identifier to the YT Music distance matrix.
@@ -408,7 +485,17 @@ def resolve_youtube_album(
     # case), this speculative lookup misses and we fall through to the
     # auto-widen below. The cost is one extra indexed PG query per
     # release-level resolve — sub-millisecond.
-    if not refresh:
+    #
+    # Round 2 P1-2: SKIP this short-circuit for ``source_label ==
+    # "discogs"``. Discogs release-ids and master-ids share the integer
+    # namespace (``release-12345`` is a different entity from
+    # ``master-12345``), so a cached matrix written under the master ID
+    # would be served for an unrelated release whose ID collides. MB
+    # UUIDs don't have this problem — release-MBIDs and release-group-
+    # MBIDs are drawn from disjoint UUID space. The asymmetry is
+    # documented and tested below; the cost is one extra mirror call on
+    # cold-cache Discogs resolves.
+    if not refresh and source_label == "mb":
         speculative = pdb.get_youtube_album_mapping(identifier, source_label)
         if speculative is not None:
             return _final(
@@ -421,12 +508,35 @@ def resolve_youtube_album(
             )
 
     # Step 1+2: auto-widen via leaf-then-group fallback.
-    if source_label == "mb":
-        widen = _resolve_mb_group(
-            identifier, mb_get_release, mb_get_release_group_releases)
-    else:
-        widen = _resolve_discogs_group(
-            identifier, discogs_get_release, discogs_get_master_releases)
+    #
+    # Round 2 P1-1: only 404s (and the Discogs ValueError) are caught
+    # inside the safe-lookup helpers; mirror outages now propagate and
+    # surface here as ``unresolved_mirror_unavailable`` /
+    # ``unresolved_timeout`` instead of silently falling through to
+    # "not_found" with a fabricated rg_id.
+    try:
+        if source_label == "mb":
+            widen = _resolve_mb_group(
+                identifier, mb_get_release, mb_get_release_group_releases)
+        else:
+            widen = _resolve_discogs_group(
+                identifier, discogs_get_release,
+                discogs_get_master_releases)
+    except (requests.Timeout, TimeoutError, socket.timeout) as exc:
+        return _final(
+            outcome="unresolved_timeout",
+            error_message=f"mirror timeout while widening "
+                          f"{identifier!r}: {exc}",
+            started=started,
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError,
+            requests.RequestException) as exc:
+        return _final(
+            outcome="unresolved_mirror_unavailable",
+            error_message=f"mirror unavailable while widening "
+                          f"{identifier!r}: {exc}",
+            started=started,
+        )
 
     if widen.rg_id is None:
         return _final(
@@ -498,6 +608,12 @@ def resolve_youtube_album(
     seed_browse_id: Optional[str] = None
     yt_album_responses: dict[str, dict] = {}
     deadline_message: Optional[str] = None
+    # Round 2 P2-4: accumulate the jitter so operators can see how
+    # much of the wall-clock time is the anti-throttle pause vs real
+    # network work. Logged at the resolve boundary and attached to
+    # ``error_message`` when non-zero.
+    cumulative_jitter_seconds = 0.0
+    jitter_min, jitter_max = jitter_range
 
     def _deadline_breached() -> bool:
         return (time.monotonic() - started) > float(deadline_seconds)
@@ -533,10 +649,16 @@ def resolve_youtube_album(
             other_browse_id = other.get("browseId")
             if not other_browse_id or other_browse_id in yt_album_responses:
                 continue
-            # Jitter between consecutive ``get_album`` calls — 1-3s
-            # randomized pause to avoid YT throttling on large release
-            # groups. The first ``get_album`` (seed) doesn't sleep.
-            _jitter(sleep_fn)
+            # Jitter between consecutive ``get_album`` calls. Default
+            # 0.5-1.5s (round 2 P2-4 — tightened from 1-3s) so the
+            # cumulative pause is bounded on large release groups; the
+            # operator can pass ``jitter_range`` to widen it back out.
+            # The first ``get_album`` (seed) doesn't sleep.
+            cumulative_jitter_seconds += _jitter(
+                sleep_fn,
+                min_seconds=jitter_min,
+                max_seconds=jitter_max,
+            )
             # Per-sibling get_album failures don't abort the whole resolve;
             # exclude the broken sibling instead.
             try:
@@ -597,30 +719,44 @@ def resolve_youtube_album(
     # return below.
 
     # Step 9-10: synthesize items per YT sibling and score N×M.
+    #
+    # Round 2 P1-3: the deadline check fires not just between YT
+    # ``get_album`` calls but also between scoring iterations. Previously
+    # one slow ``distance_fn`` call could overshoot the budget; now we
+    # break early and persist the partial matrix we have. Deadline
+    # status is attached to ``error_message`` at the final return below.
     youtube_releases: list[ResolvedYoutubeRelease] = []
     persistable_rows: list[dict[str, Any]] = []
 
     for browse_id, album_resp in yt_album_responses.items():
+        if _deadline_breached():
+            if deadline_message is None:
+                deadline_message = (
+                    f"deadline exceeded after "
+                    f"{len(youtube_releases)} YT siblings scored; "
+                    f"returning partial matrix"
+                )
+                log.warning("youtube_album_service: %s", deadline_message)
+            break
         synth_items = _synthesize_items(album_resp)
         if not synth_items:
             # An empty track list defeats scoring; skip the sibling so the
             # matrix doesn't carry a row with no data to compare against.
             continue
-        # ``raw_tracks`` is paired by index with ``synth_items`` — a
-        # malformed entry that was filtered out of ``_synthesize_items``
-        # would break this pairing, but ``_synthesize_items`` accepts
-        # every entry the YT API returns (only the per-entry ``isinstance``
-        # check skips non-dict rows, which is also enforced here).
-        raw_tracks = [
-            t for t in (album_resp.get("tracks") or []) if isinstance(t, dict)
-        ]
         distances = _score_against_siblings(
             synth_items, sibling_ids, rg_id, distance_fn, pdb,
             mb_get_release if source_label == "mb" else discogs_get_release,
+            deadline_breached=_deadline_breached,
         )
         yt_url = _compose_url(browse_id, album_resp.get("audioPlaylistId"))
         year = _parse_year(album_resp.get("year"))
         album_title = str(album_resp.get("title") or "")
+        # Sourced from the album-level ``artists[0]`` (not the per-track
+        # artist) so a Various Artists release stamps "Various" once at
+        # row scope, distinct from each track's individual credit. Pulled
+        # off ``synth_items[0].albumartist`` since ``_synthesize_items``
+        # already did the album-vs-track-artist resolution.
+        album_artist = synth_items[0].albumartist if synth_items else ""
         yt_rel = ResolvedYoutubeRelease(
             yt_browse_id=browse_id,
             yt_audio_playlist_id=album_resp.get("audioPlaylistId"),
@@ -632,21 +768,21 @@ def resolve_youtube_album(
             distances=distances,
         )
         youtube_releases.append(yt_rel)
-        # Pair ``video_id`` by list index, not by track-number lookup —
-        # YT payloads occasionally carry duplicate ``trackNumber`` values
-        # (e.g. multiple "track 1" entries on a multi-disc album, or
-        # 0-indexed payloads) and looking up by number drops the wrong
-        # videoId. Indexed pairing is unambiguous.
+        # Round 2 P3: previously this loop paired the YT ``videoId`` into
+        # ``PersistedTrack.video_id`` to fix a duplicate-trackNumber bug,
+        # but the field is never read back off the Struct anywhere — so
+        # the indexed pairing is no longer load-bearing and the field
+        # has been removed. The track loop still walks ``synth_items``
+        # directly (which already did the album-vs-track artist
+        # resolution in ``_synthesize_items``).
         persistable_tracks: list[dict[str, Any]] = []
-        for synth_i, si in enumerate(synth_items):
-            raw = raw_tracks[synth_i] if synth_i < len(raw_tracks) else {}
+        for si in synth_items:
             persistable_tracks.append({
                 "title": si.title,
                 "artists": [{"name": si.artist}],
                 "length_seconds": si.length,
                 "track_number": si.track,
                 "disc_number": si.disc,
-                "video_id": raw.get("videoId"),
             })
         persistable_rows.append({
             "yt_browse_id": browse_id,
@@ -654,12 +790,16 @@ def resolve_youtube_album(
             "yt_url": yt_url,
             "yt_year": year,
             "yt_track_count": yt_rel.track_count,
-            # ``album_title`` is persisted per row so the cache-fallback
-            # ``_rows_to_youtube_releases`` can rehydrate ``SyntheticItem.album``
-            # — without it, cached rows always returned the lossy
-            # ``album=""`` placeholder (review finding #15). Stored at the
-            # row scope (not per track) since it's a row-level fact.
+            # ``album_title`` + ``album_artist`` are persisted per row so
+            # the cache-fallback ``_rows_to_youtube_releases`` rehydrates
+            # ``SyntheticItem.album`` and ``SyntheticItem.albumartist``
+            # structurally identical to the fresh path. Without them,
+            # cached reads collapsed to ``album=""`` (#15) and
+            # ``albumartist=per-track-artist`` (round 2 maintainability-5
+            # — the Various Artists case). Both stored at row scope
+            # (not per track) since they are album-level facts.
             "album_title": album_title,
+            "album_artist": album_artist,
             "yt_tracks": persistable_tracks,
             "distances": [
                 {
@@ -680,13 +820,31 @@ def resolve_youtube_album(
 
     # Step 11: persist + return.
     pdb.upsert_youtube_album_mapping(rg_id, source_label, persistable_rows)
+
+    # Round 2 P2-4: log + surface the cumulative jitter so operators
+    # can see how much of the resolve's wall-clock was anti-throttle
+    # pause vs real network work. Attached to ``error_message`` only
+    # when non-zero (no jitter on cache-hit / empty-search paths).
+    final_error_message = deadline_message
+    if cumulative_jitter_seconds > 0:
+        jitter_note = (
+            f"jitter={cumulative_jitter_seconds:.2f}s cumulative")
+        log.info(
+            "youtube_album_service: resolve(%s, %s) %s",
+            rg_id, source_label, jitter_note,
+        )
+        if final_error_message is None:
+            final_error_message = jitter_note
+        else:
+            final_error_message = f"{final_error_message}; {jitter_note}"
+
     return _final(
         outcome="ok",
         release_group_identifier=rg_id,
         source=source_label,
         from_cache=False,
         youtube_releases=youtube_releases,
-        error_message=deadline_message,
+        error_message=final_error_message,
         started=started,
     )
 
@@ -732,38 +890,50 @@ def _safe_leaf_lookup(
     lookup: Callable[[str], Optional[dict]],
     identifier: str,
 ) -> Optional[dict]:
-    """Call a leaf lookup, treating HTTP / URL / value errors as a miss.
+    """Call a leaf lookup, treating ONLY 404 (and Discogs ValueError) as a miss.
 
     Real adapters (``web.mb.get_release`` / ``web.discogs.get_release``)
-    raise ``urllib.error.HTTPError`` on 404 and ``URLError`` on transport
-    failure; the Discogs adapter additionally raises ``ValueError`` if
-    ``int(identifier)`` fails (e.g. when the operator pastes a UUID into
-    the Discogs path). All those shapes mean "this identifier isn't a
-    release at this leaf" — auto-widen falls through to the group path.
+    raise:
+
+    * ``urllib.error.HTTPError(404)`` — release isn't at this leaf. Miss.
+    * ``urllib.error.URLError`` (no ``.code``) — transport failure. Outage.
+    * ``urllib.error.HTTPError(5xx)`` — mirror error. Outage.
+    * ``requests.Timeout`` / ``requests.ConnectionError`` — Outage.
+    * ``ValueError`` (Discogs ``int()``) — operator pasted a UUID. Miss.
+
+    Round 2 P1-1: previously every URLError / RequestException was
+    swallowed as a miss; the auto-widen then fabricated the rg_id from
+    the operator's input. Now only 404 falls through; outages propagate
+    to the top-level handler which classifies them as
+    ``unresolved_mirror_unavailable`` / ``unresolved_timeout``.
     """
     try:
         return lookup(identifier)
     except _AUTO_WIDEN_MISS_EXCS as exc:
-        log.debug(
-            "youtube_album_service: leaf lookup raised %s for %r — treating as miss",
-            type(exc).__name__, identifier,
-        )
-        return None
+        if _is_leaf_miss(exc):
+            log.debug(
+                "youtube_album_service: leaf lookup raised %s for %r — treating as miss",
+                type(exc).__name__, identifier,
+            )
+            return None
+        raise
 
 
 def _safe_group_lookup(
     lookup: Callable[[str], Optional[dict]],
     identifier: str,
 ) -> Optional[dict]:
-    """Call a release-group / master lookup with the same miss tolerance."""
+    """Call a release-group / master lookup with the same 404-only tolerance."""
     try:
         return lookup(identifier)
     except _AUTO_WIDEN_MISS_EXCS as exc:
-        log.debug(
-            "youtube_album_service: group lookup raised %s for %r — treating as miss",
-            type(exc).__name__, identifier,
-        )
-        return None
+        if _is_leaf_miss(exc):
+            log.debug(
+                "youtube_album_service: group lookup raised %s for %r — treating as miss",
+                type(exc).__name__, identifier,
+            )
+            return None
+        raise
 
 
 def _resolve_mb_group(
@@ -1103,6 +1273,7 @@ def _score_against_siblings(
     distance_fn: DistanceFn,
     pdb: Any,
     mb_fetcher: Callable[[str], Optional[dict]],
+    deadline_breached: Optional[Callable[[], bool]] = None,
 ) -> list[ResolvedDistance]:
     """Run ``distance_fn`` for every sibling MBID and collect typed results.
 
@@ -1111,9 +1282,23 @@ def _score_against_siblings(
     contract). Per-pair failures are preserved as the entry's outcome
     rather than aborting the matrix — including ``mb_lookup_failed`` for
     siblings the local mirror doesn't carry.
+
+    Round 2 P1-3: an optional ``deadline_breached`` callback breaks the
+    scoring loop early when the resolver's soft deadline is exhausted,
+    so one slow ``distance_fn`` call can't overshoot the budget.
+    Remaining unscored siblings are NOT inserted as placeholders — the
+    caller sees the partial matrix and the deadline message in
+    ``YoutubeAlbumResolverResult.error_message``.
     """
     out: list[ResolvedDistance] = []
     for mbid in sibling_mbids:
+        if deadline_breached is not None and deadline_breached():
+            log.warning(
+                "youtube_album_service: deadline breached after %d/%d "
+                "siblings scored; returning partial distance row",
+                len(out), len(sibling_mbids),
+            )
+            break
         if not mbid:
             continue
         try:
@@ -1205,10 +1390,12 @@ def _rows_to_youtube_releases(
     insert) raises ``msgspec.ValidationError`` at this seam rather
     than silently producing a ``SyntheticItem`` with garbage values.
 
-    The ``album`` field on each ``SyntheticItem`` is rehydrated from
-    the row-level ``album_title`` field — older cached rows
-    (pre-album_title) fall back to an empty string. New writes
-    always include it.
+    Album-level fields (``album``, ``albumartist``) are rehydrated
+    from the row-level ``album_title`` / ``album_artist`` columns —
+    older cached rows (pre-036) fall back to empty strings (for
+    ``album``) and to the per-track artist (for ``albumartist``, so
+    the rehydrated item still scores against beets). New writes
+    always include both fields.
     """
     out: list[ResolvedYoutubeRelease] = []
     for raw_row in rows:
@@ -1217,6 +1404,7 @@ def _rows_to_youtube_releases(
         # also accepted via ``dict(row)`` upstream.
         row = msgspec.convert(raw_row, type=PersistedYoutubeRow)
         album_title = row.album_title or ""
+        album_artist = row.album_artist or ""
         total_local = len(row.yt_tracks)
         synth_tracks: list[SyntheticItem] = []
         for t in row.yt_tracks:
@@ -1226,11 +1414,17 @@ def _rows_to_youtube_releases(
                 if artists and isinstance(artists[0], dict)
                 else ""
             )
+            # When the row was written pre-036 (no ``album_artist`` column),
+            # fall back to the per-track artist so beets can still score.
+            # Post-036 rows carry the album-level credit verbatim — for
+            # Various Artists rows this preserves "Various" instead of
+            # silently substituting the first track's artist.
+            effective_albumartist = album_artist or primary_artist
             synth_tracks.append(SyntheticItem(
                 title=t.title or "",
                 artist=primary_artist,
                 album=album_title,
-                albumartist=primary_artist,
+                albumartist=effective_albumartist,
                 track=t.track_number or 0,
                 tracktotal=total_local,
                 disc=t.disc_number or 1,
@@ -1254,11 +1448,16 @@ def _rows_to_youtube_releases(
             ))
 
         out.append(ResolvedYoutubeRelease(
-            yt_browse_id=row.yt_browse_id or "",
+            # ``yt_browse_id`` / ``yt_url`` / ``yt_track_count`` are
+            # declared required on ``PersistedYoutubeRow`` so
+            # ``msgspec.convert`` above rejects malformed JSONB at the
+            # boundary; defensive ``or ""`` fallbacks are no longer
+            # necessary (round 2 maintainability-2).
+            yt_browse_id=row.yt_browse_id,
             yt_audio_playlist_id=row.yt_audio_playlist_id,
-            yt_url=row.yt_url or "",
+            yt_url=row.yt_url,
             year=row.yt_year,
-            track_count=row.yt_track_count or 0,
+            track_count=row.yt_track_count,
             tracks=synth_tracks,
             distances=distances,
         ))

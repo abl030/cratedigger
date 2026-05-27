@@ -10134,8 +10134,20 @@ class TestYoutubeRouteContracts(_WebServerCase):
         a no-op ``close()`` method.
         """
         class _FakeSession:
+            close_calls = 0
+
             def close(self) -> None:
+                # Class-level counter so the test fixture can assert
+                # close() was actually called (round 2 P2-2). Without
+                # this, the close() helper in the route module could
+                # be deleted and no test would catch it.
+                type(self).close_calls += 1
                 return None
+
+        # Reset the counter for each ``_patch_service`` invocation so
+        # close-count assertions are scoped to one test call.
+        _FakeSession.close_calls = 0
+        self._fake_session_cls = _FakeSession
 
         with patch(
             "web.routes.youtube._build_youtube_client",
@@ -10300,6 +10312,65 @@ class TestYoutubeRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         # First positional arg is the identifier.
         self.assertEqual(mock_resolve.call_args.args[0], self.UUID_A)
+
+    def test_session_close_called_on_happy_path(self):
+        """Round 2 P2-2: the route's ``finally`` block must call
+        ``session.close()`` so the requests Session's connection pool
+        is released (finding #18). Without an assertion here, a
+        regression that removed the close call would not trip any
+        existing test.
+        """
+        with self._patch_service(self._ok_result()):
+            status, _ = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self._fake_session_cls.close_calls, 1,
+            msg="route must call session.close() exactly once on "
+                "happy-path resolves (round 2 P2-2)",
+        )
+
+    def test_session_close_called_when_service_raises(self):
+        """If ``resolve_youtube_album`` raises mid-request, the
+        ``finally`` clause still releases the session — the route
+        must not leak a connection pool because of an exception.
+        """
+        from lib.youtube_album_service import OUTCOME_HTTP_STATUS  # noqa: F401
+
+        class _FakeSession:
+            close_calls = 0
+
+            def close(self) -> None:
+                type(self).close_calls += 1
+                return None
+
+        _FakeSession.close_calls = 0
+
+        def _raising_resolver(*_a, **_kw):
+            raise RuntimeError("simulated mid-request failure")
+
+        with patch(
+            "web.routes.youtube._build_youtube_client",
+            return_value=(object(), _FakeSession()),
+        ), patch(
+            "web.routes.youtube._RedisYoutubeCache",
+            return_value=object(),
+        ), patch(
+            "web.routes.youtube.resolve_youtube_album",
+            side_effect=_raising_resolver,
+        ):
+            # The route will 500 because the resolver raised; we only
+            # care that the session was still closed.
+            try:
+                self._get(f"/api/youtube-album?identifier={self.UUID_A}")
+            except Exception:
+                pass
+
+        self.assertEqual(
+            _FakeSession.close_calls, 1,
+            msg="route must close the session even when the resolver "
+                "raises mid-request (round 2 P2-2)",
+        )
 
 
 if __name__ == "__main__":
