@@ -14,14 +14,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-# Mock heavy dependencies before importing cratedigger
-sys.modules["requests"] = MagicMock()
-sys.modules["music_tag"] = MagicMock()
-sys.modules["slskd_api"] = MagicMock()
-sys.modules["slskd_api.apis"] = MagicMock()
-sys.modules["slskd_api.apis.users"] = MagicMock()
-
-# Now import cratedigger and lib modules
+# Heavy third-party deps (``requests``, ``music_tag``, ``slskd_api``)
+# used to be mocked here at module-discovery time, before the dev shell
+# (nix/package.nix) was complete. Now they are real packages provided
+# by ``nix-shell`` and importing them is harmless. Keeping the mocks
+# would also pollute ``sys.modules['requests']`` for every subsequent
+# test in alphabetical order — tripping up exception-catching code
+# (e.g. ``lib.youtube_album_service``) that uses real
+# ``requests.Timeout`` / ``ConnectionError`` exception classes.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cratedigger
 from lib.beets import beets_validate

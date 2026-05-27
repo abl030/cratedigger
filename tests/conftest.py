@@ -12,8 +12,8 @@ import sys
 
 # Capture the REAL slskd_api module *first*, before any other import has a
 # chance to install a Mock under sys.modules["slskd_api"]. Test files like
-# test_beets_validation.py / test_integration.py mock at module top-level,
-# so this snapshot must precede every other side-effecting import.
+# test_integration.py mock at module top-level, so this snapshot must
+# precede every other side-effecting import.
 try:
     import slskd_api as _real_slskd_api
 except ImportError:
