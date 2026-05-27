@@ -1385,5 +1385,133 @@ class TestResultStructShape(unittest.TestCase):
         self.assertEqual(decoded.youtube_releases[0].distances[0].mbid, MB_REL_A)
 
 
+class _DictCache:
+    """In-memory ``BeetsDistanceCache`` for testing the YT cache wiring.
+
+    Mirrors the same-name fake in tests/test_beets_distance.py; kept
+    local so this module stays self-contained.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, bytes] = {}
+        self.get_calls: list[str] = []
+        self.set_calls: list[tuple[str, int]] = []
+
+    def get(self, key: str) -> bytes | None:
+        self.get_calls.append(key)
+        return self._store.get(key)
+
+    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
+        self.set_calls.append((key, ttl_seconds))
+        self._store[key] = value
+
+
+class _ReadOnlyDictCache(_DictCache):
+    """A cache where ``set`` always raises — simulates Redis being down
+    on the write side."""
+
+    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
+        del key, value, ttl_seconds  # signature must match base class
+        raise RuntimeError("Redis SET failed")
+
+
+class TestRedisCacheWiring(unittest.TestCase):
+    """Verifies the service uses the injected ``cache`` to accelerate
+    YouTube Music HTTP calls (`search` + `get_album`) per the plan's
+    cache-flow design. Existing tests pass ``cache=None`` and verify
+    the durable-table path; these tests verify the HTTP-accelerator
+    layer that the durable table sits on top of.
+    """
+
+    def _build_yt(self) -> FakeYTMusic:
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Dr. Octagonecologyst",
+            [_yt_search_album_result("MPREb-seed", year="1996", track_count=2)],
+        )
+        yt.set_album(
+            "MPREb-seed",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-seed",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+                year="1996",
+                tracks=_yt_tracks(["Intro", "3000"]),
+            ),
+        )
+        return yt
+
+    def _resolve(self, *, pdb, yt, cache):
+        rg = MB_RG
+        mb_release_lookup = _LookupSpy({
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        return resolve_youtube_album(
+            MB_REL_A,
+            pdb=pdb,
+            mb_get_release=mb_release_lookup,
+            mb_get_release_group_releases=_LookupSpy({
+                rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
+            }),
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=cache,
+        )
+
+    def test_first_call_populates_cache_with_search_and_get_album(self) -> None:
+        cache = _DictCache()
+        result = self._resolve(pdb=FakePipelineDB(), yt=self._build_yt(), cache=cache)
+
+        self.assertEqual(result.outcome, "ok")
+        # Search + one get_album each got written to cache.
+        keys = {k for k, _ttl in cache.set_calls}
+        self.assertIn("youtube:search:Dr. Octagon Dr. Octagonecologyst:albums:10", keys)
+        self.assertIn("youtube:album:MPREb-seed", keys)
+        # TTL is the forever sentinel.
+        for _key, ttl in cache.set_calls:
+            self.assertEqual(ttl, 2**31 - 1)
+
+    def test_second_call_with_warm_cache_skips_yt_client(self) -> None:
+        cache = _DictCache()
+        # Prime the cache by running once.
+        yt_first = self._build_yt()
+        self._resolve(pdb=FakePipelineDB(), yt=yt_first, cache=cache)
+        self.assertGreater(len(yt_first.search_calls), 0)
+        self.assertGreater(len(yt_first.get_album_calls), 0)
+
+        # Second run with a fresh YT client + the warm cache + a fresh
+        # PipelineDB so the durable-table cache is also cold. The
+        # service must read everything from Redis.
+        yt_second = self._build_yt()
+        self._resolve(pdb=FakePipelineDB(), yt=yt_second, cache=cache)
+        self.assertEqual(yt_second.search_calls, [],
+                         "warm cache must skip YT search entirely")
+        self.assertEqual(yt_second.get_album_calls, [],
+                         "warm cache must skip YT get_album entirely")
+
+    def test_corrupt_cache_entry_falls_through_to_fresh_fetch(self) -> None:
+        cache = _DictCache()
+        # Plant a deliberately-corrupt blob at the search key.
+        cache._store[
+            "youtube:search:Dr. Octagon Dr. Octagonecologyst:albums:10"
+        ] = b"not-valid-json{{"
+        yt = self._build_yt()
+        result = self._resolve(pdb=FakePipelineDB(), yt=yt, cache=cache)
+
+        # Resolution succeeds and yt_client was hit (cache miss fell
+        # through to fresh fetch).
+        self.assertEqual(result.outcome, "ok")
+        self.assertGreater(len(yt.search_calls), 0)
+
+    def test_cache_write_failure_does_not_break_resolution(self) -> None:
+        cache = _ReadOnlyDictCache()
+        yt = self._build_yt()
+        # Resolution should succeed despite every cache.set raising.
+        result = self._resolve(pdb=FakePipelineDB(), yt=yt, cache=cache)
+        self.assertEqual(result.outcome, "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

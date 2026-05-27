@@ -50,6 +50,82 @@ from lib.release_identity import detect_release_source
 log = logging.getLogger(__name__)
 
 
+# Redis cache TTL for cached YouTube Music HTTP responses. Effectively
+# forever: Redis ``SETEX`` accepts up to ``2**63 - 1``, but ``2**31 - 1``
+# (~68 years) is the conservative limit honoured by all Redis clients
+# and matches the pattern ``_RedisFingerprintCache`` callers use
+# elsewhere. The durable cache is ``pdb.youtube_album_mappings``; this
+# constant only governs the in-process HTTP-accelerator layer.
+_FOREVER_TTL_SECONDS = 2**31 - 1
+
+
+def _cached_search(
+    yt_client: Any,
+    cache: Optional[BeetsDistanceCache],
+    query: str,
+    filter_str: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Wrap ``yt_client.search(...)`` with cache-check-then-store.
+
+    Cache entries are msgspec-encoded JSON. Decode failures (e.g. a
+    corrupt entry, a schema change) fall through silently to a fresh
+    HTTP call. Cache writes are best-effort — if Redis is down, the
+    error is swallowed and the result still surfaces to the caller.
+    """
+    if cache is not None:
+        key = f"youtube:search:{query}:{filter_str}:{limit}"
+        blob = cache.get(key)
+        if blob is not None:
+            try:
+                return msgspec.json.decode(blob)
+            except msgspec.DecodeError:
+                pass
+    results = yt_client.search(query, filter=filter_str, limit=limit)
+    if cache is not None:
+        try:
+            cache.set(
+                f"youtube:search:{query}:{filter_str}:{limit}",
+                msgspec.json.encode(results),
+                _FOREVER_TTL_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 — cache writes are best-effort
+            pass
+    return results
+
+
+def _cached_get_album(
+    yt_client: Any,
+    cache: Optional[BeetsDistanceCache],
+    browse_id: str,
+) -> dict[str, Any]:
+    """Wrap ``yt_client.get_album(browse_id)`` with cache-check-then-store.
+
+    Same semantics as ``_cached_search``: cache-first read, msgspec
+    JSON encoding, swallow decode/write failures so cache problems
+    never block resolution.
+    """
+    if cache is not None:
+        key = f"youtube:album:{browse_id}"
+        blob = cache.get(key)
+        if blob is not None:
+            try:
+                return msgspec.json.decode(blob)
+            except msgspec.DecodeError:
+                pass
+    album = yt_client.get_album(browse_id)
+    if cache is not None:
+        try:
+            cache.set(
+                f"youtube:album:{browse_id}",
+                msgspec.json.encode(album),
+                _FOREVER_TTL_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return album
+
+
 # ---------------------------------------------------------------------------
 # Outcome vocabulary — shared with CLI (U7) and web route (U8).
 # ---------------------------------------------------------------------------
@@ -272,7 +348,7 @@ def resolve_youtube_album(
     seed_browse_id: Optional[str] = None
     yt_album_responses: dict[str, dict] = {}
     try:
-        search_results = yt_client.search(query, filter="albums", limit=10)
+        search_results = _cached_search(yt_client, cache, query, "albums", 10)
         seed_browse_id = _pick_yt_seed(search_results, seed_release)
         if seed_browse_id is None:
             # AE2: search returned empty → ok + empty matrix.
@@ -285,7 +361,7 @@ def resolve_youtube_album(
                 youtube_releases=[],
                 started=started,
             )
-        seed_album = yt_client.get_album(seed_browse_id)
+        seed_album = _cached_get_album(yt_client, cache, seed_browse_id)
         yt_album_responses[seed_browse_id] = seed_album
         for other in seed_album.get("other_versions") or []:
             other_browse_id = other.get("browseId")
@@ -294,8 +370,8 @@ def resolve_youtube_album(
             # Per-sibling get_album failures don't abort the whole resolve;
             # exclude the broken sibling instead.
             try:
-                yt_album_responses[other_browse_id] = yt_client.get_album(
-                    other_browse_id)
+                yt_album_responses[other_browse_id] = _cached_get_album(
+                    yt_client, cache, other_browse_id)
             except (YTMusicServerError, YTMusicUserError, YTMusicError,
                     requests.Timeout, requests.ConnectionError,
                     KeyError, IndexError) as exc:

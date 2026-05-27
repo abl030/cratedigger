@@ -52,14 +52,6 @@ __all__ = [
 ]
 
 
-# Effectively forever — Redis SETEX accepts up to ``2**63 - 1`` seconds
-# but ``2**31 - 1`` (~68 years) is the conservative limit honoured by
-# all Redis clients and is what ``_RedisFingerprintCache`` callers use
-# elsewhere. The cache is content-addressed per release group, so a
-# stale entry can only be cleared via ``?refresh=true``.
-_FOREVER_TTL_SECONDS = 2**31 - 1
-
-
 class _RedisYoutubeCache:
     """Adapt ``web/cache.py``'s Redis client to the
     ``BeetsDistanceCache`` protocol, keyed under ``youtube:album:<key>``.
