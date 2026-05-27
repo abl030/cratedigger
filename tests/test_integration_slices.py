@@ -227,15 +227,11 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
     """
 
     def _build_offline_http_error(self) -> Exception:
-        """Synthetic stand-in for slskd-api's ``requests.HTTPError`` —
-        ``test_beets_validation.py`` mocks ``sys.modules['requests']`` at
-        discovery time, so a real ``requests.HTTPError`` constructed here
-        would not be a real exception. The detector matches structurally
-        on ``.response.text``."""
-        class _FakeHTTPError(Exception):
-            pass
-
-        err = _FakeHTTPError("500 Server Error")
+        """Build a ``requests.HTTPError`` whose ``.response.text`` mirrors
+        slskd's offline-peer 500. The detector matches structurally on
+        ``.response.text``."""
+        import requests
+        err = requests.HTTPError("500 Server Error")
         err.response = SimpleNamespace(  # type: ignore[attr-defined]
             text="User pooyork appears to be offline",
         )
