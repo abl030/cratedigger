@@ -5,6 +5,7 @@ Starts a real HTTP server on a random port with mocked DB,
 verifying response codes, JSON structure, and error handling.
 """
 
+import contextlib
 import copy
 from datetime import datetime, timezone
 import email.message
@@ -10110,11 +10111,35 @@ class TestYoutubeRouteContracts(_WebServerCase):
             duration_ms=12,
         )
 
+    @contextlib.contextmanager
     def _patch_service(self, return_value):
-        return patch(
+        """Patch the resolver call AND the collaborator constructors.
+
+        The route handler constructs ``YTMusic`` and ``_RedisYoutubeCache``
+        *before* calling ``resolve_youtube_album`` so the production path
+        wires everything up cleanly. In the contract test we only care
+        about the service call's return value, so we stub the
+        construction helpers to return harmless sentinels. This also
+        makes the test robust to other tests that may have
+        monkey-patched ``requests.Session`` (ytmusicapi runs
+        ``isinstance(requests_session, requests.Session)`` at
+        construction time and crashes when the Session class is not a
+        real type).
+
+        Yields the ``resolve_youtube_album`` mock so callers can assert
+        on ``call_count`` / ``call_args``.
+        """
+        with patch(
+            "web.routes.youtube._build_youtube_client",
+            return_value=object(),
+        ), patch(
+            "web.routes.youtube._RedisYoutubeCache",
+            return_value=object(),
+        ), patch(
             "web.routes.youtube.resolve_youtube_album",
             return_value=return_value,
-        )
+        ) as mock_resolve:
+            yield mock_resolve
 
     def test_status_mapping_is_imported_from_service(self):
         """``web.routes.youtube`` must re-export ``OUTCOME_HTTP_STATUS``
