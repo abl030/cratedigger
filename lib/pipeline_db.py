@@ -6891,3 +6891,115 @@ class PipelineDB:
             rid = int(row["request_id"])
             out.setdefault(rid, []).append(dict(row))
         return out
+
+    # --- youtube_album_mappings (migration 034) ---
+    #
+    # The YouTube Music album resolver caches its scored matrix here:
+    # one row per ``yt_browse_id`` per release-group / source pair. R14
+    # (operator-triggered refresh) is satisfied by ``delete_…`` + ``upsert_…``;
+    # the natural read path is "give me the full matrix" via ``get_…``.
+
+    def get_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+    ) -> list[dict[str, Any]]:
+        """Return all cached rows for the ``(release_group_identifier, source)`` pair.
+
+        Ordered by ``yt_browse_id`` ASC for deterministic output (the
+        underlying UNIQUE index already covers the prefix). Empty list
+        when nothing is cached. JSONB columns are deserialised by
+        psycopg2 into native Python ``list`` / ``dict``.
+        """
+        cur = self._execute(
+            """
+            SELECT id, release_group_identifier, source, yt_browse_id,
+                   yt_audio_playlist_id, yt_url, yt_year, yt_track_count,
+                   yt_tracks, distances, resolved_at
+            FROM youtube_album_mappings
+            WHERE release_group_identifier = %s AND source = %s
+            ORDER BY yt_browse_id ASC
+            """,
+            (release_group_identifier, source),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def upsert_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace the matrix for ``(release_group_identifier, source)``.
+
+        Runs DELETE + INSERTs in a single transaction so a concurrent
+        reader never observes a mid-replace partial state. Partial updates
+        are not supported — refresh always replaces (R14). Each row must
+        carry: ``yt_browse_id``, ``yt_audio_playlist_id`` (optional),
+        ``yt_url``, ``yt_year`` (optional), ``yt_track_count``,
+        ``yt_tracks`` (JSONB), ``distances`` (JSONB).
+        """
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    DELETE FROM youtube_album_mappings
+                    WHERE release_group_identifier = %s AND source = %s
+                    """,
+                    (release_group_identifier, source),
+                )
+                if rows:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO youtube_album_mappings
+                            (release_group_identifier, source, yt_browse_id,
+                             yt_audio_playlist_id, yt_url, yt_year,
+                             yt_track_count, yt_tracks, distances)
+                        VALUES %s
+                        """,
+                        [
+                            (
+                                release_group_identifier,
+                                source,
+                                row["yt_browse_id"],
+                                row.get("yt_audio_playlist_id"),
+                                row["yt_url"],
+                                row.get("yt_year"),
+                                row["yt_track_count"],
+                                psycopg2.extras.Json(row["yt_tracks"]),
+                                psycopg2.extras.Json(row["distances"]),
+                            )
+                            for row in rows
+                        ],
+                    )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
+    def delete_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+    ) -> int:
+        """Drop the matrix for ``(release_group_identifier, source)``.
+
+        Returns the count of deleted rows (0 when nothing was cached).
+        Used by the operator-triggered refresh path before an upsert.
+        """
+        cur = self._execute(
+            """
+            DELETE FROM youtube_album_mappings
+            WHERE release_group_identifier = %s AND source = %s
+            """,
+            (release_group_identifier, source),
+        )
+        return cur.rowcount

@@ -947,6 +947,13 @@ class FakePipelineDB:
         # (extra headroom for the per-request compose path's request
         # fetch).
         self.query_counts: dict[str, int] = {}
+        # Migration 034 — youtube_album_mappings. Keyed by
+        # (release_group_identifier, source); each value is the full
+        # matrix the resolver scored for that pair. Refresh always
+        # replaces the whole list (no partial updates per R14).
+        self._youtube_album_mappings: dict[
+            tuple[str, str], list[dict[str, Any]],
+        ] = {}
 
     # --- Seeding ---
 
@@ -2745,6 +2752,70 @@ class FakePipelineDB:
             zero_find_cycles=zero_find_cycles,
             wrong_pressing_hits=wrong_pressing_hits,
         )
+
+    # --- youtube_album_mappings (migration 034) ---
+
+    def seed_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Populate the cache for a (release_group_identifier, source) pair.
+
+        Test helper — bypasses the upsert path so tests can pre-seed state
+        without exercising the replace semantics under test.
+        """
+        self._youtube_album_mappings[
+            (release_group_identifier, source)
+        ] = [copy.deepcopy(r) for r in rows]
+
+    def get_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+    ) -> list[dict[str, Any]]:
+        """Return all rows for the pair, ordered by ``yt_browse_id`` ASC.
+
+        Empty list when nothing is cached. Mirrors the real PipelineDB
+        contract; the resolver always reads the full matrix per pair.
+        """
+        rows = self._youtube_album_mappings.get(
+            (release_group_identifier, source), [])
+        return sorted(
+            (copy.deepcopy(r) for r in rows),
+            key=lambda r: r["yt_browse_id"],
+        )
+
+    def upsert_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace the matrix for ``(release_group_identifier, source)``.
+
+        Partial updates are not supported — refresh always replaces. The
+        real implementation wraps DELETE + INSERTs in a single transaction;
+        the fake just overwrites the dict slot, which is atomic in the
+        single-threaded test context.
+        """
+        self._youtube_album_mappings[
+            (release_group_identifier, source)
+        ] = [copy.deepcopy(r) for r in rows]
+
+    def delete_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+    ) -> int:
+        """Drop the matrix for ``(release_group_identifier, source)``.
+
+        Returns the count of deleted rows (0 when nothing was cached).
+        """
+        existing = self._youtube_album_mappings.pop(
+            (release_group_identifier, source), [])
+        return len(existing)
 
     # --- Session lifecycle ---
 

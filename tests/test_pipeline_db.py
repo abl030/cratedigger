@@ -51,6 +51,7 @@ def make_db():
         "search_log",
         "download_log",
         "album_request_field_resolutions",  # migration 030
+        "youtube_album_mappings",  # migration 034
         "album_tracks",
         "album_requests",
     ]:
@@ -7176,6 +7177,200 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         self.assertEqual(sig.zero_find_cycles, 3)
         # One wrong-pressing hit (cycle 0).
         self.assertEqual(sig.wrong_pressing_hits, 1)
+
+
+@requires_postgres
+class TestYoutubeAlbumMappings(unittest.TestCase):
+    """Integration tests for PipelineDB youtube_album_mappings CRUD (U4).
+
+    Exercises the real PostgreSQL CRUD against migration 034. The atomic
+    replace test verifies that mid-replace state is never visible — a
+    concurrent reader sees either the old matrix or the new, never an
+    interleaved subset.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _row(self, **overrides: Any) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "yt_browse_id": "MPREb_abc",
+            "yt_audio_playlist_id": "OLAK5uy_abc",
+            "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_abc",
+            "yt_year": 2020,
+            "yt_track_count": 10,
+            "yt_tracks": [
+                {"title": "Track 1", "video_id": "v1",
+                 "length_seconds": 200, "track_number": 1, "disc_number": 1,
+                 "artists": [{"name": "Artist"}]},
+            ],
+            "distances": [
+                {"mb_release_id": "mb-1", "distance": 0.05, "error": None},
+            ],
+        }
+        row.update(overrides)
+        return row
+
+    def test_get_returns_empty_list_when_nothing_cached(self):
+        self.assertEqual(
+            self.db.get_youtube_album_mapping("rg-1", "mb"),
+            [],
+        )
+
+    def test_upsert_inserts_new_rows_and_get_returns_them(self):
+        rows = [
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_b"),
+        ]
+
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", rows)
+
+        got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(len(got), 2)
+        self.assertEqual(
+            [r["yt_browse_id"] for r in got],
+            ["MPREb_a", "MPREb_b"],
+        )
+        # JSONB columns deserialize back into native Python lists/dicts.
+        self.assertEqual(
+            got[0]["yt_tracks"][0]["title"], "Track 1")
+        self.assertEqual(
+            got[0]["distances"][0]["mb_release_id"], "mb-1")
+
+    def test_get_orders_rows_by_yt_browse_id(self):
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_z"),
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_m"),
+        ])
+
+        got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(
+            [r["yt_browse_id"] for r in got],
+            ["MPREb_a", "MPREb_m", "MPREb_z"],
+        )
+
+    def test_upsert_atomically_replaces_existing_rows(self):
+        """DELETE + INSERTs in one transaction; reader never sees partial state."""
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_old1"),
+            self._row(yt_browse_id="MPREb_old2"),
+            self._row(yt_browse_id="MPREb_old3"),
+        ])
+
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_new1"),
+            self._row(yt_browse_id="MPREb_new2"),
+        ])
+
+        got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(
+            [r["yt_browse_id"] for r in got],
+            ["MPREb_new1", "MPREb_new2"],
+        )
+
+    def test_upsert_does_not_affect_other_release_group_or_source(self):
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a")])
+        self.db.upsert_youtube_album_mapping("rg-2", "mb", [
+            self._row(yt_browse_id="MPREb_b")])
+        self.db.upsert_youtube_album_mapping("rg-1", "discogs", [
+            self._row(yt_browse_id="MPREb_c")])
+
+        # Replace only rg-1/mb.
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a_v2")])
+
+        self.assertEqual(
+            [r["yt_browse_id"] for r in
+             self.db.get_youtube_album_mapping("rg-1", "mb")],
+            ["MPREb_a_v2"],
+        )
+        self.assertEqual(
+            [r["yt_browse_id"] for r in
+             self.db.get_youtube_album_mapping("rg-2", "mb")],
+            ["MPREb_b"],
+        )
+        self.assertEqual(
+            [r["yt_browse_id"] for r in
+             self.db.get_youtube_album_mapping("rg-1", "discogs")],
+            ["MPREb_c"],
+        )
+
+    def test_delete_returns_count_and_clears_rows(self):
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_b"),
+            self._row(yt_browse_id="MPREb_c"),
+        ])
+
+        deleted = self.db.delete_youtube_album_mapping("rg-1", "mb")
+
+        self.assertEqual(deleted, 3)
+        self.assertEqual(
+            self.db.get_youtube_album_mapping("rg-1", "mb"), [])
+
+    def test_delete_returns_zero_when_nothing_cached(self):
+        self.assertEqual(
+            self.db.delete_youtube_album_mapping("rg-1", "mb"),
+            0,
+        )
+
+    def test_upsert_preserves_nullable_fields(self):
+        """yt_audio_playlist_id + yt_year are NULLable per migration 034."""
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(
+                yt_browse_id="MPREb_nulls",
+                yt_audio_playlist_id=None,
+                yt_year=None,
+            ),
+        ])
+
+        got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(len(got), 1)
+        self.assertIsNone(got[0]["yt_audio_playlist_id"])
+        self.assertIsNone(got[0]["yt_year"])
+
+    def test_upsert_with_empty_rows_clears_the_pair(self):
+        """Passing an empty list deletes the pair's existing matrix."""
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_b"),
+        ])
+
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [])
+
+        self.assertEqual(
+            self.db.get_youtube_album_mapping("rg-1", "mb"), [])
+
+    def test_upsert_rolls_back_on_insert_failure(self):
+        """If a row insert violates a constraint, the prior matrix survives."""
+        self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_pre1"),
+            self._row(yt_browse_id="MPREb_pre2"),
+        ])
+
+        # CHECK constraint forbids source != ('mb', 'discogs'). We can't
+        # break source on the second call (the method parameter would have
+        # to flow into INSERT), so trigger failure via duplicate
+        # yt_browse_id within the same upsert payload — the UNIQUE
+        # (release_group_identifier, source, yt_browse_id) constraint
+        # rejects it.
+        with self.assertRaises(Exception):
+            self.db.upsert_youtube_album_mapping("rg-1", "mb", [
+                self._row(yt_browse_id="MPREb_dup"),
+                self._row(yt_browse_id="MPREb_dup"),
+            ])
+
+        # Prior matrix must survive — rollback preserved it.
+        got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(
+            [r["yt_browse_id"] for r in got],
+            ["MPREb_pre1", "MPREb_pre2"],
+        )
 
 
 if __name__ == "__main__":

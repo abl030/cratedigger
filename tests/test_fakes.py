@@ -2045,6 +2045,166 @@ class TestFakeYTMusic(unittest.TestCase):
         self.assertEqual(yt.get_album("MPREb_abc"), fixture)
 
 
+class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
+    """Self-test for FakePipelineDB youtube_album_mappings CRUD (U4).
+
+    Mirrors the real ``PipelineDB.get_youtube_album_mapping`` /
+    ``upsert_youtube_album_mapping`` / ``delete_youtube_album_mapping``
+    surface. Backing store is keyed by ``(release_group_identifier,
+    source)`` so a single MB release-group or Discogs master maps to
+    the full per-sibling matrix the resolver produced.
+    """
+
+    def _row(self, **overrides: Any) -> dict[str, Any]:
+        row = {
+            "yt_browse_id": "MPREb_abc",
+            "yt_audio_playlist_id": "OLAK5uy_abc",
+            "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_abc",
+            "yt_year": 2020,
+            "yt_track_count": 10,
+            "yt_tracks": [
+                {"title": "Track 1", "video_id": "v1",
+                 "length_seconds": 200, "track_number": 1, "disc_number": 1,
+                 "artists": [{"name": "Artist"}]},
+            ],
+            "distances": [
+                {"mb_release_id": "mb-1", "distance": 0.05, "error": None},
+            ],
+        }
+        row.update(overrides)
+        return row
+
+    def test_get_returns_empty_list_when_nothing_cached(self):
+        db = FakePipelineDB()
+
+        self.assertEqual(
+            db.get_youtube_album_mapping("rg-1", "mb"),
+            [],
+        )
+
+    def test_upsert_inserts_new_rows_and_get_returns_them(self):
+        db = FakePipelineDB()
+        rows = [
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_b"),
+        ]
+
+        db.upsert_youtube_album_mapping("rg-1", "mb", rows)
+
+        got = db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(len(got), 2)
+        self.assertEqual(
+            [r["yt_browse_id"] for r in got],
+            ["MPREb_a", "MPREb_b"],
+        )
+
+    def test_get_returns_rows_ordered_by_yt_browse_id(self):
+        """Determinism contract — order is yt_browse_id ASC regardless of insert order."""
+        db = FakePipelineDB()
+        rows = [
+            self._row(yt_browse_id="MPREb_z"),
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_m"),
+        ]
+
+        db.upsert_youtube_album_mapping("rg-1", "mb", rows)
+
+        got = db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(
+            [r["yt_browse_id"] for r in got],
+            ["MPREb_a", "MPREb_m", "MPREb_z"],
+        )
+
+    def test_upsert_atomically_replaces_existing_rows(self):
+        db = FakePipelineDB()
+        db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_old1"),
+            self._row(yt_browse_id="MPREb_old2"),
+            self._row(yt_browse_id="MPREb_old3"),
+        ])
+
+        # Replace with a smaller, disjoint matrix.
+        db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_new"),
+        ])
+
+        got = db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["yt_browse_id"], "MPREb_new")
+
+    def test_upsert_does_not_affect_other_release_group_or_source(self):
+        db = FakePipelineDB()
+        db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a")])
+        db.upsert_youtube_album_mapping("rg-2", "mb", [
+            self._row(yt_browse_id="MPREb_b")])
+        db.upsert_youtube_album_mapping("rg-1", "discogs", [
+            self._row(yt_browse_id="MPREb_c")])
+
+        # Replace rg-1/mb only.
+        db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a_v2")])
+
+        self.assertEqual(
+            [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-1", "mb")],
+            ["MPREb_a_v2"],
+        )
+        self.assertEqual(
+            [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-2", "mb")],
+            ["MPREb_b"],
+        )
+        self.assertEqual(
+            [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-1", "discogs")],
+            ["MPREb_c"],
+        )
+
+    def test_delete_returns_count_and_clears_rows(self):
+        db = FakePipelineDB()
+        db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(yt_browse_id="MPREb_a"),
+            self._row(yt_browse_id="MPREb_b"),
+            self._row(yt_browse_id="MPREb_c"),
+        ])
+
+        deleted = db.delete_youtube_album_mapping("rg-1", "mb")
+
+        self.assertEqual(deleted, 3)
+        self.assertEqual(db.get_youtube_album_mapping("rg-1", "mb"), [])
+
+    def test_delete_returns_zero_when_nothing_cached(self):
+        db = FakePipelineDB()
+
+        deleted = db.delete_youtube_album_mapping("rg-1", "mb")
+
+        self.assertEqual(deleted, 0)
+
+    def test_seed_helper_populates_state(self):
+        db = FakePipelineDB()
+        rows = [self._row(yt_browse_id="MPREb_seed")]
+
+        db.seed_youtube_album_mapping("rg-1", "mb", rows)
+
+        got = db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["yt_browse_id"], "MPREb_seed")
+
+    def test_upsert_preserves_optional_none_fields(self):
+        """yt_audio_playlist_id + yt_year are NULLable per migration 034."""
+        db = FakePipelineDB()
+        db.upsert_youtube_album_mapping("rg-1", "mb", [
+            self._row(
+                yt_browse_id="MPREb_nulls",
+                yt_audio_playlist_id=None,
+                yt_year=None,
+            ),
+        ])
+
+        got = db.get_youtube_album_mapping("rg-1", "mb")
+        self.assertEqual(len(got), 1)
+        self.assertIsNone(got[0]["yt_audio_playlist_id"])
+        self.assertIsNone(got[0]["yt_year"])
+
+
 class TestBuilders(unittest.TestCase):
     def test_make_download_file_defaults(self):
         f = make_download_file()
@@ -3704,6 +3864,7 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "set_advisory_lock_result",
             "set_cooldown_result",
             "queue_execute_results",
+            "seed_youtube_album_mapping",
         }
         real = _public_methods(PipelineDB)
         fake = _public_methods(FakePipelineDB)
