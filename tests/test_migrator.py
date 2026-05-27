@@ -2505,5 +2505,280 @@ class TestAlbumRequestsReleaseGroupYearSchema(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+@requires_postgres
+class TestYoutubeAlbumMappingsSchema(unittest.TestCase):
+    """Migration 034 adds the ``youtube_album_mappings`` table — the
+    durable cache for the YouTube Music album resolver. See U3 of
+    ``docs/plans/2026-05-27-001-feat-youtube-music-album-resolver-plan.md``.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_table_exists_with_expected_columns(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'youtube_album_mappings'
+            ORDER BY ordinal_position
+        """)
+        cols = {r[0]: (r[1], r[2]) for r in rows}
+        self.assertIn("id", cols)
+        self.assertEqual(cols["release_group_identifier"], ("NO", "text"))
+        self.assertEqual(cols["source"], ("NO", "text"))
+        self.assertEqual(cols["yt_browse_id"], ("NO", "text"))
+        self.assertEqual(cols["yt_audio_playlist_id"], ("YES", "text"))
+        self.assertEqual(cols["yt_url"], ("NO", "text"))
+        self.assertEqual(cols["yt_year"], ("YES", "integer"))
+        self.assertEqual(cols["yt_track_count"], ("NO", "integer"))
+        # Migration 036 added the album-level columns so the cache
+        # round-trip preserves SyntheticItem.album / albumartist
+        # fidelity (round 2 P0-1, maintainability-5).
+        self.assertEqual(cols["album_title"], ("YES", "text"))
+        self.assertEqual(cols["album_artist"], ("YES", "text"))
+        self.assertEqual(cols["yt_tracks"], ("NO", "jsonb"))
+        self.assertEqual(cols["distances"], ("NO", "jsonb"))
+        self.assertEqual(cols["resolved_at"][0], "NO")
+        self.assertIn("timestamp", cols["resolved_at"][1])
+
+    def test_source_check_constraint_rejects_unknown(self):
+        # Both 'mb' and 'discogs' are allowed; anything else is rejected.
+        # Finding #26: the prior test only exercised 'mb' — we also
+        # assert a successful 'discogs' insert before the rejection
+        # case so both legitimate branches of the CHECK are covered.
+        rid_mb = self._query("""
+            INSERT INTO youtube_album_mappings
+              (release_group_identifier, source, yt_browse_id, yt_url,
+               yt_track_count, yt_tracks, distances)
+            VALUES ('rg-allowed', 'mb', 'MPREb_abc', 'https://music.example/',
+                    10, '[]'::jsonb, '[]'::jsonb)
+            RETURNING id
+        """)[0][0]
+        rid_discogs = self._query("""
+            INSERT INTO youtube_album_mappings
+              (release_group_identifier, source, yt_browse_id, yt_url,
+               yt_track_count, yt_tracks, distances)
+            VALUES ('master-allowed', 'discogs', 'MPREb_dis',
+                    'https://music.example/2', 5,
+                    '[]'::jsonb, '[]'::jsonb)
+            RETURNING id
+        """)[0][0]
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO youtube_album_mappings
+                      (release_group_identifier, source, yt_browse_id, yt_url,
+                       yt_track_count, yt_tracks, distances)
+                    VALUES ('rg-bad-source', 'tidal', 'MPREb_x', 'u',
+                            1, '[]'::jsonb, '[]'::jsonb)
+                """)
+        finally:
+            self._exec("DELETE FROM youtube_album_mappings WHERE id = %s",
+                       (rid_mb,))
+            self._exec("DELETE FROM youtube_album_mappings WHERE id = %s",
+                       (rid_discogs,))
+
+    def test_idx_yam_release_group_index_exists(self):
+        """Migration 034 creates ``idx_yam_release_group`` to keep the
+        planner's choice stable as the table grows. Finding #27.
+        """
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'youtube_album_mappings'
+              AND indexname = 'idx_yam_release_group'
+        """)
+        self.assertEqual(len(rows), 1,
+                         msg="idx_yam_release_group must exist on "
+                             "youtube_album_mappings (created by 034)")
+
+    def test_unique_natural_key(self):
+        # Same (release_group_identifier, source, yt_browse_id) tuple
+        # cannot be inserted twice — UNIQUE rejects the duplicate.
+        self._exec("""
+            INSERT INTO youtube_album_mappings
+              (release_group_identifier, source, yt_browse_id, yt_url,
+               yt_track_count, yt_tracks, distances)
+            VALUES ('rg-unique', 'mb', 'MPREb_unique',
+                    'https://music.example/', 5,
+                    '[]'::jsonb, '[]'::jsonb)
+        """)
+        try:
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO youtube_album_mappings
+                      (release_group_identifier, source, yt_browse_id, yt_url,
+                       yt_track_count, yt_tracks, distances)
+                    VALUES ('rg-unique', 'mb', 'MPREb_unique', 'other-url',
+                            5, '[]'::jsonb, '[]'::jsonb)
+                """)
+            # Different yt_browse_id IS allowed for the same group.
+            self._exec("""
+                INSERT INTO youtube_album_mappings
+                  (release_group_identifier, source, yt_browse_id, yt_url,
+                   yt_track_count, yt_tracks, distances)
+                VALUES ('rg-unique', 'mb', 'MPREb_unique_2',
+                        'https://music.example/2', 5,
+                        '[]'::jsonb, '[]'::jsonb)
+            """)
+        finally:
+            self._exec("DELETE FROM youtube_album_mappings "
+                       "WHERE release_group_identifier = 'rg-unique'")
+
+    def test_records_applied_version_034(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 34"
+        )
+        self.assertEqual(len(rows), 1)
+
+
+@requires_postgres
+class TestYoutubeAlbumEmptyResolutionsSchema(unittest.TestCase):
+    """Migration 035 adds the ``youtube_album_empty_resolutions`` marker
+    table so the resolver can distinguish "never resolved" from
+    "resolved to empty matrix" (ce-code-review finding #3 — R14).
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_table_exists_with_expected_columns(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'youtube_album_empty_resolutions'
+            ORDER BY ordinal_position
+        """)
+        cols = {r[0]: (r[1], r[2]) for r in rows}
+        self.assertEqual(
+            cols["release_group_identifier"], ("NO", "text"))
+        self.assertEqual(cols["source"], ("NO", "text"))
+        self.assertEqual(cols["resolved_at"][0], "NO")
+        self.assertIn("timestamp", cols["resolved_at"][1])
+
+    def test_primary_key_is_release_group_plus_source(self):
+        # Inserting the same (rg, source) tuple twice must fail.
+        self._exec("""
+            INSERT INTO youtube_album_empty_resolutions
+              (release_group_identifier, source) VALUES ('rg-empty-x', 'mb')
+        """)
+        try:
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO youtube_album_empty_resolutions
+                      (release_group_identifier, source)
+                    VALUES ('rg-empty-x', 'mb')
+                """)
+        finally:
+            self._exec(
+                "DELETE FROM youtube_album_empty_resolutions "
+                "WHERE release_group_identifier = 'rg-empty-x'")
+
+    def test_source_check_constraint_rejects_unknown(self):
+        # Round 2 T-6: round 1 #26's lesson ("cover both legitimate
+        # branches of the CHECK") didn't propagate into the sibling
+        # table's test. Insert both 'mb' AND 'discogs' positives before
+        # the negative case so a future migration that accidentally
+        # drops one of them fails this test.
+        self._exec("""
+            INSERT INTO youtube_album_empty_resolutions
+              (release_group_identifier, source) VALUES ('rg-ok-mb', 'mb')
+        """)
+        self._exec("""
+            INSERT INTO youtube_album_empty_resolutions
+              (release_group_identifier, source) VALUES ('rg-ok-dis', 'discogs')
+        """)
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO youtube_album_empty_resolutions
+                      (release_group_identifier, source)
+                    VALUES ('rg-bad', 'tidal')
+                """)
+        finally:
+            self._exec(
+                "DELETE FROM youtube_album_empty_resolutions "
+                "WHERE release_group_identifier IN ('rg-ok-mb', 'rg-ok-dis')")
+
+    def test_records_applied_version_035(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 35"
+        )
+        self.assertEqual(len(rows), 1)
+
+
+@requires_postgres
+class TestYoutubeAlbumMappingsAlbumTitleSchema(unittest.TestCase):
+    """Migration 036 adds ``album_title`` and ``album_artist`` columns to
+    ``youtube_album_mappings`` so the cache round-trip preserves the
+    album-level facts the resolver writes. Round 2 review P0-1 (album_title
+    silently dropped at the DB boundary) + maintainability-5 (album_artist
+    lossy on rehydration). Both columns are NULLable to admit pre-036
+    rows (none yet on this branch — feature has never shipped).
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def test_album_title_and_album_artist_columns_exist_nullable_text(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'youtube_album_mappings'
+              AND column_name IN ('album_title', 'album_artist')
+        """)
+        cols = {r[0]: (r[1], r[2]) for r in rows}
+        self.assertEqual(cols.get("album_title"), ("YES", "text"))
+        self.assertEqual(cols.get("album_artist"), ("YES", "text"))
+
+    def test_records_applied_version_036(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 36"
+        )
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

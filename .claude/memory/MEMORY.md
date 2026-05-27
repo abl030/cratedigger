@@ -2,10 +2,14 @@
 - [Use nix-shell](feedback_use_nix_shell.md) — All Python/test commands must run inside nix-shell, never bare python3
 - [TDD](feedback_tdd.md) — Strict TDD: tests first, then implementation, verify at each step
 - [Finish the job](feedback_finish_the_job.md) — Wire up new functionality end-to-end — don't leave infrastructure disconnected
+- [Never defer work](feedback_never_defer_work.md) — Don't split adjacent fixes into follow-up issues; scope them into the same PR
 - [Migration before deploy](feedback_migration_before_deploy.md) — Always ALTER TABLE on prod BEFORE committing code that uses new columns
 - [Dict boundary lesson](feedback_dict_boundary.md) — Two dict shapes flow through cratedigger.py; only one is DownloadFile — converting the wrong one crashed prod
 - [Playwright test artists](feedback_playwright_test_artists.md) — Brief the playwright agent to use small/obscure artists, not Radiohead — 15s mirror timeout
 - [Prose over picker](feedback_prose_over_picker.md) — User dislikes the AskUserQuestion picker; default to plain prose questions in chat
+- [Brainstorm artifact scope](feedback_brainstorm_artifact_scope.md) — When user scopes a brainstorm to "the artifact itself," don't fish for downstream consumers — point Phase 1.2 lenses inward at the contract
+- [Extend, don't extract](feedback_extend_not_extract.md) — When a new caller wants an existing service's logic, default to one new optional parameter — not helper extraction or restructuring
+- [Test fidelity meta-pattern](feedback_test_fidelity_meta_pattern.md) — "Fix lands in code but production never sees it" smell at DB-write and external-adapter boundaries; force real-PG round-trip + real-exception fakes
 - [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
@@ -17,3 +21,5 @@
 - [Refactoring phases](project_refactoring_phases.md) — Status of the multi-phase refactoring of cratedigger.py through pyright cleanup
 - [Renamed to cratedigger](project_cratedigger_rename.md) — Project is cratedigger now across the board (repo, DB, systemd, working dir, memory dir)
 - [Plex asciify_paths split](project_plex_asciify_split.md) — 2026-05-18: asciify_paths + beet move split 1,178 Plex albums; fix is Plex merge API, not Empty Trash
+- [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
+- [Converge is operator-authority](project_converge_operator_authority.md) — Wrong Matches converge button must NOT route deletions through the evidence classifier

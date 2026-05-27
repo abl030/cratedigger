@@ -616,19 +616,13 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
     generic exception (transient, retry next cycle)."""
 
     def _make_offline_http_error(self, body: str) -> Exception:
-        """Build an exception whose ``.response.text`` mirrors what slskd
-        returns when the peer is offline. We avoid constructing a real
-        ``requests.HTTPError`` here because ``test_beets_validation.py``
-        replaces ``sys.modules['requests']`` with a MagicMock at discovery
-        time, which would make a runtime ``import requests`` here yield
-        non-class types. The detector matches structurally on
-        ``.response.text``, so a synthetic shape works identically."""
+        """Build a ``requests.HTTPError`` whose ``.response.text`` mirrors
+        what slskd returns when the peer is offline. The detector matches
+        structurally on ``.response.text``."""
         from types import SimpleNamespace
+        import requests
 
-        class _FakeHTTPError(Exception):
-            pass
-
-        err = _FakeHTTPError("500 Server Error")
+        err = requests.HTTPError("500 Server Error")
         err.response = SimpleNamespace(text=body)  # type: ignore[attr-defined]
         return err
 

@@ -26,6 +26,7 @@ import music_tag
 from lib.beets_distance import (
     BeetsDistanceCache,
     BeetsDistanceResult,
+    SyntheticItem,
     compute_beets_distance,
 )
 
@@ -520,6 +521,322 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
             # Round-trip back to a struct of the same shape.
             r2 = msgspec.json.decode(blob, type=BeetsDistanceResult)
             self.assertEqual(r2.distance, r.distance)
+
+
+# ============================================================================
+# items_override path — synthetic items scored without filesystem IO.
+# ============================================================================
+
+
+def _synth_items(titles: list[str], *, length: float = 60.0,
+                 artist: str = "Dr. Octagon",
+                 album: str = "Dr. Octagonecologyst",
+                 disc: int = 1) -> list[SyntheticItem]:
+    """Build a list of SyntheticItems matching ``_ok_mb_release`` defaults."""
+    return [
+        SyntheticItem(
+            title=t,
+            artist=artist,
+            album=album,
+            albumartist=artist,
+            track=i + 1,
+            tracktotal=len(titles),
+            disc=disc,
+            disctotal=1,
+            length=length,
+        )
+        for i, t in enumerate(titles)
+    ]
+
+
+class _PDBExploder:
+    """PDB stand-in whose every method raises — verifies override path
+    skips DB completely (no get_download_log_entry, no get_request)."""
+
+    def get_download_log_entry(self, log_id):  # pragma: no cover — must not be called
+        raise AssertionError(
+            "items_override path must NOT call get_download_log_entry")
+
+    def get_request(self, request_id):  # pragma: no cover — must not be called
+        raise AssertionError(
+            "items_override path must NOT call get_request")
+
+
+class TestComputeBeetsDistanceWithItemsOverride(unittest.TestCase):
+    """Coverage for the additive ``items_override`` parameter.
+
+    The override path scores caller-provided items without touching the
+    filesystem or the download_log/request rows. Its guardrails are the
+    same as the existing path except the cross-RG check is opt-in via
+    ``mb_release_group_id``.
+    """
+
+    # ---------- Happy path: synthetic items match MB tracks ---------- #
+
+    def test_happy_path_matches_with_zero_distance(self) -> None:
+        """Synthetic items with matching titles/length → small distance, outcome ok."""
+        mb = _ok_mb_release(mbid="rel-aaa", rg="rg-shared")
+        # MB tracks are Intro (60s) and 3000 (180s) per _ok_mb_release default.
+        items = [
+            SyntheticItem(
+                title="Intro", artist="Dr. Octagon", album="Dr. Octagonecologyst",
+                albumartist="Dr. Octagon", track=1, tracktotal=2,
+                disc=1, disctotal=1, length=60.0,
+            ),
+            SyntheticItem(
+                title="3000", artist="Dr. Octagon", album="Dr. Octagonecologyst",
+                albumartist="Dr. Octagon", track=2, tracktotal=2,
+                disc=1, disctotal=1, length=180.0,
+            ),
+        ]
+        r = compute_beets_distance(
+            mbid="rel-aaa",
+            items_override=items,
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: mb,
+        )
+        self.assertEqual(r.outcome, "ok", msg=r.error_message)
+        assert r.distance is not None
+        self.assertGreaterEqual(r.distance, 0.0)
+        self.assertLess(r.distance, 0.5)
+        self.assertIsNotNone(r.components)
+        assert r.components is not None
+        self.assertGreater(len(r.components), 0)
+        # Override path means no download_log was consulted.
+        self.assertIsNone(r.download_log_id)
+        self.assertIsNone(r.request_id)
+        self.assertEqual(r.matched_tracks, 2)
+        self.assertEqual(r.total_local_tracks, 2)
+        self.assertEqual(r.total_mb_tracks, 2)
+        self.assertEqual(r.candidate_mbid, "rel-aaa")
+        self.assertEqual(r.candidate_release_group_id, "rg-shared")
+
+    # ---------- Track-count asymmetries ---------- #
+
+    def test_mismatched_tracks_reports_extras(self) -> None:
+        """12 synth items vs 10 MB tracks → matched=10, extra_local=2, extra_mb=0."""
+        mb_tracks = [
+            {"disc_number": 1, "track_number": i + 1,
+             "title": f"Track {i + 1}", "length_seconds": 60.0}
+            for i in range(10)
+        ]
+        mb = _ok_mb_release(mbid="rel-aaa", rg="rg-shared", tracks=mb_tracks)
+        items = _synth_items([f"Track {i + 1}" for i in range(12)])
+        r = compute_beets_distance(
+            mbid="rel-aaa",
+            items_override=items,
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: mb,
+        )
+        self.assertEqual(r.outcome, "ok", msg=r.error_message)
+        self.assertEqual(r.total_local_tracks, 12)
+        self.assertEqual(r.total_mb_tracks, 10)
+        self.assertEqual(r.matched_tracks, 10)
+        self.assertEqual(r.extra_local_tracks, 2)
+        self.assertEqual(r.extra_mb_tracks, 0)
+
+    # ---------- Per-component penalties ---------- #
+
+    def test_per_component_breakdown_penalises_wrong_title(self) -> None:
+        """Wrong track-title → "tracks" component carries a non-zero penalty.
+
+        Beets aggregates per-track distances (title + length + position)
+        under the single ``tracks`` key, so we assert on the aggregate
+        rather than separate ``track_title`` / ``track_length`` keys.
+        Distinct ``length_penalty`` clarity is preserved by comparing a
+        wrong-title result to a clean-tag baseline.
+        """
+        mb_tracks = [
+            {"disc_number": 1, "track_number": 1, "title": "RealTitle",
+             "length_seconds": 60.0},
+        ]
+        mb = _ok_mb_release(mbid="rel-aaa", rg="rg-shared", tracks=mb_tracks)
+        wrong_title_items = [
+            SyntheticItem(
+                title="CompletelyDifferentTitle",
+                artist="Dr. Octagon", album="Dr. Octagonecologyst",
+                albumartist="Dr. Octagon",
+                track=1, tracktotal=1, disc=1, disctotal=1,
+                length=60.0,
+            ),
+        ]
+        clean_items = [
+            SyntheticItem(
+                title="RealTitle",
+                artist="Dr. Octagon", album="Dr. Octagonecologyst",
+                albumartist="Dr. Octagon",
+                track=1, tracktotal=1, disc=1, disctotal=1,
+                length=60.0,
+            ),
+        ]
+        wrong = compute_beets_distance(
+            mbid="rel-aaa",
+            items_override=wrong_title_items,
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: mb,
+        )
+        clean = compute_beets_distance(
+            mbid="rel-aaa",
+            items_override=clean_items,
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: mb,
+        )
+        self.assertEqual(wrong.outcome, "ok", msg=wrong.error_message)
+        self.assertEqual(clean.outcome, "ok", msg=clean.error_message)
+        assert wrong.components is not None and clean.components is not None
+        wrong_tracks = wrong.components.get("tracks", 0.0)
+        clean_tracks = clean.components.get("tracks", 0.0)
+        self.assertGreater(wrong_tracks, clean_tracks,
+            msg=(f"expected wrong-title tracks penalty > clean tracks penalty, "
+                 f"got wrong={wrong.components} clean={clean.components}"))
+
+    # ---------- MB-side guardrails still fire ---------- #
+
+    def test_mb_lookup_failed_in_override_path(self) -> None:
+        """mb_get_release returns None → mb_lookup_failed, no IO attempted."""
+        items = _synth_items(["A", "B"])
+        r = compute_beets_distance(
+            mbid="rel-x",
+            items_override=items,
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: None,
+        )
+        self.assertEqual(r.outcome, "mb_lookup_failed")
+        self.assertIsNone(r.distance)
+        self.assertIsNone(r.folder_path)
+
+    def test_mb_no_release_group_in_override_path(self) -> None:
+        """MB release lacks release_group_id → mb_no_release_group, no IO."""
+        mb = _ok_mb_release(mbid="rel-x")
+        mb["release_group_id"] = None
+        items = _synth_items(["A", "B"])
+        r = compute_beets_distance(
+            mbid="rel-x",
+            items_override=items,
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: mb,
+        )
+        self.assertEqual(r.outcome, "mb_no_release_group")
+        self.assertIsNone(r.distance)
+        self.assertIsNone(r.folder_path)
+
+    # ---------- Empty items list ---------- #
+
+    def test_empty_items_override_distinct_outcome(self) -> None:
+        """items_override=[] → empty_items_override outcome (NOT no_audio).
+
+        The two are deliberately distinguishable — empty_items_override is a
+        caller error, no_audio means a real folder on disk had no readable
+        audio. Conflating them would erode audit data.
+        """
+        r = compute_beets_distance(
+            mbid="rel-x",
+            items_override=[],
+            mb_release_group_id="rg-shared",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+        )
+        self.assertEqual(r.outcome, "empty_items_override")
+        self.assertIsNone(r.distance)
+        # The empty-items condition is detected without DB / MB / FS IO.
+        self.assertIsNone(r.folder_path)
+
+    # ---------- Input validation guardrail ---------- #
+
+    def test_invalid_input_both_signaled(self) -> None:
+        """Both download_log_id AND items_override → invalid_input, no IO."""
+        items = _synth_items(["A"])
+        r = compute_beets_distance(
+            download_log_id=42,
+            items_override=items,
+            mbid="rel-x",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+        )
+        self.assertEqual(r.outcome, "invalid_input")
+        self.assertIsNone(r.distance)
+        # No DB / MB / FS touch — the exploder PDB would have raised.
+
+    def test_invalid_input_neither_signaled(self) -> None:
+        """Neither download_log_id NOR items_override → invalid_input, no IO."""
+        r = compute_beets_distance(
+            mbid="rel-x",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+        )
+        self.assertEqual(r.outcome, "invalid_input")
+        self.assertIsNone(r.distance)
+
+    # ---------- Cross-RG guardrail in the override path ---------- #
+
+    def test_cross_rg_guardrail_fires_with_explicit_rg(self) -> None:
+        """items_override + mb_release_group_id pointing at a different RG
+        from the candidate → wrong_release_group, no scoring attempted."""
+        items = _synth_items(["A", "B"])
+        # Candidate MBID's RG is "rg-other" but caller asserts "rg-source".
+        r = compute_beets_distance(
+            mbid="rel-alien",
+            items_override=items,
+            mb_release_group_id="rg-source",
+            pdb=_PDBExploder(),
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
+        )
+        self.assertEqual(r.outcome, "wrong_release_group")
+        self.assertEqual(r.request_release_group_id, "rg-source")
+        self.assertEqual(r.candidate_release_group_id, "rg-other")
+        # No scoring — distance never computed.
+        self.assertIsNone(r.distance)
+        self.assertIsNone(r.folder_path)
+
+    def test_cross_rg_guardrail_skipped_without_rg_param(self) -> None:
+        """items_override + mb_release_group_id=None → guardrail off; proceeds
+        to scoring even when candidate MBID's RG differs from anything implicit.
+        The function MUST NOT consult any request row in this path."""
+        items = _synth_items(["Intro", "3000"])
+        # Candidate is in rg-other; no mb_release_group_id passed, so no check.
+        r = compute_beets_distance(
+            mbid="rel-alien",
+            items_override=items,
+            pdb=_PDBExploder(),  # would raise if DB consulted
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
+        )
+        self.assertEqual(r.outcome, "ok", msg=r.error_message)
+        self.assertEqual(r.candidate_release_group_id, "rg-other")
+        # No request RG was looked up — the override-without-RG path doesn't
+        # know the caller's RG and doesn't make one up.
+        self.assertIsNone(r.request_release_group_id)
+
+    # ---------- Regression: Replace-picker path unchanged ---------- #
+
+    def test_replace_picker_path_unchanged_when_no_override(self) -> None:
+        """download_log_id alone, no items_override, no mb_release_group_id →
+        exact same behaviour as before. Drive to a known outcome (wrong_release_group)
+        to prove the existing guardrails still fire identically.
+        """
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": "/whatever"}},
+            request={"id": 7, "mb_release_group_id": "rg-source"},
+        )
+        r = compute_beets_distance(
+            download_log_id=1,
+            mbid="rel-alien",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
+            resolve_failed_path=lambda p: p,
+        )
+        # Existing test_wrong_release_group_guardrail asserts the same shape.
+        self.assertEqual(r.outcome, "wrong_release_group")
+        self.assertEqual(r.request_release_group_id, "rg-source")
+        self.assertEqual(r.candidate_release_group_id, "rg-other")
+        self.assertEqual(r.download_log_id, 1)
+        self.assertEqual(r.request_id, 7)
 
 
 if __name__ == "__main__":

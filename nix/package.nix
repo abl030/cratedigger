@@ -22,6 +22,7 @@ let
     ps.redis     # web UI cache (graceful no-op if redis server is down, but the module must be importable)
     ps.zstandard # peer cache compresses msgpack directory payloads before writing Redis bytes
     ps.beets     # beets.autotag.distance for /api/beets-distance — library import only
+    ps.ytmusicapi # YouTube Music album resolver — anonymous `YTMusic()` for search + get_album
     slskd-api
   ];
 

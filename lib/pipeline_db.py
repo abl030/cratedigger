@@ -18,7 +18,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -6891,3 +6891,166 @@ class PipelineDB:
             rid = int(row["request_id"])
             out.setdefault(rid, []).append(dict(row))
         return out
+
+    # --- youtube_album_mappings (migration 034) ---
+    #
+    # The YouTube Music album resolver caches its scored matrix here:
+    # one row per ``yt_browse_id`` per release-group / source pair. R14
+    # (operator-triggered refresh) is satisfied by ``delete_…`` + ``upsert_…``;
+    # the natural read path is "give me the full matrix" via ``get_…``.
+
+    def get_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+    ) -> Optional[list[dict[str, Any]]]:
+        """Return all cached rows for the ``(release_group_identifier, source)`` pair.
+
+        Reads from two tables: the main ``youtube_album_mappings``
+        (row per YT sibling) and the ``youtube_album_empty_resolutions``
+        marker (one row per ``(rg, source)`` pair whose YT search
+        returned zero albums). JSONB columns are deserialised by
+        psycopg2 into native Python ``list`` / ``dict``; outer rows
+        are ordered by ``yt_browse_id`` ASC for deterministic output.
+
+        Returns ``None`` when the pair has never been resolved, and an
+        empty list when it has been resolved to an empty matrix (AE2 —
+        an empty YT search result is persisted as the empty list).
+        The distinction matters: ``[]`` means "we checked and found
+        nothing" (cache HIT, the resolver short-circuits); ``None``
+        means "we have no record" (cache MISS, the resolver re-polls
+        YT). Previously the resolver couldn't tell the two cases apart
+        and re-polled YT on every resolve for empty-search release
+        groups, defeating R14.
+
+        Implementation: if ``youtube_album_mappings`` has any rows, we
+        return them. Otherwise we probe the marker table — a row there
+        means "resolved-to-empty" (return ``[]``); absence means "never
+        resolved" (return ``None``).
+        """
+        cur = self._execute(
+            """
+            SELECT id, release_group_identifier, source, yt_browse_id,
+                   yt_audio_playlist_id, yt_url, yt_year, yt_track_count,
+                   album_title, album_artist,
+                   yt_tracks, distances, resolved_at
+            FROM youtube_album_mappings
+            WHERE release_group_identifier = %s AND source = %s
+            ORDER BY yt_browse_id ASC
+            """,
+            (release_group_identifier, source),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        if rows:
+            return rows
+        # Check the empty-resolution marker (see
+        # ``upsert_youtube_album_mapping`` — empty matrices are
+        # persisted into a side table since the main table is
+        # row-shaped and an empty matrix has no rows to insert).
+        cur2 = self._execute(
+            """
+            SELECT 1 FROM youtube_album_empty_resolutions
+            WHERE release_group_identifier = %s AND source = %s
+            """,
+            (release_group_identifier, source),
+        )
+        if cur2.fetchone() is not None:
+            return []
+        return None
+
+    def upsert_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace the matrix for ``(release_group_identifier, source)``.
+
+        Runs DELETE + INSERTs in a single transaction so a concurrent
+        reader never observes a mid-replace partial state. Partial updates
+        are not supported — refresh always replaces (R14). Each row must
+        carry: ``yt_browse_id``, ``yt_audio_playlist_id`` (optional),
+        ``yt_url``, ``yt_year`` (optional), ``yt_track_count``,
+        ``yt_tracks`` (JSONB), ``distances`` (JSONB).
+
+        When ``rows`` is empty, also writes a marker row into
+        ``youtube_album_empty_resolutions`` so the next
+        ``get_youtube_album_mapping`` returns ``[]`` (cache HIT) instead
+        of ``None`` (cache MISS) — the distinction that lets the
+        resolver short-circuit empty-search release groups instead of
+        re-polling YT every cycle. The marker is deleted when ``rows``
+        is non-empty (a later resolve that found albums supersedes the
+        empty flag).
+        """
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    DELETE FROM youtube_album_mappings
+                    WHERE release_group_identifier = %s AND source = %s
+                    """,
+                    (release_group_identifier, source),
+                )
+                if rows:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO youtube_album_mappings
+                            (release_group_identifier, source, yt_browse_id,
+                             yt_audio_playlist_id, yt_url, yt_year,
+                             yt_track_count, album_title, album_artist,
+                             yt_tracks, distances)
+                        VALUES %s
+                        """,
+                        [
+                            (
+                                release_group_identifier,
+                                source,
+                                row["yt_browse_id"],
+                                row.get("yt_audio_playlist_id"),
+                                row["yt_url"],
+                                row.get("yt_year"),
+                                row["yt_track_count"],
+                                row.get("album_title"),
+                                row.get("album_artist"),
+                                psycopg2.extras.Json(row["yt_tracks"]),
+                                psycopg2.extras.Json(row["distances"]),
+                            )
+                            for row in rows
+                        ],
+                    )
+                    # A non-empty resolve supersedes any prior empty marker.
+                    cur.execute(
+                        """
+                        DELETE FROM youtube_album_empty_resolutions
+                        WHERE release_group_identifier = %s AND source = %s
+                        """,
+                        (release_group_identifier, source),
+                    )
+                else:
+                    # Empty resolve: stamp the marker so subsequent reads
+                    # return ``[]`` (cache HIT, don't re-poll YT) instead of
+                    # ``None`` (cache MISS, re-poll YT). ON CONFLICT to keep
+                    # the upsert idempotent across refresh cycles.
+                    cur.execute(
+                        """
+                        INSERT INTO youtube_album_empty_resolutions
+                            (release_group_identifier, source)
+                        VALUES (%s, %s)
+                        ON CONFLICT (release_group_identifier, source)
+                          DO UPDATE SET resolved_at = NOW()
+                        """,
+                        (release_group_identifier, source),
+                    )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
