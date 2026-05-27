@@ -143,6 +143,30 @@ class _AudioFileFingerprint(msgspec.Struct):
     media: str
 
 
+class SyntheticItem(msgspec.Struct, kw_only=True):
+    """Caller-provided item shape for the ``items_override`` path.
+
+    Mirrors the subset of ``_AudioFileFingerprint`` that beets'
+    ``distance()`` actually reads, minus the on-disk fields
+    (``path``, ``mtime``, ``size``, ``format``, ``media``). This is the
+    wire-boundary type the YT Music album resolver constructs from
+    upstream JSON before handing the matrix to ``compute_beets_distance``.
+
+    ``length`` is in seconds (float) to match beets' internal
+    representation and ``_AudioFileFingerprint.length``.
+    """
+
+    title: str
+    artist: str
+    album: str
+    albumartist: str
+    track: int
+    tracktotal: int
+    disc: int
+    disctotal: int
+    length: float
+
+
 def _audio_files_under(folder: str) -> list[str]:
     """Return absolute paths to audio files under ``folder``.
 
@@ -318,66 +342,157 @@ def _build_items(fingerprints: Sequence[_AudioFileFingerprint]):
     return items
 
 
+def _build_items_from_synthetic(items: Sequence[SyntheticItem]):
+    """Construct in-memory beets ``Item`` instances from synthetic items.
+
+    Mirrors ``_build_items`` for the ``items_override`` path. ``path`` is
+    a synthetic placeholder per-index (beets ``Item.path`` must be bytes
+    but the distance helpers never read it back) and ``format`` / ``media``
+    are empty strings — beets' distance helpers skip missing-field
+    comparisons rather than penalising them.
+    """
+    out = []
+    for i, si in enumerate(items):
+        item = _beets_library.Item(
+            path=f"synthetic://{i}".encode("utf-8"),
+            title=si.title,
+            artist=si.artist,
+            album=si.album,
+            albumartist=si.albumartist,
+            track=si.track,
+            tracktotal=si.tracktotal,
+            disc=si.disc,
+            disctotal=si.disctotal,
+            length=si.length,
+            format="",
+            media="",
+        )
+        out.append(item)
+    return out
+
+
 # === Service entrypoint =================================================
 
 
 def compute_beets_distance(
-    download_log_id: int,
-    mbid: str,
+    download_log_id: Optional[int] = None,
+    mbid: Optional[str] = None,
     *,
+    items_override: Optional[list[SyntheticItem]] = None,
+    mb_release_group_id: Optional[str] = None,
     pdb,  # lib.pipeline_db.PipelineDB — duck-typed for test fakes
     mb_get_release: Callable[[str], Optional[dict]],
     cache: Optional[BeetsDistanceCache] = None,
     resolve_failed_path: Optional[Callable[[str], Optional[str]]] = None,
 ) -> BeetsDistanceResult:
-    """Compute beets match distance for one ``(download_log_id, mbid)``.
+    """Compute beets match distance for one MBID.
 
     Service-layer entrypoint. Pure of HTTP/CLI concerns; callers map the
     typed result onto status codes / exit codes (CLI ⇄ API symmetry).
 
-    Guardrails before any heavy work:
-      1. download_log row must exist;
-      2. request row for that log must exist;
+    Two input modes (exactly one of them must be supplied):
+
+    1. **Replace-picker mode** — pass ``download_log_id``. The function
+       loads the download_log + request rows, resolves the on-disk folder,
+       reads tag fingerprints, and scores those against the candidate
+       MBID's MB release. The cross-RG guardrail compares the candidate's
+       RG to the request's RG.
+
+    2. **Override mode** — pass ``items_override`` (and optionally
+       ``mb_release_group_id``). Caller provides ``SyntheticItem``s
+       directly; no DB or filesystem IO occurs. When
+       ``mb_release_group_id`` is provided, the cross-RG guardrail
+       compares the candidate's RG to that caller-supplied RG; when it's
+       ``None`` the guardrail is skipped (standalone scoring contract).
+
+    Guardrails fire in this order, before any heavy work:
+      0. Exactly one of (download_log_id, items_override) must be set,
+         and items_override (when set) must be non-empty;
+      1. (Replace mode) download_log row must exist;
+      2. (Replace mode) request row for that log must exist;
       3. MB release for ``mbid`` must be fetchable;
       4. MB release must belong to a release group;
-      5. that release group MUST equal the request's release group.
+      5. that release group MUST equal the caller-known RG (request's
+         in Replace mode, ``mb_release_group_id`` in Override mode).
 
-    Only after all five does the function touch the filesystem.
+    Only after all five does the function touch the filesystem (and only
+    in Replace mode).
     """
     started = time.monotonic()
 
-    # 1. Load the download_log entry.
-    log_row = pdb.get_download_log_entry(download_log_id)
-    if not log_row:
+    # 0. Exactly-one-of guardrail. Both supplied or neither → caller bug.
+    if (download_log_id is not None) == (items_override is not None):
         return _result(
-            "download_log_not_found",
-            error=f"download_log #{download_log_id} not found",
-            download_log_id=download_log_id,
+            "invalid_input",
+            error=(
+                "exactly one of download_log_id or items_override must be "
+                "supplied (got both)" if download_log_id is not None
+                else "exactly one of download_log_id or items_override must be "
+                "supplied (got neither)"
+            ),
             candidate_mbid=mbid,
             started=started,
         )
 
-    # 2. Load the request for its release group.
-    request_id = log_row.get("request_id")
-    if not isinstance(request_id, int):
+    # 0a. mbid is structurally required for any downstream MB lookup.
+    if mbid is None:
         return _result(
-            "request_not_found",
-            error="download_log row has no request_id",
-            download_log_id=download_log_id,
+            "invalid_input",
+            error="mbid is required",
+            started=started,
+        )
+
+    # 0b. Empty items_override is a distinct caller error from on-disk no_audio.
+    if items_override is not None and len(items_override) == 0:
+        return _result(
+            "empty_items_override",
+            error="items_override is empty (caller provided no items to score)",
             candidate_mbid=mbid,
             started=started,
         )
-    req = pdb.get_request(request_id)
-    if not req:
-        return _result(
-            "request_not_found",
-            error=f"request #{request_id} not found",
-            download_log_id=download_log_id,
-            request_id=request_id,
-            candidate_mbid=mbid,
-            started=started,
-        )
-    request_rg = req.get("mb_release_group_id")
+
+    # Branch: Replace-picker path loads DB rows; Override path skips them.
+    log_row: Optional[dict] = None
+    request_id: Optional[int] = None
+    request_rg: Optional[str] = None
+
+    if download_log_id is not None:
+        # 1. Load the download_log entry.
+        log_row = pdb.get_download_log_entry(download_log_id)
+        if not log_row:
+            return _result(
+                "download_log_not_found",
+                error=f"download_log #{download_log_id} not found",
+                download_log_id=download_log_id,
+                candidate_mbid=mbid,
+                started=started,
+            )
+
+        # 2. Load the request for its release group.
+        request_id = log_row.get("request_id")
+        if not isinstance(request_id, int):
+            return _result(
+                "request_not_found",
+                error="download_log row has no request_id",
+                download_log_id=download_log_id,
+                candidate_mbid=mbid,
+                started=started,
+            )
+        req = pdb.get_request(request_id)
+        if not req:
+            return _result(
+                "request_not_found",
+                error=f"request #{request_id} not found",
+                download_log_id=download_log_id,
+                request_id=request_id,
+                candidate_mbid=mbid,
+                started=started,
+            )
+        request_rg = req.get("mb_release_group_id")
+    else:
+        # Override mode: caller supplies the RG directly (or None to opt
+        # out of the cross-RG guardrail). No DB consult.
+        request_rg = mb_release_group_id
 
     # 3. Fetch MB release for the candidate mbid.
     try:
@@ -417,13 +532,20 @@ def compute_beets_distance(
         )
 
     # 5. Guardrail — refuse cross-RG distance queries.
+    # Replace mode: ``request_rg`` is the request row's RG.
+    # Override mode: ``request_rg`` is the caller-supplied
+    # ``mb_release_group_id`` (None opts out).
     if request_rg and request_rg != candidate_rg:
+        diff_desc = (
+            f"request #{request_id}'s release group {request_rg}"
+            if request_id is not None
+            else f"caller-supplied release group {request_rg}"
+        )
         return _result(
             "wrong_release_group",
             error=(
                 f"MBID {mbid} is in release group {candidate_rg}, "
-                f"which differs from request #{request_id}'s release "
-                f"group {request_rg}"
+                f"which differs from {diff_desc}"
             ),
             download_log_id=download_log_id,
             request_id=request_id,
@@ -433,48 +555,56 @@ def compute_beets_distance(
             started=started,
         )
 
-    # 6. Resolve the on-disk path for the rejected download.
-    vr = log_row.get("validation_result") or {}
-    failed_path = (vr.get("failed_path") if isinstance(vr, dict) else None) or ""
-    resolver = resolve_failed_path
-    if resolver is None:
-        from lib.util import resolve_failed_path as default_resolver
-        resolver = default_resolver
-    resolved = resolver(str(failed_path)) if failed_path else None
-    if not resolved:
-        return _result(
-            "folder_missing",
-            error=(
-                f"download_log #{download_log_id} failed_path "
-                f"{failed_path!r} does not exist on disk"
-            ),
-            download_log_id=download_log_id,
-            request_id=request_id,
-            request_release_group_id=request_rg,
-            candidate_release_group_id=candidate_rg,
-            candidate_mbid=mbid,
-            started=started,
-        )
+    # 6. Build items — either from disk (Replace mode) or from synthetic.
+    resolved: Optional[str] = None
+    fingerprint_count: Optional[int] = None
+    if items_override is not None:
+        items = _build_items_from_synthetic(items_override)
+    else:
+        # Resolve the on-disk path for the rejected download.
+        assert log_row is not None  # narrowed above; Replace-mode invariant
+        vr = log_row.get("validation_result") or {}
+        failed_path = (vr.get("failed_path") if isinstance(vr, dict) else None) or ""
+        resolver = resolve_failed_path
+        if resolver is None:
+            from lib.util import resolve_failed_path as default_resolver
+            resolver = default_resolver
+        resolved = resolver(str(failed_path)) if failed_path else None
+        if not resolved:
+            return _result(
+                "folder_missing",
+                error=(
+                    f"download_log #{download_log_id} failed_path "
+                    f"{failed_path!r} does not exist on disk"
+                ),
+                download_log_id=download_log_id,
+                request_id=request_id,
+                request_release_group_id=request_rg,
+                candidate_release_group_id=candidate_rg,
+                candidate_mbid=mbid,
+                started=started,
+            )
 
-    # 7. Read (or cache-hit) audio fingerprints.
-    fingerprints = _read_folder_fingerprints(resolved, cache)
-    if not fingerprints:
-        return _result(
-            "no_audio",
-            error=f"no readable audio files under {resolved}",
-            download_log_id=download_log_id,
-            request_id=request_id,
-            request_release_group_id=request_rg,
-            candidate_release_group_id=candidate_rg,
-            candidate_mbid=mbid,
-            folder_path=resolved,
-            started=started,
-        )
+        # 7. Read (or cache-hit) audio fingerprints.
+        fingerprints = _read_folder_fingerprints(resolved, cache)
+        if not fingerprints:
+            return _result(
+                "no_audio",
+                error=f"no readable audio files under {resolved}",
+                download_log_id=download_log_id,
+                request_id=request_id,
+                request_release_group_id=request_rg,
+                candidate_release_group_id=candidate_rg,
+                candidate_mbid=mbid,
+                folder_path=resolved,
+                started=started,
+            )
+        fingerprint_count = len(fingerprints)
+        items = _build_items(fingerprints)
 
     # 8. Hand to beets for the actual distance compute.
     try:
         album_info = _build_album_info(mb_release, mbid)
-        items = _build_items(fingerprints)
         mapping, extra_items, extra_tracks = _beets_match_mod.assign_items(
             items, album_info.tracks)
         dist = _beets_distance_mod.distance(items, album_info, mapping)
@@ -488,7 +618,10 @@ def compute_beets_distance(
             candidate_release_group_id=candidate_rg,
             candidate_mbid=mbid,
             folder_path=resolved,
-            total_local_tracks=len(fingerprints),
+            total_local_tracks=(
+                fingerprint_count if fingerprint_count is not None
+                else len(items)
+            ),
             total_mb_tracks=len(mb_release.get("tracks") or []),
             started=started,
         )
