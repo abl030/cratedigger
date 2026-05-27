@@ -9,6 +9,7 @@
 - [Prose over picker](feedback_prose_over_picker.md) — User dislikes the AskUserQuestion picker; default to plain prose questions in chat
 - [Brainstorm artifact scope](feedback_brainstorm_artifact_scope.md) — When user scopes a brainstorm to "the artifact itself," don't fish for downstream consumers — point Phase 1.2 lenses inward at the contract
 - [Extend, don't extract](feedback_extend_not_extract.md) — When a new caller wants an existing service's logic, default to one new optional parameter — not helper extraction or restructuring
+- [Test fidelity meta-pattern](feedback_test_fidelity_meta_pattern.md) — "Fix lands in code but production never sees it" smell at DB-write and external-adapter boundaries; force real-PG round-trip + real-exception fakes
 - [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
