@@ -6,6 +6,8 @@
 - [Dict boundary lesson](feedback_dict_boundary.md) — Two dict shapes flow through cratedigger.py; only one is DownloadFile — converting the wrong one crashed prod
 - [Playwright test artists](feedback_playwright_test_artists.md) — Brief the playwright agent to use small/obscure artists, not Radiohead — 15s mirror timeout
 - [Prose over picker](feedback_prose_over_picker.md) — User dislikes the AskUserQuestion picker; default to plain prose questions in chat
+- [Brainstorm artifact scope](feedback_brainstorm_artifact_scope.md) — When user scopes a brainstorm to "the artifact itself," don't fish for downstream consumers — point Phase 1.2 lenses inward at the contract
+- [Extend, don't extract](feedback_extend_not_extract.md) — When a new caller wants an existing service's logic, default to one new optional parameter — not helper extraction or restructuring
 - [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
