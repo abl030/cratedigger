@@ -84,6 +84,8 @@ def _cached_search(
     query: str,
     filter_str: str,
     limit: int,
+    *,
+    refresh: bool = False,
 ) -> list[dict[str, Any]]:
     """Wrap ``yt_client.search(...)`` with cache-check-then-store.
 
@@ -91,8 +93,12 @@ def _cached_search(
     corrupt entry, a schema change) fall through silently to a fresh
     HTTP call. Cache writes are best-effort — if Redis is down, the
     error is swallowed and the result still surfaces to the caller.
+
+    When ``refresh=True``, the cache read is skipped but the cache is
+    still updated with the fresh response — refresh is "bust then
+    refill", not "bust and forget".
     """
-    if cache is not None:
+    if cache is not None and not refresh:
         key = f"youtube:search:{query}:{filter_str}:{limit}"
         blob = cache.get(key)
         if blob is not None:
@@ -117,14 +123,17 @@ def _cached_get_album(
     yt_client: Any,
     cache: Optional[BeetsDistanceCache],
     browse_id: str,
+    *,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Wrap ``yt_client.get_album(browse_id)`` with cache-check-then-store.
 
     Same semantics as ``_cached_search``: cache-first read, msgspec
     JSON encoding, swallow decode/write failures so cache problems
-    never block resolution.
+    never block resolution. ``refresh=True`` skips the cache read but
+    still updates it with the fresh response.
     """
-    if cache is not None:
+    if cache is not None and not refresh:
         key = f"youtube:album:{browse_id}"
         blob = cache.get(key)
         if blob is not None:
@@ -341,8 +350,16 @@ def resolve_youtube_album(
         )
 
     # Step 3: cache-first read.
+    #
+    # ``get_youtube_album_mapping`` returns ``None`` when the (rg, source)
+    # pair has NEVER been resolved, and ``[]`` when it has been resolved
+    # but YT had no albums to surface (AE2). The distinction matters:
+    # ``None`` means "we have nothing — go ask YT"; ``[]`` means "we
+    # checked and there's nothing there — don't re-poll YT". Without
+    # this, an empty-search release group would re-fetch YT on every
+    # resolve, defeating R14.
     cached_rows = pdb.get_youtube_album_mapping(rg_id, source_label)
-    if not refresh and cached_rows:
+    if not refresh and cached_rows is not None:
         return _final(
             outcome="ok",
             release_group_identifier=rg_id,
@@ -392,7 +409,8 @@ def resolve_youtube_album(
     seed_browse_id: Optional[str] = None
     yt_album_responses: dict[str, dict] = {}
     try:
-        search_results = _cached_search(yt_client, cache, query, "albums", 10)
+        search_results = _cached_search(
+            yt_client, cache, query, "albums", 10, refresh=refresh)
         seed_browse_id = _pick_yt_seed(search_results, seed_release)
         if seed_browse_id is None:
             # AE2: search returned empty → ok + empty matrix.
@@ -405,7 +423,8 @@ def resolve_youtube_album(
                 youtube_releases=[],
                 started=started,
             )
-        seed_album = _cached_get_album(yt_client, cache, seed_browse_id)
+        seed_album = _cached_get_album(
+            yt_client, cache, seed_browse_id, refresh=refresh)
         yt_album_responses[seed_browse_id] = seed_album
         for other in seed_album.get("other_versions") or []:
             other_browse_id = other.get("browseId")
@@ -419,7 +438,7 @@ def resolve_youtube_album(
             # exclude the broken sibling instead.
             try:
                 yt_album_responses[other_browse_id] = _cached_get_album(
-                    yt_client, cache, other_browse_id)
+                    yt_client, cache, other_browse_id, refresh=refresh)
             except (YTMusicServerError, YTMusicUserError, YTMusicError,
                     requests.Timeout, requests.ConnectionError,
                     KeyError, IndexError) as exc:
@@ -438,7 +457,12 @@ def resolve_youtube_album(
         yt_failure = (_classify_server_error(exc), f"YT server error: {exc}")
     except YTMusicError as exc:
         yt_failure = ("unresolved_mirror_unavailable", f"YT error: {exc}")
-    except (KeyError, IndexError) as exc:
+    except (KeyError, IndexError, ValueError, TypeError) as exc:
+        # ``ValueError`` and ``TypeError`` cover residual int/str coercion
+        # failures from within the YT response — e.g. an unexpected
+        # ``None`` slipping past ``_safe_int`` because we missed a code
+        # path. Treating these as parse failures (not 500s) keeps the
+        # resolver resilient to schema drift in ytmusicapi outputs.
         yt_failure = ("youtube_parse_failed", f"YT parse failed: {exc}")
 
     if yt_failure is not None:
@@ -485,7 +509,8 @@ def resolve_youtube_album(
             yt_audio_playlist_id=album_resp.get("audioPlaylistId"),
             yt_url=yt_url,
             year=year,
-            track_count=int(album_resp.get("trackCount") or len(synth_items)),
+            track_count=_safe_int(album_resp.get("trackCount"), 0)
+                or len(synth_items),
             tracks=synth_items,
             distances=distances,
         )
@@ -760,7 +785,7 @@ def _pick_yt_seed(
         yt_year_parsed = _parse_year(r.get("year"))
         if mb_year is not None and yt_year_parsed is None:
             year_dist = 9999
-        track_dist = abs(int(r.get("trackCount") or 0) - mb_track_count)
+        track_dist = abs(_safe_int(r.get("trackCount"), 0) - mb_track_count)
         score = (year_dist, track_dist)
         if best_score is None or score < best_score:
             best_score = score
@@ -787,6 +812,44 @@ def _parse_year(raw: Any) -> Optional[int]:
         return int(str(raw)[:4])
     except (TypeError, ValueError):
         return None
+
+
+def _safe_int(raw: Any, default: int) -> int:
+    """Coerce ``raw`` to ``int``; return ``default`` on missing/garbage.
+
+    YT payloads occasionally carry numeric fields as strings ("01"),
+    floats, or ``None``. Bare ``int()`` would raise — and a single
+    raised ValueError inside the per-track loop would cascade to a
+    youtube_parse_failed 503 for the whole resolve. Tolerant coercion
+    keeps the resolve in the happy path and lets the track end up with
+    the defaulted value.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        # ``bool`` is an ``int`` subclass but coercing True/False isn't
+        # what the caller asked for; treat as garbage.
+        return default
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(raw: Any, default: float) -> float:
+    """Coerce ``raw`` to ``float``; return ``default`` on missing/garbage."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return default
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +906,7 @@ def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
             # idx+1 so we match the typical 1-indexed convention.
             # (No-op when the payload is already 1-indexed.)
             track_num = idx + 1
-        length = float(t.get("duration_seconds") or 0.0)
+        length = _safe_float(t.get("duration_seconds"), 0.0)
         out.append(SyntheticItem(
             title=title,
             artist=artist,
@@ -851,7 +914,7 @@ def _synthesize_items(album_resp: dict) -> list[SyntheticItem]:
             albumartist=albumartist,
             track=track_num,
             tracktotal=total,
-            disc=int(t.get("disc_number") or 1),
+            disc=_safe_int(t.get("disc_number"), 1) or 1,
             disctotal=1,
             length=length,
         ))

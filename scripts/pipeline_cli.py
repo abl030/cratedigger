@@ -2126,7 +2126,14 @@ def _build_youtube_client():
     Lazy-imports ``requests``, ``urllib3``, and ``ytmusicapi`` so the
     CLI's startup cost stays low and the rest of the script doesn't
     pay for unused HTTP machinery.
+
+    The session binds a default ``(connect, read)`` timeout of
+    ``(5, 30)`` so an unresponsive YT endpoint can't pin the CLI
+    invocation forever (finding #4). ``requests`` exposes no
+    Session-level timeout config; ``functools.partial`` on
+    ``session.request`` is the established pattern.
     """
+    from functools import partial
     import requests
     from urllib3.util.retry import Retry
     from requests.adapters import HTTPAdapter
@@ -2149,6 +2156,8 @@ def _build_youtube_client():
         ),
         "Accept-Language": "en-US,en;q=0.9",
     })
+    session.request = partial(  # type: ignore[method-assign]
+        session.request, timeout=(5, 30))
     return YTMusic(requests_session=session, language="en")
 
 
@@ -3216,7 +3225,10 @@ def _build_parser() -> tuple[
     )
     p_ya.add_argument(
         "--refresh", action="store_true",
-        help="Force re-fetch from YouTube Music (default: serve from cache)",
+        help="Bypass BOTH the durable cache (youtube_album_mappings) "
+             "AND the in-process Redis HTTP accelerator, forcing a "
+             "fresh YouTube Music fetch. The fresh response is then "
+             "written back to both layers. (Default: serve from cache.)",
     )
     p_ya.add_argument(
         "--json", action="store_true",

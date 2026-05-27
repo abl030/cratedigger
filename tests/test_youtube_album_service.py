@@ -16,6 +16,7 @@ import unittest
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
+import msgspec
 import requests
 from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
 
@@ -364,6 +365,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
                 self.assertEqual(d.outcome, "ok")
         # Cache was persisted.
         cached_rows = pdb.get_youtube_album_mapping(rg, "mb")
+        assert cached_rows is not None
         self.assertEqual(len(cached_rows), 2)
 
     def test_ae3_release_level_mbid_auto_widens(self) -> None:
@@ -902,6 +904,77 @@ class TestCacheBehavior(unittest.TestCase):
         self.assertFalse(r2.from_cache)
         self.assertGreater(len(yt2.search_calls), 0)
 
+    def test_empty_search_result_caches_empty_matrix_no_repoll(self) -> None:
+        """Finding #3: an empty YT search result must be cached as
+        ``[]`` and short-circuit on the next resolve. Previously the
+        falsy ``cached_rows`` gate ignored ``[]`` and re-polled YT
+        every time, defeating R14 for empty-search release groups.
+        """
+        rg = MB_RG
+        mb_leaf = _LookupSpy({
+            rg: None,
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        mb_group = _LookupSpy({rg: _ok_mb_rg_releases((MB_REL_A, 1996))})
+
+        yt1 = FakeYTMusic()
+        yt1.set_search("Dr. Octagon Dr. Octagonecologyst", [])
+        pdb = FakePipelineDB()
+
+        r1 = resolve_youtube_album(
+            rg,
+            pdb=pdb,
+            mb_get_release=mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt1,
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(r1.outcome, "ok")
+        self.assertEqual(r1.youtube_releases, [])
+        # Empty matrix is persisted: contract says get_youtube_album_mapping
+        # returns [] (not None) on the next read.
+        self.assertEqual(pdb.get_youtube_album_mapping(rg, "mb"), [])
+
+        # Second resolve: the cache gate should fire on the empty list
+        # and the resolver should NOT re-call YT.
+        yt2 = FakeYTMusic()
+        # No canned search response — if the resolver tries to call,
+        # ``FakeYTMusic.search`` will raise / return missing data.
+        r2 = resolve_youtube_album(
+            rg,
+            pdb=pdb,
+            mb_get_release=mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt2,
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        self.assertEqual(r2.outcome, "ok")
+        self.assertTrue(r2.from_cache,
+                        msg="empty matrix should be served from cache, "
+                            "not re-fetched from YT")
+        self.assertEqual(r2.youtube_releases, [])
+        # Zero YT traffic on the second resolve.
+        self.assertEqual(yt2.search_calls, [])
+        self.assertEqual(yt2.get_album_calls, [])
+
+    def test_get_youtube_album_mapping_distinguishes_none_from_empty(self) -> None:
+        """Contract: FakePipelineDB (and the real PipelineDB) must
+        return ``None`` for an unresolved pair and ``[]`` for a pair
+        that was resolved to an empty matrix. Finding #3 hinges on
+        this distinction.
+        """
+        pdb = FakePipelineDB()
+        self.assertIsNone(pdb.get_youtube_album_mapping("never-resolved", "mb"))
+        pdb.upsert_youtube_album_mapping("resolved-to-empty", "mb", [])
+        self.assertEqual(
+            pdb.get_youtube_album_mapping("resolved-to-empty", "mb"), [])
+
 
 class TestJitterBetweenSiblingGetAlbumCalls(unittest.TestCase):
     """Finding #2: 1-3s jitter between consecutive ``get_album`` calls.
@@ -1000,6 +1073,79 @@ class TestJitterBetweenSiblingGetAlbumCalls(unittest.TestCase):
         self.assertEqual(len(r.youtube_releases), 1)
         self.assertEqual(sleeps, [],
                          msg="single-sibling resolve must not jitter")
+
+
+class TestPayloadCoercionResilience(unittest.TestCase):
+    """Finding #5: YT payloads occasionally carry numeric fields as
+    strings ("01", "60.0") or ``None``; bare ``int()`` / ``float()``
+    would raise and produce a 500. The resolver routes coercion through
+    ``_safe_int`` / ``_safe_float`` helpers so unexpected shapes degrade
+    gracefully (the track ends up with a defaulted value, the resolve
+    succeeds).
+    """
+
+    def test_string_track_number_does_not_500(self) -> None:
+        """A YT album whose tracks report ``trackNumber: "01"`` (string,
+        not int) must not 500 the resolver — coercion is tolerant.
+        """
+        rg = MB_RG
+        mb_leaf = _LookupSpy({
+            rg: None,
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        mb_group = _LookupSpy({rg: _ok_mb_rg_releases((MB_REL_A, 1996))})
+
+        yt = FakeYTMusic()
+        yt.set_search(
+            "Dr. Octagon Dr. Octagonecologyst",
+            [_yt_search_album_result("MPREb-stringy", year="1996",
+                                     track_count=2)],
+        )
+        stringy_tracks = [
+            {"videoId": "vid-0", "title": "Intro",
+             "artists": [{"name": "Dr. Octagon"}],
+             "album": {"name": "Dr. Octagonecologyst", "id": "MPREb-na"},
+             "duration": "1:00", "duration_seconds": "60",  # string
+             "trackNumber": "01",                            # string
+             "isAvailable": True, "isExplicit": False},
+            {"videoId": "vid-1", "title": "3000",
+             "artists": [{"name": "Dr. Octagon"}],
+             "album": {"name": "Dr. Octagonecologyst", "id": "MPREb-na"},
+             "duration": "3:00", "duration_seconds": None,  # None
+             "trackNumber": "02",
+             "isAvailable": True, "isExplicit": False},
+        ]
+        yt.set_album(
+            "MPREb-stringy",
+            FakeYTMusic.make_album_fixture(
+                audio_playlist_id="OLAK5uy-stringy",
+                title="Dr. Octagonecologyst",
+                artists=[{"name": "Dr. Octagon"}],
+                year="1996",
+                tracks=stringy_tracks,
+                other_versions=[],
+            ),
+        )
+
+        result = resolve_youtube_album(
+            rg,
+            pdb=FakePipelineDB(),
+            mb_get_release=mb_leaf,
+            mb_get_release_group_releases=mb_group,
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+        # The resolver gracefully handled the string/None coercion.
+        self.assertEqual(result.outcome, "ok",
+                         msg=f"expected ok, got {result.outcome}: "
+                             f"{result.error_message}")
+        self.assertEqual(len(result.youtube_releases), 1)
+        # Tracks were synthesised — _safe_int defaulted the bogus
+        # values but didn't crash the resolve.
+        self.assertEqual(len(result.youtube_releases[0].tracks), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1829,6 +1975,64 @@ class TestRedisCacheWiring(unittest.TestCase):
         # Resolution should succeed despite every cache.set raising.
         result = self._resolve(pdb=FakePipelineDB(), yt=yt, cache=cache)
         self.assertEqual(result.outcome, "ok")
+
+    def test_refresh_true_bypasses_redis_read_but_still_writes(self) -> None:
+        """Finding #6: ``refresh=True`` must skip the Redis cache READ
+        (forcing a fresh YT fetch) but STILL update the cache with the
+        new response so subsequent non-refresh resolves can hit it.
+        """
+        rg = MB_RG
+        mb_release_lookup = _LookupSpy({
+            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=rg, year=1996),
+        })
+        # Build the canonical search-key the cache will use.
+        search_key = (
+            "youtube:search:Dr. Octagon Dr. Octagonecologyst:albums:10"
+        )
+        album_key = "youtube:album:MPREb-seed"
+
+        cache = _DictCache()
+        # Prime the cache with a STALE result the resolver should ignore.
+        # If refresh=True doesn't bypass the Redis read, this stale entry
+        # would route through and yt_client.search would never be called.
+        stale_search = msgspec.json.encode([
+            _yt_search_album_result(
+                "MPREb-STALE", year="1990", track_count=99),
+        ])
+        cache._store[search_key] = stale_search
+
+        # The "fresh" YT contains the real seed.
+        yt = self._build_yt()
+        result = resolve_youtube_album(
+            MB_REL_A,
+            pdb=FakePipelineDB(),
+            mb_get_release=mb_release_lookup,
+            mb_get_release_group_releases=_LookupSpy({
+                rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
+            }),
+            discogs_get_release=_empty_lookup(),
+            discogs_get_master_releases=_empty_lookup(),
+            yt_client=yt,
+            distance_fn=_canned_distance(),
+            cache=cache,
+            refresh=True,
+        )
+        self.assertEqual(result.outcome, "ok")
+        # refresh=True bypassed the stale cache entry — YT.search ran.
+        self.assertGreater(len(yt.search_calls), 0,
+                           msg="refresh=True must bypass the Redis read "
+                               "and call yt_client.search")
+        # The fresh response replaced the stale cache entry. The
+        # subsequent (non-refresh) resolve would now hit the cache.
+        self.assertIn(search_key, cache._store)
+        self.assertIn(album_key, cache._store)
+        # Confirm the cached search payload is the fresh one (not stale).
+        decoded_search = msgspec.json.decode(cache._store[search_key])
+        browse_ids = {
+            r.get("browseId") for r in decoded_search if isinstance(r, dict)
+        }
+        self.assertIn("MPREb-seed", browse_ids)
+        self.assertNotIn("MPREb-STALE", browse_ids)
 
 
 if __name__ == "__main__":

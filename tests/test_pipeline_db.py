@@ -52,6 +52,7 @@ def make_db():
         "download_log",
         "album_request_field_resolutions",  # migration 030
         "youtube_album_mappings",  # migration 034
+        "youtube_album_empty_resolutions",  # migration 035
         "album_tracks",
         "album_requests",
     ]:
@@ -7217,11 +7218,38 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         row.update(overrides)
         return row
 
-    def test_get_returns_empty_list_when_nothing_cached(self):
-        self.assertEqual(
+    def test_get_returns_none_when_pair_never_resolved(self):
+        # Distinction matters: ``None`` = "never resolved" (cache MISS),
+        # ``[]`` = "resolved to empty matrix" (cache HIT). See
+        # ce-code-review finding #3.
+        self.assertIsNone(
             self.db.get_youtube_album_mapping("rg-1", "mb"),
+        )
+
+    def test_get_returns_empty_list_after_upsert_of_empty_rows(self):
+        # Upserting an empty matrix stamps the empty-resolution marker
+        # so the next read returns ``[]`` (cache HIT) instead of
+        # ``None`` (cache MISS). Without this, the resolver re-polls
+        # YT on every cycle for empty-search release groups (R14).
+        self.db.upsert_youtube_album_mapping("rg-empty", "mb", [])
+        self.assertEqual(
+            self.db.get_youtube_album_mapping("rg-empty", "mb"),
             [],
         )
+
+    def test_empty_marker_cleared_on_non_empty_upsert(self):
+        # An empty resolve followed by a non-empty resolve must clear the
+        # empty marker — subsequent reads return the matrix, not [].
+        self.db.upsert_youtube_album_mapping("rg-flip", "mb", [])
+        self.assertEqual(
+            self.db.get_youtube_album_mapping("rg-flip", "mb"), [])
+        self.db.upsert_youtube_album_mapping("rg-flip", "mb", [
+            self._row(yt_browse_id="MPREb_real"),
+        ])
+        got = self.db.get_youtube_album_mapping("rg-flip", "mb")
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual([r["yt_browse_id"] for r in got], ["MPREb_real"])
 
     def test_upsert_inserts_new_rows_and_get_returns_them(self):
         rows = [
@@ -7232,6 +7260,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         self.db.upsert_youtube_album_mapping("rg-1", "mb", rows)
 
         got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(len(got), 2)
         self.assertEqual(
             [r["yt_browse_id"] for r in got],
@@ -7251,6 +7280,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         ])
 
         got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(
             [r["yt_browse_id"] for r in got],
             ["MPREb_a", "MPREb_m", "MPREb_z"],
@@ -7270,6 +7300,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         ])
 
         got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(
             [r["yt_browse_id"] for r in got],
             ["MPREb_new1", "MPREb_new2"],
@@ -7287,19 +7318,22 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         self.db.upsert_youtube_album_mapping("rg-1", "mb", [
             self._row(yt_browse_id="MPREb_a_v2")])
 
+        rg1_mb = self.db.get_youtube_album_mapping("rg-1", "mb")
+        rg2_mb = self.db.get_youtube_album_mapping("rg-2", "mb")
+        rg1_discogs = self.db.get_youtube_album_mapping("rg-1", "discogs")
+        assert rg1_mb is not None
+        assert rg2_mb is not None
+        assert rg1_discogs is not None
         self.assertEqual(
-            [r["yt_browse_id"] for r in
-             self.db.get_youtube_album_mapping("rg-1", "mb")],
+            [r["yt_browse_id"] for r in rg1_mb],
             ["MPREb_a_v2"],
         )
         self.assertEqual(
-            [r["yt_browse_id"] for r in
-             self.db.get_youtube_album_mapping("rg-2", "mb")],
+            [r["yt_browse_id"] for r in rg2_mb],
             ["MPREb_b"],
         )
         self.assertEqual(
-            [r["yt_browse_id"] for r in
-             self.db.get_youtube_album_mapping("rg-1", "discogs")],
+            [r["yt_browse_id"] for r in rg1_discogs],
             ["MPREb_c"],
         )
 
@@ -7314,6 +7348,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         ])
 
         got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(len(got), 1)
         self.assertIsNone(got[0]["yt_audio_playlist_id"])
         self.assertIsNone(got[0]["yt_year"])
@@ -7351,6 +7386,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
 
         # Prior matrix must survive — rollback preserved it.
         got = self.db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(
             [r["yt_browse_id"] for r in got],
             ["MPREb_pre1", "MPREb_pre2"],

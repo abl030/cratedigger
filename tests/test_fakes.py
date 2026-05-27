@@ -2074,13 +2074,19 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         row.update(overrides)
         return row
 
-    def test_get_returns_empty_list_when_nothing_cached(self):
+    def test_get_returns_none_when_pair_never_resolved(self):
+        # Distinction matters: ``None`` = "never resolved" (cache MISS),
+        # ``[]`` = "resolved to empty matrix" (cache HIT). See finding #3.
         db = FakePipelineDB()
+        self.assertIsNone(db.get_youtube_album_mapping("rg-1", "mb"))
 
+    def test_get_returns_empty_list_after_upsert_of_empty_rows(self):
+        # Resolving to an empty matrix must be visible on the next read
+        # as ``[]`` (cache HIT) — not ``None`` (cache MISS).
+        db = FakePipelineDB()
+        db.upsert_youtube_album_mapping("rg-empty", "mb", [])
         self.assertEqual(
-            db.get_youtube_album_mapping("rg-1", "mb"),
-            [],
-        )
+            db.get_youtube_album_mapping("rg-empty", "mb"), [])
 
     def test_upsert_inserts_new_rows_and_get_returns_them(self):
         db = FakePipelineDB()
@@ -2092,6 +2098,7 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         db.upsert_youtube_album_mapping("rg-1", "mb", rows)
 
         got = db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(len(got), 2)
         self.assertEqual(
             [r["yt_browse_id"] for r in got],
@@ -2110,6 +2117,7 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         db.upsert_youtube_album_mapping("rg-1", "mb", rows)
 
         got = db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(
             [r["yt_browse_id"] for r in got],
             ["MPREb_a", "MPREb_m", "MPREb_z"],
@@ -2129,6 +2137,7 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         ])
 
         got = db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["yt_browse_id"], "MPREb_new")
 
@@ -2145,16 +2154,22 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         db.upsert_youtube_album_mapping("rg-1", "mb", [
             self._row(yt_browse_id="MPREb_a_v2")])
 
+        rg1_mb = db.get_youtube_album_mapping("rg-1", "mb")
+        rg2_mb = db.get_youtube_album_mapping("rg-2", "mb")
+        rg1_discogs = db.get_youtube_album_mapping("rg-1", "discogs")
+        assert rg1_mb is not None
+        assert rg2_mb is not None
+        assert rg1_discogs is not None
         self.assertEqual(
-            [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-1", "mb")],
+            [r["yt_browse_id"] for r in rg1_mb],
             ["MPREb_a_v2"],
         )
         self.assertEqual(
-            [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-2", "mb")],
+            [r["yt_browse_id"] for r in rg2_mb],
             ["MPREb_b"],
         )
         self.assertEqual(
-            [r["yt_browse_id"] for r in db.get_youtube_album_mapping("rg-1", "discogs")],
+            [r["yt_browse_id"] for r in rg1_discogs],
             ["MPREb_c"],
         )
 
@@ -2165,6 +2180,7 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         db.seed_youtube_album_mapping("rg-1", "mb", rows)
 
         got = db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["yt_browse_id"], "MPREb_seed")
 
@@ -2180,6 +2196,7 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         ])
 
         got = db.get_youtube_album_mapping("rg-1", "mb")
+        assert got is not None
         self.assertEqual(len(got), 1)
         self.assertIsNone(got[0]["yt_audio_playlist_id"])
         self.assertIsNone(got[0]["yt_year"])

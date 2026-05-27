@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional
 from zoneinfo import ZoneInfo
 import msgspec
 
@@ -2774,14 +2774,23 @@ class FakePipelineDB:
         self,
         release_group_identifier: str,
         source: str,
-    ) -> list[dict[str, Any]]:
+    ) -> Optional[list[dict[str, Any]]]:
         """Return all rows for the pair, ordered by ``yt_browse_id`` ASC.
 
-        Empty list when nothing is cached. Mirrors the real PipelineDB
-        contract; the resolver always reads the full matrix per pair.
+        Returns ``None`` when the pair has never been resolved, and an
+        empty list when it has been resolved to an empty matrix. The
+        distinction matters: ``[]`` means "we checked and found nothing"
+        (cache HIT — don't re-poll YT), while ``None`` means "we have
+        no record" (cache MISS — go ask YT).
+
+        Mirrors the real PipelineDB contract; the resolver gate is
+        ``if not refresh and cached_rows is not None``.
         """
-        rows = self._youtube_album_mappings.get(
-            (release_group_identifier, source), [])
+        if (release_group_identifier, source) not in self._youtube_album_mappings:
+            return None
+        rows = self._youtube_album_mappings[
+            (release_group_identifier, source)
+        ]
         return sorted(
             (copy.deepcopy(r) for r in rows),
             key=lambda r: r["yt_browse_id"],

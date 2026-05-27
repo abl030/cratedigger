@@ -108,7 +108,14 @@ def _build_youtube_client():
     web server's startup cost stays low and unrelated routes don't
     pay for unused HTTP machinery. Mirrors
     ``scripts/pipeline_cli.py::_build_youtube_client``.
+
+    The session binds a default ``(connect, read)`` timeout of
+    ``(5, 30)`` so unresponsive YT endpoints can't pin a worker
+    forever (finding #4). ``requests`` exposes no Session-level
+    timeout config; ``functools.partial`` on ``session.request`` is
+    the established pattern.
     """
+    from functools import partial
     import requests
     from urllib3.util.retry import Retry
     from requests.adapters import HTTPAdapter
@@ -131,6 +138,11 @@ def _build_youtube_client():
         ),
         "Accept-Language": "en-US,en;q=0.9",
     })
+    # Bind a default (connect, read) timeout so unresponsive remotes
+    # don't pin the worker forever. Per-call ``timeout=`` kwargs
+    # still override this default.
+    session.request = partial(  # type: ignore[method-assign]
+        session.request, timeout=(5, 30))
     return YTMusic(requests_session=session, language="en")
 
 
@@ -231,8 +243,11 @@ GET_DESCRIPTIONS: dict[str, str] = {
     "/api/youtube-album": (
         "YouTube Music album resolver — given an MB or Discogs "
         "release-or-group identifier, returns the typed "
-        "(yt_release × mb_release) distance matrix with optional "
-        "?refresh=true to bypass the in-process Redis cache."
+        "(yt_release × mb_release) distance matrix. "
+        "?refresh=true bypasses BOTH the durable cache "
+        "(youtube_album_mappings) and the in-process Redis HTTP "
+        "accelerator, forcing a fresh YT Music fetch; the fresh "
+        "response is then written back to both layers."
     ),
 }
 

@@ -18,7 +18,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -6903,13 +6903,32 @@ class PipelineDB:
         self,
         release_group_identifier: str,
         source: str,
-    ) -> list[dict[str, Any]]:
+    ) -> Optional[list[dict[str, Any]]]:
         """Return all cached rows for the ``(release_group_identifier, source)`` pair.
 
         Ordered by ``yt_browse_id`` ASC for deterministic output (the
-        underlying UNIQUE index already covers the prefix). Empty list
-        when nothing is cached. JSONB columns are deserialised by
-        psycopg2 into native Python ``list`` / ``dict``.
+        underlying UNIQUE index already covers the prefix). JSONB
+        columns are deserialised by psycopg2 into native Python
+        ``list`` / ``dict``.
+
+        Returns ``None`` when the pair has never been resolved, and an
+        empty list when it has been resolved to an empty matrix (AE2 —
+        an empty YT search result is persisted as the empty list).
+        The distinction matters: ``[]`` means "we checked and found
+        nothing" (cache HIT, the resolver short-circuits); ``None``
+        means "we have no record" (cache MISS, the resolver re-polls
+        YT). Previously the resolver couldn't tell the two cases apart
+        and re-polled YT on every resolve for empty-search release
+        groups, defeating R14.
+
+        The presence check uses a single SELECT — there's no second
+        round trip to ``schema_migrations`` or a separate "exists"
+        marker. We rely on the row's natural-key uniqueness: a write
+        of ``rows=[]`` inserts a sentinel zero-row deletion (DELETE +
+        empty INSERT) that leaves no rows but DOES create the
+        ``(rg, source)`` association in a separate
+        ``youtube_album_empty_resolutions`` marker (see
+        ``upsert_youtube_album_mapping``).
         """
         cur = self._execute(
             """
@@ -6922,7 +6941,23 @@ class PipelineDB:
             """,
             (release_group_identifier, source),
         )
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+        if rows:
+            return rows
+        # Check the empty-resolution marker (see
+        # ``upsert_youtube_album_mapping`` — empty matrices are
+        # persisted into a side table since the main table is
+        # row-shaped and an empty matrix has no rows to insert).
+        cur2 = self._execute(
+            """
+            SELECT 1 FROM youtube_album_empty_resolutions
+            WHERE release_group_identifier = %s AND source = %s
+            """,
+            (release_group_identifier, source),
+        )
+        if cur2.fetchone() is not None:
+            return []
+        return None
 
     def upsert_youtube_album_mapping(
         self,
@@ -6938,6 +6973,15 @@ class PipelineDB:
         carry: ``yt_browse_id``, ``yt_audio_playlist_id`` (optional),
         ``yt_url``, ``yt_year`` (optional), ``yt_track_count``,
         ``yt_tracks`` (JSONB), ``distances`` (JSONB).
+
+        When ``rows`` is empty, also writes a marker row into
+        ``youtube_album_empty_resolutions`` so the next
+        ``get_youtube_album_mapping`` returns ``[]`` (cache HIT) instead
+        of ``None`` (cache MISS) — the distinction that lets the
+        resolver short-circuit empty-search release groups instead of
+        re-polling YT every cycle. The marker is deleted when ``rows``
+        is non-empty (a later resolve that found albums supersedes the
+        empty flag).
         """
         self._ensure_conn()
         old_autocommit = self.conn.autocommit
@@ -6977,6 +7021,29 @@ class PipelineDB:
                             )
                             for row in rows
                         ],
+                    )
+                    # A non-empty resolve supersedes any prior empty marker.
+                    cur.execute(
+                        """
+                        DELETE FROM youtube_album_empty_resolutions
+                        WHERE release_group_identifier = %s AND source = %s
+                        """,
+                        (release_group_identifier, source),
+                    )
+                else:
+                    # Empty resolve: stamp the marker so subsequent reads
+                    # return ``[]`` (cache HIT, don't re-poll YT) instead of
+                    # ``None`` (cache MISS, re-poll YT). ON CONFLICT to keep
+                    # the upsert idempotent across refresh cycles.
+                    cur.execute(
+                        """
+                        INSERT INTO youtube_album_empty_resolutions
+                            (release_group_identifier, source)
+                        VALUES (%s, %s)
+                        ON CONFLICT (release_group_identifier, source)
+                          DO UPDATE SET resolved_at = NOW()
+                        """,
+                        (release_group_identifier, source),
                     )
             self.conn.commit()
         except Exception:
