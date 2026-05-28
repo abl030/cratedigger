@@ -234,12 +234,23 @@ def _build_ytdlp_argv(
     ``ens19`` → pfSense WireGuard, so YouTube egress is VPN-routed while
     the worker's DB/control traffic stays on the main NIC. ``None`` leaves
     the argv unchanged (default-route egress).
+
+    ``--remux-video`` does a lossless container remux so the staged files
+    land in a container the importer recognizes: YouTube Music ``bestaudio``
+    is opus-in-webm (``.webm``) or aac-in-mp4, and the importer's
+    audio-extension set accepts neither (it would measure ``empty_fileset``
+    and reject). ``--remux-video`` is stream-copy only — it fails rather
+    than re-encoding if the codec is incompatible with the target container
+    — so ``webm``(opus)→``.opus`` and ``mp4``(aac)→``.m4a`` are guaranteed
+    lossless. ``.m4a`` / ``.mp3`` / ``.opus`` match no rule and pass through
+    untouched. Requires ffmpeg on PATH (the systemd unit provides it).
     """
     argv = [
         ytdlp_bin,
         "--ignore-config",
         "--no-ignore-errors",
         "-f", "bestaudio",
+        "--remux-video", "webm>opus/mp4>m4a",
         "--output", output_template,
     ]
     if source_address:
