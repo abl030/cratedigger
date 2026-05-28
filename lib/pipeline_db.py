@@ -1852,6 +1852,15 @@ class PipelineDB:
         )
         return {row["mb_release_group_id"] for row in cur.fetchall()}
 
+    def list_non_replaced_requests(self) -> list[dict[str, Any]]:
+        """Return active pipeline rows for disk-coverage reconciliation."""
+        cur = self._execute(
+            "SELECT * FROM album_requests "
+            "WHERE status != 'replaced' "
+            "ORDER BY id ASC"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def supersede_request_mbid(
         self,
         old_request_id: int,
@@ -7053,4 +7062,3 @@ class PipelineDB:
             raise
         finally:
             self.conn.autocommit = old_autocommit
-

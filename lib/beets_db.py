@@ -478,6 +478,26 @@ class BeetsDB:
         """
         return set(self._batch_lookup_album_ids(mbids).keys())
 
+    def list_release_identities(self) -> list[dict[str, object]]:
+        """Return beets album identity columns for inverse coverage views."""
+        rows = self._conn.execute(
+            "SELECT id, album, albumartist, mb_albumid, discogs_albumid "
+            "FROM albums "
+            "WHERE NULLIF(mb_albumid, '') IS NOT NULL "
+            "OR (discogs_albumid IS NOT NULL AND discogs_albumid != 0) "
+            "ORDER BY id ASC"
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "album": r[1],
+                "albumartist": r[2],
+                "mb_albumid": r[3],
+                "discogs_albumid": r[4],
+            }
+            for r in rows
+        ]
+
     def check_mbids_detail(self, mbids: list[str]) -> dict[str, dict[str, object]]:
         """Batch lookup: release ID → {beets_tracks, beets_format, beets_bitrate, beets_samplerate, beets_bitdepth}.
 

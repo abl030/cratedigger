@@ -64,6 +64,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import PipelineDB, DEFAULT_DSN
 from lib.import_preview import ImportPreviewValues
+from lib.disk_coverage_service import disk_coverage
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.util import (
     resolve_failed_path as _shared_resolve_failed_path,
@@ -203,6 +204,19 @@ def cmd_list(db, args):
               f"{a['artist_name']} - {a['album_title']}  "
               f"({a['mb_release_id'] or a.get('discogs_release_id') or 'no-id'})")
     print(f"\n  Total: {len(albums)}")
+
+
+def cmd_disk_coverage(db, args):
+    from lib.beets_db import BeetsDB
+
+    with BeetsDB(args.beets_db) as beets:
+        result = disk_coverage(
+            db,
+            beets,
+            include_rows=not args.counts_only,
+            include_inverse=args.include_inverse,
+        )
+    print(json.dumps(msgspec.to_builtins(result), indent=2, sort_keys=True))
 
 
 def cmd_add(db, args):
@@ -2963,6 +2977,27 @@ def _build_parser() -> tuple[
     # status
     sub.add_parser("status", help="Show counts by status")
 
+    # disk-coverage
+    p_disk = sub.add_parser(
+        "disk-coverage",
+        help="Show which active pipeline rows are actually present in beets",
+    )
+    p_disk.add_argument(
+        "--beets-db",
+        default=os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db"),
+        help="Path to beets SQLite DB (default: BEETS_DB or production path)",
+    )
+    p_disk.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="Suppress the off-disk row list and print counts only",
+    )
+    p_disk.add_argument(
+        "--include-inverse",
+        action="store_true",
+        help="Also include beets albums with no active pipeline row",
+    )
+
     # retry
     p_retry = sub.add_parser("retry", help="Reset a failed request to wanted")
     p_retry.add_argument("id", type=int, help="Request ID")
@@ -3418,6 +3453,7 @@ def main():
         "add": cmd_add,
         "query": cmd_query,
         "status": cmd_status,
+        "disk-coverage": cmd_disk_coverage,
         "retry": cmd_retry,
         "cancel": cmd_cancel,
         "set": cmd_set,

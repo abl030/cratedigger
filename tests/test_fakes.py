@@ -2489,6 +2489,16 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         db = FakePipelineDB()
         self.assertEqual(db.list_active_release_group_ids(), set())
 
+    def test_list_non_replaced_requests_excludes_replaced_and_sorts_by_id(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        db.seed_request(make_request_row(id=1, status="imported"))
+        db.seed_request(make_request_row(id=3, status="replaced"))
+
+        rows = db.list_non_replaced_requests()
+
+        self.assertEqual([r["id"] for r in rows], [1, 2])
+
     def test_get_request_by_replaces_request_id_found(self):
         db = self._seed_old()
         new_id = db.supersede_request_mbid(
@@ -4304,6 +4314,31 @@ class TestFakeBeetsDB(unittest.TestCase):
             beets.get_album_info_calls,
             ["mbid-1", "mbid-unknown"],
         )
+
+    def test_check_mbids_uses_seeded_album_exists_state(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-1", True)
+        beets.set_album_exists("missing", False)
+
+        self.assertEqual(beets.check_mbids(["mbid-1", "missing"]), {"mbid-1"})
+        self.assertEqual(beets.check_mbids_calls, [["mbid-1", "missing"]])
+
+    def test_list_release_identities_returns_seeded_rows(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_release_identities([
+            {
+                "id": 7,
+                "album": "Album",
+                "albumartist": "Artist",
+                "mb_albumid": "mbid-1",
+                "discogs_albumid": None,
+            },
+        ])
+
+        rows = beets.list_release_identities()
+
+        self.assertEqual(rows[0]["mb_albumid"], "mbid-1")
+        self.assertEqual(beets.list_release_identities_calls, 1)
 
     def test_get_all_album_ids_for_release_returns_list(self) -> None:
         beets = FakeBeetsDB()

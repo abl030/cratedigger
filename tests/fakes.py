@@ -3028,6 +3028,15 @@ class FakePipelineDB:
             and row.get("mb_release_group_id") is not None
         }
 
+    def list_non_replaced_requests(self) -> list[dict[str, Any]]:
+        """Return active request rows ordered like PipelineDB."""
+        rows = [
+            r for r in self._requests.values()
+            if r.get("status") != "replaced"
+        ]
+        rows.sort(key=lambda r: int(r["id"]))
+        return [copy.deepcopy(r) for r in rows]
+
     def delete_request(self, request_id: int) -> None:
         """Delete a request and cascade to child tables.
 
@@ -4967,6 +4976,7 @@ class FakeBeetsDB:
         self._album_info: dict[str, Any] = {}
         self._item_paths: dict[str, list[tuple[int, str]]] = {}
         self._album_path_by_id: dict[int, str | None] = {}
+        self._release_identities: list[dict[str, Any]] = []
         # Default return values for unseeded keys — match the real
         # BeetsDB's "no row" shapes so tests don't crash on missing
         # explicit seeds.
@@ -4981,6 +4991,8 @@ class FakeBeetsDB:
         self.get_all_album_ids_for_release_calls: list[str] = []
         self.get_album_path_by_id_calls: list[int] = []
         self.get_item_paths_calls: list[str] = []
+        self.check_mbids_calls: list[list[str]] = []
+        self.list_release_identities_calls: int = 0
 
     # --- Seeding helpers ---
 
@@ -5003,11 +5015,22 @@ class FakeBeetsDB:
     def set_album_path_by_id(self, album_id: int, path: str | None) -> None:
         self._album_path_by_id[album_id] = path
 
+    def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
+        self._release_identities = [copy.deepcopy(r) for r in rows]
+
     # --- Real-method surface ---
 
     def album_exists(self, release_id: str) -> bool:
         self.album_exists_calls.append(release_id)
         return self._album_exists.get(release_id, self._album_exists_default)
+
+    def check_mbids(self, mbids: list[str]) -> set[str]:
+        self.check_mbids_calls.append(list(mbids))
+        return {mbid for mbid in mbids if self.album_exists(mbid)}
+
+    def list_release_identities(self) -> list[dict[str, Any]]:
+        self.list_release_identities_calls += 1
+        return [copy.deepcopy(r) for r in self._release_identities]
 
     def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
         self.get_all_album_ids_for_release_calls.append(release_id)

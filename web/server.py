@@ -39,6 +39,7 @@ from web import mb as mb_api
 from lib.beets_db import BeetsDB
 from lib.pipeline_db import PipelineDB
 from web.routes import browse as _browse_routes
+from web.routes import disk_coverage as _disk_coverage_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
 from web.routes import imports as _imports_routes
@@ -217,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
     # Route modules export their own dicts; we merge them here.
     _FUNC_GET_ROUTES: dict[str, object] = {
         **_browse_routes.GET_ROUTES,
+        **_disk_coverage_routes.GET_ROUTES,
         **_labels_routes.GET_ROUTES,
         **_pipeline_routes.GET_ROUTES,
         **_library_routes.GET_ROUTES,
@@ -226,6 +228,7 @@ class Handler(BaseHTTPRequestHandler):
 
     _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
         *_browse_routes.GET_PATTERNS,
+        *_disk_coverage_routes.GET_PATTERNS,
         *_labels_routes.GET_PATTERNS,
         *_pipeline_routes.GET_PATTERNS,
         *_library_routes.GET_PATTERNS,
@@ -250,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
     # populated incrementally. Empty until U18 step 2.
     _FUNC_GET_DESCRIPTIONS: dict[str, str] = {
         **_browse_routes.GET_DESCRIPTIONS,
+        **_disk_coverage_routes.GET_DESCRIPTIONS,
         **_labels_routes.GET_DESCRIPTIONS,
         **_pipeline_routes.GET_DESCRIPTIONS,
         **_library_routes.GET_DESCRIPTIONS,
@@ -266,6 +270,7 @@ class Handler(BaseHTTPRequestHandler):
 
     _FUNC_GET_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
         *_browse_routes.PATTERN_DESCRIPTIONS,
+        *_disk_coverage_routes.PATTERN_DESCRIPTIONS,
         *_labels_routes.PATTERN_DESCRIPTIONS,
         *_pipeline_routes.PATTERN_DESCRIPTIONS,
         *_library_routes.PATTERN_DESCRIPTIONS,

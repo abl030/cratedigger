@@ -1039,6 +1039,7 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/discogs/release/(\d+)$",
         "/api/discogs/label/search",
         r"^/api/discogs/label/(\d+)$",
+        "/api/disk-coverage",
         "/api/pipeline/log",
         "/api/pipeline/status",
         "/api/pipeline/recent",
@@ -1438,6 +1439,17 @@ class TestPipelineRouteContracts(_WebServerCase):
         "match_time_s", "peers_browsed", "peers_browsed_lazy",
         "peer_dirs", "fanout_waves",
     }
+    DISK_COVERAGE_COUNT_FIELDS = {
+        "active_total", "on_disk_total", "off_disk_total", "by_status",
+        "on_disk_by_status", "off_disk_by_status", "inverse_total",
+    }
+    DISK_COVERAGE_ROW_FIELDS = {
+        "id", "status", "artist_name", "album_title", "mb_release_id",
+        "discogs_release_id",
+    }
+    DISK_COVERAGE_INVERSE_FIELDS = {
+        "id", "album", "albumartist", "mb_albumid", "discogs_albumid",
+    }
 
     def setUp(self) -> None:
         self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
@@ -1473,6 +1485,54 @@ class TestPipelineRouteContracts(_WebServerCase):
             },
             "pipeline log counts",
         )
+
+    def test_disk_coverage_contract(self):
+        from tests.fakes import FakeBeetsDB
+        import web.server as srv
+
+        fake = self.mock_db._fake
+        fake.seed_request(make_request_row(
+            id=9001, status="wanted", mb_release_id="disk-missing-mbid",
+            artist_name="Missing Artist", album_title="Missing Album",
+        ))
+        beets = FakeBeetsDB()
+
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/disk-coverage")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, {"counts", "off_disk", "inverse"},
+            "disk coverage response")
+        _assert_required_fields(
+            self, data["counts"], self.DISK_COVERAGE_COUNT_FIELDS,
+            "disk coverage counts")
+        _assert_required_fields(
+            self, data["off_disk"][0], self.DISK_COVERAGE_ROW_FIELDS,
+            "disk coverage off-disk row")
+
+    def test_disk_coverage_inverse_contract(self):
+        from tests.fakes import FakeBeetsDB
+        import web.server as srv
+
+        beets = FakeBeetsDB()
+        beets.set_release_identities([
+            {
+                "id": 77,
+                "album": "Untracked Album",
+                "albumartist": "Untracked Artist",
+                "mb_albumid": "beets-only-mbid",
+                "discogs_albumid": None,
+            },
+        ])
+
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/disk-coverage?inverse=1")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data["inverse"][0], self.DISK_COVERAGE_INVERSE_FIELDS,
+            "disk coverage inverse row")
 
     def test_pipeline_log_surfaces_wrong_match_triage_audit(self):
         original_log = copy.deepcopy(self.mock_db.get_log.return_value)

@@ -3423,5 +3423,30 @@ class TestPipelineCliRoutes(unittest.TestCase):
         self.assertEqual(names_list, sorted(names_list))
 
 
+class TestPipelineCliDiskCoverage(unittest.TestCase):
+    def test_disk_coverage_prints_json_from_shared_service(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="missing-mbid"))
+        beets = MagicMock()
+        beets.__enter__.return_value = beets
+        beets.__exit__.return_value = None
+        beets.check_mbids.return_value = set()
+
+        args = MagicMock(
+            beets_db="/tmp/beets.db",
+            counts_only=False,
+            include_inverse=False,
+        )
+        with patch("lib.beets_db.BeetsDB", return_value=beets), \
+                redirect_stdout(io.StringIO()) as out:
+            pipeline_cli.cmd_disk_coverage(db, args)
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["counts"]["off_disk_total"], 1)
+        self.assertEqual(payload["off_disk"][0]["id"], 1)
+        beets.check_mbids.assert_called_once_with(["missing-mbid"])
+
+
 if __name__ == "__main__":
     unittest.main()

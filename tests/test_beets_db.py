@@ -1423,5 +1423,45 @@ class TestAlbumRowSource(unittest.TestCase):
         self.assertEqual(unknown[0]["source"], "unknown")
 
 
+class TestListReleaseIdentities(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        _insert_album(
+            self.db_path, 1, "mbid-1", [(320000, "/a.mp3")],
+            album="MB Album", albumartist="Artist")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO albums "
+            "(id, mb_albumid, album, albumartist, discogs_albumid) "
+            "VALUES (2, NULL, 'Discogs Album', 'Artist', 67890)"
+        )
+        conn.execute(
+            "INSERT INTO albums "
+            "(id, mb_albumid, album, albumartist, discogs_albumid) "
+            "VALUES (3, NULL, 'No ID Album', 'Artist', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO albums "
+            "(id, mb_albumid, album, albumartist, discogs_albumid) "
+            "VALUES (4, '', 'Zero Sentinel Album', 'Artist', 0)"
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmpdir)
+
+    def test_returns_albums_with_release_identity_columns(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            rows = db.list_release_identities()
+
+        self.assertEqual([r["id"] for r in rows], [1, 2])
+        self.assertEqual(rows[0]["mb_albumid"], "mbid-1")
+        self.assertEqual(rows[1]["discogs_albumid"], 67890)
+
+
 if __name__ == "__main__":
     unittest.main()
