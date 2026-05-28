@@ -17,23 +17,24 @@ branch = True
 # turns SIGTERM into a normal flush so we don't lose every collection cycle.
 # The oneshot timer doesn't need this — atexit already covers it.
 sigterm = True
-# `source = .` means "everything under cwd is in scope" — covers all of lib/,
-# web/, harness/, scripts/, plus the top-level entry points (cratedigger.py,
-# album_source.py). Listing individual files in `source =` makes coverage
-# emit "Module foo.py was never imported" warnings on every subprocess that
-# doesn't happen to load that file.
+# Production systemd units run with WorkingDirectory=stateDir while the Python
+# source lives under /nix/store/<hash>-source. Use include globs instead of
+# source=. so coverage tracks the packaged source rather than the mutable state
+# directory. The local repo glob keeps test-suite coverage comparable.
 #
-# Don't track the test suite itself — that conflates "test runs" with "real
-# code paths." The whole point of the prod-vs-test diff is to find code only
-# tests exercise.
-source = .
+# Don't track the test suite itself — that conflates "test runs" with "real code
+# paths." The whole point of the prod-vs-test diff is to find code only tests
+# exercise.
+include =
+    */cratedigger/*
+    /nix/store/*-source/*
+    /nix/store/*-cratedigger-src/*
 omit =
     tests/*
     */tests/*
     */test_*.py
     */__pycache__/*
     */site-packages/*
-    /nix/store/*
     build/*
 
 [report]

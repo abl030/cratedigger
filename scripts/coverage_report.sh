@@ -32,7 +32,7 @@ if [[ -n "$SRC_HOST" ]]; then
   echo "=== Pulling coverage data from ${SRC_HOST}:${SRC_DIR} ==="
   # Use sudo on the remote side because the dir is owned by cratedigger's user.
   # rsync's --rsync-path is the canonical way to escalate on the remote.
-  rsync -av --rsync-path="sudo rsync" \
+  rsync -a --info=stats2 --rsync-path="sudo rsync" \
     "${SRC_HOST}:${SRC_DIR}/" "$DEST_DIR/" \
     --include='.coverage.*' --exclude='*'
   echo
