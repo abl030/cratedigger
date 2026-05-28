@@ -85,6 +85,7 @@ from lib.youtube_ingest_service import (
     OUTCOME_EXIT_CODE as YOUTUBE_INGEST_EXIT_CODE,
     SubmitResult as YoutubeIngestSubmitResult,
     YoutubeIngestService,
+    default_youtube_ingest_service_factory,
 )
 
 MB_API = "http://192.168.1.35:5200/ws/2"
@@ -2285,42 +2286,6 @@ def cmd_youtube_album(db, args):
     return OUTCOME_EXIT_CODE.get(result.outcome, 1)
 
 
-def _default_mb_track_count_from_mirror(mbid: str) -> int | None:
-    """Production ``mb_track_count_fn`` for the YT-rescue CLI.
-
-    Thin wrapper around ``web.mb.get_release`` that counts entries in the
-    slimmed ``tracks`` array. Returns ``None`` if the MB mirror responds
-    without a usable track list — the service then surfaces
-    ``track_count_precheck_failed`` and the operator escalates.
-
-    Wired here (rather than as ``_default_mb_track_count`` in
-    ``lib.youtube_ingest_service``) per the plan: the service-side default
-    raises ``NotImplementedError`` to force every caller to inject an
-    explicit wiring, and this CLI command supplies the MB-mirror flavour.
-    """
-    from web import mb as mb_api
-
-    release = mb_api.get_release(mbid, fresh=False)
-    if not isinstance(release, dict):
-        return None
-    tracks = release.get("tracks")
-    if not isinstance(tracks, list):
-        return None
-    return len(tracks)
-
-
-def _default_youtube_ingest_service_factory(db) -> YoutubeIngestService:
-    """Construct a production ``YoutubeIngestService`` for the CLI.
-
-    Wires the live MB-mirror ``mb_track_count_fn`` (other ports retain
-    their library-side production defaults). Kept as a module-local seam
-    so tests can override ``cmd_youtube_rescue(..., service_factory=...)``
-    without monkey-patching globals.
-    """
-    return YoutubeIngestService(
-        db, mb_track_count_fn=_default_mb_track_count_from_mirror)
-
-
 def cmd_youtube_rescue(db, args, *, service_factory=None):
     """``pipeline-cli youtube-rescue <request_id> <browse_id> [--json]``.
 
@@ -2342,7 +2307,7 @@ def cmd_youtube_rescue(db, args, *, service_factory=None):
       * 5 — ``transient`` (DB / MB-mirror hiccup; retry)
       * 1 — unknown outcome (safety net)
     """
-    factory = service_factory or _default_youtube_ingest_service_factory
+    factory = service_factory or default_youtube_ingest_service_factory
     svc = factory(db)
     result = svc.submit(int(args.request_id), str(args.browse_id))
 

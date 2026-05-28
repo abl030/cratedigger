@@ -377,27 +377,64 @@ def _default_ytdlp_runner(**_kwargs: Any) -> YtdlpRunResult:
 
 
 def _default_mb_track_count(_mbid: str) -> Optional[int]:
-    """Sentinel default — production wiring deferred to U7/U9.
+    """Sentinel default — production wiring lives in
+    :func:`default_mb_track_count_from_mirror` below.
 
-    The R7 precheck and R10 gate both need to know the canonical MB
-    track count for the request's MBID. The user's local MB mirror at
-    ``http://192.168.1.35:5200`` exposes ``/release/<mbid>`` (see
-    ``web/mb.py::get_release``) which carries the tracks array, but
-    wiring that into the service requires either a new helper in
-    ``lib/`` or threading ``web.mb`` past the test seam. The plan
-    explicitly says: "if mb_track_count_fn's production wiring is
-    genuinely uncertain, ship the kwarg-DI port with a clear
-    NotImplementedError default and document for U7/U9 to wire up —
-    don't invent a function that doesn't work."
-
-    Tests inject a fake that returns canned values; the worker (U6)
-    will wire this in production via a thin wrapper around
-    ``web.mb.get_release`` that counts ``len(release['tracks'])``.
+    Kept as a NotImplementedError sentinel so callers who construct a
+    bare ``YoutubeIngestService(pdb)`` without an MB-wiring fail fast
+    at the first precheck/gate rather than silently passing a
+    ``None`` MB count through. The production callers (CLI in
+    ``scripts/pipeline_cli.py``, HTTP route in ``web/routes/youtube.py``)
+    go through :func:`default_youtube_ingest_service_factory` which wires
+    the live MB-mirror flavour. Tests inject a fake that returns canned
+    values.
     """
     raise NotImplementedError(
-        "mb_track_count_fn must be injected — production wiring deferred "
-        "to U7/U9 (see lib.youtube_ingest_service._default_mb_track_count "
-        "docstring); tests inject a fake")
+        "mb_track_count_fn must be injected — production wiring lives "
+        "in lib.youtube_ingest_service.default_mb_track_count_from_mirror; "
+        "use default_youtube_ingest_service_factory(pdb) in production "
+        "callers, or inject a fake in tests")
+
+
+def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
+    """Production ``mb_track_count_fn`` — counts tracks via the MB mirror.
+
+    Thin wrapper around ``web.mb.get_release`` that counts entries in the
+    slimmed ``tracks`` array. Returns ``None`` if the MB mirror responds
+    without a usable track list — the service then surfaces
+    ``track_count_precheck_failed`` and the operator escalates.
+
+    Shared by both production callers (CLI in
+    ``scripts/pipeline_cli.py::cmd_youtube_rescue`` and HTTP route in
+    ``web/routes/youtube.py::post_pipeline_youtube_rescue``) per CLI ⇄
+    API symmetry — duplicating the helper across the two wrappers would
+    let them drift in subtle ways (different timeout, different cache
+    behaviour). Tests inject a fake instead of calling this helper.
+    """
+    from web import mb as mb_api
+
+    release = mb_api.get_release(mbid, fresh=False)
+    if not isinstance(release, dict):
+        return None
+    tracks = release.get("tracks")
+    if not isinstance(tracks, list):
+        return None
+    return len(tracks)
+
+
+def default_youtube_ingest_service_factory(pdb: Any) -> "YoutubeIngestService":
+    """Construct a production ``YoutubeIngestService`` for CLI / API.
+
+    Wires the live MB-mirror ``mb_track_count_fn`` (other ports retain
+    their library-side production defaults). Both
+    ``scripts/pipeline_cli.py::cmd_youtube_rescue`` and
+    ``web/routes/youtube.py::post_pipeline_youtube_rescue`` call this
+    so the two surfaces share one wiring per CLI ⇄ API symmetry. Tests
+    inject a service via ``service_factory=`` (CLI) or patch the
+    service method directly (HTTP contract tests).
+    """
+    return YoutubeIngestService(
+        pdb, mb_track_count_fn=default_mb_track_count_from_mirror)
 
 
 def _default_stage_dir(src: Path, dest: Path) -> None:
