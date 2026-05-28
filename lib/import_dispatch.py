@@ -6,6 +6,7 @@ that runs import_one.py and dispatches on the ImportResult decision.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -58,6 +59,11 @@ from lib.import_evidence import (
     ensure_candidate_evidence_for_action,
     load_current_evidence_for_action,
 )
+from lib.import_manifest import (
+    audio_relative_paths,
+    check_audio_manifest,
+    tracked_audio_paths_from_validation_items,
+)
 from lib.processing_paths import normalize_source_dirs
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
                       trigger_meelo_clean)
@@ -92,6 +98,7 @@ DISPATCH_CODE_BAD_REQUEST = "bad_request"
 # Consumers may react to this outcome, but must not re-run a parallel import
 # decision to prove it again.
 DISPATCH_CODE_QUALITY_PIPELINE_REJECTED = "quality_pipeline_rejected"
+DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
@@ -101,6 +108,123 @@ DISPATCH_CODE_QUALITY_PIPELINE_REJECTED = "quality_pipeline_rejected"
 # ``auto_import``, none of which appear here — their staging dir under
 # ``/Incoming`` is always safe to remove (see issue #89).
 FORCE_MANUAL_SCENARIOS: frozenset[str] = frozenset({"force_import", "manual_import"})
+
+
+def _validation_result_dict(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _origin_manifest_for_download_log(
+    db: "PipelineDB",
+    *,
+    download_log_id: int | None,
+    failed_path: str,
+) -> list[str]:
+    if download_log_id is None:
+        return []
+    get_entry = getattr(db, "get_download_log_entry", None)
+    if get_entry is None:
+        return []
+    entry = get_entry(download_log_id)
+    if not isinstance(entry, dict):
+        return []
+    vr = _validation_result_dict(entry.get("validation_result"))
+    if not vr:
+        return []
+    items = vr.get("items")
+    if not isinstance(items, list):
+        return []
+    return tracked_audio_paths_from_validation_items(items, root=failed_path)
+
+
+def _expected_request_track_count(db: "PipelineDB", request_id: int) -> int | None:
+    get_tracks = getattr(db, "get_tracks", None)
+    if get_tracks is None:
+        return None
+    try:
+        tracks = get_tracks(request_id)
+    except Exception:
+        logger.debug("Failed to read expected tracks for manifest guard", exc_info=True)
+        return None
+    if not isinstance(tracks, list) or not tracks:
+        return None
+    return len(tracks)
+
+
+def _guard_force_manual_audio_manifest(
+    db: "PipelineDB",
+    *,
+    request_id: int,
+    failed_path: str,
+    download_log_id: int | None,
+) -> DispatchOutcome | None:
+    """Block force/manual import if the source contains unowned audio."""
+    expected_count = _expected_request_track_count(db, request_id)
+    manifest = _origin_manifest_for_download_log(
+        db,
+        download_log_id=download_log_id,
+        failed_path=failed_path,
+    )
+    if manifest:
+        if expected_count is not None and len(manifest) != expected_count:
+            detail = (
+                "Origin validation manifest has "
+                f"{len(manifest)} audio files but the request expects "
+                f"{expected_count}; refusing force/manual import"
+            )
+            logger.error("IMPORT MANIFEST REJECTED: path=%s %s", failed_path, detail)
+            return DispatchOutcome(
+                success=False,
+                message=detail,
+                code=DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+            )
+        check = check_audio_manifest(failed_path, manifest)
+        if check.ok:
+            return None
+        detail = (
+            "Force/manual import source does not match the original selected "
+            f"audio manifest: {check.detail()}"
+        )
+        logger.error("IMPORT MANIFEST REJECTED: path=%s %s", failed_path, detail)
+        return DispatchOutcome(
+            success=False,
+            message=detail,
+            code=DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+        )
+
+    if expected_count is None:
+        detail = (
+            "Force/manual import requires either an origin audio manifest or "
+            "request track rows; refusing to pass an unowned folder to beets"
+        )
+        logger.error("IMPORT MANIFEST REJECTED: path=%s %s", failed_path, detail)
+        return DispatchOutcome(
+            success=False,
+            message=detail,
+            code=DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+        )
+    actual_audio = audio_relative_paths(failed_path)
+    if len(actual_audio) == expected_count:
+        return None
+    detail = (
+        "Force/manual import source has "
+        f"{len(actual_audio)} audio files but the request expects "
+        f"{expected_count}; source audio: {', '.join(actual_audio)}"
+    )
+    logger.error("IMPORT MANIFEST REJECTED: path=%s %s", failed_path, detail)
+    return DispatchOutcome(
+        success=False,
+        message=detail,
+        code=DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+    )
 
 
 def _should_cleanup_path(scenario: str, action: "DispatchAction") -> bool:
@@ -2251,6 +2375,15 @@ def _dispatch_import_from_db_locked(
 
     if not os.path.isdir(failed_path):
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
+
+    manifest_reject = _guard_force_manual_audio_manifest(
+        db,
+        request_id=request_id,
+        failed_path=failed_path,
+        download_log_id=download_log_id,
+    )
+    if manifest_reject is not None:
+        return manifest_reject
 
     from lib.config import read_runtime_config
 

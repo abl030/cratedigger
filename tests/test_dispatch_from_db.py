@@ -96,6 +96,10 @@ def _mock_beets_db_for_dispatch():
     return cls
 
 
+def _seed_single_track(db: FakePipelineDB, request_id: int = 42) -> None:
+    db.set_tracks(request_id, [{"track_number": 1, "title": "Track"}])
+
+
 class TestDispatchFromDbOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state after force/manual import."""
 
@@ -127,6 +131,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         req_kwargs.update(req_overrides)
         req = make_request_row(**req_kwargs)
         db.seed_request(req)
+        _seed_single_track(db, 42)
 
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=320)
@@ -329,6 +334,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
+        _seed_single_track(db)
         download_log_id = db.log_download(
             42,
             outcome="rejected",
@@ -371,6 +377,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -404,6 +411,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
+        _seed_single_track(db)
         ir = make_import_result(decision="import", new_min_bitrate=245)
         tmpdir = tempfile.mkdtemp()
         try:
@@ -447,6 +455,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -487,6 +496,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
+        _seed_single_track(db)
         tmpdir = tempfile.mkdtemp()
         try:
             track = os.path.join(tmpdir, "01.mp3")
@@ -569,6 +579,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
+        _seed_single_track(db)
         tmpdir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
@@ -632,6 +643,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="Son Ambulance",
             album_title="Someone Else's Deja Vu",
         ))
+        _seed_single_track(db)
         tmpdir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
@@ -706,6 +718,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             artist_name="The Bug Tester",
             album_title="Zero Rows Affected",
         ))
+        _seed_single_track(db)
         tmpdir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
@@ -842,6 +855,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
             id=42, mb_release_id="mbid-123", status="manual",
             artist_name="Son Ambulance", album_title="Someone Else's Deja Vu",
         ))
+        _seed_single_track(db)
         return db
 
     def _dispatch(self, db: "FakePipelineDB"):
@@ -946,6 +960,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
             artist_name="Artist",
             album_title="Album",
         ))
+        _seed_single_track(db)
 
         cfg = CratediggerConfig(
             beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",

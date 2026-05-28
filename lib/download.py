@@ -46,6 +46,11 @@ from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
 )
+from lib.import_manifest import (
+    check_audio_manifest,
+    move_failed_import_curated,
+    tracked_audio_paths_for_downloads,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     automation_import_dedupe_key,
@@ -54,7 +59,6 @@ from lib.import_queue import (
 from lib.staged_album import StagedAlbum
 from lib.util import (
     move_abandoned_auto_import,
-    move_failed_import,
     log_validation_result,
 )
 
@@ -1083,6 +1087,29 @@ def _materialize_processing_dir(
     return True
 
 
+def _check_staged_audio_manifest(
+    album_data: GrabListEntry,
+    staged_album: StagedAlbum,
+) -> tuple[bool, str]:
+    check = check_audio_manifest(
+        staged_album.current_path,
+        tracked_audio_paths_for_downloads(album_data.files),
+    )
+    if check.ok:
+        return True, ""
+    detail = (
+        "Staged import folder does not match the selected audio manifest: "
+        f"{check.detail()}"
+    )
+    logger.error(
+        "IMPORT MANIFEST REJECTED: request_id=%s path=%s %s",
+        album_data.db_request_id,
+        staged_album.current_path,
+        detail,
+    )
+    return False, detail
+
+
 def process_completed_album(
     album_data: GrabListEntry,
     failed_grab: list[Any],
@@ -1166,6 +1193,26 @@ def _process_beets_validation(
     """
     from lib.beets import beets_validate as _bv
     current_path = staged_album.current_path
+    manifest_ok, manifest_detail = _check_staged_audio_manifest(
+        album_data,
+        staged_album,
+    )
+    if not manifest_ok:
+        return _reject_request_auto_import(
+            album_data,
+            ValidationResult(
+                valid=False,
+                scenario="untracked_audio",
+                detail=manifest_detail,
+                error=manifest_detail,
+                path=current_path,
+            ),
+            staged_album,
+            ctx,
+            detail=manifest_detail,
+            scenario="untracked_audio",
+            error=manifest_detail,
+        )
     bv_result = _bv(ctx.cfg.beets_harness_path, current_path,
                     album_data.mb_release_id, ctx.cfg.beets_distance_threshold)
     usernames_pre = set(f.username for f in album_data.files if f.username)
@@ -1293,8 +1340,9 @@ def _reject_request_auto_import(
         error=error,
     )
     failed_result.source_dirs = _source_dirs_for_album(album_data)
-    failed_result.failed_path = move_failed_import(
+    failed_result.failed_path = move_failed_import_curated(
         staged_album.current_path,
+        allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
         scenario=failed_result.scenario,
     )
     logger.error(
@@ -1545,8 +1593,9 @@ def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResu
                             import_job_id: int | None = None) -> DispatchOutcome:
     """Handle a rejected beets validation result."""
     bv_result.source_dirs = _source_dirs_for_album(album_data)
-    failed_dest = move_failed_import(
+    failed_dest = move_failed_import_curated(
         staged_album.current_path,
+        allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
         scenario=bv_result.scenario,
     )
     bv_result.failed_path = failed_dest
