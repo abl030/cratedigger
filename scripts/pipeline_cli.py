@@ -76,6 +76,16 @@ from lib.youtube_album_service import (
     OUTCOME_EXIT_CODE,
     resolve_youtube_album,
 )
+# U4 / CLI ⇄ API symmetry: import the YT-rescue ingest service's outcome
+# → exit-code mapping with an alias (the youtube_album_service one above
+# is already bound). Keep this the single source of truth for the CLI; the
+# U5 route imports OUTCOME_HTTP_STATUS from the same module for HTTP-side
+# mapping.
+from lib.youtube_ingest_service import (
+    OUTCOME_EXIT_CODE as YOUTUBE_INGEST_EXIT_CODE,
+    SubmitResult as YoutubeIngestSubmitResult,
+    YoutubeIngestService,
+)
 
 MB_API = "http://192.168.1.35:5200/ws/2"
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
@@ -2275,6 +2285,90 @@ def cmd_youtube_album(db, args):
     return OUTCOME_EXIT_CODE.get(result.outcome, 1)
 
 
+def _default_mb_track_count_from_mirror(mbid: str) -> int | None:
+    """Production ``mb_track_count_fn`` for the YT-rescue CLI.
+
+    Thin wrapper around ``web.mb.get_release`` that counts entries in the
+    slimmed ``tracks`` array. Returns ``None`` if the MB mirror responds
+    without a usable track list — the service then surfaces
+    ``track_count_precheck_failed`` and the operator escalates.
+
+    Wired here (rather than as ``_default_mb_track_count`` in
+    ``lib.youtube_ingest_service``) per the plan: the service-side default
+    raises ``NotImplementedError`` to force every caller to inject an
+    explicit wiring, and this CLI command supplies the MB-mirror flavour.
+    """
+    from web import mb as mb_api
+
+    release = mb_api.get_release(mbid, fresh=False)
+    if not isinstance(release, dict):
+        return None
+    tracks = release.get("tracks")
+    if not isinstance(tracks, list):
+        return None
+    return len(tracks)
+
+
+def _default_youtube_ingest_service_factory(db) -> YoutubeIngestService:
+    """Construct a production ``YoutubeIngestService`` for the CLI.
+
+    Wires the live MB-mirror ``mb_track_count_fn`` (other ports retain
+    their library-side production defaults). Kept as a module-local seam
+    so tests can override ``cmd_youtube_rescue(..., service_factory=...)``
+    without monkey-patching globals.
+    """
+    return YoutubeIngestService(
+        db, mb_track_count_fn=_default_mb_track_count_from_mirror)
+
+
+def cmd_youtube_rescue(db, args, *, service_factory=None):
+    """``pipeline-cli youtube-rescue <request_id> <browse_id> [--json]``.
+
+    Submit a YouTube-Music rescue ingest for one album request. Counterpart
+    of ``POST /api/pipeline/<id>/youtube-rescue`` (U5). Both surfaces wrap
+    ``YoutubeIngestService.submit`` — keep them in sync (see ``CLAUDE.md``
+    § "CLI ⇄ API surface symmetry"). The outcome → exit-code mapping is
+    imported directly from the service module
+    (``YOUTUBE_INGEST_EXIT_CODE``) to keep a single source of truth.
+
+    Exit codes (from ``lib.youtube_ingest_service.OUTCOME_EXIT_CODE``):
+      * 0 — ``accepted``
+      * 2 — ``request_not_found``
+      * 3 — ``no_resolver_mapping``, ``track_count_precheck_failed``
+            (semantic input violations)
+      * 4 — ``wrong_state`` (request is not ``wanted`` / ``manual``),
+            ``in_flight`` (an existing ``youtube_running`` row already
+            owns this request — re-issue once it's terminal)
+      * 5 — ``transient`` (DB / MB-mirror hiccup; retry)
+      * 1 — unknown outcome (safety net)
+    """
+    factory = service_factory or _default_youtube_ingest_service_factory
+    svc = factory(db)
+    result = svc.submit(int(args.request_id), str(args.browse_id))
+
+    if getattr(args, "json", False):
+        print(msgspec.json.encode(result).decode())
+    else:
+        if result.outcome == "accepted":
+            print(
+                f"accepted: download_log_id={result.download_log_id}")
+        else:
+            # Failure paths print classified outcome + detail to stderr
+            # so success-only consumers can pipe stdout without noise.
+            sys.stderr.write(
+                f"{result.outcome}"
+                f"{f': {result.detail}' if result.detail else ''}\n"
+            )
+            if result.download_log_id is not None:
+                # ``in_flight`` carries the existing log id; surface so
+                # the operator knows where to look.
+                sys.stderr.write(
+                    f"  existing download_log_id={result.download_log_id}\n"
+                )
+
+    return YOUTUBE_INGEST_EXIT_CODE.get(result.outcome, 1)
+
+
 def cmd_search_plan_dry_run(db, args):
     """U6: ``pipeline-cli search-plan dry-run <request_id>``.
 
@@ -3286,6 +3380,31 @@ def _build_parser() -> tuple[
         help="Print structured JSON instead of human-readable matrix",
     )
 
+    # youtube-rescue (U4): submit a YouTube Music rescue ingest for one
+    # request. Counterpart of ``POST /api/pipeline/<id>/youtube-rescue``
+    # (U5). Both surfaces wrap ``YoutubeIngestService.submit``.
+    p_yr = sub.add_parser(
+        "youtube-rescue",
+        help="Submit a YouTube Music rescue ingest for one request "
+             "(requires a resolver mapping; emits a youtube_running "
+             "download_log row).",
+    )
+    p_yr.add_argument(
+        "request_id", type=int,
+        help="album_requests.id to attach the rescue to",
+    )
+    p_yr.add_argument(
+        "browse_id",
+        help="YouTube Music browse_id (e.g. MPREb_...); must already "
+             "be cached in youtube_album_mappings for this request's "
+             "release group",
+    )
+    p_yr.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON ({outcome, download_log_id, detail}) "
+             "instead of plain text.",
+    )
+
     # routes (U18 step 3): self-document the CLI surface. Mirrors
     # ``GET /api/_index`` on the web side; both are read-only and zero-arg.
     p_routes = sub.add_parser(
@@ -3471,6 +3590,7 @@ def main():
         "replace": cmd_replace,
         "beets-distance": cmd_beets_distance,
         "youtube-album": cmd_youtube_album,
+        "youtube-rescue": cmd_youtube_rescue,
     }
     search_plan_commands = {
         "show": cmd_search_plan_show,
