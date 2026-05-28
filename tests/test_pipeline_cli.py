@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from typing import Any, cast
 
 from scripts import pipeline_cli
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -3458,10 +3458,9 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="missing-mbid"))
-        beets = MagicMock()
-        beets.__enter__.return_value = beets
-        beets.__exit__.return_value = None
-        beets.check_mbids.return_value = set()
+        # "missing-mbid" is not seeded as a beets album, so check_mbids
+        # returns it as off-disk.
+        beets = FakeBeetsDB()
 
         args = MagicMock(
             beets_db="/tmp/beets.db",
@@ -3475,7 +3474,7 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["counts"]["off_disk_total"], 1)
         self.assertEqual(payload["off_disk"][0]["id"], 1)
-        beets.check_mbids.assert_called_once_with(["missing-mbid"])
+        self.assertEqual(beets.check_mbids_calls, [["missing-mbid"]])
 
 class TestCmdYoutubeRescue(unittest.TestCase):
     """``pipeline-cli youtube-rescue`` wraps

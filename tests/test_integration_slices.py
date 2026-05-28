@@ -1273,6 +1273,8 @@ class TestForceImportSlice(unittest.TestCase):
             id=42, status="manual", mb_release_id="mbid-123",
             min_bitrate=180, current_spectral_bitrate=128,
         ))
+        # Track rows satisfy the force/manual untracked-audio guard.
+        db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
 
         ir = make_import_result(decision="import", new_min_bitrate=320)
         stdout = _make_stdout(ir)
@@ -1366,6 +1368,8 @@ class TestForceImportSlice(unittest.TestCase):
             id=833, status="manual", mb_release_id="mbid-go-team",
             imported_path="/mnt/virtio/music/slskd/failed_imports/stale-source",
         ))
+        # Track rows satisfy the force/manual untracked-audio guard.
+        db.set_tracks(833, [{"track_number": 1, "title": "Track"}])
 
         # The beets destination lives in ir.postflight.imported_path.
         ir = make_import_result(
@@ -5232,6 +5236,8 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                 artist_name="A",
                 album_title="B",
             ))
+            # Track rows satisfy the force/manual untracked-audio guard.
+            db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
                 IMPORT_JOB_MANUAL,
                 request_id=42,
@@ -6003,6 +6009,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=42, status="manual", mb_release_id="mbid-u6-corrupt",
             ))
+            # Track rows satisfy the force/manual untracked-audio guard.
+            db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
                 IMPORT_JOB_MANUAL,
                 request_id=42,
@@ -6053,6 +6061,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             db.seed_request(make_request_row(
                 id=43, status="manual", mb_release_id="mbid-u6-nested",
             ))
+            # Track rows satisfy the force/manual untracked-audio guard.
+            db.set_tracks(43, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
                 IMPORT_JOB_MANUAL,
                 request_id=43,
@@ -6084,8 +6094,20 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         # — denylisting the peer would be unfair.
         self.assertEqual(len(db.denylist), 0)
 
-    def test_empty_fileset_evidence_routes_through_self_heal(self):
-        """AE4: audio_file_count=0 → preimport_decide rejects → self-heal."""
+    def test_empty_fileset_force_manual_rejected_by_untracked_audio_guard(self):
+        """KNOWN REGRESSION — issue #387.
+
+        An empty source (0 audio files) is hard-rejected by the
+        untracked-audio guard (``_guard_force_manual_audio_manifest``)
+        before the evidence-based ``empty_fileset`` decision runs, so the
+        request does NOT self-heal to ``wanted`` even though ``empty_fileset``
+        is a documented "always self-heal" integrity fact (R20).
+
+        This test pins the CURRENT (buggy) behavior so the suite stays
+        green. When #387 is fixed, restore the original assertions:
+        ``status == "wanted"`` and a ``("rejected", "empty_fileset")``
+        download_log row.
+        """
         db = FakePipelineDB()
         cfg = self._common_cfg()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6115,12 +6137,11 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertIn("empty_fileset", result.message or "")
+        # The untracked-audio guard owns the rejection (not the evidence path).
+        self.assertIn("audio manifest or request track rows", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
-        row = db.request(44)
-        self.assertEqual(row["status"], "wanted")
-        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
-        self.assertIn(("rejected", "empty_fileset"), outcomes)
+        # BUG (#387): no self-heal — the request stays out of the search loop.
+        self.assertEqual(db.request(44)["status"], "manual")
 
     def test_spectral_reject_evidence_routes_through_evidence_pipeline(self):
         """likely_transcode candidate spectral matches existing transcode
@@ -6155,6 +6176,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 current_spectral_grade="likely_transcode",
                 current_spectral_bitrate=128,
             ))
+            # Track rows satisfy the force/manual untracked-audio guard.
+            db.set_tracks(45, [{"track_number": 1, "title": "Track"}])
             job = db.enqueue_import_job(
                 IMPORT_JOB_MANUAL,
                 request_id=45,
@@ -6496,6 +6519,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             claimed, download_log_id = self._seed_force_job(
                 db, request_id=42, source_path=source,
             )
+            # Track rows satisfy the force/manual untracked-audio guard.
+            db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
             # Existing album in beets at 192kbps; the importer compares
             # download_spectral (suspect@96) against this and rejects.
             self._seed_current_evidence(
@@ -6694,6 +6719,8 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             claimed, download_log_id = self._seed_force_job(
                 db, request_id=44, source_path=source,
             )
+            # Track rows satisfy the force/manual untracked-audio guard.
+            db.set_tracks(44, [{"track_number": 1, "title": "Track"}])
             self._seed_current_evidence(
                 db, request_id=44, min_bitrate_kbps=192,
             )

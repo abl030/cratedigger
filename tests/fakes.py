@@ -2187,35 +2187,6 @@ class FakePipelineDB:
         # Production UPDATE silently no-ops if the id doesn't exist;
         # mirror that.
 
-    def find_next_youtube_pending(
-        self, limit: int = 1,
-    ) -> list[dict[str, Any]]:
-        """Mirror of ``PipelineDB.find_next_youtube_pending``.
-
-        FIFO by ``(created_at, id)`` per R16; filters on
-        ``source='youtube'`` AND ``outcome='youtube_running'`` and
-        rows that have not yet been claimed by a worker.
-        """
-        rows = sorted(
-            (entry for entry in self.download_logs
-             if entry.source == "youtube"
-             and entry.outcome == "youtube_running"
-             and not (entry.youtube_metadata or {}).get("worker_claimed_at")),
-            key=lambda e: (e.created_at, e.id),
-        )
-        return [
-            {
-                "id": entry.id,
-                "request_id": entry.request_id,
-                "source": entry.source,
-                "outcome": entry.outcome,
-                "youtube_metadata": copy.deepcopy(entry.youtube_metadata)
-                if entry.youtube_metadata is not None else None,
-                "created_at": entry.created_at,
-            }
-            for entry in rows[:int(limit)]
-        ]
-
     def claim_next_youtube_pending(
         self,
         *,

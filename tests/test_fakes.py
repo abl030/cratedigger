@@ -4771,8 +4771,8 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
     - ``insert_youtube_running`` raises ``YoutubeInFlightError`` on the
       second in-flight submission for the same request_id
     - ``update_youtube_terminal`` merges metadata (PG ``||`` operator)
-    - ``find_next_youtube_pending`` is FIFO by ``created_at, id``,
-      excludes slskd rows and terminal rows
+    - ``claim_next_youtube_pending`` is FIFO by ``created_at, id``,
+      excludes slskd rows and terminal rows, and stamps worker metadata
     - ``find_orphan_youtube_running`` returns claimed in-flight ids only
     """
 
@@ -4850,7 +4850,7 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     db.update_youtube_terminal(log_id, bogus, {})
 
-    def test_find_next_youtube_pending_filters_by_source_and_outcome(self):
+    def test_claim_next_youtube_pending_filters_by_source_and_outcome(self):
         db = FakePipelineDB()
         # An slskd-side row.
         db.log_download(
@@ -4858,28 +4858,25 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
         )
         # An in-flight YT row.
         yt_id = db.insert_youtube_running(**self._payload(42))
-        rows = db.find_next_youtube_pending(limit=10)
+        rows = db.claim_next_youtube_pending(worker_id="w", limit=10)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], yt_id)
         self.assertEqual(rows[0]["source"], "youtube")
 
-    def test_find_next_youtube_pending_excludes_terminal_rows(self):
+    def test_claim_next_youtube_pending_excludes_terminal_rows(self):
         db = FakePipelineDB()
         log_id = db.insert_youtube_running(**self._payload(42))
-        self.assertEqual(
-            [r["id"] for r in db.find_next_youtube_pending(limit=10)],
-            [log_id],
-        )
+        # A terminal (never-claimed) row is not drainable.
         db.update_youtube_terminal(log_id, "youtube_success", {})
-        self.assertEqual(db.find_next_youtube_pending(limit=10), [])
+        self.assertEqual(db.claim_next_youtube_pending(worker_id="w", limit=10), [])
 
-    def test_find_next_youtube_pending_is_fifo(self):
+    def test_claim_next_youtube_pending_is_fifo(self):
         db = FakePipelineDB()
         first = db.insert_youtube_running(**self._payload(42))
         second = db.insert_youtube_running(**self._payload(
             43, browse_id="MPREb_43",
         ))
-        rows = db.find_next_youtube_pending(limit=10)
+        rows = db.claim_next_youtube_pending(worker_id="w", limit=10)
         self.assertEqual([r["id"] for r in rows], [first, second])
 
     def test_claim_next_youtube_pending_marks_worker_metadata(self):
@@ -4890,8 +4887,10 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
         ))
         claimed = db.claim_next_youtube_pending(worker_id="worker-1", limit=1)
         self.assertEqual([r["id"] for r in claimed], [first])
+        # The unclaimed sibling is still drainable by the next claim.
         self.assertEqual(
-            [r["id"] for r in db.find_next_youtube_pending(limit=10)],
+            [r["id"] for r in db.claim_next_youtube_pending(
+                worker_id="worker-2", limit=10)],
             [second],
         )
         meta = claimed[0]["youtube_metadata"]
@@ -4913,8 +4912,10 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
                 log_id, "youtube_failed", {"reason": "worker_interrupted"},
             )
         self.assertEqual(db.find_orphan_youtube_running(), [])
+        # The surviving sibling is still drainable after the orphan sweep.
         self.assertEqual(
-            [r["id"] for r in db.find_next_youtube_pending(limit=10)],
+            [r["id"] for r in db.claim_next_youtube_pending(
+                worker_id="worker-2", limit=10)],
             [second],
         )
 

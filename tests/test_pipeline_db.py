@@ -7697,30 +7697,27 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.db.update_youtube_terminal(log_id, bogus, {})
 
-    def test_find_next_youtube_pending_excludes_slskd_rows(self):
+    def test_claim_next_youtube_pending_excludes_slskd_rows(self):
         """Source discriminator must filter slskd rows out of the worker queue."""
         # An slskd-side row for the same request.
         self.db.log_download(
             self.request_id, soulseek_username="alice", outcome="success",
         )
         yt_id = self.db.insert_youtube_running(**self._yt_payload())
-        rows = self.db.find_next_youtube_pending(limit=10)
+        rows = self.db.claim_next_youtube_pending(worker_id="w", limit=10)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], yt_id)
         self.assertEqual(rows[0]["source"], "youtube")
         self.assertEqual(rows[0]["outcome"], "youtube_running")
 
-    def test_find_next_youtube_pending_excludes_terminal_rows(self):
+    def test_claim_next_youtube_pending_excludes_terminal_rows(self):
         log_id = self.db.insert_youtube_running(**self._yt_payload())
-        self.assertEqual(
-            [r["id"] for r in self.db.find_next_youtube_pending(limit=10)],
-            [log_id],
-        )
+        # A terminal (never-claimed) row is not drainable.
         self.db.update_youtube_terminal(log_id, "youtube_success", {})
-        # Once terminal, the worker queue is empty again.
-        self.assertEqual(self.db.find_next_youtube_pending(limit=10), [])
+        self.assertEqual(
+            self.db.claim_next_youtube_pending(worker_id="w", limit=10), [])
 
-    def test_find_next_youtube_pending_orders_by_created_at(self):
+    def test_claim_next_youtube_pending_orders_by_created_at(self):
         """FIFO contract per R16: earliest created_at first."""
         # Distinct requests so the partial unique index permits multiple
         # in-flight rows.
@@ -7742,7 +7739,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         second = self.db.insert_youtube_running(**self._yt_payload(
             request_id=rid_c, browse_id="MPREb_c",
         ))
-        rows = self.db.find_next_youtube_pending(limit=10)
+        rows = self.db.claim_next_youtube_pending(worker_id="w", limit=10)
         self.assertEqual([r["id"] for r in rows], [first, second])
 
     def test_claim_next_youtube_pending_marks_worker_metadata(self):
@@ -7759,8 +7756,10 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         claimed = self.db.claim_next_youtube_pending(
             worker_id="worker-1", limit=1)
         self.assertEqual([r["id"] for r in claimed], [first])
+        # The unclaimed sibling is still drainable by the next claim.
         self.assertEqual(
-            [r["id"] for r in self.db.find_next_youtube_pending(limit=10)],
+            [r["id"] for r in self.db.claim_next_youtube_pending(
+                worker_id="worker-2", limit=10)],
             [second],
         )
         meta = claimed[0]["youtube_metadata"]
@@ -7790,8 +7789,10 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
                 log_id, "youtube_failed", {"reason": "worker_interrupted"},
             )
         self.assertEqual(self.db.find_orphan_youtube_running(), [])
+        # The surviving sibling is still drainable after the orphan sweep.
         self.assertEqual(
-            [r["id"] for r in self.db.find_next_youtube_pending(limit=10)],
+            [r["id"] for r in self.db.claim_next_youtube_pending(
+                worker_id="worker-2", limit=10)],
             [second],
         )
 

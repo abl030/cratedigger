@@ -72,6 +72,10 @@ pkgs.testers.nixosTest {
       # because no download_log source='youtube' outcome='youtube_running'
       # rows exist in the test DB.
       youtubeIngest.enable = true;
+      # Host-specific VPN-NIC bind address (KTD9). The VM's --once run
+      # never invokes yt-dlp (empty queue), so this is exercised only at
+      # the wrapper-render seam: we assert the flag lands in the ExecStart.
+      youtubeIngest.sourceAddress = "10.0.2.15";
       timer.enable = false;
       healthCheck.enable = false;
     };
@@ -178,6 +182,10 @@ pkgs.testers.nixosTest {
     # for the yt-dlp path-prepend so we know the worker process's PATH
     # will resolve the binary.
     machine.succeed("grep -q 'yt-dlp.*bin' $(command -v cratedigger-youtube-ingest)")
+
+    # The configured sourceAddress renders into the worker's ExecStart so
+    # yt-dlp binds its client socket to the VPN-routed NIC (egress hardening).
+    machine.succeed("grep -q -- '--source-address \"10.0.2.15\"' $(command -v cratedigger-youtube-ingest)")
 
     # The drainer's per-process temp dir was created by systemd-tmpfiles
     # with the same ownership as the cratedigger user.
