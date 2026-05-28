@@ -149,7 +149,8 @@
       --dsn "${cfg.pipelineDb.dsn}" \
       --temp-dir "${cfg.youtubeIngest.tempDir}" \
       --staging-dir "${cfg.beetsValidation.stagingDir}" \
-      --poll-interval ${toString cfg.youtubeIngest.pollIntervalSeconds} "$@"
+      --poll-interval ${toString cfg.youtubeIngest.pollIntervalSeconds} \
+      ${optionalString (cfg.youtubeIngest.sourceAddress != "") ''--source-address "${cfg.youtubeIngest.sourceAddress}" ''}"$@"
   '';
 
   # Unfindable detection oneshot — see lib/unfindable_detection_service.py.
@@ -453,6 +454,23 @@ in {
           Seconds the drainer sleeps between idle queue polls. Matches the
           importer worker's poll cadence; tune downward only if the operator
           wants tighter latency on rescue jobs.
+        '';
+      };
+      sourceAddress = mkOption {
+        type = types.str;
+        default = "";
+        example = "192.168.1.36";
+        description = ''
+          Local IP to bind yt-dlp's client socket to (passed through as
+          ``yt-dlp --source-address``). Leave empty for default-route
+          egress. Set this to the host's VPN-routed NIC IP so YouTube
+          egress is policy-routed through the upstream VPN, the same way
+          slskd's traffic is routed: the host's source-IP routing rule
+          (``ip rule from <addr> lookup <table>``) sends sockets bound to
+          this address out the VPN interface. The worker's DB/control
+          traffic is unaffected because only yt-dlp binds to this address.
+          This is host-specific, so it lives in the downstream wrapper, not
+          the in-flake module's defaults (KTD9).
         '';
       };
     };

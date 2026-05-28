@@ -212,6 +212,7 @@ def _build_ytdlp_argv(
     ytdlp_bin: str,
     url: str,
     output_template: str,
+    source_address: str | None = None,
 ) -> list[str]:
     """Construct the yt-dlp argv list.
 
@@ -226,16 +227,25 @@ def _build_ytdlp_argv(
     which the service then routes to a ``youtube_failed`` outcome.
     The track-count gate (R10) catches partial successes as well, but
     failing loud at the subprocess boundary is the cleaner signal.
+
+    ``source_address`` binds yt-dlp's client socket to a specific local
+    IP. On doc2 that IP is the VPN-routed second NIC (``192.168.1.36``);
+    the host's source-IP policy-routing rule then sends that traffic out
+    ``ens19`` → pfSense WireGuard, so YouTube egress is VPN-routed while
+    the worker's DB/control traffic stays on the main NIC. ``None`` leaves
+    the argv unchanged (default-route egress).
     """
-    return [
+    argv = [
         ytdlp_bin,
         "--ignore-config",
         "--no-ignore-errors",
         "-f", "bestaudio",
         "--output", output_template,
-        "--",
-        url,
     ]
+    if source_address:
+        argv += ["--source-address", source_address]
+    argv += ["--", url]
+    return argv
 
 
 def _run_ytdlp(
@@ -247,6 +257,7 @@ def _run_ytdlp(
     temp_root: Path = DEFAULT_TEMP_DIR,
     request_id: int | None = None,
     browse_id: str | None = None,
+    source_address: str | None = None,
     subprocess_run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ytdlp_bin_resolver: Callable[[], str] = _resolve_ytdlp_binary,
 ) -> YtdlpRunResult:
@@ -297,6 +308,7 @@ def _run_ytdlp(
         ytdlp_bin=ytdlp_bin,
         url=url,
         output_template=output_template,
+        source_address=source_address,
     )
 
     logger.info(
@@ -360,6 +372,7 @@ def build_service(
     *,
     temp_dir: Path,
     staging_dir: Path | None = None,
+    source_address: str | None = None,
     ytdlp_runner_fn: Callable[..., YtdlpRunResult] | None = None,
 ) -> YoutubeIngestService:
     """Construct the production ``YoutubeIngestService`` for the worker.
@@ -370,12 +383,14 @@ def build_service(
     worker's wiring surface.
 
     Tests pass ``ytdlp_runner_fn=`` directly to control the fake; the
-    production default closes over ``temp_dir`` so each worker process
-    has its own scratch root.
+    production default closes over ``temp_dir`` (and ``source_address``,
+    when the operator has bound yt-dlp egress to the VPN NIC) so each
+    worker process has its own scratch root and routing.
     """
     if ytdlp_runner_fn is None:
         def _bound_runner(**kwargs: Any) -> YtdlpRunResult:
-            return _run_ytdlp(temp_root=temp_dir, **kwargs)
+            return _run_ytdlp(
+                temp_root=temp_dir, source_address=source_address, **kwargs)
         ytdlp_runner_fn = _bound_runner
     staging_root = (
         Path(stage_to_ai_root(staging_dir=str(staging_dir), auto_import=True))
@@ -602,6 +617,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             "Shared beets staging root; YT rescues publish under its "
             "auto-import/ child."),
     )
+    parser.add_argument(
+        "--source-address",
+        default=None,
+        help=(
+            "Local IP to bind yt-dlp's client socket to (yt-dlp "
+            "--source-address). On doc2 set to the VPN-routed NIC IP "
+            "(192.168.1.36) so YouTube egress is policy-routed through "
+            "pfSense WireGuard; leave unset for default-route egress."),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--worker-id", default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -647,7 +671,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                     len(swept), swept)
 
             service = build_service(
-                db, temp_dir=args.temp_dir, staging_dir=args.staging_dir)
+                db,
+                temp_dir=args.temp_dir,
+                staging_dir=args.staging_dir,
+                source_address=args.source_address)
             try:
                 return run_loop(
                     db,

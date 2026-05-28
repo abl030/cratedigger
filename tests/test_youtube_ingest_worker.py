@@ -30,6 +30,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -149,7 +150,10 @@ class TestSweepOrphanRunningRows(unittest.TestCase):
         row = pdb.get_download_log_entry(log_id)
         assert row is not None
         self.assertEqual(row["outcome"], "youtube_running")
-        self.assertEqual([r["id"] for r in pdb.find_next_youtube_pending()], [log_id])
+        # The survivor is still drainable by the worker's claim path.
+        self.assertEqual(
+            [r["id"] for r in pdb.claim_next_youtube_pending(worker_id="w")],
+            [log_id])
 
     def test_empty_queue_sweeps_nothing(self) -> None:
         pdb = FakePipelineDB()
@@ -363,6 +367,35 @@ class TestYtdlpArgvShape(unittest.TestCase):
         # bestaudio format.
         idx = argv.index("-f")
         self.assertEqual(argv[idx + 1], "bestaudio")
+
+    def test_source_address_absent_by_default(self) -> None:
+        # When no source address is configured the argv is unchanged — the
+        # worker egresses on the host's default route (no VPN binding).
+        argv = worker._build_ytdlp_argv(
+            ytdlp_bin="/usr/bin/yt-dlp",
+            url="https://music.youtube.com/playlist?list=FAKE",
+            output_template="/tmp/out/%(title)s.%(ext)s",
+        )
+        self.assertNotIn("--source-address", argv)
+
+    def test_source_address_injected_when_set(self) -> None:
+        # Binding yt-dlp's client socket to the VPN-routed NIC IP makes its
+        # egress match the host's source-IP policy-routing rule (ens19 →
+        # pfSense WireGuard). The flag must precede the '--' separator.
+        argv = worker._build_ytdlp_argv(
+            ytdlp_bin="/usr/bin/yt-dlp",
+            url="https://music.youtube.com/playlist?list=FAKE",
+            output_template="/tmp/out/%(title)s.%(ext)s",
+            source_address="192.168.1.36",
+        )
+        self.assertIn("--source-address", argv)
+        idx = argv.index("--source-address")
+        self.assertEqual(argv[idx + 1], "192.168.1.36")
+        self.assertLess(idx, argv.index("--"))
+        # The URL positional is still last, still '--'-separated.
+        self.assertEqual(argv[-2], "--")
+        self.assertEqual(
+            argv[-1], "https://music.youtube.com/playlist?list=FAKE")
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +762,83 @@ class TestBuildService(unittest.TestCase):
                     exit_code=0, stderr_excerpt=None, staged_files=[]),
             )
         self.assertEqual(svc.staging_root, Path(tmp) / "staging" / "auto-import")
+
+    def test_threads_source_address_into_runner_argv(self) -> None:
+        # build_service must forward source_address all the way to the
+        # yt-dlp argv via the bound production runner — otherwise the option
+        # is dead config the worker never applies.
+        pdb = FakePipelineDB()
+        captured: dict[str, list[str]] = {}
+
+        def _fake_subprocess_run(
+            argv: list[str], **_kw: Any
+        ) -> SimpleNamespace:
+            captured["argv"] = list(argv)
+            return SimpleNamespace(returncode=0, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = worker.build_service(
+                pdb, temp_dir=Path(tmp), source_address="192.168.1.36")
+            svc.ytdlp_runner_fn(
+                url="https://music.youtube.com/playlist?list=FAKE",
+                expected_track_count=1,
+                output_dir=Path(tmp),
+                subprocess_run=_fake_subprocess_run,
+                ytdlp_bin_resolver=lambda: "/usr/bin/yt-dlp",
+            )
+        argv = captured["argv"]
+        self.assertIn("--source-address", argv)
+        self.assertEqual(
+            argv[argv.index("--source-address") + 1], "192.168.1.36")
+
+    def test_no_source_address_in_runner_argv_by_default(self) -> None:
+        pdb = FakePipelineDB()
+        captured: dict[str, list[str]] = {}
+
+        def _fake_subprocess_run(
+            argv: list[str], **_kw: Any
+        ) -> SimpleNamespace:
+            captured["argv"] = list(argv)
+            return SimpleNamespace(returncode=0, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = worker.build_service(pdb, temp_dir=Path(tmp))
+            svc.ytdlp_runner_fn(
+                url="https://music.youtube.com/playlist?list=FAKE",
+                expected_track_count=1,
+                output_dir=Path(tmp),
+                subprocess_run=_fake_subprocess_run,
+                ytdlp_bin_resolver=lambda: "/usr/bin/yt-dlp",
+            )
+        self.assertNotIn("--source-address", captured["argv"])
+
+
+class TestMainSourceAddressWiring(unittest.TestCase):
+    """The ``--source-address`` CLI flag must reach ``build_service``."""
+
+    def test_source_address_flag_reaches_build_service(self) -> None:
+        pdb = FakePipelineDB()
+        pdb.set_advisory_lock_result(True)
+        captured: dict[str, Any] = {}
+
+        def _fake_build_service(db: Any, **kw: Any) -> YoutubeIngestService:
+            captured.update(kw)
+            return YoutubeIngestService(pdb)
+
+        with patch.object(worker, "PipelineDB", return_value=pdb), \
+                patch.object(
+                    worker, "sweep_orphan_running_rows", return_value=[]), \
+                patch.object(
+                    worker, "build_service",
+                    side_effect=_fake_build_service):
+            rc = worker.main([
+                "--temp-dir", "/tmp/yt-test-srcaddr",
+                "--source-address", "192.168.1.36",
+                "--once",
+            ])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured.get("source_address"), "192.168.1.36")
 
 
 if __name__ == "__main__":  # pragma: no cover
