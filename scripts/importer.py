@@ -15,6 +15,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import msgspec
+
 from lib.import_dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_REQUEUE_FAILED,
@@ -25,6 +27,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
+    IMPORT_JOB_YOUTUBE,
     ImportJob,
 )
 from lib.pipeline_db import (
@@ -33,6 +36,7 @@ from lib.pipeline_db import (
     PipelineDB,
 )
 from lib.quality import ActiveDownloadState
+from lib.youtube_ingest_service import YoutubeImportPayload
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
@@ -198,6 +202,9 @@ def execute_import_job(
     if job.job_type == IMPORT_JOB_AUTOMATION:
         return execute_automation_import_job(db, job, ctx=ctx)
 
+    if job.job_type == IMPORT_JOB_YOUTUBE:
+        return execute_youtube_import_job(db, job, ctx=ctx)
+
     return DispatchOutcome(
         success=False,
         message=f"Unsupported import job type: {job.job_type}",
@@ -276,6 +283,116 @@ def execute_automation_import_job(
     return DispatchOutcome(
         success=False,
         message="Automation import processing failed",
+    )
+
+
+def execute_youtube_import_job(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    ctx: Any = None,
+) -> DispatchOutcome:
+    """Run completed-staging processing for a YouTube-rescue import job.
+
+    Mirrors ``execute_automation_import_job`` structurally but sources the
+    staged path from ``job.payload['staged_path']`` (decoded via
+    ``msgspec.convert(...)`` into ``YoutubeImportPayload`` at the wire
+    boundary) rather than from ``album_requests.active_download_state``.
+
+    KTD1: this path never reads from nor writes to ``active_download_state``.
+    The YT staged dir lives under ``/Incoming/auto-import/<artist>-<album>/``
+    already (the U6 worker stages it there directly), so the downstream
+    pipeline observes a request-scoped auto-import staging path with
+    no slskd-resume state attached.
+
+    R17: terminal status flips run through
+    ``transitions.finalize_request → mark_imported_with_rescue`` (the
+    single source-agnostic write site), so YT rescues populate
+    ``rescued_at`` + ``prior_unfindable_category`` atomically when the
+    request had a prior ``unfindable_category``.
+
+    No cooldown side effects: the slskd cooldown machinery is keyed on
+    peer usernames; YT has no peers. We never call ``denylist_user`` /
+    ``update_user_failure_count`` / ``check_and_apply_cooldown``. The
+    synthetic ``ActiveDownloadState`` we build has ``files=[]``, so the
+    rejection paths inside ``_handle_rejected_result`` find no usernames
+    to denylist.
+    """
+    from lib.download import process_completed_album, reconstruct_grab_list_entry
+
+    request_id = job.request_id
+    if request_id is None:
+        return DispatchOutcome(False, "YouTube import job has no request_id")
+
+    try:
+        payload = msgspec.convert(job.payload, type=YoutubeImportPayload)
+    except msgspec.ValidationError as exc:
+        # Malformed payload — surface as a failed DispatchOutcome rather
+        # than crashing the worker. The orphan/retry machinery is the
+        # importer's existing concern; we just refuse to act on garbage.
+        logger.error(
+            "YouTube import job %s payload validation failed: %s",
+            job.id,
+            exc,
+        )
+        return DispatchOutcome(
+            success=False,
+            message=f"YouTube import payload is malformed: {exc}",
+        )
+
+    row = db.get_request(request_id)
+    if not row:
+        return DispatchOutcome(False, f"Album request {request_id} not found")
+
+    # Synthetic ActiveDownloadState — used ONLY to feed
+    # reconstruct_grab_list_entry. No files (yt-dlp already staged the
+    # album to disk), current_path = the payload's staged path. This
+    # struct is never persisted: KTD1 keeps active_download_state
+    # untouched on the row, and the downstream
+    # update_download_state_current_path call inside
+    # _materialize_processing_dir is gated by status='downloading' so
+    # it no-ops for wanted/manual rows.
+    state = ActiveDownloadState(
+        filetype=row.get("target_format") or "opus",
+        enqueued_at="",
+        last_progress_at="",
+        files=[],
+        current_path=payload.staged_path,
+    )
+    entry = reconstruct_grab_list_entry(row, state)
+    entry.import_folder = payload.staged_path
+
+    created_ctx = ctx is None
+    runtime_ctx = ctx or _build_runtime_context(db)
+    try:
+        outcome = process_completed_album(
+            entry,
+            [],
+            runtime_ctx,
+            import_job_id=job.id,
+        )
+    finally:
+        if created_ctx:
+            runtime_ctx.pipeline_db_source.close()
+
+    if outcome is None:
+        return DispatchOutcome(
+            success=False,
+            message=(
+                "YouTube import was deferred or requires manual recovery"
+            ),
+            deferred=True,
+        )
+    if isinstance(outcome, DispatchOutcome):
+        return outcome
+    if outcome:
+        return DispatchOutcome(
+            success=True,
+            message="YouTube import processing completed",
+        )
+    return DispatchOutcome(
+        success=False,
+        message="YouTube import processing failed",
     )
 
 

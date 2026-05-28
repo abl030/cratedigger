@@ -20,6 +20,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
+    IMPORT_JOB_YOUTUBE,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
@@ -2333,3 +2334,732 @@ class TestYoutubeImportJobType(unittest.TestCase):
         self.assertNotEqual(
             youtube_import_dedupe_key(7), youtube_import_dedupe_key(8),
         )
+
+
+class TestExecuteYoutubeImportJob(unittest.TestCase):
+    """U9: importer dispatcher for ``youtube_import`` job_type.
+
+    Covers AE7 (happy-path import to terminal state), AE8 (long-tail
+    rescue audit chain), AE9 (rescue from ``manual``), the preview-worker
+    front-gate path-resolution divergence, no-cooldown-leakage, and
+    payload type-validation.
+
+    Test shape mirrors ``TestImporterWorker``: drive the production
+    ``importer.process_claimed_job`` entry point with a ``FakePipelineDB``,
+    seed a queued YT job, mark it importable so the importer can claim it,
+    and patch the leaf seam (``lib.download.process_completed_album``) so
+    we can assert dispatcher behaviour without exercising the full beets
+    pipeline (which is covered by its own integration slices).
+    """
+
+    def _mark_importable(self, db: FakePipelineDB, job: Any) -> Any:
+        updated = db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        assert updated is not None
+        return updated
+
+    def _enqueue_youtube_job(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int,
+        staged_path: str,
+        browse_id: str = "MPREb_abc",
+        download_log_id: int = 1,
+    ) -> Any:
+        from lib.import_queue import (
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+        return db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=request_id,
+            dedupe_key=youtube_import_dedupe_key(download_log_id),
+            payload=youtube_import_payload(
+                staged_path=staged_path,
+                request_id=request_id,
+                browse_id=browse_id,
+            ),
+        )
+
+    def _claim(self, db: FakePipelineDB) -> Any:
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+        return claimed
+
+    def test_happy_path_drives_through_pipeline_and_returns_success(self):
+        """AE7: a YT job dispatched through importer.process_claimed_job
+        runs the existing per-job pipeline (process_completed_album)
+        with the staged path coming from the payload, NOT from
+        active_download_state."""
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.opus"), "wb") as fp:
+                fp.write(b"audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                # No active_download_state — YT path must NOT depend on it.
+                active_download_state=None,
+                artist_name="Test Artist",
+                album_title="Test Album",
+                mb_release_id="mbid-yt-happy",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=11,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            with patch(
+                "lib.download.process_completed_album",
+                return_value=DispatchOutcome(True, "Imported by dispatch"),
+            ) as proc:
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        # Pipeline invoked exactly once with the import_job_id forwarded.
+        proc.assert_called_once()
+        self.assertEqual(proc.call_args.kwargs["import_job_id"], job.id)
+        # The GrabListEntry passed in is sourced from the request row +
+        # YT payload's staged_path, not from active_download_state.
+        entry_arg = proc.call_args.args[0]
+        self.assertEqual(entry_arg.import_folder, staged)
+        self.assertEqual(entry_arg.db_request_id, 42)
+        self.assertEqual(entry_arg.files, [])
+        # Terminal queue state reflects the DispatchOutcome.
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.message, "Imported by dispatch")
+
+    def test_happy_path_finalizes_request_to_imported_via_rescue(self):
+        """AE7: when process_completed_album returns True (legacy non-
+        DispatchOutcome path), the dispatcher reports success and the
+        request row remains untouched here — the actual status flip
+        happens inside the dispatch path via finalize_request →
+        mark_imported_with_rescue. We assert success-mapping without
+        re-deriving the status flip (which is covered separately by
+        TestRescueAuditChain below)."""
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                active_download_state=None,
+                mb_release_id="mbid-yt-true",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=12,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            with patch(
+                "lib.download.process_completed_album",
+                return_value=True,
+            ):
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.message, "YouTube import processing completed")
+
+    def test_rescue_audit_chain_wanted_to_imported_via_finalize_request(self):
+        """AE8: a YT import on a previously-unfindable request populates
+        ``rescued_at`` + ``prior_unfindable_category`` atomically. The
+        dispatcher invokes the pipeline; the pipeline invokes
+        ``finalize_request`` which routes to ``mark_imported_with_rescue``.
+
+        We drive the rescue capture seam directly by having the patched
+        pipeline call ``finalize_request(to_imported)`` against the fake DB,
+        which mirrors what the production pipeline does inside
+        ``dispatch_import_from_db`` on import success.
+        """
+        from scripts import importer
+        from lib import transitions
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                active_download_state=None,
+                mb_release_id="mbid-yt-rescue",
+                unfindable_category="wrong_pressing_available",
+                unfindable_categorised_at=datetime(
+                    2026, 5, 1, tzinfo=timezone.utc),
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=13,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            def _run_real_finalize(*args: Any, **kwargs: Any) -> DispatchOutcome:
+                # Mirror the production seam: dispatch_import_from_db
+                # would call finalize_request(to_imported) on auto-import
+                # success. That call routes to mark_imported_with_rescue.
+                transitions.finalize_request(
+                    cast(Any, db),
+                    42,
+                    transitions.RequestTransition.to_imported(
+                        from_status="wanted",
+                    ),
+                )
+                return DispatchOutcome(True, "Imported")
+
+            with patch(
+                "lib.download.process_completed_album",
+                side_effect=_run_real_finalize,
+            ):
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        # The job completed successfully…
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        # …and the request row carries the long-tail-rescue audit chain.
+        row = db.get_request(42)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNotNone(row["rescued_at"])
+        self.assertEqual(
+            row["prior_unfindable_category"], "wrong_pressing_available")
+        # Current category is cleared (the rescue IS the resolution).
+        self.assertIsNone(row["unfindable_category"])
+
+    def test_rescue_from_manual_transitions_manual_to_imported(self):
+        """AE9: a request started in ``manual`` status transitions
+        ``manual → imported`` through the same single source-agnostic
+        write site (``mark_imported_with_rescue``)."""
+        from scripts import importer
+        from lib import transitions
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="manual",
+                active_download_state=None,
+                mb_release_id="mbid-yt-from-manual",
+                unfindable_category="album_absent_artist_present",
+                unfindable_categorised_at=datetime(
+                    2026, 5, 1, tzinfo=timezone.utc),
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=14,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            def _run_real_finalize(*args: Any, **kwargs: Any) -> DispatchOutcome:
+                transitions.finalize_request(
+                    cast(Any, db),
+                    42,
+                    transitions.RequestTransition.to_imported(
+                        from_status="manual",
+                    ),
+                )
+                return DispatchOutcome(True, "Imported from manual")
+
+            with patch(
+                "lib.download.process_completed_album",
+                side_effect=_run_real_finalize,
+            ):
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        row = db.get_request(42)
+        assert row is not None
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNotNone(row["rescued_at"])
+        self.assertEqual(
+            row["prior_unfindable_category"], "album_absent_artist_present")
+
+    def test_no_cooldown_leakage_on_wrong_match_reject(self):
+        """The dispatcher running through the wrong-matches reject path
+        does not denylist any user or apply any cooldown — YT produces
+        no peer to attribute failures to.
+        """
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                active_download_state=None,
+                mb_release_id="mbid-yt-reject",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=15,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            # Simulate a wrong-matches reject from the pipeline.
+            with patch(
+                "lib.download.process_completed_album",
+                return_value=DispatchOutcome(
+                    False, "Rejected: high_distance"),
+            ):
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        # No slskd peer means nothing to denylist and nothing to cool.
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.user_cooldowns, {})
+
+    def test_no_cooldown_leakage_on_quality_pipeline_reject(self):
+        """Same invariant on the quality-pipeline reject path: empty
+        files list ⇒ no usernames to attribute ⇒ denylist + cooldowns
+        remain untouched."""
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                active_download_state=None,
+                mb_release_id="mbid-yt-quality-reject",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=16,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            with patch(
+                "lib.download.process_completed_album",
+                return_value=DispatchOutcome(
+                    False,
+                    "Quality pipeline rejected",
+                    code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+                ),
+            ):
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(db.user_cooldowns, {})
+
+    def test_dispatcher_does_not_read_or_write_active_download_state(self):
+        """KTD1: the YT dispatcher never touches active_download_state.
+        The path source-of-truth is the payload's ``staged_path``.
+
+        Seed a row with a DIFFERENT active_download_state.current_path
+        than the payload's staged_path; assert the pipeline gets the
+        payload's path, and assert the row's active_download_state is
+        unchanged after dispatch.
+        """
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            unrelated_state = {
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "current_path": "/some/unrelated/slskd/path",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            }
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                # Even if some unrelated automation state happens to be
+                # populated, the YT path must ignore it.
+                active_download_state=unrelated_state,
+                mb_release_id="mbid-yt-ktd1",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=17,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            with patch(
+                "lib.download.process_completed_album",
+                return_value=DispatchOutcome(True, "ok"),
+            ) as proc:
+                importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=object(),
+                )
+
+        # The entry handed to the pipeline carries the YT staged_path,
+        # NOT the unrelated active_download_state current_path.
+        entry_arg = proc.call_args.args[0]
+        self.assertEqual(entry_arg.import_folder, staged)
+        self.assertEqual(entry_arg.files, [])
+        # And the row's active_download_state is untouched.
+        row = db.get_request(42)
+        assert row is not None
+        self.assertEqual(
+            row.get("active_download_state"), unrelated_state)
+
+    def test_missing_request_returns_failed_dispatch_outcome(self):
+        from scripts import importer
+
+        db = FakePipelineDB()
+        # Enqueue against a request_id that has no row.
+        job = self._enqueue_youtube_job(
+            db, request_id=999, staged_path="/Incoming/auto-import/x",
+            download_log_id=18,
+        )
+        self._mark_importable(db, job)
+        claimed = self._claim(db)
+
+        updated = importer.process_claimed_job(
+            cast(Any, db),
+            claimed,
+            ctx=object(),
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertIn("not found", str(updated.message))
+
+    def test_missing_request_id_returns_failed_dispatch_outcome(self):
+        from scripts import importer
+        from lib.import_queue import ImportJob
+
+        # Construct an ImportJob with request_id=None directly — this is
+        # a defensive guard for a path the production codepaths shouldn't
+        # produce (the YT submit guards block it upstream), but the
+        # dispatcher must still fail-fast rather than crash.
+        db = FakePipelineDB()
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": None,
+            "dedupe_key": "youtube_import:download_log:99",
+            "payload": {
+                "staged_path": "/Incoming/auto-import/x",
+                "request_id": 1,
+                "browse_id": "MPREb_abc",
+            },
+        })
+
+        outcome = importer.execute_youtube_import_job(
+            cast(Any, db), job, ctx=object(),
+        )
+
+        self.assertFalse(outcome.success)
+        self.assertIn("request_id", outcome.message)
+
+    def test_malformed_payload_returns_failed_dispatch_outcome(self):
+        """Payload type-validation: missing ``staged_path`` raises
+        ``msgspec.ValidationError`` at the wire seam and the dispatcher
+        surfaces it as a failed ``DispatchOutcome`` rather than crashing
+        the worker.
+        """
+        from scripts import importer
+        from lib.import_queue import ImportJob
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        # Build a job with a malformed payload (missing staged_path).
+        # We construct ImportJob directly because the queue validator
+        # would otherwise reject this payload — we want the dispatcher
+        # to handle the case where a malformed row somehow lands.
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": "youtube_import:download_log:42",
+            "payload": {
+                "request_id": 42,
+                "browse_id": "MPREb_abc",
+                # staged_path missing
+            },
+        })
+
+        outcome = importer.execute_youtube_import_job(
+            cast(Any, db), job, ctx=object(),
+        )
+
+        self.assertFalse(outcome.success)
+        self.assertIn("malformed", outcome.message.lower())
+
+    def test_malformed_payload_with_wrong_type_for_request_id(self):
+        """Wrong type at the wire seam (request_id is str, not int) is
+        a ValidationError, not a silent coerce."""
+        from scripts import importer
+        from lib.import_queue import ImportJob
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": "youtube_import:download_log:43",
+            "payload": {
+                "staged_path": "/Incoming/auto-import/x",
+                "request_id": "42",  # wrong type
+                "browse_id": "MPREb_abc",
+            },
+        })
+
+        outcome = importer.execute_youtube_import_job(
+            cast(Any, db), job, ctx=object(),
+        )
+
+        self.assertFalse(outcome.success)
+        self.assertIn("malformed", outcome.message.lower())
+
+
+class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
+    """U9: preview-worker front-gate divergence between job_types.
+
+    ``_front_gate_source_path`` is the cheap path-derivation helper the
+    preview worker uses to test stored candidate evidence's snapshot
+    against the current source location before deciding whether to skip
+    measurement. For YT jobs the path comes from the payload; for
+    automation jobs it comes from ``active_download_state``. The two
+    branches are independent and the YT branch never reads
+    ``active_download_state`` (KTD1).
+
+    Also covers ``_preview_input`` parity — the worker can fall through
+    to full measurement for a YT job by reading the same payload
+    seam (not active_download_state).
+    """
+
+    def test_youtube_job_returns_payload_staged_path(self):
+        from scripts import import_preview_worker
+        from lib.import_queue import (
+            ImportJob,
+            youtube_import_payload,
+            youtube_import_dedupe_key,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": youtube_import_dedupe_key(99),
+            "payload": youtube_import_payload(
+                staged_path="/Incoming/auto-import/Artist - Album",
+                request_id=42,
+                browse_id="MPREb_abc",
+            ),
+        })
+
+        result = import_preview_worker._front_gate_source_path(
+            cast(Any, db), job,
+        )
+
+        self.assertEqual(result, "/Incoming/auto-import/Artist - Album")
+
+    def test_youtube_job_does_not_read_active_download_state(self):
+        """KTD1 at the front-gate: even if active_download_state has a
+        current_path populated, the YT branch returns the payload's
+        staged_path."""
+        from scripts import import_preview_worker
+        from lib.import_queue import (
+            ImportJob,
+            youtube_import_payload,
+            youtube_import_dedupe_key,
+        )
+
+        db = FakePipelineDB()
+        # Seed a row with active_download_state pointing somewhere else.
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "current_path": "/totally/different/path",
+                "files": [],
+            },
+        ))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": youtube_import_dedupe_key(99),
+            "payload": youtube_import_payload(
+                staged_path="/Incoming/auto-import/Artist - Album",
+                request_id=42,
+                browse_id="MPREb_abc",
+            ),
+        })
+
+        result = import_preview_worker._front_gate_source_path(
+            cast(Any, db), job,
+        )
+
+        # Returns the payload path, not the active_download_state path.
+        self.assertEqual(result, "/Incoming/auto-import/Artist - Album")
+
+    def test_automation_branch_is_independent_of_youtube_branch(self):
+        """Sanity: the automation branch still reads active_download_state.
+        The YT branch was added without altering automation behaviour."""
+        from scripts import import_preview_worker
+        from lib.import_queue import ImportJob, automation_import_dedupe_key
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "current_path": "/slskd/Test Artist - Test Album",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_AUTOMATION,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": automation_import_dedupe_key(42),
+            "payload": {},
+        })
+
+        # The automation branch derives from active_download_state +
+        # canonical path computation. Patch out the canonical
+        # derivation to a deterministic value (we just want to prove
+        # the branch was taken, not retest the derivation logic).
+        with patch(
+            "scripts.import_preview_worker.derive_canonical_import_folder",
+            return_value="/derived/from/active_download_state",
+        ) as derive:
+            result = import_preview_worker._front_gate_source_path(
+                cast(Any, db), job,
+            )
+
+        derive.assert_called_once()
+        self.assertEqual(result, "/derived/from/active_download_state")
+
+    def test_youtube_job_malformed_payload_falls_through(self):
+        """Malformed YT payload → front-gate returns None so the worker
+        falls through to full measurement (rather than crashing)."""
+        from scripts import import_preview_worker
+        from lib.import_queue import ImportJob
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": "youtube_import:download_log:99",
+            # Missing staged_path.
+            "payload": {"request_id": 42, "browse_id": "MPREb_abc"},
+        })
+
+        result = import_preview_worker._front_gate_source_path(
+            cast(Any, db), job,
+        )
+
+        self.assertIsNone(result)
+
+    def test_preview_input_uses_payload_staged_path_for_youtube(self):
+        """The ``_preview_input`` helper (the slow-path measurement seam)
+        also reads the YT payload, not active_download_state."""
+        from scripts import import_preview_worker
+        from lib.import_queue import (
+            ImportJob,
+            youtube_import_payload,
+            youtube_import_dedupe_key,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": youtube_import_dedupe_key(99),
+            "payload": youtube_import_payload(
+                staged_path="/Incoming/auto-import/Artist - Album",
+                request_id=42,
+                browse_id="MPREb_abc",
+            ),
+        })
+
+        result = import_preview_worker._preview_input(
+            cast(Any, db), job,
+        )
+
+        self.assertEqual(result["path"], "/Incoming/auto-import/Artist - Album")
+        self.assertEqual(result["request_id"], 42)
+        # YT has no slskd peer ⇒ no source_username.
+        self.assertIsNone(result["source_username"])
+        self.assertFalse(result["force"])
+
+    def test_preview_input_raises_on_malformed_youtube_payload(self):
+        from scripts import import_preview_worker
+        from lib.import_queue import ImportJob
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_YOUTUBE,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": "youtube_import:download_log:99",
+            "payload": {"request_id": 42, "browse_id": "MPREb_abc"},
+        })
+
+        with self.assertRaises(ValueError) as ctx:
+            import_preview_worker._preview_input(cast(Any, db), job)
+
+        self.assertIn("malformed", str(ctx.exception).lower())
