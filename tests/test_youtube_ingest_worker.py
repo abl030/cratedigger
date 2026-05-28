@@ -385,6 +385,17 @@ class TestYtdlpArgvShape(unittest.TestCase):
         # Still a postprocessor flag, so it precedes the '--' separator.
         self.assertLess(argv.index("--remux-video"), argv.index("--"))
 
+    def test_embed_metadata_present(self) -> None:
+        # Without embedded tags the import-time beets match falls back to
+        # filename/length similarity and exceeds the 0.15 auto-import gate.
+        argv = worker._build_ytdlp_argv(
+            ytdlp_bin="/usr/bin/yt-dlp",
+            url="https://music.youtube.com/playlist?list=FAKE",
+            output_template="/tmp/out/%(title)s.%(ext)s",
+        )
+        self.assertIn("--embed-metadata", argv)
+        self.assertLess(argv.index("--embed-metadata"), argv.index("--"))
+
     def test_source_address_absent_by_default(self) -> None:
         # When no source address is configured the argv is unchanged — the
         # worker egresses on the host's default route (no VPN binding).
