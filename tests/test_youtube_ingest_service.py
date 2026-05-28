@@ -16,7 +16,11 @@ from unittest.mock import patch
 import msgspec
 
 from lib.import_queue import IMPORT_JOB_YOUTUBE
-from lib.pipeline_db import YoutubeInFlightError
+from lib import pipeline_db as _pipeline_db_mod  # module-import so the raise
+# site below resolves YoutubeInFlightError at call time. tests/test_pipeline_db.py
+# does importlib.reload(pipeline_db); a stale symbol import here would raise the
+# pre-reload class while the service catches the post-reload one — see the
+# matching comment in lib/youtube_ingest_service.py.
 from lib.youtube_ingest_service import (
     OUTCOME_EXIT_CODE,
     OUTCOME_HTTP_STATUS,
@@ -27,7 +31,6 @@ from lib.youtube_ingest_service import (
     YoutubeIngestService,
     YtdlpRunResult,
     classify_youtube_failure,
-    detect_request_source,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
@@ -448,7 +451,7 @@ class TestSubmitTransient(unittest.TestCase):
         svc = _make_service(pdb)
 
         def _explode_in_flight(**_kwargs: Any) -> int:
-            raise YoutubeInFlightError(42, 7777)
+            raise _pipeline_db_mod.YoutubeInFlightError(42, 7777)
 
         with patch.object(
             pdb, "insert_youtube_running", side_effect=_explode_in_flight,
@@ -921,26 +924,6 @@ class TestYoutubeIngestMetadataStruct(unittest.TestCase):
         }
         m = msgspec.convert(wire, type=YoutubeIngestMetadata)
         self.assertEqual(m.yt_url, YT_URL)
-
-
-# ---------------------------------------------------------------------------
-# Source detection helper.
-# ---------------------------------------------------------------------------
-
-
-class TestDetectRequestSource(unittest.TestCase):
-    def test_mb_request(self) -> None:
-        row = make_request_row(mb_release_id=MB_REL, discogs_release_id=None)
-        self.assertEqual(detect_request_source(row), "mb")
-
-    def test_discogs_request(self) -> None:
-        row = make_request_row(
-            mb_release_id=None, discogs_release_id="123456")
-        self.assertEqual(detect_request_source(row), "discogs")
-
-    def test_neither_returns_none(self) -> None:
-        row = make_request_row(mb_release_id=None, discogs_release_id=None)
-        self.assertIsNone(detect_request_source(row))
 
 
 if __name__ == "__main__":  # pragma: no cover

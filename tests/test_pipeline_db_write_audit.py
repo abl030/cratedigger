@@ -129,6 +129,17 @@ ALLOWLIST: dict[str, str] = {
         "TODO: backfill round-trip test (legacy method, predates rule)",
     "upsert_album_quality_evidence":
         "TODO: backfill round-trip test (legacy method, predates rule)",
+    # Methods whose round-trip tests exist but read via an asymmetric
+    # seam the audit's auto-detector can't see. Both write into
+    # ``download_log`` and round-trip via ``get_download_log_entry`` —
+    # the audit looks for ``get_youtube_running`` / ``get_youtube_terminal``
+    # which don't exist (and shouldn't — the table is ``download_log``,
+    # not per-outcome). Round-trip guards live at
+    # ``tests/test_pipeline_db.py::TestYoutubeIngestDownloadLog``.
+    "insert_youtube_running":
+        "round-trip via get_download_log_entry; tested in TestYoutubeIngestDownloadLog",
+    "update_youtube_terminal":
+        "round-trip via get_download_log_entry; tested in TestYoutubeIngestDownloadLog",
 }
 
 

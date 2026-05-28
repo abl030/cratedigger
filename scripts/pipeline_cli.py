@@ -83,8 +83,6 @@ from lib.youtube_album_service import (
 # mapping.
 from lib.youtube_ingest_service import (
     OUTCOME_EXIT_CODE as YOUTUBE_INGEST_EXIT_CODE,
-    SubmitResult as YoutubeIngestSubmitResult,
-    YoutubeIngestService,
     default_youtube_ingest_service_factory,
 )
 

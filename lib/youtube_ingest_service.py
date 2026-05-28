@@ -46,8 +46,13 @@ from lib.import_queue import (
     youtube_import_dedupe_key,
     youtube_import_payload,
 )
-from lib.pipeline_db import YoutubeInFlightError
-from lib.release_identity import detect_release_source
+from lib import pipeline_db as _pipeline_db_mod  # noqa: F401 — module-import so
+# ``except _pipeline_db_mod.YoutubeInFlightError`` resolves the class at catch
+# time. A symbol import (``from lib.pipeline_db import YoutubeInFlightError``)
+# would bind once at module load; tests/test_pipeline_db.py does
+# ``importlib.reload(pipeline_db)`` and the symbol then points at the
+# pre-reload class while the fake raises the post-reload class. Module-level
+# attribute lookup survives the reload because the module object is the same.
 
 log = logging.getLogger(__name__)
 
@@ -664,7 +669,7 @@ class YoutubeIngestService:
                 yt_url=yt_url,
                 expected_track_count=int(current_mb_count),
             )
-        except YoutubeInFlightError as exc:
+        except _pipeline_db_mod.YoutubeInFlightError as exc:
             existing_id = exc.existing_download_log_id
             return SubmitResult(
                 outcome="in_flight",
@@ -1032,21 +1037,3 @@ def _safe_excerpt(text: Optional[str], limit: int = 4096) -> str:
     return text[:limit] + "…[truncated]"
 
 
-# Source-detection convenience for callers that need to know which mirror
-# to query when building a custom ``release_group_resolver_fn``. Kept on
-# the module surface so wrappers don't reach into ``lib.release_identity``.
-def detect_request_source(request_row: dict[str, Any]) -> Optional[str]:
-    """Return ``'mb'`` / ``'discogs'`` / ``None`` for one request row.
-
-    Mirrors the discriminator string used by ``youtube_album_mappings``
-    (``'mb'`` / ``'discogs'``). ``None`` when the row has neither a
-    valid MB release id nor a Discogs release id.
-    """
-    mb = request_row.get("mb_release_id")
-    if isinstance(mb, str) and detect_release_source(mb) == "musicbrainz":
-        return "mb"
-    discogs = request_row.get("discogs_release_id")
-    if isinstance(discogs, (str, int)):
-        if detect_release_source(discogs) == "discogs":
-            return "discogs"
-    return None

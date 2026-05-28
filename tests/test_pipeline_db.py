@@ -7533,7 +7533,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         ))
         self.assertNotEqual(first_id, second_id)
 
-    def test_update_youtube_terminal_to_success_writes_metadata(self):
+    def test_update_youtube_terminal_to_success_round_trip_preserves_metadata(self):
         log_id = self.db.insert_youtube_running(**self._yt_payload())
         terminal_meta = {
             "per_track_video_ids": ["v1", "v2", "v3"],
