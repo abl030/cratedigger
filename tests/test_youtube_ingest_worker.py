@@ -368,6 +368,23 @@ class TestYtdlpArgvShape(unittest.TestCase):
         idx = argv.index("-f")
         self.assertEqual(argv[idx + 1], "bestaudio")
 
+    def test_remux_video_webm_to_opus(self) -> None:
+        # YouTube Music bestaudio is opus-in-webm (.webm) / aac-in-mp4,
+        # neither of which the importer's audio-extension set recognizes
+        # (it sees them as empty_fileset). --remux-video is stream-copy only
+        # (fails rather than re-encoding), so webm(opus)->.opus and
+        # mp4(aac)->.m4a are lossless container changes the importer accepts.
+        argv = worker._build_ytdlp_argv(
+            ytdlp_bin="/usr/bin/yt-dlp",
+            url="https://music.youtube.com/playlist?list=FAKE",
+            output_template="/tmp/out/%(title)s.%(ext)s",
+        )
+        self.assertIn("--remux-video", argv)
+        self.assertEqual(
+            argv[argv.index("--remux-video") + 1], "webm>opus/mp4>m4a")
+        # Still a postprocessor flag, so it precedes the '--' separator.
+        self.assertLess(argv.index("--remux-video"), argv.index("--"))
+
     def test_source_address_absent_by_default(self) -> None:
         # When no source address is configured the argv is unchanged — the
         # worker egresses on the host's default route (no VPN binding).
