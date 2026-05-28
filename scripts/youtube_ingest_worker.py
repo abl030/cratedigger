@@ -244,6 +244,14 @@ def _build_ytdlp_argv(
     — so ``webm``(opus)→``.opus`` and ``mp4``(aac)→``.m4a`` are guaranteed
     lossless. ``.m4a`` / ``.mp3`` / ``.opus`` match no rule and pass through
     untouched. Requires ffmpeg on PATH (the systemd unit provides it).
+
+    ``--embed-metadata`` writes YouTube Music's title / artist / album /
+    date into the file tags during the same ffmpeg pass. Without it the
+    staged audio is untagged and the import-time beets match (pinned to the
+    release via ``--search-id``) falls back to filename + track-length
+    similarity, scoring well above the 0.15 auto-import threshold. The
+    embedded tags only serve the match — beets rewrites canonical
+    release tags on import.
     """
     argv = [
         ytdlp_bin,
@@ -251,6 +259,7 @@ def _build_ytdlp_argv(
         "--no-ignore-errors",
         "-f", "bestaudio",
         "--remux-video", "webm>opus/mp4>m4a",
+        "--embed-metadata",
         "--output", output_template,
     ]
     if source_address:
