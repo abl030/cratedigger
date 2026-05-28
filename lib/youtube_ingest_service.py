@@ -1269,15 +1269,6 @@ class YoutubeIngestService:
         except (TypeError, ValueError):
             return None
 
-    @classmethod
-    def _distance_total_mb_tracks(
-        cls,
-        mapping_row: dict[str, Any],
-        target_mbid: str,
-    ) -> Optional[int]:
-        """Backward-compatible wrapper for MB-named tests/callers."""
-        return cls._distance_total_tracks(mapping_row, target_mbid)
-
     def _cleanup_ytdlp_run(self, run: YtdlpRunResult) -> Optional[str]:
         """Best-effort delete the scratch paths used by one yt-dlp run."""
         return self._cleanup_paths(self._ytdlp_cleanup_paths(run))

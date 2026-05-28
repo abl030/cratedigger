@@ -138,19 +138,6 @@ def _move_to_failed_imports(
     return target_path
 
 
-def move_failed_import(src_path: str, scenario: str | None = None) -> str | None:
-    """Move a failed import to a failed_imports/ sibling directory.
-
-    Creates failed_imports/ next to src_path's parent. Uses absolute paths
-    throughout — does not depend on os.getcwd().
-
-    Bad-file scenarios (audio_corrupt, spectral_reject) go to
-    failed_imports/bad_files/ to keep them separate from wrong matches
-    that may be manually imported later.
-    """
-    return _move_to_failed_imports(src_path, scenario=scenario)
-
-
 def move_abandoned_auto_import(src_path: str) -> str | None:
     """Move an interrupted auto-import to a diagnosable failed_imports folder."""
     folder_name = os.path.basename(os.path.abspath(src_path))

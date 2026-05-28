@@ -3568,9 +3568,6 @@ class PipelineDB:
     #     the worker can layer reason / stderr_excerpt / observed counts
     #     on top of the submission-time blob without re-reading it.
     #
-    #   * ``find_next_youtube_pending`` — read-only unclaimed queue query.
-    #     FIFO by ``created_at`` per R16.
-    #
     #   * ``claim_next_youtube_pending`` — worker-side claim transition. It
     #     adds ``worker_claimed_at`` / ``worker_id`` to ``youtube_metadata``
     #     before the worker starts yt-dlp, which lets startup recovery
@@ -3780,29 +3777,6 @@ class PipelineDB:
             """,
             (outcome, psycopg2.extras.Json(metadata_dict), download_log_id),
         )
-
-    def find_next_youtube_pending(self, limit: int = 1) -> list[dict[str, Any]]:
-        """Return the next unclaimed ``youtube_running`` rows.
-
-        FIFO by ``created_at`` per R16. Returns full row dicts (not just
-        ids) so callers can inspect ``youtube_metadata`` without a second
-        round-trip. Empty list when nothing is pending.
-        """
-        cur = self._execute(
-            """
-            SELECT id, request_id, source, outcome, youtube_metadata,
-                   created_at
-            FROM download_log
-            WHERE source = 'youtube'
-              AND outcome = 'youtube_running'
-              AND NOT (COALESCE(youtube_metadata, '{}'::jsonb)
-                       ? 'worker_claimed_at')
-            ORDER BY created_at ASC, id ASC
-            LIMIT %s
-            """,
-            (int(limit),),
-        )
-        return [dict(row) for row in cur.fetchall()]
 
     def claim_next_youtube_pending(
         self,
