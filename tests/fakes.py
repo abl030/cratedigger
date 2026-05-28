@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from lib.import_queue import (
     ImportJob,
+    IMPORT_JOB_YOUTUBE,
     IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
@@ -115,6 +116,12 @@ class DownloadLogRow:
     id: int = 0
     # Migration 021: addressing FK to album_quality_evidence(id).
     candidate_evidence_id: int | None = None
+    # Migration 037 — source discriminator + YT-specific JSONB blob.
+    # ``source`` defaults to ``'slskd'`` matching the production NOT NULL
+    # DEFAULT. ``youtube_metadata`` is NULL unless this row was written
+    # via ``insert_youtube_running``.
+    source: str = "slskd"
+    youtube_metadata: dict[str, Any] | None = None
     # Auto-populated timestamp matching download_log.created_at.
     created_at: datetime = field(default_factory=_utcnow)
     # Catch-all for less commonly asserted fields
@@ -1050,6 +1057,17 @@ class FakePipelineDB:
             existing = self.get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
                 return ImportJob.from_row(existing.to_dict(), deduped=True)
+        if job_type == IMPORT_JOB_YOUTUBE and request_id is not None:
+            for row in self._import_jobs:
+                if (
+                    row.get("job_type") == IMPORT_JOB_YOUTUBE
+                    and row.get("request_id") == request_id
+                    and row.get("status") in ("queued", "running")
+                ):
+                    raise ValueError(
+                        "active youtube_import already exists for "
+                        f"request_id={request_id}"
+                    )
 
         self._next_import_job_id += 1
         now = _utcnow()
@@ -1138,6 +1156,50 @@ class FakePipelineDB:
         ]
         rows.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+
+    def find_active_youtube_import_job(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+    ) -> ImportJob | None:
+        rows = [
+            row for row in self._import_jobs
+            if row.get("job_type") == IMPORT_JOB_YOUTUBE
+            and row.get("request_id") == request_id
+            and row.get("status") in ("queued", "running")
+        ]
+        rows.sort(key=lambda row: row["id"])
+        return ImportJob.from_row(copy.deepcopy(rows[0])) if rows else None
+
+    def list_active_youtube_rescues(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for entry in sorted(
+            self.download_logs,
+            key=lambda e: (e.created_at, e.id),
+        ):
+            if entry.source != "youtube" or entry.outcome != "youtube_running":
+                continue
+            req = self._requests.get(entry.request_id) or {}
+            rows.append({
+                "download_log_id": entry.id,
+                "request_id": entry.request_id,
+                "source": entry.source,
+                "outcome": entry.outcome,
+                "youtube_metadata": copy.deepcopy(entry.youtube_metadata),
+                "created_at": entry.created_at,
+                "artist_name": req.get("artist_name"),
+                "album_title": req.get("album_title"),
+                "mb_release_id": req.get("mb_release_id"),
+                "request_status": req.get("status"),
+            })
+            if len(rows) >= int(limit):
+                break
+        return rows
 
     def list_active_import_jobs_for_wrong_match(
         self,
@@ -2012,6 +2074,191 @@ class FakePipelineDB:
         ))
         return self._next_download_log_id
 
+    # --- YouTube rescue ingest (mirrors PipelineDB U2 methods) ---
+
+    _YOUTUBE_TERMINAL_OUTCOMES: frozenset[str] = frozenset({
+        "youtube_success", "youtube_failed",
+    })
+
+    def insert_youtube_running(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+        audio_playlist_id: str | None,
+        yt_url: str,
+        expected_track_count: int,
+        resolver_mapping_id: int | None = None,
+        per_track_video_ids: list[str] | None = None,
+    ) -> int:
+        """Mirror of ``PipelineDB.insert_youtube_running``.
+
+        Raises ``YoutubeInFlightError`` when a ``youtube_running`` row
+        already exists for the same ``request_id``, mirroring the real
+        partial unique index (``one_youtube_running_per_request``) on
+        the production schema.
+        """
+        existing_id: int | None = None
+        for entry in self.download_logs:
+            if (entry.source == "youtube"
+                    and entry.outcome == "youtube_running"
+                    and entry.request_id == request_id):
+                existing_id = entry.id
+                break
+        if existing_id is not None:
+            # Look up YoutubeInFlightError lazily so we always raise the
+            # currently-loaded class. A prior test in this run may have
+            # done ``importlib.reload(lib.pipeline_db)`` (e.g.
+            # ``TestReleaseIdToLockKey::test_key_is_stable_across_imports``);
+            # a module-level binding would point at the pre-reload class
+            # and assertRaises in the caller would miss it.
+            from lib.pipeline_db import YoutubeInFlightError as _YIFE
+            raise _YIFE(request_id, existing_id)
+
+        self._next_download_log_id += 1
+        metadata: dict[str, Any] = {
+            "yt_url": yt_url,
+            "browse_id": browse_id,
+            "audio_playlist_id": audio_playlist_id,
+            "expected_track_count": int(expected_track_count),
+        }
+        if resolver_mapping_id is not None:
+            metadata["resolver_mapping_id"] = int(resolver_mapping_id)
+        if per_track_video_ids is not None:
+            metadata["per_track_video_ids"] = [
+                str(video_id) for video_id in per_track_video_ids
+            ]
+        self.download_logs.append(DownloadLogRow(
+            request_id=request_id,
+            outcome="youtube_running",
+            source="youtube",
+            youtube_metadata=metadata,
+            id=self._next_download_log_id,
+        ))
+        return self._next_download_log_id
+
+    def enqueue_youtube_import_and_mark_success(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        message: str,
+        terminal_metadata: dict[str, Any],
+    ) -> ImportJob:
+        job = self.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            message=message,
+        )
+        self.update_youtube_terminal(
+            download_log_id,
+            "youtube_success",
+            terminal_metadata,
+        )
+        return job
+
+    def update_youtube_terminal(
+        self,
+        download_log_id: int,
+        outcome: str,
+        metadata_dict: dict[str, Any],
+    ) -> None:
+        """Mirror of ``PipelineDB.update_youtube_terminal``.
+
+        Merges ``metadata_dict`` onto the existing ``youtube_metadata``
+        blob the way the production ``||`` JSONB operator would.
+        """
+        if outcome not in self._YOUTUBE_TERMINAL_OUTCOMES:
+            raise ValueError(
+                f"update_youtube_terminal: outcome must be one of "
+                f"{sorted(self._YOUTUBE_TERMINAL_OUTCOMES)!r}, got {outcome!r}"
+            )
+        for entry in self.download_logs:
+            if entry.id == download_log_id:
+                entry.outcome = outcome
+                merged: dict[str, Any] = dict(entry.youtube_metadata or {})
+                merged.update(metadata_dict)
+                entry.youtube_metadata = merged
+                return
+        # Production UPDATE silently no-ops if the id doesn't exist;
+        # mirror that.
+
+    def find_next_youtube_pending(
+        self, limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Mirror of ``PipelineDB.find_next_youtube_pending``.
+
+        FIFO by ``(created_at, id)`` per R16; filters on
+        ``source='youtube'`` AND ``outcome='youtube_running'`` and
+        rows that have not yet been claimed by a worker.
+        """
+        rows = sorted(
+            (entry for entry in self.download_logs
+             if entry.source == "youtube"
+             and entry.outcome == "youtube_running"
+             and not (entry.youtube_metadata or {}).get("worker_claimed_at")),
+            key=lambda e: (e.created_at, e.id),
+        )
+        return [
+            {
+                "id": entry.id,
+                "request_id": entry.request_id,
+                "source": entry.source,
+                "outcome": entry.outcome,
+                "youtube_metadata": copy.deepcopy(entry.youtube_metadata)
+                if entry.youtube_metadata is not None else None,
+                "created_at": entry.created_at,
+            }
+            for entry in rows[:int(limit)]
+        ]
+
+    def claim_next_youtube_pending(
+        self,
+        *,
+        worker_id: str | None,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        rows = sorted(
+            (entry for entry in self.download_logs
+             if entry.source == "youtube"
+             and entry.outcome == "youtube_running"
+             and not (entry.youtube_metadata or {}).get("worker_claimed_at")),
+            key=lambda e: (e.created_at, e.id),
+        )[:int(limit)]
+        claimed_at = _utcnow().isoformat()
+        for entry in rows:
+            metadata = dict(entry.youtube_metadata or {})
+            metadata["worker_claimed_at"] = claimed_at
+            metadata["worker_id"] = worker_id
+            entry.youtube_metadata = metadata
+        return [
+            {
+                "id": entry.id,
+                "request_id": entry.request_id,
+                "source": entry.source,
+                "outcome": entry.outcome,
+                "youtube_metadata": copy.deepcopy(entry.youtube_metadata)
+                if entry.youtube_metadata is not None else None,
+                "created_at": entry.created_at,
+            }
+            for entry in rows
+        ]
+
+    def find_orphan_youtube_running(self) -> list[int]:
+        """Mirror of ``PipelineDB.find_orphan_youtube_running``."""
+        rows = sorted(
+            (entry for entry in self.download_logs
+             if entry.source == "youtube"
+             and entry.outcome == "youtube_running"
+             and (entry.youtube_metadata or {}).get("worker_claimed_at")),
+            key=lambda e: (e.created_at, e.id),
+        )
+        return [entry.id for entry in rows]
+
     def abandon_auto_import_request(
         self,
         *,
@@ -2796,6 +3043,32 @@ class FakePipelineDB:
             key=lambda r: r["yt_browse_id"],
         )
 
+    def find_youtube_album_mapping_for_release(
+        self,
+        *,
+        source: str,
+        release_id: str,
+        browse_id: str,
+    ) -> Optional[dict[str, Any]]:
+        for (rg_id, row_source), rows in self._youtube_album_mappings.items():
+            if row_source != source:
+                continue
+            for row in rows:
+                if str(row.get("yt_browse_id") or "") != browse_id:
+                    continue
+                distances = row.get("distances") or []
+                if not any(
+                    isinstance(entry, dict)
+                    and str(entry.get("mbid") or "") == str(release_id)
+                    for entry in distances
+                ):
+                    continue
+                out = copy.deepcopy(row)
+                out.setdefault("release_group_identifier", rg_id)
+                out.setdefault("source", row_source)
+                return out
+        return None
+
     def upsert_youtube_album_mapping(
         self,
         release_group_identifier: str,
@@ -3131,7 +3404,7 @@ class FakePipelineDB:
                 "prev_min_bitrate": req.get("prev_min_bitrate"),
                 "search_filetype_override": req.get(
                     "search_filetype_override"),
-                "source": req.get("source"),
+                "request_source": req.get("source"),
             })
             rows.append(joined)
             if len(rows) >= limit:
@@ -3669,6 +3942,12 @@ class FakePipelineDB:
             "import_result": entry.import_result,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
+            # Migration 037 — source discriminator + YT JSONB. Mirrors
+            # the production read seam (every consumer sees these two
+            # columns whether or not the row originated from YT).
+            "source": entry.source,
+            "youtube_metadata": copy.deepcopy(entry.youtube_metadata)
+            if entry.youtube_metadata is not None else None,
         }
         row.update(entry.extra)
         # Mirror the real LEFT JOIN to album_quality_evidence: prefer
@@ -4516,6 +4795,20 @@ class FakePipelineDB:
             if plan.status != "active":
                 continue
             if plan.generator_id != generator_id:
+                continue
+            if any(
+                entry.source == "youtube"
+                and entry.outcome == "youtube_running"
+                and entry.request_id == r.get("id")
+                for entry in self.download_logs
+            ):
+                continue
+            if any(
+                row.get("job_type") == IMPORT_JOB_YOUTUBE
+                and row.get("request_id") == r.get("id")
+                and row.get("status") in ("queued", "running")
+                for row in self._import_jobs
+            ):
                 continue
             eligible.append(r)
         eligible.sort(

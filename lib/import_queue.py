@@ -10,11 +10,21 @@ from typing import Any
 IMPORT_JOB_FORCE = "force_import"
 IMPORT_JOB_MANUAL = "manual_import"
 IMPORT_JOB_AUTOMATION = "automation_import"
+# YouTube rescue ingest (U2 of the YT rescue plan). The YT worker stages
+# audio to the configured ``auto-import/<artist>-<album>/`` directory and
+# enqueues a
+# ``youtube_import`` job with the staged path carried in ``payload``
+# rather than via ``album_requests.active_download_state``. The importer
+# dispatcher (U9) reads the path from the payload and reuses the rest of
+# the existing per-job pipeline (preview measurement, quality gate,
+# beets distance, wrong-matches OR auto-import, ``mark_imported_with_rescue``).
+IMPORT_JOB_YOUTUBE = "youtube_import"
 
 IMPORT_JOB_TYPES = frozenset({
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
     IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_YOUTUBE,
 })
 IMPORT_JOB_STATUSES = frozenset({"queued", "running", "completed", "failed"})
 IMPORT_JOB_ACTIVE_STATUSES = frozenset({"queued", "running"})
@@ -257,6 +267,21 @@ def validate_payload(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         failed_path = payload.get("failed_path")
         if not isinstance(failed_path, str) or not failed_path:
             raise ValueError(f"{job_type} payload requires failed_path")
+    if job_type == IMPORT_JOB_YOUTUBE:
+        staged_path = payload.get("staged_path")
+        if not isinstance(staged_path, str) or not staged_path:
+            raise ValueError(f"{job_type} payload requires staged_path")
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, int):
+            raise ValueError(f"{job_type} payload requires request_id (int)")
+        browse_id = payload.get("browse_id")
+        if not isinstance(browse_id, str) or not browse_id:
+            raise ValueError(f"{job_type} payload requires browse_id")
+        download_log_id = payload.get("download_log_id")
+        if download_log_id is not None and not isinstance(download_log_id, int):
+            raise ValueError(
+                f"{job_type} payload download_log_id must be int when present"
+            )
     return payload
 
 
@@ -270,6 +295,18 @@ def manual_import_dedupe_key(request_id: int, path: str) -> str:
 
 def automation_import_dedupe_key(request_id: int) -> str:
     return f"{IMPORT_JOB_AUTOMATION}:request:{int(request_id)}"
+
+
+def youtube_import_dedupe_key(download_log_id: int) -> str:
+    """Dedupe-key for a YT rescue's `youtube_import` job_type row.
+
+    The YT worker creates exactly one ``youtube_import`` per
+    ``download_log`` row (the row is the queue entry's audit ancestor).
+    Keying on the download_log id is the right grain: a re-enqueue
+    attempt for the same submission would otherwise create a parallel
+    import_jobs row.
+    """
+    return f"{IMPORT_JOB_YOUTUBE}:download_log:{int(download_log_id)}"
 
 
 def force_import_payload(
@@ -296,3 +333,30 @@ def manual_import_payload(*, failed_path: str) -> dict[str, Any]:
 
 def automation_import_payload() -> dict[str, Any]:
     return {}
+
+
+def youtube_import_payload(
+    *,
+    staged_path: str,
+    request_id: int,
+    browse_id: str,
+    download_log_id: int | None = None,
+) -> dict[str, Any]:
+    """Build the payload dict for a ``youtube_import`` job.
+
+    The YT ingest worker stages audio to
+    ``/Incoming/auto-import/<artist>-<album>/`` and enqueues this
+    payload — the importer dispatcher (U9) reads ``staged_path``
+    instead of the slskd-shaped ``active_download_state``.
+
+    All three fields are required and validated by
+    ``validate_payload(IMPORT_JOB_YOUTUBE, payload)``.
+    """
+    payload: dict[str, Any] = {
+        "staged_path": str(staged_path),
+        "request_id": int(request_id),
+        "browse_id": str(browse_id),
+    }
+    if download_log_id is not None:
+        payload["download_log_id"] = int(download_log_id)
+    return payload

@@ -1611,6 +1611,36 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("variant:        v2_artist_album_no_year", out)
         self.assertIn("(empty list)", out)
 
+    def test_show_renders_youtube_history_source_and_metadata(self):
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=5, manual_reason=None))
+        log_id = db.insert_youtube_running(
+            request_id=5,
+            browse_id="MPREb_cli_show",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=cli-show",
+            expected_track_count=10,
+        )
+        db.update_youtube_terminal(
+            log_id,
+            "youtube_failed",
+            {
+                "reason": "track_count_mismatch",
+                "observed_track_count": 9,
+                "stderr_excerpt": "line 1\nline 2",
+            },
+        )
+
+        out = self._capture(db, 5)
+
+        self.assertIn("youtube_failed via youtube", out)
+        self.assertIn("browse_id=MPREb_cli_show", out)
+        self.assertIn("tracks=9/10", out)
+        self.assertIn("reason=track_count_mismatch", out)
+        self.assertIn("yt_url:", out)
+        self.assertIn("stderr:    line 2", out)
+        self.assertNotIn("from None", out)
+
 
 class TestCmdSearchPlanShow(unittest.TestCase):
     """U6 read-only inspection CLI: ``pipeline-cli search-plan show``.
@@ -3446,6 +3476,159 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
         self.assertEqual(payload["counts"]["off_disk_total"], 1)
         self.assertEqual(payload["off_disk"][0]["id"], 1)
         beets.check_mbids.assert_called_once_with(["missing-mbid"])
+
+class TestCmdYoutubeRescue(unittest.TestCase):
+    """``pipeline-cli youtube-rescue`` wraps
+    ``YoutubeIngestService.submit``. Counterpart of the API endpoint
+    ``POST /api/pipeline/<id>/youtube-rescue`` (U5) — both must stay in
+    sync; see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
+
+    Service-layer correctness lives in ``tests.test_youtube_ingest_service``;
+    here we pin the outcome → exit-code mapping and the stdout/stderr/JSON
+    output discipline.
+    """
+
+    def _run(self, *, outcome, download_log_id=None, detail=None,
+             json_out=False, request_id=42, browse_id="MPREb_test"):
+        from lib.youtube_ingest_service import (
+            OUTCOME_EXIT_CODE as INGEST_EXIT_CODE,
+            SubmitResult,
+        )
+
+        # Sanity: the outcome the test asks for must actually be a
+        # SubmitOutcome — keeps the subTest table honest as the literal
+        # evolves.
+        self.assertIn(outcome, INGEST_EXIT_CODE,
+                      f"unknown SubmitOutcome {outcome!r}")
+
+        result = SubmitResult(
+            outcome=outcome,
+            download_log_id=download_log_id,
+            detail=detail,
+        )
+
+        class _StubService:
+            def submit(self, _rid, _browse):
+                return result
+
+        def _factory(_db):
+            return _StubService()
+
+        args = SimpleNamespace(
+            request_id=request_id, browse_id=browse_id, json=json_out,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_youtube_rescue(
+                MagicMock(), args, service_factory=_factory)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    # ----- outcome → exit code subTest table -----
+
+    def test_exit_codes_match_service_table_for_every_outcome(self):
+        """Every ``SubmitOutcome`` maps to its
+        ``OUTCOME_EXIT_CODE`` entry — single-source-of-truth contract."""
+        from lib.youtube_ingest_service import OUTCOME_EXIT_CODE as TABLE
+        cases = [
+            ("accepted",                    0),
+            ("request_not_found",           2),
+            ("wrong_state",                 4),
+            ("in_flight",                   4),
+            ("no_resolver_mapping",         3),
+            ("track_count_precheck_failed", 3),
+            ("transient",                   5),
+        ]
+        # The table itself must match the literal coverage above —
+        # forces future contributors who add a new outcome to update
+        # both the service map and this subTest table together.
+        self.assertEqual(set(o for o, _ in cases), set(TABLE),
+                         "subTest cases drifted from OUTCOME_EXIT_CODE")
+        for outcome, expected_rc in cases:
+            with self.subTest(outcome=outcome):
+                # in_flight / accepted have a populated download_log_id
+                # to make sure the path that reads it doesn't crash.
+                dl_id = 7 if outcome in ("accepted", "in_flight") else None
+                rc, _, _ = self._run(
+                    outcome=outcome, download_log_id=dl_id,
+                    detail="example reason",
+                )
+                self.assertEqual(rc, expected_rc)
+                self.assertEqual(rc, TABLE[outcome])
+
+    # ----- plain-text output -----
+
+    def test_accepted_prints_download_log_id_to_stdout(self):
+        rc, out, err = self._run(outcome="accepted", download_log_id=99)
+        self.assertEqual(rc, 0)
+        self.assertIn("download_log_id=99", out)
+        self.assertEqual(err, "")
+
+    def test_failure_prints_classified_outcome_to_stderr(self):
+        rc, out, err = self._run(
+            outcome="wrong_state",
+            detail="request 42 is in status 'imported'",
+        )
+        self.assertEqual(rc, 4)
+        # Stdout stays clean for failure paths so JSON-piping callers
+        # never see noise mixed in.
+        self.assertEqual(out, "")
+        self.assertIn("wrong_state", err)
+        self.assertIn("imported", err)
+
+    def test_in_flight_surfaces_existing_download_log_id_on_stderr(self):
+        rc, _, err = self._run(
+            outcome="in_flight", download_log_id=55,
+            detail="existing youtube_running row",
+        )
+        self.assertEqual(rc, 4)
+        self.assertIn("in_flight", err)
+        self.assertIn("existing download_log_id=55", err)
+
+    # ----- --json output -----
+
+    def test_json_accepted_carries_full_payload(self):
+        rc, out, _ = self._run(
+            outcome="accepted", download_log_id=99, json_out=True,
+        )
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "accepted")
+        self.assertEqual(payload["download_log_id"], 99)
+        self.assertIsNone(payload["detail"])
+
+    def test_json_failure_carries_null_download_log_id(self):
+        rc, out, _ = self._run(
+            outcome="no_resolver_mapping",
+            detail="run the resolver first",
+            json_out=True,
+        )
+        self.assertEqual(rc, 3)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "no_resolver_mapping")
+        self.assertIsNone(payload["download_log_id"])
+        self.assertEqual(payload["detail"], "run the resolver first")
+
+    # ----- argparse plumbing -----
+
+    def test_argparse_rejects_missing_browse_id(self):
+        parser_test_argv = ["youtube-rescue", "42"]
+        with patch.object(sys, "argv", ["pipeline-cli"] + parser_test_argv), \
+             redirect_stderr(io.StringIO()), \
+             redirect_stdout(io.StringIO()), \
+             self.assertRaises(SystemExit) as cm:
+            pipeline_cli.main()
+        # argparse exits with code 2 for missing required positionals.
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_argparse_rejects_missing_request_id(self):
+        parser_test_argv = ["youtube-rescue"]
+        with patch.object(sys, "argv", ["pipeline-cli"] + parser_test_argv), \
+             redirect_stderr(io.StringIO()), \
+             redirect_stdout(io.StringIO()), \
+             self.assertRaises(SystemExit) as cm:
+            pipeline_cli.main()
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

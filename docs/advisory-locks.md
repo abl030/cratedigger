@@ -60,6 +60,7 @@ namespace, second is the per-lock key.
 | Importer worker | `ADVISORY_LOCK_NAMESPACE_IMPORTER` | `0x51554555` | "QUEU" | `1` | One importer process drains the beets-mutating lane |
 | Per-request plan | `ADVISORY_LOCK_NAMESPACE_PLAN` | `0x504C414E` | "PLAN" | `request_id` | Search-plan generation / supersession serialisation |
 | Wrong-match cleanup | `ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP` | `0x574D434C` | "WMCL" | `wrong_match_cleanup_lock_key(request_id, download_log_id, source_path)` | Serialise deletion of one wrong-match source |
+| YT ingest worker | `ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST` | `0x59544942` | "YTIB" | `1` | One `cratedigger-youtube-ingest.service` instance drains the YT rescue queue (`download_log` rows where `source='youtube'` AND `outcome='youtube_running'`) |
 
 The ASCII-visible hex lets `pg_locks` rows be interpreted at a glance
 during debugging:

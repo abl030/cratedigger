@@ -234,6 +234,14 @@ function downloadFileCounts(files) {
 }
 
 function downloadingSummary(item) {
+  if (isYoutubeIngestItem(item)) {
+    const meta = item.youtube_metadata || {};
+    const parts = ['YouTube'];
+    if (meta.expected_track_count) parts.push(`${meta.expected_track_count} tracks`);
+    if (meta.browse_id) parts.push(`browse ${meta.browse_id}`);
+    if (item.created_at) parts.push(`accepted ${awstTime(item.created_at)}`);
+    return parts.join(' · ');
+  }
   const active = item.active_download_state || {};
   const importJob = item.active_import_job || null;
   const files = Array.isArray(active.files) ? active.files : [];
@@ -258,12 +266,16 @@ function downloadingSummary(item) {
 }
 
 function downloadingItemCounts(item) {
+  if (isYoutubeIngestItem(item)) {
+    return { total: 0, completed: 0, queued: 0, errored: 0 };
+  }
   const active = item.active_download_state || {};
   const files = Array.isArray(active.files) ? active.files : [];
   return downloadFileCounts(files);
 }
 
 function isWaitingForImport(item) {
+  if (isYoutubeIngestItem(item)) return false;
   const active = item.active_download_state || {};
   if (item.active_import_job || active.processing_started_at) return true;
 
@@ -275,6 +287,7 @@ function isWaitingForImport(item) {
 }
 
 function downloadingBadge(item) {
+  if (isYoutubeIngestItem(item)) return ['youtube ingest', 'badge-new'];
   const job = item.active_import_job || null;
   if (!job) return ['downloading', 'badge-downloading'];
   if (job.status === 'running') return ['importing', 'badge-force'];
@@ -282,13 +295,28 @@ function downloadingBadge(item) {
 }
 
 function downloadingBorderColor(item) {
+  if (isYoutubeIngestItem(item)) return '#7a5a00';
   const job = item.active_import_job || null;
   if (!job) return '#1a3a5a';
   return job.status === 'running' ? '#36c' : '#1a4a2a';
 }
 
+function isYoutubeIngestItem(item) {
+  return item && item.download_kind === 'youtube_ingest';
+}
+
+function normalizeYoutubeIngestItem(row) {
+  return {
+    ...row,
+    id: row.request_id,
+    download_kind: 'youtube_ingest',
+    active_download_state: null,
+    active_import_job: null,
+  };
+}
+
 function renderDownloadingHeader(activeCount, hiddenImportCount) {
-  const activeLabel = `${activeCount} active Soulseek download${activeCount === 1 ? '' : 's'}`;
+  const activeLabel = `${activeCount} active download${activeCount === 1 ? '' : 's'}`;
   if (!hiddenImportCount) return `<div class="r-date-header">${activeLabel}</div>`;
   const hiddenLabel = `${hiddenImportCount} complete/waiting for import hidden`;
   return `<div class="r-date-header">${activeLabel} · ${hiddenLabel}</div>`;
@@ -304,22 +332,28 @@ export function renderDownloadingItems(items) {
   return items.map(item => {
     const date = item.updated_at ? awstDate(item.updated_at) : awstDate(item.created_at || '');
     const [badge, badgeClass] = downloadingBadge(item);
+    const detailKey = isYoutubeIngestItem(item)
+      ? `youtube-${item.download_log_id}`
+      : String(item.id);
     // Downloading rows are pipeline_request rows — `item.id` is the
     // album_requests.id directly. Always render the inspector button.
     const spBtn = renderSearchPlanButton({ pipelineId: item.id });
+    const idText = isYoutubeIngestItem(item)
+      ? `#${item.id} · YT #${item.download_log_id}`
+      : `#${item.id}`;
     return `
-      <div class="r-item" style="border-left-color:${downloadingBorderColor(item)}" onclick="window.toggleDetail('downloading-${item.id}', ${item.id})">
+      <div class="r-item" style="border-left-color:${downloadingBorderColor(item)}" onclick="window.toggleDetail('downloading-${detailKey}', ${item.id})">
         <div class="p-top">
           <div>
             <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
             <div class="p-artist">${esc(item.artist_name)}</div>
           </div>
-          <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">#${item.id}</span></div>
+          <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${idText}</span></div>
         </div>
         <div class="p-meta"><span>${esc(downloadingSummary(item))}</span></div>
         <div class="p-meta"><span>${date}</span>${item.last_outcome ? `<span>last: ${esc(item.last_outcome)}</span>` : ''}</div>
       </div>
-      <div class="p-detail" id="downloading-${item.id}"></div>
+      <div class="p-detail" id="downloading-${detailKey}"></div>
     `;
   }).join('');
 }
@@ -363,11 +397,12 @@ async function loadDownloading() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const items = data.downloading || [];
+    const youtubeItems = (data.youtube_ingest || []).map(normalizeYoutubeIngestItem);
     const activeDownloads = items.filter(item => !isWaitingForImport(item));
     const hiddenImportCount = items.length - activeDownloads.length;
     el.innerHTML = renderRecentsSubnav()
-      + renderDownloadingHeader(activeDownloads.length, hiddenImportCount)
-      + renderDownloadingItems(activeDownloads);
+      + renderDownloadingHeader(activeDownloads.length + youtubeItems.length, hiddenImportCount)
+      + renderDownloadingItems([...youtubeItems, ...activeDownloads]);
   } catch (e) {
     el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load downloads</div>';
   }
@@ -470,6 +505,7 @@ export const __test__ = {
   recentsLogUrl,
   triageLabelText,
   renderDownloadingItems,
+  normalizeYoutubeIngestItem,
   renderImportQueueItems,
   renderRecentsCounts,
   renderRecentsDateHeader,

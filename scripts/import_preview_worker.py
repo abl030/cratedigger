@@ -35,6 +35,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
+    IMPORT_JOB_YOUTUBE,
     ImportJob,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
@@ -47,6 +48,7 @@ from lib.quality_evidence import (
     EvidenceBuildResult,
     load_candidate_evidence_for_source,
 )
+from lib.youtube_ingest_service import YoutubeImportPayload
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
@@ -183,6 +185,21 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
         if isinstance(failed_path, str) and failed_path:
             return failed_path
         return None
+    if job.job_type == IMPORT_JOB_YOUTUBE:
+        # KTD1: YT path NEVER reads ``active_download_state``. The
+        # staged path comes from ``import_jobs.payload['staged_path']``,
+        # decoded via ``msgspec.convert`` for wire-boundary safety.
+        try:
+            youtube_payload = msgspec.convert(payload, type=YoutubeImportPayload)
+        except msgspec.ValidationError:
+            logger.debug(
+                "front-gate YT payload validation failed for job %s; "
+                "falling through to measurement",
+                job.id,
+                exc_info=True,
+            )
+            return None
+        return youtube_payload.staged_path
     if job.job_type == IMPORT_JOB_AUTOMATION:
         if job.request_id is None:
             return None
@@ -325,6 +342,25 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
             "path": state.current_path,
             "force": False,
             "source_username": _first_state_username(state),
+            "download_log_id": None,
+        }
+
+    if job.job_type == IMPORT_JOB_YOUTUBE:
+        # KTD1: never read ``active_download_state``. The staged path
+        # is the authoritative source — yt-dlp already wrote files
+        # there, and we measure them in place. ``source_username`` is
+        # None because YT has no slskd peer to attribute to.
+        try:
+            youtube_payload = msgspec.convert(payload, type=YoutubeImportPayload)
+        except msgspec.ValidationError as exc:
+            raise ValueError(
+                f"YouTube import preview job has malformed payload: {exc}"
+            ) from exc
+        return {
+            "request_id": job.request_id,
+            "path": youtube_payload.staged_path,
+            "force": False,
+            "source_username": None,
             "download_log_id": None,
         }
 

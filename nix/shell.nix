@@ -25,6 +25,8 @@ pkgs.mkShell {
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
     pkgs.ffmpeg              # ffprobe for bitrate measurement in quality tests
+    pkgs.yt-dlp              # YouTube-rescue ingest worker invokes this binary;
+                             # dev-shell tests resolve it via `shutil.which("yt-dlp")`
   ];
 
   shellHook = ''

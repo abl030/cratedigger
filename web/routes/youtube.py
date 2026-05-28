@@ -22,13 +22,19 @@ import logging
 import re
 
 import msgspec
+from pydantic import BaseModel
 
 from lib.youtube_album_service import (
     OUTCOME_HTTP_STATUS,
     resolve_youtube_album,
 )
+from lib.youtube_ingest_service import (
+    OUTCOME_HTTP_STATUS as YOUTUBE_INGEST_HTTP_STATUS,
+    default_youtube_ingest_service_factory,
+)
 from web import discogs as discogs_api
 from web import mb as mb_api
+from web.routes._pydantic import parse_body
 
 
 log = logging.getLogger(__name__)
@@ -49,7 +55,10 @@ __all__ = [
     "PATTERN_DESCRIPTIONS",
     "POST_PATTERN_DESCRIPTIONS",
     "OUTCOME_HTTP_STATUS",
+    "YOUTUBE_INGEST_HTTP_STATUS",
+    "YoutubeRescueRequest",
     "get_youtube_album",
+    "post_pipeline_youtube_rescue",
 ]
 
 
@@ -241,6 +250,77 @@ def get_youtube_album(h, params: dict[str, list[str]]) -> None:
     h._json(payload, status=status)
 
 
+class YoutubeRescueRequest(BaseModel):
+    """HTTP body for ``POST /api/pipeline/<id>/youtube-rescue``.
+
+    The ``request_id`` is taken from the URL path, NOT the body — only
+    the ``browse_id`` (the YouTube Music album browseId, the same value
+    the resolver returns in its ``yt_browse_id`` column) is body-side.
+    """
+
+    browse_id: str
+
+
+def post_pipeline_youtube_rescue(h, body: dict, req_id_str: str) -> None:
+    """``POST /api/pipeline/<id>/youtube-rescue``.
+
+    Submit a YouTube-Music rescue ingest for one album request.
+    Counterpart of ``pipeline-cli youtube-rescue`` (U4). Both surfaces
+    wrap ``YoutubeIngestService.submit`` — keep them in sync (see
+    ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"). The outcome → HTTP
+    status mapping is imported directly from
+    ``lib.youtube_ingest_service.OUTCOME_HTTP_STATUS`` (aliased as
+    ``YOUTUBE_INGEST_HTTP_STATUS`` to disambiguate from the resolver's
+    ``OUTCOME_HTTP_STATUS``) so the CLI, HTTP route, and service share
+    one source of truth.
+
+    Body: ``{"browse_id": "<MPREb_...>"}``.
+
+    Status mapping (from ``YOUTUBE_INGEST_HTTP_STATUS``):
+      * 200 — ``accepted``
+      * 400 — body validation failure (missing ``browse_id`` etc.) or
+        invalid URL ``request_id``
+      * 404 — ``request_not_found``
+      * 409 — ``wrong_state`` (request is not ``wanted`` / ``manual``),
+              ``in_flight`` (an existing ``youtube_running`` row already
+              owns this request — re-issue once it's terminal)
+      * 422 — ``no_resolver_mapping`` (run the YouTube album resolver
+              first), ``track_count_precheck_failed`` (resolver cache
+              vs. MB mirror disagree — refresh first)
+      * 503 — ``transient`` (DB / MB-mirror hiccup; retry)
+
+    The response payload always carries the typed
+    ``{"download_log_id", "outcome", "detail"}`` shape so frontend
+    consumers can render every outcome uniformly. ``download_log_id``
+    is populated on ``accepted`` (the new row's id) and on
+    ``in_flight`` (the existing in-flight row's id, so callers can
+    render "you already have a rescue running, check id=N").
+    """
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    req = parse_body(h, body or {}, YoutubeRescueRequest)
+    if req is None:
+        return
+
+    s = _server()
+    svc = default_youtube_ingest_service_factory(s._db())
+    result = svc.submit(request_id, req.browse_id)
+
+    payload = msgspec.to_builtins(result)
+    status = YOUTUBE_INGEST_HTTP_STATUS.get(result.outcome, 500)
+    if result.outcome != "accepted":
+        # Mirror the search-plan-advance convention: non-2xx responses
+        # carry both the structured ``detail`` field and the legacy
+        # top-level ``error`` field for older frontend toasts that
+        # grep the ``error`` string.
+        payload["error"] = result.detail or result.outcome
+    h._json(payload, status=status)
+
+
 # ── Route tables ─────────────────────────────────────────────────────
 
 GET_ROUTES: dict[str, object] = {
@@ -251,7 +331,10 @@ POST_ROUTES: dict[str, object] = {}
 
 GET_PATTERNS: list[tuple[re.Pattern[str], object]] = []
 
-POST_PATTERNS: list[tuple[re.Pattern[str], object]] = []
+POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
+    (re.compile(r"^/api/pipeline/(\d+)/youtube-rescue$"),
+     post_pipeline_youtube_rescue),
+]
 
 GET_DESCRIPTIONS: dict[str, str] = {
     "/api/youtube-album": (
@@ -267,9 +350,16 @@ GET_DESCRIPTIONS: dict[str, str] = {
 
 POST_DESCRIPTIONS: dict[str, str] = {}
 
-# POST routes register no pattern-based handlers, but server.py merges
-# this list into ``_FUNC_POST_PATTERN_DESCRIPTIONS`` so the description
-# table stays symmetric with the dispatch table (finding #21).
-POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
+# server.py merges this list into ``_FUNC_POST_PATTERN_DESCRIPTIONS``
+# so the description table stays symmetric with the dispatch table
+# (finding #21).
+POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^/api/pipeline/(\d+)/youtube-rescue$"),
+     "Submit a YouTube-Music rescue ingest for one album request. "
+     "Counterpart of ``pipeline-cli youtube-rescue``; both surfaces "
+     "wrap ``YoutubeIngestService.submit``. Body: {\"browse_id\": "
+     "\"<MPREb_...>\"}. Returns the new (or existing in-flight) "
+     "``download_log_id`` plus a structured outcome."),
+]
 
 PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []

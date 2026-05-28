@@ -73,6 +73,8 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     request_min_bitrate: int | None
     search_filetype_override: str | None
     source: str | None
+    request_source: str | None = None
+    youtube_metadata: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return cast(dict[str, object], msgspec.to_builtins(self))

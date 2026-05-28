@@ -2780,5 +2780,384 @@ class TestYoutubeAlbumMappingsAlbumTitleSchema(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+@requires_postgres
+class TestDownloadLogYoutubeSourceSchema(unittest.TestCase):
+    """Migration 037 extends ``download_log`` for the YT rescue ingest API
+    (U1 of ``docs/plans/2026-05-28-001-feat-youtube-rescue-ingest-api-plan.md``):
+
+    - ``source`` discriminator column (DEFAULT ``'slskd'`` backfills every
+      pre-037 row in one ALTER; CHECK admits ``'slskd'`` and ``'youtube'``)
+    - ``youtube_metadata`` nullable JSONB
+    - widened ``download_log_outcome_check`` admitting the three YT outcomes
+      (``youtube_running``, ``youtube_success``, ``youtube_failed``)
+    - partial unique index ``one_youtube_running_per_request`` enforcing
+      R4 idempotency at the DB layer
+    - widened ``import_jobs.job_type`` admitting ``youtube_import`` for the
+      worker-to-importer handoff
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def test_records_applied_version_037(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 37"
+        )
+        self.assertEqual(len(rows), 1)
+
+    def test_source_column_present_with_slskd_default(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'download_log'
+              AND column_name = 'source'
+        """)
+        self.assertEqual(len(rows), 1)
+        _, is_nullable, data_type, column_default = rows[0]
+        self.assertEqual(is_nullable, "NO")
+        self.assertEqual(data_type, "text")
+        # Default literal renders as 'slskd'::text in PG's reflection.
+        self.assertIn("'slskd'", column_default or "")
+
+    def test_youtube_metadata_column_present_nullable_jsonb(self):
+        rows = self._query("""
+            SELECT column_name, is_nullable, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'download_log'
+              AND column_name = 'youtube_metadata'
+        """)
+        self.assertEqual(len(rows), 1)
+        _, is_nullable, data_type = rows[0]
+        self.assertEqual(is_nullable, "YES")
+        self.assertEqual(data_type, "jsonb")
+
+    def test_default_backfills_existing_rows_to_slskd(self):
+        """A row inserted without specifying ``source`` lands as
+        ``source='slskd'`` and ``youtube_metadata IS NULL`` — proves the
+        single-statement DEFAULT-based backfill is what pre-037 rows would
+        have picked up at migration time.
+
+        We can't directly inspect what the migrator did to pre-existing rows
+        in the ephemeral DB (conftest applies migrations once at session
+        start against an empty schema), but the column's runtime DEFAULT is
+        the same mechanism that backfilled them, so a fresh insert that omits
+        the column proves the contract.
+        """
+        rid = self._make_request("mig037-default-mbid")
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, outcome)
+                VALUES (%s, 'success')
+            """, (rid,))
+            rows = self._query("""
+                SELECT source, youtube_metadata
+                FROM download_log WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(len(rows), 1)
+            source, youtube_metadata = rows[0]
+            self.assertEqual(source, "slskd")
+            self.assertIsNone(youtube_metadata)
+        finally:
+            # CASCADE on album_requests.id cleans the download_log row too.
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_source_check_rejects_unknown_value(self):
+        rid = self._make_request("mig037-bad-source-mbid")
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO download_log (request_id, source, outcome)
+                    VALUES (%s, 'spotify', 'success')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_source_check_admits_youtube(self):
+        # The CHECK admits both legitimate sources — explicit positive case
+        # for the new 'youtube' branch sits alongside the existing 'slskd'
+        # default-path coverage above.
+        rid = self._make_request("mig037-youtube-source-mbid")
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, source, outcome,
+                                          youtube_metadata)
+                VALUES (%s, 'youtube', 'youtube_success',
+                        '{"yt_url": "https://music.example/"}'::jsonb)
+            """, (rid,))
+            rows = self._query("""
+                SELECT source, outcome, youtube_metadata->>'yt_url'
+                FROM download_log WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(rows, [("youtube", "youtube_success",
+                                     "https://music.example/")])
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_outcome_check_admits_youtube_outcomes(self):
+        rid = self._make_request("mig037-youtube-outcomes-mbid")
+        try:
+            for outcome in ("youtube_running", "youtube_success",
+                            "youtube_failed"):
+                with self.subTest(outcome=outcome):
+                    self._exec("""
+                        INSERT INTO download_log (request_id, source, outcome)
+                        VALUES (%s, 'youtube', %s)
+                    """, (rid, outcome))
+            # Pre-existing outcomes still admitted — sanity check that the
+            # widened CHECK didn't drop the prior vocabulary.
+            for outcome in ("success", "rejected", "failed", "timeout",
+                            "force_import", "manual_import", "curator_ban",
+                            "measurement_failed"):
+                with self.subTest(outcome=outcome):
+                    self._exec("""
+                        INSERT INTO download_log (request_id, source, outcome)
+                        VALUES (%s, 'slskd', %s)
+                    """, (rid, outcome))
+            # Bogus outcome still rejected.
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO download_log (request_id, source, outcome)
+                    VALUES (%s, 'youtube', 'youtube_definitely_not_real')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_partial_unique_index_rejects_second_youtube_running(self):
+        """At most one ``youtube_running`` row per request_id while the
+        first is in flight (R4 enforced at the DB layer)."""
+        rid = self._make_request("mig037-inflight-mbid")
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, source, outcome)
+                VALUES (%s, 'youtube', 'youtube_running')
+            """, (rid,))
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO download_log (request_id, source, outcome)
+                    VALUES (%s, 'youtube', 'youtube_running')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_partial_unique_index_allows_resubmit_after_terminal(self):
+        """Once the in-flight row transitions to a terminal outcome
+        (``youtube_success`` / ``youtube_failed``) the partial index admits
+        the next submission. Both terminal directions are exercised."""
+        for terminal in ("youtube_success", "youtube_failed"):
+            with self.subTest(terminal=terminal):
+                rid = self._make_request(f"mig037-resubmit-{terminal}-mbid")
+                try:
+                    self._exec("""
+                        INSERT INTO download_log (request_id, source, outcome)
+                        VALUES (%s, 'youtube', 'youtube_running')
+                    """, (rid,))
+                    self._exec("""
+                        UPDATE download_log
+                        SET outcome = %s
+                        WHERE request_id = %s
+                          AND source = 'youtube'
+                          AND outcome = 'youtube_running'
+                    """, (terminal, rid))
+                    # Now a fresh youtube_running insert is permitted.
+                    self._exec("""
+                        INSERT INTO download_log (request_id, source, outcome)
+                        VALUES (%s, 'youtube', 'youtube_running')
+                    """, (rid,))
+                    rows = self._query("""
+                        SELECT outcome FROM download_log
+                        WHERE request_id = %s AND source = 'youtube'
+                        ORDER BY id ASC
+                    """, (rid,))
+                    self.assertEqual(
+                        [r[0] for r in rows],
+                        [terminal, "youtube_running"],
+                    )
+                finally:
+                    self._exec("DELETE FROM album_requests WHERE id = %s",
+                               (rid,))
+
+    def test_partial_unique_index_does_not_block_slskd_rows(self):
+        """A slskd row sharing request_id must NOT be blocked by the YT
+        partial unique index — the WHERE clause scopes it to
+        ``source='youtube' AND outcome='youtube_running'`` only."""
+        rid = self._make_request("mig037-slskd-coexist-mbid")
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, source, outcome)
+                VALUES (%s, 'youtube', 'youtube_running')
+            """, (rid,))
+            # Multiple slskd rows for the same request — none touched by the
+            # partial index. This is the dominant historical shape.
+            for _ in range(3):
+                self._exec("""
+                    INSERT INTO download_log (request_id, source, outcome)
+                    VALUES (%s, 'slskd', 'failed')
+                """, (rid,))
+            counts = self._query("""
+                SELECT source, COUNT(*) FROM download_log
+                WHERE request_id = %s
+                GROUP BY source
+                ORDER BY source
+            """, (rid,))
+            self.assertEqual(counts, [("slskd", 3), ("youtube", 1)])
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_one_youtube_running_per_request_index_exists(self):
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'download_log'
+              AND indexname = 'one_youtube_running_per_request'
+        """)
+        self.assertEqual(len(rows), 1,
+                         msg="one_youtube_running_per_request must exist on "
+                             "download_log (created by 037)")
+
+    def test_import_jobs_job_type_check_admits_youtube_import(self):
+        rid = self._make_request("mig037-youtube-import-job-mbid")
+        dedupe_key = "youtube-import:mig037"
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'youtube_import', %s, %s,
+                    '{"staged_path": "/tmp/yt", "request_id": 1,
+                      "browse_id": "MPREb_mig037"}'::jsonb
+                )
+            """, (rid, dedupe_key))
+            rows = self._query("""
+                SELECT job_type, payload->>'browse_id'
+                FROM import_jobs
+                WHERE dedupe_key = %s
+            """, (dedupe_key,))
+            self.assertEqual(rows, [("youtube_import", "MPREb_mig037")])
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE dedupe_key = %s",
+                       (dedupe_key,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
+@requires_postgres
+class TestActiveYoutubeImportRequestSchema(unittest.TestCase):
+    """Migration 038 keeps active ``youtube_import`` handoffs request-scoped."""
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def test_records_applied_version_038(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 38"
+        )
+        self.assertEqual(len(rows), 1)
+
+    def test_one_active_youtube_import_per_request_index_exists(self):
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'import_jobs'
+              AND indexname = 'one_active_youtube_import_per_request'
+        """)
+        self.assertEqual(len(rows), 1)
+
+    def test_active_youtube_import_unique_by_request(self):
+        rid = self._make_request("mig038-youtube-import-active-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'youtube_import', %s, 'youtube_import:download_log:1',
+                    '{"staged_path": "/tmp/yt-a", "request_id": 1,
+                      "browse_id": "MPREb_a", "download_log_id": 1}'::jsonb
+                )
+            """, (rid,))
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, request_id, dedupe_key, payload
+                    ) VALUES (
+                        'youtube_import', %s, 'youtube_import:download_log:2',
+                        '{"staged_path": "/tmp/yt-b", "request_id": 1,
+                          "browse_id": "MPREb_b", "download_log_id": 2}'::jsonb
+                    )
+                """, (rid,))
+            self._exec("""
+                UPDATE import_jobs
+                SET status = 'completed'
+                WHERE request_id = %s
+                  AND job_type = 'youtube_import'
+            """, (rid,))
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'youtube_import', %s, 'youtube_import:download_log:3',
+                    '{"staged_path": "/tmp/yt-c", "request_id": 1,
+                      "browse_id": "MPREb_c", "download_log_id": 3}'::jsonb
+                )
+            """, (rid,))
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE request_id = %s", (rid,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
 if __name__ == "__main__":
     unittest.main()

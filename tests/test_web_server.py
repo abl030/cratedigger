@@ -216,7 +216,8 @@ def _make_server():
             "mb_release_id": "abc-123", "year": 2024,
             "country": "US", "request_status": "imported",
             "request_min_bitrate": 320, "prev_min_bitrate": None,
-            "search_filetype_override": None, "source": "request",
+            "search_filetype_override": None, "source": "slskd",
+            "request_source": "request",
         },
     ]
     mock_db._execute.return_value = MagicMock(fetchone=MagicMock(return_value={
@@ -245,6 +246,8 @@ def _make_server():
             "staged_path": None, "download_path": None,
             "sample_rate": None, "bit_depth": None, "is_vbr": None,
             "import_result": None, "validation_result": None,
+            "source": "slskd", "request_source": "request",
+            "youtube_metadata": None,
         },
     ]
 
@@ -764,6 +767,46 @@ class TestServerEndpoints(unittest.TestCase):
         self.mock_db.count_by_status.return_value = {
             "wanted": 0, "imported": 1, "manual": 0}
 
+    def test_pipeline_downloading_includes_active_youtube_ingest(self):
+        self.mock_db.get_by_status.side_effect = None
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.count_by_status.return_value = {"downloading": 0}
+        self.mock_db.get_download_history_batch.return_value = {}
+        self.mock_db.list_active_youtube_rescues.return_value = [{
+            "download_log_id": 301,
+            "request_id": 202,
+            "source": "youtube",
+            "outcome": "youtube_running",
+            "youtube_metadata": {
+                "browse_id": "yt-browse",
+                "expected_track_count": 2,
+                "yt_url": "https://music.youtube.com/playlist?list=abc",
+            },
+            "created_at": datetime(2026, 5, 28, tzinfo=timezone.utc),
+            "artist_name": "YT Artist",
+            "album_title": "YT Album",
+            "mb_release_id": "yt-mbid",
+            "request_status": "wanted",
+        }]
+
+        status, data = self._get("/api/pipeline/downloading")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["downloading"], [])
+        self.assertEqual(len(data["youtube_ingest"]), 1)
+        rescue = data["youtube_ingest"][0]
+        self.assertEqual(rescue["download_log_id"], 301)
+        self.assertEqual(rescue["album_title"], "YT Album")
+        self.assertEqual(rescue["youtube_metadata"]["browse_id"], "yt-browse")
+        self.assertTrue(rescue["created_at"].startswith("2026-05-28T00:00:00"))
+        self.mock_db.list_active_youtube_rescues.assert_called_with(limit=50)
+
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.list_active_youtube_rescues.return_value = []
+        self.mock_db.get_download_history_batch.reset_mock()
+        self.mock_db.count_by_status.return_value = {
+            "wanted": 0, "imported": 1, "manual": 0}
+
     def test_pipeline_detail(self):
         status, data = self._get("/api/pipeline/100")
         self.assertEqual(status, 200)
@@ -1096,6 +1139,12 @@ class TestRouteContractAudit(unittest.TestCase):
         # CLI ⇄ API symmetry. Outcome → HTTP status from
         # ``OUTCOME_HTTP_STATUS`` (single source of truth).
         "/api/youtube-album",
+        # U5: YouTube rescue ingest submit. Wraps
+        # ``lib.youtube_ingest_service.YoutubeIngestService.submit`` —
+        # same service as ``pipeline-cli youtube-rescue`` (U4) per
+        # CLI ⇄ API symmetry. Outcome → HTTP status from
+        # ``OUTCOME_HTTP_STATUS`` on the ingest service.
+        r"^/api/pipeline/(\d+)/youtube-rescue$",
     }
 
     def test_all_web_routes_are_classified_for_contract_coverage(self):
@@ -10420,6 +10469,193 @@ class TestYoutubeRouteContracts(_WebServerCase):
             msg="route must close the session even when the resolver "
                 "raises mid-request (round 2 P2-2)",
         )
+
+
+class TestPipelineYoutubeRescueContract(_WebServerCase):
+    """U5 contract for ``POST /api/pipeline/<id>/youtube-rescue``.
+
+    The endpoint wraps ``YoutubeIngestService.submit``. Both the CLI
+    (``pipeline-cli youtube-rescue``, U4) and the API live or die on
+    the same service contract — see ``CLAUDE.md`` § "CLI ⇄ API surface
+    symmetry". Status-code mapping is imported from
+    ``lib.youtube_ingest_service.OUTCOME_HTTP_STATUS`` (single source
+    of truth shared with the CLI's ``OUTCOME_EXIT_CODE``).
+    """
+
+    REQUIRED_FIELDS = {"download_log_id", "outcome", "detail"}
+
+    def _patch_service(self, **result_kwargs):
+        """Patch ``YoutubeIngestService.submit`` to return a canned
+        :class:`SubmitResult`.
+
+        Production-shape fidelity: ``SubmitResult`` is the real
+        ``msgspec.Struct`` returned by the service; we construct it
+        with the exact field types the service does so JSON encoding
+        through ``msgspec.to_builtins`` round-trips faithfully.
+        """
+        from unittest.mock import patch as _patch
+        from lib.youtube_ingest_service import SubmitResult
+        return _patch(
+            "lib.youtube_ingest_service.YoutubeIngestService.submit",
+            return_value=SubmitResult(**result_kwargs),
+        )
+
+    # ----- happy path -----
+
+    def test_accepted_returns_200_with_required_fields(self):
+        with self._patch_service(
+                outcome="accepted", download_log_id=42, detail=None):
+            status, data = self._post(
+                "/api/pipeline/100/youtube-rescue",
+                {"browse_id": "MPREb_abc"})
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS,
+                                "youtube-rescue accepted response")
+        self.assertEqual(data["outcome"], "accepted")
+        self.assertEqual(data["download_log_id"], 42)
+        # 200 responses do NOT carry a top-level ``error`` field.
+        self.assertNotIn("error", data)
+
+    # ----- outcome → HTTP status subTest table -----
+
+    def test_status_codes_match_service_table_for_every_outcome(self):
+        """Every ``SubmitOutcome`` maps to its ``OUTCOME_HTTP_STATUS``
+        entry — single-source-of-truth contract.
+
+        Mirrors the CLI's ``test_exit_codes_match_service_table_for_every_outcome``
+        so the two surfaces stay in lockstep.
+        """
+        from lib.youtube_ingest_service import OUTCOME_HTTP_STATUS as TABLE
+        cases = [
+            ("accepted",                    200),
+            ("request_not_found",           404),
+            ("wrong_state",                 409),
+            ("in_flight",                   409),
+            ("no_resolver_mapping",         422),
+            ("track_count_precheck_failed", 422),
+            ("transient",                   503),
+        ]
+        # The table itself must match the literal coverage above —
+        # forces future contributors to keep the subTest table and
+        # the service map aligned.
+        self.assertEqual(set(o for o, _ in cases), set(TABLE),
+                         "subTest cases drifted from OUTCOME_HTTP_STATUS")
+        for outcome, expected_status in cases:
+            with self.subTest(outcome=outcome):
+                # ``accepted`` / ``in_flight`` carry a populated
+                # ``download_log_id``; the rest leave it None.
+                dl_id = 7 if outcome in ("accepted", "in_flight") else None
+                with self._patch_service(
+                        outcome=outcome,
+                        download_log_id=dl_id,
+                        detail=f"detail for {outcome}"):
+                    status, data = self._post(
+                        "/api/pipeline/100/youtube-rescue",
+                        {"browse_id": "MPREb_abc"})
+                self.assertEqual(status, expected_status)
+                self.assertEqual(status, TABLE[outcome])
+                _assert_required_fields(
+                    self, data, self.REQUIRED_FIELDS,
+                    f"{outcome} response shape")
+                self.assertEqual(data["outcome"], outcome)
+                if outcome != "accepted":
+                    # Non-2xx responses carry the legacy ``error`` field
+                    # for older frontend toasts that grep on it.
+                    self.assertIn("error", data)
+                    # ``detail`` is also surfaced verbatim in ``detail``.
+                    self.assertIsNotNone(data["detail"])
+
+    # ----- in_flight surfaces existing id (Covers AE3 from API side) -----
+
+    def test_in_flight_returns_existing_download_log_id(self):
+        with self._patch_service(
+                outcome="in_flight",
+                download_log_id=99,
+                detail="existing download_log_id=99 is in youtube_running "
+                "state for request 100"):
+            status, data = self._post(
+                "/api/pipeline/100/youtube-rescue",
+                {"browse_id": "MPREb_abc"})
+        self.assertEqual(status, 409)
+        self.assertEqual(data["outcome"], "in_flight")
+        self.assertEqual(data["download_log_id"], 99)
+        self.assertIn("99", data["error"])
+
+    # ----- body validation (parse_body / Pydantic) -----
+
+    def test_missing_browse_id_returns_400(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.youtube_ingest_service.YoutubeIngestService.submit",
+        ) as mock_submit:
+            status, data = self._post(
+                "/api/pipeline/100/youtube-rescue", {})
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertIn("browse_id", data["error"])
+        # Service must NOT have been called — parse_body short-circuited.
+        mock_submit.assert_not_called()
+
+    def test_non_string_browse_id_returns_400(self):
+        from unittest.mock import patch as _patch
+        with _patch(
+            "lib.youtube_ingest_service.YoutubeIngestService.submit",
+        ) as mock_submit:
+            status, data = self._post(
+                "/api/pipeline/100/youtube-rescue",
+                {"browse_id": 12345})
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_submit.assert_not_called()
+
+    def test_non_object_body_returns_400(self):
+        """``parse_body`` rejects non-object JSON bodies (string / list /
+        number) with 400 — same shape as ``test_advance_rejects_non_int_ordinal``.
+        The route's body parser is the single adapter, not inline."""
+        from unittest.mock import patch as _patch
+        raw_body = b'"hello"'  # valid JSON but not an object
+        req = Request(
+            f"{self.base}/api/pipeline/100/youtube-rescue",
+            data=raw_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _patch(
+            "lib.youtube_ingest_service.YoutubeIngestService.submit",
+        ) as mock_submit:
+            try:
+                resp = urlopen(req, timeout=5)
+                status = resp.status
+                data = json.loads(resp.read())
+            except HTTPError as e:
+                status = e.code
+                data = json.loads(e.read())
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        mock_submit.assert_not_called()
+
+    # ----- URL path validation -----
+
+    def test_passes_url_request_id_and_body_browse_id_to_service(self):
+        """The service must receive (request_id from URL, browse_id from
+        body). Regression guard against a future refactor that picks
+        ``request_id`` off the body."""
+        from unittest.mock import patch as _patch
+        from lib.youtube_ingest_service import SubmitResult
+        with _patch(
+            "lib.youtube_ingest_service.YoutubeIngestService.submit",
+            return_value=SubmitResult(
+                outcome="accepted", download_log_id=1, detail=None),
+        ) as mock_submit:
+            status, _ = self._post(
+                "/api/pipeline/12345/youtube-rescue",
+                {"browse_id": "MPREb_xyz"})
+        self.assertEqual(status, 200)
+        mock_submit.assert_called_once()
+        # ``submit(request_id, browse_id)`` — positional args.
+        args = mock_submit.call_args.args
+        self.assertEqual(args[0], 12345)
+        self.assertEqual(args[1], "MPREb_xyz")
 
 
 if __name__ == "__main__":

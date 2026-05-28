@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from typing import Any, cast
 
 from lib.grab_list import DownloadFile
 from lib.import_dispatch import (
@@ -123,7 +124,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             )
 
             outcome = dispatch_import_from_db(
-                db,
+                cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=True,
@@ -160,7 +161,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             )
 
             outcome = dispatch_import_from_db(
-                db,
+                cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=True,
@@ -190,7 +191,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             open(os.path.join(root, "bonus.mp3"), "wb").close()
 
             outcome = dispatch_import_from_db(
-                db,
+                cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=False,
@@ -213,7 +214,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             open(os.path.join(root, "01.mp3"), "wb").close()
 
             outcome = dispatch_import_from_db(
-                db,
+                cast(Any, db),
                 request_id=42,
                 failed_path=root,
                 force=False,

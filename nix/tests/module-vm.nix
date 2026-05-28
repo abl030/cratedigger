@@ -66,6 +66,12 @@ pkgs.testers.nixosTest {
         enable = true;
         beetsDb = "/etc/cratedigger/beets.db";
       };
+      # Enable the YouTube-rescue ingest worker so its unit is rendered.
+      # We only assert structural properties (dependencies, PATH, lock
+      # contention) — the worker process itself starts but stays idle
+      # because no download_log source='youtube' outcome='youtube_running'
+      # rows exist in the test DB.
+      youtubeIngest.enable = true;
       timer.enable = false;
       healthCheck.enable = false;
     };
@@ -79,6 +85,8 @@ pkgs.testers.nixosTest {
     systemd.services.cratedigger.wants = [ "postgresql.service" ];
     systemd.services.cratedigger-web.after = [ "postgresql.service" ];
     systemd.services.cratedigger-web.wants = [ "postgresql.service" ];
+    systemd.services.cratedigger-youtube-ingest.after = [ "postgresql.service" ];
+    systemd.services.cratedigger-youtube-ingest.wants = [ "postgresql.service" ];
 
     # Speed up the VM
     virtualisation.memorySize = 2048;
@@ -148,5 +156,37 @@ pkgs.testers.nixosTest {
     # wired into timers.target.
     enabled = machine.succeed("systemctl is-enabled cratedigger-unfindable.timer").strip()
     assert enabled == "enabled", f"unfindable timer not enabled: {enabled}"
+
+    # U7: cratedigger-youtube-ingest.service. The worker is long-lived
+    # (Type=simple); we verify it comes up active, idle (no pending
+    # jobs in the test DB), and that the structural contracts hold:
+    #
+    #   - migrate-dependency ordering (Requires + After)
+    #   - the wrapper exports `yt-dlp` onto the worker's PATH (worker-
+    #     specific, NOT on the shared runtime path)
+    #   - the per-process temp dir is created by systemd-tmpfiles
+    #   - second-instance start exits 0 fast (advisory-lock contention)
+    machine.wait_for_unit("cratedigger-youtube-ingest.service")
+    state = machine.succeed("systemctl is-active cratedigger-youtube-ingest.service").strip()
+    assert state == "active", f"youtube-ingest unit not active: {state}"
+
+    machine.succeed("systemctl show -p After cratedigger-youtube-ingest.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Requires cratedigger-youtube-ingest.service | grep -q cratedigger-db-migrate.service")
+
+    # The wrapper exports yt-dlp's bin onto PATH for the worker process.
+    # The wrapper binary itself is on systemPackages PATH; grep its body
+    # for the yt-dlp path-prepend so we know the worker process's PATH
+    # will resolve the binary.
+    machine.succeed("grep -q 'yt-dlp.*bin' $(command -v cratedigger-youtube-ingest)")
+
+    # The drainer's per-process temp dir was created by systemd-tmpfiles
+    # with the same ownership as the cratedigger user.
+    machine.succeed("test -d /var/lib/cratedigger/youtube-ingest-temp")
+
+    # Advisory-lock contention: starting a second instance manually
+    # must exit 0 (clean — duplicate-start is expected, not a crash)
+    # and not respawn. The systemd unit holds the lock; this invocation
+    # fails to acquire and returns 0 immediately.
+    machine.succeed("cratedigger-youtube-ingest --once")
   '';
 }

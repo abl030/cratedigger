@@ -30,6 +30,7 @@ import psycopg2.extras
 import msgspec
 
 from lib.import_queue import (
+    IMPORT_JOB_YOUTUBE,
     ImportJob,
     IMPORT_JOB_PREVIEW_WAITING,
     validate_preview_failure_status,
@@ -147,6 +148,16 @@ ADVISORY_LOCK_NAMESPACE_PLAN = 0x504C414E
 # ``wrong_match_cleanup_lock_key(request_id, download_log_id, source_path)``.
 # ``0x574D434C`` = ASCII "WMCL", recognisable in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP = 0x574D434C
+
+# Singleton YouTube-ingest worker lock. The DB-side partial unique index
+# on ``download_log`` (``one_youtube_running_per_request``) serializes
+# per-request submissions, but a second worker process running
+# concurrently could race on draining the queue. The worker takes this
+# process-wide lock at startup before sweeping orphans or claiming the
+# next ``youtube_running`` row.
+# ``0x59544942`` = ASCII "YTIB" (YouTube InBound), recognisable in
+# ``pg_locks``.
+ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST = 0x59544942
 
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
@@ -929,6 +940,26 @@ class SupersedeRaceError(Exception):
     session already superseded the row between our row-lock acquisition
     and the UPDATE. Caller maps this to a transient retry outcome.
     """
+
+
+class YoutubeInFlightError(Exception):
+    """Raised by ``PipelineDB.insert_youtube_running`` when the partial
+    unique index ``one_youtube_running_per_request`` (migration 037)
+    rejects the insert because a prior ``youtube_running`` row already
+    exists for the same ``request_id``.
+
+    The caller (``YoutubeIngestService.submit``) maps this to the
+    ``in_flight`` outcome and returns the existing ``download_log_id`` in
+    ``SubmitResult.detail`` so the operator can observe the in-flight
+    submission they collided with.
+    """
+
+    def __init__(self, request_id: int, existing_download_log_id: int | None) -> None:
+        super().__init__(
+            f"YouTube rescue already in flight for request_id={request_id}"
+        )
+        self.request_id = request_id
+        self.existing_download_log_id = existing_download_log_id
 
 
 class PipelineDB:
@@ -3208,7 +3239,8 @@ class PipelineDB:
                    ar.album_title, ar.artist_name, ar.mb_release_id,
                    ar.year, ar.country, ar.status AS request_status,
                    ar.min_bitrate AS request_min_bitrate,
-                   ar.prev_min_bitrate, ar.search_filetype_override, ar.source
+                   ar.prev_min_bitrate, ar.search_filetype_override,
+                   ar.source AS request_source
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
         """
@@ -3519,6 +3551,369 @@ class PipelineDB:
         finally:
             self.conn.autocommit = old_autocommit
 
+    # --- YouTube rescue ingest (download_log doubles as queue + audit) ---
+    #
+    # The four methods below operate on ``download_log`` rows with
+    # ``source='youtube'`` (migration 037). Together they implement the
+    # queue contract the YT ingest worker drains:
+    #
+    #   * ``insert_youtube_running`` — submission-time INSERT. The partial
+    #     unique index ``one_youtube_running_per_request`` (migration 037)
+    #     enforces R4 idempotency at the DB layer; we catch the
+    #     ``UniqueViolation`` and re-raise as ``YoutubeInFlightError`` so
+    #     the service layer can map it to the ``in_flight`` outcome.
+    #
+    #   * ``update_youtube_terminal`` — worker-side terminal-state UPDATE.
+    #     ``youtube_metadata`` uses the PG ``||`` JSONB merge operator so
+    #     the worker can layer reason / stderr_excerpt / observed counts
+    #     on top of the submission-time blob without re-reading it.
+    #
+    #   * ``find_next_youtube_pending`` — read-only unclaimed queue query.
+    #     FIFO by ``created_at`` per R16.
+    #
+    #   * ``claim_next_youtube_pending`` — worker-side claim transition. It
+    #     adds ``worker_claimed_at`` / ``worker_id`` to ``youtube_metadata``
+    #     before the worker starts yt-dlp, which lets startup recovery
+    #     distinguish accepted-but-unclaimed rows from a prior worker's
+    #     abandoned in-flight work.
+    #
+    #   * ``find_orphan_youtube_running`` — startup orphan sweep (R22).
+    #     At worker startup only claimed rows are orphans (the previous
+    #     worker process crashed mid-job); accepted-but-unclaimed rows
+    #     remain queued. The worker transitions each orphan id via
+    #     ``update_youtube_terminal(id, 'youtube_failed', {reason:
+    #     'worker_interrupted', ...})``.
+
+    _YOUTUBE_TERMINAL_OUTCOMES: frozenset[str] = frozenset({
+        "youtube_success", "youtube_failed",
+    })
+
+    def insert_youtube_running(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+        audio_playlist_id: str | None,
+        yt_url: str,
+        expected_track_count: int,
+        resolver_mapping_id: int | None = None,
+        per_track_video_ids: list[str] | None = None,
+    ) -> int:
+        """Insert a ``download_log`` row for a YT rescue submission.
+
+        Returns the new row's id. Raises ``YoutubeInFlightError`` if the
+        partial unique index ``one_youtube_running_per_request`` (migration
+        037) rejects the insert because a prior ``youtube_running`` row
+        already exists for the same ``request_id`` — the caller maps this
+        to the ``in_flight`` outcome.
+
+        ``youtube_metadata`` is the submission-time blob: the worker layers
+        terminal-state fields (reason, stderr_excerpt, observed counts) on
+        top via ``update_youtube_terminal``.
+        """
+        metadata: dict[str, Any] = {
+            "yt_url": yt_url,
+            "browse_id": browse_id,
+            "audio_playlist_id": audio_playlist_id,
+            "expected_track_count": int(expected_track_count),
+        }
+        if resolver_mapping_id is not None:
+            metadata["resolver_mapping_id"] = int(resolver_mapping_id)
+        if per_track_video_ids is not None:
+            metadata["per_track_video_ids"] = [
+                str(video_id) for video_id in per_track_video_ids
+            ]
+        try:
+            cur = self._execute(
+                """
+                INSERT INTO download_log (
+                    request_id, source, outcome, youtube_metadata
+                ) VALUES (%s, 'youtube', 'youtube_running', %s)
+                RETURNING id
+                """,
+                (request_id, psycopg2.extras.Json(metadata)),
+            )
+        except psycopg2.errors.UniqueViolation as exc:
+            # Look up the in-flight row so the caller can surface the
+            # existing id in the outcome's ``detail`` field.
+            existing_id: int | None = None
+            try:
+                lookup = self._execute(
+                    """
+                    SELECT id FROM download_log
+                    WHERE request_id = %s
+                      AND source = 'youtube'
+                      AND outcome = 'youtube_running'
+                    LIMIT 1
+                    """,
+                    (request_id,),
+                )
+                row = lookup.fetchone()
+                if row is not None:
+                    existing_id = int(row["id"])
+            except Exception:
+                pass
+            raise YoutubeInFlightError(request_id, existing_id) from exc
+        row = cur.fetchone()
+        assert row is not None, "INSERT RETURNING should always return a row"
+        return int(row["id"])
+
+    def enqueue_youtube_import_and_mark_success(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        message: str,
+        terminal_metadata: dict[str, Any],
+    ) -> ImportJob:
+        """Atomically hand staged YT audio to importer and mark audit success."""
+        validate_job_type(IMPORT_JOB_YOUTUBE)
+        payload = validate_payload(IMPORT_JOB_YOUTUBE, payload)
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    WITH inserted AS (
+                        INSERT INTO import_jobs (
+                            job_type, request_id, dedupe_key, payload, message,
+                            preview_status, preview_message,
+                            preview_completed_at, importable_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
+                        ON CONFLICT (dedupe_key)
+                            WHERE dedupe_key IS NOT NULL
+                              AND status IN ('queued', 'running')
+                        DO NOTHING
+                        RETURNING *
+                    )
+                    SELECT inserted.*, false AS deduped
+                    FROM inserted
+                    UNION ALL
+                    SELECT import_jobs.*, true AS deduped
+                    FROM import_jobs
+                    WHERE dedupe_key = %s
+                      AND status IN ('queued', 'running')
+                      AND NOT EXISTS (SELECT 1 FROM inserted)
+                    ORDER BY deduped
+                    LIMIT 1
+                    """,
+                    (
+                        IMPORT_JOB_YOUTUBE,
+                        int(request_id),
+                        dedupe_key,
+                        psycopg2.extras.Json(payload),
+                        message,
+                        IMPORT_JOB_PREVIEW_WAITING,
+                        dedupe_key,
+                    ),
+                )
+                job_row = cur.fetchone()
+                if job_row is None:
+                    raise RuntimeError("youtube import enqueue returned no row")
+                cur.execute(
+                    """
+                    UPDATE download_log
+                    SET outcome = 'youtube_success',
+                        youtube_metadata =
+                            COALESCE(youtube_metadata, '{}'::jsonb)
+                            || %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (
+                        psycopg2.extras.Json(terminal_metadata),
+                        int(download_log_id),
+                    ),
+                )
+            self.conn.commit()
+            return ImportJob.from_row(
+                dict(job_row),
+                deduped=bool(job_row["deduped"]),
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
+
+    def update_youtube_terminal(
+        self,
+        download_log_id: int,
+        outcome: str,
+        metadata_dict: dict[str, Any],
+    ) -> None:
+        """Transition a ``youtube_running`` row to a terminal outcome.
+
+        ``outcome`` MUST be ``'youtube_success'`` or ``'youtube_failed'``
+        — anything else raises ``ValueError`` before touching the DB.
+        ``metadata_dict`` is merged onto the existing ``youtube_metadata``
+        blob via the PG ``||`` JSONB operator, so callers can add fields
+        (reason, stderr_excerpt, observed_track_count, ...) without
+        re-reading the submission-time payload.
+
+        The UPDATE is intentionally not guarded by a ``WHERE
+        outcome='youtube_running'`` filter — the partial unique index
+        already permits at most one such row per request, and the
+        operator-visible audit value of a possible double-write is the
+        row's final ``updated_at`` not its source state. Keeping it
+        unconditional means tests and ops queries can replay terminal-
+        write paths without first re-priming the row to running.
+        """
+        if outcome not in self._YOUTUBE_TERMINAL_OUTCOMES:
+            raise ValueError(
+                f"update_youtube_terminal: outcome must be one of "
+                f"{sorted(self._YOUTUBE_TERMINAL_OUTCOMES)!r}, got {outcome!r}"
+            )
+        self._execute(
+            """
+            UPDATE download_log
+            SET outcome = %s,
+                youtube_metadata = COALESCE(youtube_metadata, '{}'::jsonb)
+                                   || %s::jsonb
+            WHERE id = %s
+            """,
+            (outcome, psycopg2.extras.Json(metadata_dict), download_log_id),
+        )
+
+    def find_next_youtube_pending(self, limit: int = 1) -> list[dict[str, Any]]:
+        """Return the next unclaimed ``youtube_running`` rows.
+
+        FIFO by ``created_at`` per R16. Returns full row dicts (not just
+        ids) so callers can inspect ``youtube_metadata`` without a second
+        round-trip. Empty list when nothing is pending.
+        """
+        cur = self._execute(
+            """
+            SELECT id, request_id, source, outcome, youtube_metadata,
+                   created_at
+            FROM download_log
+            WHERE source = 'youtube'
+              AND outcome = 'youtube_running'
+              AND NOT (COALESCE(youtube_metadata, '{}'::jsonb)
+                       ? 'worker_claimed_at')
+            ORDER BY created_at ASC, id ASC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def claim_next_youtube_pending(
+        self,
+        *,
+        worker_id: str | None,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Claim the next unclaimed YT rows and return them for processing."""
+        cur = self._execute(
+            """
+            WITH candidate AS (
+                SELECT id
+                FROM download_log
+                WHERE source = 'youtube'
+                  AND outcome = 'youtube_running'
+                  AND NOT (COALESCE(youtube_metadata, '{}'::jsonb)
+                           ? 'worker_claimed_at')
+                ORDER BY created_at ASC, id ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE download_log dl
+            SET youtube_metadata = COALESCE(dl.youtube_metadata, '{}'::jsonb)
+                                   || jsonb_build_object(
+                                       'worker_claimed_at', NOW(),
+                                       'worker_id', %s
+                                   )
+            FROM candidate
+            WHERE dl.id = candidate.id
+            RETURNING dl.id, dl.request_id, dl.source, dl.outcome,
+                      dl.youtube_metadata, dl.created_at
+            """,
+            (int(limit), worker_id),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def find_orphan_youtube_running(self) -> list[int]:
+        """Return ids of claimed ``youtube_running`` rows.
+
+        Called by the worker's startup orphan sweep (R22). At startup
+        time only rows with ``worker_claimed_at`` are orphans — accepted
+        but unclaimed rows remain drainable across worker downtime. The
+        caller iterates the returned ids and transitions each via
+        ``update_youtube_terminal(id, 'youtube_failed', {reason:
+        'worker_interrupted', ...})``.
+        """
+        cur = self._execute(
+            """
+            SELECT id
+            FROM download_log
+            WHERE source = 'youtube'
+              AND outcome = 'youtube_running'
+              AND COALESCE(youtube_metadata, '{}'::jsonb)
+                  ? 'worker_claimed_at'
+            ORDER BY created_at ASC, id ASC
+            """,
+        )
+        return [int(row["id"]) for row in cur.fetchall()]
+
+    def find_active_youtube_import_job(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+    ) -> ImportJob | None:
+        """Return active ``youtube_import`` job for this request."""
+        cur = self._execute(
+            """
+            SELECT *, false AS deduped
+            FROM import_jobs
+            WHERE job_type = %s
+              AND request_id = %s
+              AND status IN ('queued', 'running')
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (IMPORT_JOB_YOUTUBE, int(request_id)),
+        )
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row is not None else None
+
+    def list_active_youtube_rescues(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return active YouTube rescue rows for API/operator visibility."""
+        cur = self._execute(
+            """
+            SELECT
+                dl.id AS download_log_id,
+                dl.request_id,
+                dl.source,
+                dl.outcome,
+                dl.youtube_metadata,
+                dl.created_at,
+                ar.artist_name,
+                ar.album_title,
+                ar.mb_release_id,
+                ar.status AS request_status
+            FROM download_log dl
+            JOIN album_requests ar ON ar.id = dl.request_id
+            WHERE dl.source = 'youtube'
+              AND dl.outcome = 'youtube_running'
+            ORDER BY dl.created_at ASC, dl.id ASC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     # Evidence-overlay extension applied to every download_log read seam
     # (single entry / per-request history / batch). The legacy denorm
     # spectral / V0 columns on download_log are NULL whenever the
@@ -3531,6 +3926,10 @@ class PipelineDB:
     # build_download_history_row, the wrong-match route, ...). Doing it
     # at the read seam means there's exactly one place to maintain the
     # mapping, and downstream code keeps using the existing field names.
+    #
+    # ``dl.*`` automatically projects ``source`` and ``youtube_metadata``
+    # (migration 037) onto every consumer; no additional column list
+    # change is needed here.
     _DOWNLOAD_LOG_HISTORY_SELECT = """
         SELECT
             dl.*,
@@ -5756,6 +6155,20 @@ class PipelineDB:
               AND (ar.next_retry_after IS NULL OR ar.next_retry_after <= %s)
               AND sp.status = 'active'
               AND sp.generator_id = %s
+              AND NOT EXISTS (
+                SELECT 1
+                FROM download_log dl
+                WHERE dl.request_id = ar.id
+                  AND dl.source = 'youtube'
+                  AND dl.outcome = 'youtube_running'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM import_jobs ij
+                WHERE ij.request_id = ar.id
+                  AND ij.job_type = %s
+                  AND ij.status IN ('queued', 'running')
+              )
             ORDER BY
               CASE
                 WHEN COALESCE(ar.search_attempts, 0) = 0
@@ -5768,7 +6181,7 @@ class PipelineDB:
         """
         if limit:
             sql += f" LIMIT {int(limit)}"
-        cur = self._execute(sql, (now, generator_id))
+        cur = self._execute(sql, (now, generator_id, IMPORT_JOB_YOUTUBE))
         return [dict(r) for r in cur.fetchall()]
 
     def list_wanted_for_plan_reconciliation(
@@ -6966,6 +7379,43 @@ class PipelineDB:
         if cur2.fetchone() is not None:
             return []
         return None
+
+    def find_youtube_album_mapping_for_release(
+        self,
+        *,
+        source: str,
+        release_id: str,
+        browse_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return cached YT mapping row whose distance targets one release.
+
+        Discogs ingest uses this as the no-new-column bridge from a request's
+        release id to the resolver's widened group key. The resolver stores
+        Discogs matrices under the master id for normal releases and under the
+        leaf id for orphan releases; the exact ``distances[].mbid`` entry is
+        the stable link back to the request release.
+        """
+        cur = self._execute(
+            """
+            SELECT id, release_group_identifier, source, yt_browse_id,
+                   yt_audio_playlist_id, yt_url, yt_year, yt_track_count,
+                   album_title, album_artist,
+                   yt_tracks, distances, resolved_at
+            FROM youtube_album_mappings
+            WHERE source = %s
+              AND yt_browse_id = %s
+              AND EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(distances) AS dist
+                  WHERE dist->>'mbid' = %s
+              )
+            ORDER BY resolved_at DESC, id ASC
+            LIMIT 1
+            """,
+            (source, browse_id, str(release_id)),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
 
     def upsert_youtube_album_mapping(
         self,

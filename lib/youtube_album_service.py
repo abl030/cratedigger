@@ -337,13 +337,8 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
 class PersistedTrack(msgspec.Struct, kw_only=True):
     """One persisted track inside ``yt_tracks`` JSONB.
 
-    Round 2 P3: the ``video_id`` field was written into JSONB but
-    never read off the typed Struct after the round 1 indexed-pairing
-    fix. Removed entirely (and dropped from the writer below) so the
-    Struct contract matches what we actually consume — no dead fields
-    masquerading as wire shape. Pre-round-2 rows still carry
-    ``video_id`` in their JSONB; ``msgspec.convert`` ignores extra
-    keys, so those rows decode cleanly even after the field's gone.
+    ``video_id`` is used by the YT rescue ingest audit trail to persist
+    the exact per-track videos selected from the resolver row.
     """
 
     title: Optional[str] = None
@@ -351,6 +346,7 @@ class PersistedTrack(msgspec.Struct, kw_only=True):
     length_seconds: Optional[float] = None
     track_number: Optional[int] = None
     disc_number: Optional[int] = None
+    video_id: Optional[str] = None
 
 
 class PersistedDistance(msgspec.Struct, kw_only=True):
@@ -773,21 +769,25 @@ def resolve_youtube_album(
             distances=distances,
         )
         youtube_releases.append(yt_rel)
-        # Round 2 P3: previously this loop paired the YT ``videoId`` into
-        # ``PersistedTrack.video_id`` to fix a duplicate-trackNumber bug,
-        # but the field is never read back off the Struct anywhere — so
-        # the indexed pairing is no longer load-bearing and the field
-        # has been removed. The track loop still walks ``synth_items``
-        # directly (which already did the album-vs-track artist
-        # resolution in ``_synthesize_items``).
+        # Pair by index rather than track number because YT payloads may
+        # carry duplicate or zero-indexed trackNumber values. The synth
+        # list was built from the same input order immediately above.
         persistable_tracks: list[dict[str, Any]] = []
-        for si in synth_items:
+        raw_tracks = album_resp.get("tracks") or []
+        for idx, si in enumerate(synth_items):
+            raw_track = raw_tracks[idx] if idx < len(raw_tracks) else {}
+            video_id = (
+                raw_track.get("videoId")
+                if isinstance(raw_track, dict)
+                else None
+            )
             persistable_tracks.append({
                 "title": si.title,
                 "artists": [{"name": si.artist}],
                 "length_seconds": si.length,
                 "track_number": si.track,
                 "disc_number": si.disc,
+                "video_id": video_id if isinstance(video_id, str) else None,
             })
         persistable_rows.append({
             "yt_browse_id": browse_id,

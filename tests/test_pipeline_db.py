@@ -453,6 +453,28 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertNotEqual(first.id, later.id)
 
+    def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
+        from lib.import_queue import (
+            IMPORT_JOB_YOUTUBE,
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=self.req_id,
+            dedupe_key=youtube_import_dedupe_key(17),
+            payload=youtube_import_payload(
+                staged_path="/tmp/youtube-staged",
+                request_id=self.req_id,
+                browse_id="MPREb_pg_constraint",
+            ),
+        )
+
+        self.assertEqual(job.job_type, IMPORT_JOB_YOUTUBE)
+        self.assertEqual(job.request_id, self.req_id)
+        self.assertEqual(job.payload["browse_id"], "MPREb_pg_constraint")
+
     def test_claim_complete_and_fail_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
@@ -1202,6 +1224,25 @@ class TestDownloadLog(unittest.TestCase):
         rejected_outcomes = {row["outcome"] for row in rejected}
         self.assertIn("rejected", rejected_outcomes,
                       "gate-rejected rows must surface under the rejected filter")
+
+    def test_get_log_keeps_download_source_and_aliases_request_source(self):
+        slskd_id = self.db.log_download(
+            self.req_id, "user-success", "mp3", "/Incoming/A/B",
+            outcome="success", beets_distance=0.05)
+        yt_id = self.db.insert_youtube_running(
+            request_id=self.req_id,
+            browse_id="MPREb_get_log",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=get-log",
+            expected_track_count=10,
+        )
+
+        rows = self.db.get_log(limit=10)
+        by_id = {row["id"]: row for row in rows}
+        self.assertEqual(by_id[slskd_id]["source"], "slskd")
+        self.assertEqual(by_id[slskd_id]["request_source"], "request")
+        self.assertEqual(by_id[yt_id]["source"], "youtube")
+        self.assertEqual(by_id[yt_id]["request_source"], "request")
 
 
 @requires_postgres
@@ -5305,6 +5346,42 @@ class TestGetWantedSearchable(unittest.TestCase):
         )
         self.assertEqual(self.db.get_wanted_searchable("g1"), [])
 
+    def test_active_youtube_rescue_excluded(self):
+        from lib.import_queue import (
+            IMPORT_JOB_YOUTUBE,
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        rid_running = self._add_wanted("yt-running")
+        self._make_active(rid_running, "g1")
+        self.db.insert_youtube_running(
+            request_id=rid_running,
+            browse_id="MPREb_running",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=running",
+            expected_track_count=10,
+        )
+
+        rid_import = self._add_wanted("yt-import")
+        self._make_active(rid_import, "g1")
+        self.db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=rid_import,
+            dedupe_key=youtube_import_dedupe_key(123),
+            payload=youtube_import_payload(
+                staged_path="/tmp/yt-import",
+                request_id=rid_import,
+                browse_id="MPREb_import",
+            ),
+        )
+
+        rid_clear = self._add_wanted("clear")
+        self._make_active(rid_clear, "g1")
+
+        rows = self.db.get_wanted_searchable("g1")
+        self.assertEqual({r["id"] for r in rows}, {rid_clear})
+
     def test_limit_applied(self):
         ids = []
         for i in range(5):
@@ -7403,6 +7480,34 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         self.assertEqual(
             self.db.get_youtube_album_mapping("rg-1", "mb"), [])
 
+    def test_find_mapping_for_release_matches_exact_distance(self):
+        self.db.upsert_youtube_album_mapping("discogs-master-1", "discogs", [
+            self._row(
+                yt_browse_id="MPREb_discogs",
+                distances=[
+                    {"mbid": "12345", "distance": 0.05, "error": None},
+                    {"mbid": "67890", "distance": 0.25, "error": None},
+                ],
+            )
+        ])
+
+        got = self.db.find_youtube_album_mapping_for_release(
+            source="discogs",
+            release_id="12345",
+            browse_id="MPREb_discogs",
+        )
+
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got["release_group_identifier"], "discogs-master-1")
+        self.assertEqual(got["source"], "discogs")
+        self.assertIsNone(self.db.find_youtube_album_mapping_for_release(
+            source="mb", release_id="12345", browse_id="MPREb_discogs"))
+        self.assertIsNone(self.db.find_youtube_album_mapping_for_release(
+            source="discogs", release_id="99999", browse_id="MPREb_discogs"))
+        self.assertIsNone(self.db.find_youtube_album_mapping_for_release(
+            source="discogs", release_id="12345", browse_id="MPREb_other"))
+
     def test_upsert_rolls_back_on_insert_failure(self):
         """If a row insert violates a constraint, the prior matrix survives."""
         self.db.upsert_youtube_album_mapping("rg-1", "mb", [
@@ -7429,6 +7534,397 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             [r["yt_browse_id"] for r in got],
             ["MPREb_pre1", "MPREb_pre2"],
         )
+
+
+@requires_postgres
+class TestYoutubeIngestDownloadLog(unittest.TestCase):
+    """Integration tests for YT-rescue ingest methods on download_log (U2).
+
+    Exercises the real PostgreSQL CRUD against migration 037: source
+    discriminator, ``youtube_metadata`` JSONB, partial unique index, and
+    the widened ``download_log_outcome_check`` constraint. The Rule A
+    round-trip test (``test_insert_youtube_running_round_trip_preserves_every_field``)
+    is the load-bearing guard against a future field drifting between
+    the Python payload and the INSERT column list.
+    """
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.request_id = self.db.add_request(
+            mb_release_id="yt-rescue-mbid-1",
+            artist_name="Test Artist",
+            album_title="Test Album",
+            source="request",
+        )
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _yt_payload(self, **overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "request_id": self.request_id,
+            "browse_id": "MPREb_default",
+            "audio_playlist_id": "OLAK5uy_default",
+            "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_default",
+            "expected_track_count": 10,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_insert_youtube_running_round_trip_preserves_every_field(self):
+        """Rule A: every key in the input dict round-trips through PG.
+
+        If a future schema/method change drops a field from the INSERT
+        column list (or from the JSONB blob the helper writes), the
+        for-loop below names the offending key. This is the load-bearing
+        guard per ``.claude/rules/test-fidelity.md`` § "Rule A".
+        """
+        payload = self._yt_payload(
+            browse_id="MPREb_roundtrip",
+            audio_playlist_id="OLAK5uy_roundtrip",
+            yt_url="https://music.youtube.com/playlist?list=OLAK5uy_roundtrip",
+            expected_track_count=12,
+        )
+        log_id = self.db.insert_youtube_running(**payload)
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+
+        # Top-level row columns set by INSERT.
+        self.assertEqual(entry["request_id"], payload["request_id"])
+        self.assertEqual(entry["source"], "youtube")
+        self.assertEqual(entry["outcome"], "youtube_running")
+
+        # JSONB metadata: every supplied field round-trips through psycopg2.
+        meta = entry["youtube_metadata"]
+        self.assertIsInstance(meta, dict)
+        for key, expected in {
+            "yt_url": payload["yt_url"],
+            "browse_id": payload["browse_id"],
+            "audio_playlist_id": payload["audio_playlist_id"],
+            "expected_track_count": payload["expected_track_count"],
+        }.items():
+            self.assertEqual(
+                meta.get(key), expected,
+                msg=f"field {key} was dropped at the PG boundary",
+            )
+
+    def test_insert_youtube_running_persists_resolver_audit_fields(self):
+        log_id = self.db.insert_youtube_running(
+            **self._yt_payload(),
+            resolver_mapping_id=44,
+            per_track_video_ids=["v1", "v2"],
+        )
+
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        meta = entry["youtube_metadata"]
+        self.assertEqual(meta["resolver_mapping_id"], 44)
+        self.assertEqual(meta["per_track_video_ids"], ["v1", "v2"])
+
+    def test_insert_youtube_running_raises_on_idempotency_violation(self):
+        """Partial unique index serialises submissions per R4."""
+        first_id = self.db.insert_youtube_running(**self._yt_payload())
+        from lib.pipeline_db import YoutubeInFlightError
+        with self.assertRaises(YoutubeInFlightError) as ctx:
+            self.db.insert_youtube_running(**self._yt_payload(
+                browse_id="MPREb_collide",
+            ))
+        # Existing id surfaced via the exception so the service can put
+        # it in SubmitResult.detail.
+        self.assertEqual(ctx.exception.existing_download_log_id, first_id)
+        self.assertEqual(ctx.exception.request_id, self.request_id)
+
+    def test_insert_after_terminal_succeeds(self):
+        """Once a row goes terminal, the partial index admits the next.
+
+        Confirms the WHERE clause on the partial index is keyed to
+        ``outcome='youtube_running'`` — otherwise terminal rows would
+        permanently block re-submission.
+        """
+        first_id = self.db.insert_youtube_running(**self._yt_payload())
+        self.db.update_youtube_terminal(
+            first_id, "youtube_failed", {"reason": "test_release"},
+        )
+        # Second submit MUST now succeed.
+        second_id = self.db.insert_youtube_running(**self._yt_payload(
+            browse_id="MPREb_after_terminal",
+        ))
+        self.assertNotEqual(first_id, second_id)
+
+    def test_update_youtube_terminal_to_success_round_trip_preserves_metadata(self):
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        terminal_meta = {
+            "per_track_video_ids": ["v1", "v2", "v3"],
+            "observed_track_count": 10,
+            "expected_track_count": 10,
+        }
+        self.db.update_youtube_terminal(log_id, "youtube_success", terminal_meta)
+
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_success")
+        meta = entry["youtube_metadata"]
+        self.assertIsInstance(meta, dict)
+        # Merge: submission-time fields survive.
+        self.assertEqual(meta["browse_id"], "MPREb_default")
+        # Terminal-time fields are layered on top.
+        self.assertEqual(meta["per_track_video_ids"], ["v1", "v2", "v3"])
+        self.assertEqual(meta["observed_track_count"], 10)
+
+    def test_update_youtube_terminal_to_failed_writes_metadata(self):
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        terminal_meta = {
+            "reason": "track_count_mismatch",
+            "observed_track_count": 7,
+            "expected_track_count": 10,
+            "stderr_excerpt": "[ytdl] short play\n",
+        }
+        self.db.update_youtube_terminal(log_id, "youtube_failed", terminal_meta)
+
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_failed")
+        meta = entry["youtube_metadata"]
+        self.assertIsInstance(meta, dict)
+        self.assertEqual(meta["reason"], "track_count_mismatch")
+        self.assertEqual(meta["observed_track_count"], 7)
+        self.assertEqual(meta["stderr_excerpt"], "[ytdl] short play\n")
+
+    def test_update_youtube_terminal_rejects_non_terminal_outcomes(self):
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        for bogus in ("youtube_running", "success", "rejected", ""):
+            with self.subTest(outcome=bogus):
+                with self.assertRaises(ValueError):
+                    self.db.update_youtube_terminal(log_id, bogus, {})
+
+    def test_find_next_youtube_pending_excludes_slskd_rows(self):
+        """Source discriminator must filter slskd rows out of the worker queue."""
+        # An slskd-side row for the same request.
+        self.db.log_download(
+            self.request_id, soulseek_username="alice", outcome="success",
+        )
+        yt_id = self.db.insert_youtube_running(**self._yt_payload())
+        rows = self.db.find_next_youtube_pending(limit=10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], yt_id)
+        self.assertEqual(rows[0]["source"], "youtube")
+        self.assertEqual(rows[0]["outcome"], "youtube_running")
+
+    def test_find_next_youtube_pending_excludes_terminal_rows(self):
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        self.assertEqual(
+            [r["id"] for r in self.db.find_next_youtube_pending(limit=10)],
+            [log_id],
+        )
+        self.db.update_youtube_terminal(log_id, "youtube_success", {})
+        # Once terminal, the worker queue is empty again.
+        self.assertEqual(self.db.find_next_youtube_pending(limit=10), [])
+
+    def test_find_next_youtube_pending_orders_by_created_at(self):
+        """FIFO contract per R16: earliest created_at first."""
+        # Distinct requests so the partial unique index permits multiple
+        # in-flight rows.
+        rid_b = self.db.add_request(
+            mb_release_id="yt-rescue-mbid-b",
+            artist_name="B Artist",
+            album_title="B Album",
+            source="request",
+        )
+        rid_c = self.db.add_request(
+            mb_release_id="yt-rescue-mbid-c",
+            artist_name="C Artist",
+            album_title="C Album",
+            source="request",
+        )
+        first = self.db.insert_youtube_running(**self._yt_payload(
+            request_id=rid_b, browse_id="MPREb_b",
+        ))
+        second = self.db.insert_youtube_running(**self._yt_payload(
+            request_id=rid_c, browse_id="MPREb_c",
+        ))
+        rows = self.db.find_next_youtube_pending(limit=10)
+        self.assertEqual([r["id"] for r in rows], [first, second])
+
+    def test_claim_next_youtube_pending_marks_worker_metadata(self):
+        rid_b = self.db.add_request(
+            mb_release_id="yt-rescue-mbid-b",
+            artist_name="B Artist",
+            album_title="B Album",
+            source="request",
+        )
+        first = self.db.insert_youtube_running(**self._yt_payload())
+        second = self.db.insert_youtube_running(**self._yt_payload(
+            request_id=rid_b, browse_id="MPREb_b",
+        ))
+        claimed = self.db.claim_next_youtube_pending(
+            worker_id="worker-1", limit=1)
+        self.assertEqual([r["id"] for r in claimed], [first])
+        self.assertEqual(
+            [r["id"] for r in self.db.find_next_youtube_pending(limit=10)],
+            [second],
+        )
+        meta = claimed[0]["youtube_metadata"]
+        self.assertEqual(meta["worker_id"], "worker-1")
+        self.assertIsNotNone(meta["worker_claimed_at"])
+
+    def test_find_orphan_youtube_running_returns_claimed_ids(self):
+        rid_b = self.db.add_request(
+            mb_release_id="yt-rescue-mbid-b-claimed",
+            artist_name="B Artist",
+            album_title="B Album",
+            source="request",
+        )
+        first = self.db.insert_youtube_running(**self._yt_payload())
+        second = self.db.insert_youtube_running(**self._yt_payload(
+            request_id=rid_b, browse_id="MPREb_b",
+        ))
+        self.assertEqual(self.db.find_orphan_youtube_running(), [])
+        self.db.claim_next_youtube_pending(worker_id="worker-1", limit=1)
+        orphans = self.db.find_orphan_youtube_running()
+        self.assertEqual(orphans, [first])
+
+        # Worker's startup sweep marks each failed; the orphan set
+        # resolves to empty.
+        for log_id in orphans:
+            self.db.update_youtube_terminal(
+                log_id, "youtube_failed", {"reason": "worker_interrupted"},
+            )
+        self.assertEqual(self.db.find_orphan_youtube_running(), [])
+        self.assertEqual(
+            [r["id"] for r in self.db.find_next_youtube_pending(limit=10)],
+            [second],
+        )
+
+    def test_list_active_youtube_rescues_returns_request_context(self):
+        yt_id = self.db.insert_youtube_running(**self._yt_payload(
+            browse_id="MPREb_visible",
+            expected_track_count=2,
+        ))
+
+        rows = self.db.list_active_youtube_rescues(limit=10)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["download_log_id"], yt_id)
+        self.assertEqual(rows[0]["request_id"], self.request_id)
+        self.assertEqual(rows[0]["source"], "youtube")
+        self.assertEqual(rows[0]["outcome"], "youtube_running")
+        self.assertEqual(rows[0]["artist_name"], "Test Artist")
+        self.assertEqual(rows[0]["album_title"], "Test Album")
+        self.assertEqual(
+            rows[0]["youtube_metadata"]["browse_id"], "MPREb_visible")
+
+        self.db.update_youtube_terminal(
+            yt_id, "youtube_failed", {"reason": "operator_cancelled"},
+        )
+        self.assertEqual(self.db.list_active_youtube_rescues(limit=10), [])
+
+    def test_active_youtube_import_guard_is_request_scoped(self):
+        from lib.import_queue import (
+            IMPORT_JOB_YOUTUBE,
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=self.request_id,
+            dedupe_key=youtube_import_dedupe_key(901),
+            payload=youtube_import_payload(
+                staged_path="/tmp/yt-a",
+                request_id=self.request_id,
+                browse_id="MPREb_a",
+                download_log_id=901,
+            ),
+        )
+
+        active = self.db.find_active_youtube_import_job(
+            request_id=self.request_id,
+            browse_id="MPREb_b",
+        )
+        assert active is not None
+        self.assertEqual(active.id, job.id)
+
+        with self.assertRaises(Exception):
+            self.db.enqueue_import_job(
+                IMPORT_JOB_YOUTUBE,
+                request_id=self.request_id,
+                dedupe_key=youtube_import_dedupe_key(902),
+                payload=youtube_import_payload(
+                    staged_path="/tmp/yt-b",
+                    request_id=self.request_id,
+                    browse_id="MPREb_b",
+                    download_log_id=902,
+                ),
+            )
+
+    def test_atomic_youtube_import_enqueue_marks_download_log_success(self):
+        from lib.import_queue import (
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        payload = youtube_import_payload(
+            staged_path="/tmp/yt-staged",
+            request_id=self.request_id,
+            browse_id="MPREb_default",
+            download_log_id=log_id,
+        )
+
+        job = self.db.enqueue_youtube_import_and_mark_success(
+            download_log_id=log_id,
+            request_id=self.request_id,
+            dedupe_key=youtube_import_dedupe_key(log_id),
+            payload=payload,
+            message="yt handoff",
+            terminal_metadata={"observed_track_count": 10},
+        )
+
+        self.assertEqual(job.request_id, self.request_id)
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_success")
+        self.assertEqual(
+            entry["youtube_metadata"]["observed_track_count"], 10)
+
+    def test_read_seam_includes_source_and_youtube_metadata(self):
+        """Every download_log read seam surfaces the new columns."""
+        # An slskd row (source defaults to 'slskd', youtube_metadata=NULL).
+        slskd_id = self.db.log_download(
+            self.request_id, soulseek_username="alice", outcome="success",
+        )
+        yt_id = self.db.insert_youtube_running(**self._yt_payload())
+        self.db.update_youtube_terminal(
+            yt_id, "youtube_success",
+            {"observed_track_count": 10, "expected_track_count": 10},
+        )
+
+        # get_download_log_entry
+        slskd_entry = self.db.get_download_log_entry(slskd_id)
+        assert slskd_entry is not None
+        self.assertEqual(slskd_entry["source"], "slskd")
+        self.assertIsNone(slskd_entry["youtube_metadata"])
+
+        yt_entry = self.db.get_download_log_entry(yt_id)
+        assert yt_entry is not None
+        self.assertEqual(yt_entry["source"], "youtube")
+        self.assertEqual(yt_entry["outcome"], "youtube_success")
+        yt_meta = yt_entry["youtube_metadata"]
+        self.assertIsInstance(yt_meta, dict)
+        self.assertEqual(yt_meta["observed_track_count"], 10)
+
+        # get_download_history
+        history = self.db.get_download_history(self.request_id)
+        self.assertEqual(len(history), 2)
+        by_source = {r["source"]: r for r in history}
+        self.assertEqual(set(by_source.keys()), {"slskd", "youtube"})
+        self.assertIsNone(by_source["slskd"]["youtube_metadata"])
+        self.assertIsInstance(by_source["youtube"]["youtube_metadata"], dict)
+
+        # get_download_history_batch
+        batch = self.db.get_download_history_batch([self.request_id])
+        rows = batch[self.request_id]
+        self.assertEqual({r["source"] for r in rows}, {"slskd", "youtube"})
 
 
 if __name__ == "__main__":

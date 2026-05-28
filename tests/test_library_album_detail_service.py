@@ -76,7 +76,9 @@ def _history_row(**overrides: object) -> dict[str, object]:
         "existing_spectral_bitrate": None,
         "import_result": None,
         "validation_result": None,
-        "source": "request",
+        "source": "slskd",
+        "request_source": "request",
+        "youtube_metadata": None,
     }
     row.update(overrides)
     return row
@@ -172,7 +174,42 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
             detail.download_history[0].validation_result,
             {"detail": "distance too high"},
         )
-        self.assertEqual(detail.download_history[0].source, "request")
+        self.assertEqual(detail.download_history[0].source, "slskd")
+        self.assertEqual(detail.download_history[0].request_source, "request")
+
+    def test_download_history_surfaces_youtube_metadata(self) -> None:
+        detail = build_library_album_detail(
+            detail_row=_beets_detail(),
+            pipeline_request=make_request_row(
+                id=42,
+                mb_release_id=RELEASE_ID,
+                status="wanted",
+                source="request",
+            ),
+            download_history=[_history_row(
+                outcome="youtube_failed",
+                soulseek_username=None,
+                source="youtube",
+                youtube_metadata={
+                    "browse_id": "MPREb_detail",
+                    "reason": "track_count_mismatch",
+                    "expected_track_count": 10,
+                    "observed_track_count": 9,
+                },
+            )],
+        )
+
+        history = detail.download_history[0]
+        self.assertEqual(history.source, "youtube")
+        self.assertEqual(
+            history.youtube_metadata,
+            {
+                "browse_id": "MPREb_detail",
+                "reason": "track_count_mismatch",
+                "expected_track_count": 10,
+                "observed_track_count": 9,
+            },
+        )
 
     def test_build_library_album_detail_surfaces_wrong_match_triage_audit(self) -> None:
         detail = build_library_album_detail(
