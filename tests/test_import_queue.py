@@ -2229,3 +2229,107 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         assert evidence is not None
         self.assertEqual(len(evidence.files), 1)
         self.assertEqual(evidence.files[0].relative_path, "01.mp3")
+
+
+class TestYoutubeImportJobType(unittest.TestCase):
+    """Constant + helper coverage for the YT-rescue ``youtube_import`` job_type.
+
+    Covers U2's import_queue extensions:
+    - ``IMPORT_JOB_YOUTUBE`` is registered in ``IMPORT_JOB_TYPES``
+    - ``youtube_import_dedupe_key`` is keyed on the download_log id
+    - ``youtube_import_payload`` produces the {staged_path, request_id, browse_id}
+      shape the U9 dispatcher consumes
+    - ``validate_payload`` enforces all three fields are present and typed
+    """
+
+    def test_constant_is_in_registered_job_types(self):
+        from lib.import_queue import IMPORT_JOB_TYPES, IMPORT_JOB_YOUTUBE
+        self.assertIn(IMPORT_JOB_YOUTUBE, IMPORT_JOB_TYPES)
+        self.assertEqual(IMPORT_JOB_YOUTUBE, "youtube_import")
+
+    def test_validate_job_type_accepts_youtube_import(self):
+        from lib.import_queue import validate_job_type, IMPORT_JOB_YOUTUBE
+        self.assertEqual(
+            validate_job_type(IMPORT_JOB_YOUTUBE), IMPORT_JOB_YOUTUBE,
+        )
+
+    def test_youtube_import_payload_roundtrip(self):
+        from lib.import_queue import youtube_import_payload, validate_payload, IMPORT_JOB_YOUTUBE
+        payload = youtube_import_payload(
+            staged_path="/Incoming/auto-import/Artist - Album",
+            request_id=42,
+            browse_id="MPREb_abc",
+        )
+        self.assertEqual(payload, {
+            "staged_path": "/Incoming/auto-import/Artist - Album",
+            "request_id": 42,
+            "browse_id": "MPREb_abc",
+        })
+        # validate_payload passes through unchanged for a valid payload.
+        validated = validate_payload(IMPORT_JOB_YOUTUBE, payload)
+        self.assertEqual(validated, payload)
+
+    def test_youtube_import_payload_coerces_request_id_to_int(self):
+        from lib.import_queue import youtube_import_payload
+        payload = youtube_import_payload(
+            staged_path="/Incoming/auto-import/Artist - Album",
+            request_id=42,  # already int
+            browse_id="MPREb_abc",
+        )
+        self.assertIsInstance(payload["request_id"], int)
+
+    def test_validate_payload_youtube_rejects_missing_staged_path(self):
+        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        with self.assertRaises(ValueError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "request_id": 42, "browse_id": "MPREb_abc",
+            })
+
+    def test_validate_payload_youtube_rejects_empty_staged_path(self):
+        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        with self.assertRaises(ValueError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "staged_path": "",
+                "request_id": 42,
+                "browse_id": "MPREb_abc",
+            })
+
+    def test_validate_payload_youtube_rejects_missing_request_id(self):
+        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        with self.assertRaises(ValueError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "staged_path": "/Incoming/auto-import/x",
+                "browse_id": "MPREb_abc",
+            })
+
+    def test_validate_payload_youtube_rejects_non_int_request_id(self):
+        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        with self.assertRaises(ValueError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "staged_path": "/Incoming/auto-import/x",
+                "request_id": "42",  # str, not int
+                "browse_id": "MPREb_abc",
+            })
+
+    def test_validate_payload_youtube_rejects_missing_browse_id(self):
+        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        with self.assertRaises(ValueError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "staged_path": "/Incoming/auto-import/x",
+                "request_id": 42,
+            })
+
+    def test_dedupe_key_uses_download_log_id(self):
+        from lib.import_queue import youtube_import_dedupe_key
+        self.assertEqual(
+            youtube_import_dedupe_key(7),
+            "youtube_import:download_log:7",
+        )
+        # Same id ⇒ same key (idempotency).
+        self.assertEqual(
+            youtube_import_dedupe_key(7), youtube_import_dedupe_key(7),
+        )
+        # Different id ⇒ different key.
+        self.assertNotEqual(
+            youtube_import_dedupe_key(7), youtube_import_dedupe_key(8),
+        )

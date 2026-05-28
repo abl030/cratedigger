@@ -115,6 +115,12 @@ class DownloadLogRow:
     id: int = 0
     # Migration 021: addressing FK to album_quality_evidence(id).
     candidate_evidence_id: int | None = None
+    # Migration 037 — source discriminator + YT-specific JSONB blob.
+    # ``source`` defaults to ``'slskd'`` matching the production NOT NULL
+    # DEFAULT. ``youtube_metadata`` is NULL unless this row was written
+    # via ``insert_youtube_running``.
+    source: str = "slskd"
+    youtube_metadata: dict[str, Any] | None = None
     # Auto-populated timestamp matching download_log.created_at.
     created_at: datetime = field(default_factory=_utcnow)
     # Catch-all for less commonly asserted fields
@@ -2012,6 +2018,124 @@ class FakePipelineDB:
         ))
         return self._next_download_log_id
 
+    # --- YouTube rescue ingest (mirrors PipelineDB U2 methods) ---
+
+    _YOUTUBE_TERMINAL_OUTCOMES: frozenset[str] = frozenset({
+        "youtube_success", "youtube_failed",
+    })
+
+    def insert_youtube_running(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+        audio_playlist_id: str | None,
+        yt_url: str,
+        expected_track_count: int,
+    ) -> int:
+        """Mirror of ``PipelineDB.insert_youtube_running``.
+
+        Raises ``YoutubeInFlightError`` when a ``youtube_running`` row
+        already exists for the same ``request_id``, mirroring the real
+        partial unique index (``one_youtube_running_per_request``) on
+        the production schema.
+        """
+        existing_id: int | None = None
+        for entry in self.download_logs:
+            if (entry.source == "youtube"
+                    and entry.outcome == "youtube_running"
+                    and entry.request_id == request_id):
+                existing_id = entry.id
+                break
+        if existing_id is not None:
+            # Look up YoutubeInFlightError lazily so we always raise the
+            # currently-loaded class. A prior test in this run may have
+            # done ``importlib.reload(lib.pipeline_db)`` (e.g.
+            # ``TestReleaseIdToLockKey::test_key_is_stable_across_imports``);
+            # a module-level binding would point at the pre-reload class
+            # and assertRaises in the caller would miss it.
+            from lib.pipeline_db import YoutubeInFlightError as _YIFE
+            raise _YIFE(request_id, existing_id)
+
+        self._next_download_log_id += 1
+        metadata: dict[str, Any] = {
+            "yt_url": yt_url,
+            "browse_id": browse_id,
+            "audio_playlist_id": audio_playlist_id,
+            "expected_track_count": int(expected_track_count),
+        }
+        self.download_logs.append(DownloadLogRow(
+            request_id=request_id,
+            outcome="youtube_running",
+            source="youtube",
+            youtube_metadata=metadata,
+            id=self._next_download_log_id,
+        ))
+        return self._next_download_log_id
+
+    def update_youtube_terminal(
+        self,
+        download_log_id: int,
+        outcome: str,
+        metadata_dict: dict[str, Any],
+    ) -> None:
+        """Mirror of ``PipelineDB.update_youtube_terminal``.
+
+        Merges ``metadata_dict`` onto the existing ``youtube_metadata``
+        blob the way the production ``||`` JSONB operator would.
+        """
+        if outcome not in self._YOUTUBE_TERMINAL_OUTCOMES:
+            raise ValueError(
+                f"update_youtube_terminal: outcome must be one of "
+                f"{sorted(self._YOUTUBE_TERMINAL_OUTCOMES)!r}, got {outcome!r}"
+            )
+        for entry in self.download_logs:
+            if entry.id == download_log_id:
+                entry.outcome = outcome
+                merged: dict[str, Any] = dict(entry.youtube_metadata or {})
+                merged.update(metadata_dict)
+                entry.youtube_metadata = merged
+                return
+        # Production UPDATE silently no-ops if the id doesn't exist;
+        # mirror that.
+
+    def find_next_youtube_pending(
+        self, limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Mirror of ``PipelineDB.find_next_youtube_pending``.
+
+        FIFO by ``(created_at, id)`` per R16; filters on
+        ``source='youtube'`` AND ``outcome='youtube_running'``.
+        """
+        rows = sorted(
+            (entry for entry in self.download_logs
+             if entry.source == "youtube"
+             and entry.outcome == "youtube_running"),
+            key=lambda e: (e.created_at, e.id),
+        )
+        return [
+            {
+                "id": entry.id,
+                "request_id": entry.request_id,
+                "source": entry.source,
+                "outcome": entry.outcome,
+                "youtube_metadata": copy.deepcopy(entry.youtube_metadata)
+                if entry.youtube_metadata is not None else None,
+                "created_at": entry.created_at,
+            }
+            for entry in rows[:int(limit)]
+        ]
+
+    def find_orphan_youtube_running(self) -> list[int]:
+        """Mirror of ``PipelineDB.find_orphan_youtube_running``."""
+        rows = sorted(
+            (entry for entry in self.download_logs
+             if entry.source == "youtube"
+             and entry.outcome == "youtube_running"),
+            key=lambda e: (e.created_at, e.id),
+        )
+        return [entry.id for entry in rows]
+
     def abandon_auto_import_request(
         self,
         *,
@@ -3669,6 +3793,12 @@ class FakePipelineDB:
             "import_result": entry.import_result,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
+            # Migration 037 — source discriminator + YT JSONB. Mirrors
+            # the production read seam (every consumer sees these two
+            # columns whether or not the row originated from YT).
+            "source": entry.source,
+            "youtube_metadata": copy.deepcopy(entry.youtube_metadata)
+            if entry.youtube_metadata is not None else None,
         }
         row.update(entry.extra)
         # Mirror the real LEFT JOIN to album_quality_evidence: prefer

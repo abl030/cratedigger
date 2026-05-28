@@ -148,6 +148,16 @@ ADVISORY_LOCK_NAMESPACE_PLAN = 0x504C414E
 # ``0x574D434C`` = ASCII "WMCL", recognisable in ``pg_locks``.
 ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP = 0x574D434C
 
+# Singleton YouTube-ingest worker lock. The DB-side partial unique index
+# on ``download_log`` (``one_youtube_running_per_request``) serializes
+# per-request submissions, but a second worker process running
+# concurrently could race on draining the queue. The worker takes this
+# process-wide lock at startup before sweeping orphans or claiming the
+# next ``youtube_running`` row.
+# ``0x59544942`` = ASCII "YTIB" (YouTube InBound), recognisable in
+# ``pg_locks``.
+ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST = 0x59544942
+
 
 def release_id_to_lock_key(mb_release_id: str) -> int:
     """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.
@@ -929,6 +939,26 @@ class SupersedeRaceError(Exception):
     session already superseded the row between our row-lock acquisition
     and the UPDATE. Caller maps this to a transient retry outcome.
     """
+
+
+class YoutubeInFlightError(Exception):
+    """Raised by ``PipelineDB.insert_youtube_running`` when the partial
+    unique index ``one_youtube_running_per_request`` (migration 037)
+    rejects the insert because a prior ``youtube_running`` row already
+    exists for the same ``request_id``.
+
+    The caller (``YoutubeIngestService.submit``) maps this to the
+    ``in_flight`` outcome and returns the existing ``download_log_id`` in
+    ``SubmitResult.detail`` so the operator can observe the in-flight
+    submission they collided with.
+    """
+
+    def __init__(self, request_id: int, existing_download_log_id: int | None) -> None:
+        super().__init__(
+            f"YouTube rescue already in flight for request_id={request_id}"
+        )
+        self.request_id = request_id
+        self.existing_download_log_id = existing_download_log_id
 
 
 class PipelineDB:
@@ -3519,6 +3549,180 @@ class PipelineDB:
         finally:
             self.conn.autocommit = old_autocommit
 
+    # --- YouTube rescue ingest (download_log doubles as queue + audit) ---
+    #
+    # The four methods below operate on ``download_log`` rows with
+    # ``source='youtube'`` (migration 037). Together they implement the
+    # queue contract the YT ingest worker drains:
+    #
+    #   * ``insert_youtube_running`` — submission-time INSERT. The partial
+    #     unique index ``one_youtube_running_per_request`` (migration 037)
+    #     enforces R4 idempotency at the DB layer; we catch the
+    #     ``UniqueViolation`` and re-raise as ``YoutubeInFlightError`` so
+    #     the service layer can map it to the ``in_flight`` outcome.
+    #
+    #   * ``update_youtube_terminal`` — worker-side terminal-state UPDATE.
+    #     ``youtube_metadata`` uses the PG ``||`` JSONB merge operator so
+    #     the worker can layer reason / stderr_excerpt / observed counts
+    #     on top of the submission-time blob without re-reading it.
+    #
+    #   * ``find_next_youtube_pending`` — worker drain query. FIFO by
+    #     ``created_at`` per R16.
+    #
+    #   * ``find_orphan_youtube_running`` — startup orphan sweep (R22).
+    #     At worker startup any row still in ``youtube_running`` is by
+    #     definition an orphan (the previous worker process crashed mid-
+    #     job); the worker calls this method, then transitions each id
+    #     via ``update_youtube_terminal(id, 'youtube_failed', {reason:
+    #     'worker_died', ...})``.
+
+    _YOUTUBE_TERMINAL_OUTCOMES: frozenset[str] = frozenset({
+        "youtube_success", "youtube_failed",
+    })
+
+    def insert_youtube_running(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+        audio_playlist_id: str | None,
+        yt_url: str,
+        expected_track_count: int,
+    ) -> int:
+        """Insert a ``download_log`` row for a YT rescue submission.
+
+        Returns the new row's id. Raises ``YoutubeInFlightError`` if the
+        partial unique index ``one_youtube_running_per_request`` (migration
+        037) rejects the insert because a prior ``youtube_running`` row
+        already exists for the same ``request_id`` — the caller maps this
+        to the ``in_flight`` outcome.
+
+        ``youtube_metadata`` is the submission-time blob: the worker layers
+        terminal-state fields (reason, stderr_excerpt, observed counts) on
+        top via ``update_youtube_terminal``.
+        """
+        metadata: dict[str, Any] = {
+            "yt_url": yt_url,
+            "browse_id": browse_id,
+            "audio_playlist_id": audio_playlist_id,
+            "expected_track_count": int(expected_track_count),
+        }
+        try:
+            cur = self._execute(
+                """
+                INSERT INTO download_log (
+                    request_id, source, outcome, youtube_metadata
+                ) VALUES (%s, 'youtube', 'youtube_running', %s)
+                RETURNING id
+                """,
+                (request_id, psycopg2.extras.Json(metadata)),
+            )
+        except psycopg2.errors.UniqueViolation as exc:
+            # Look up the in-flight row so the caller can surface the
+            # existing id in the outcome's ``detail`` field.
+            existing_id: int | None = None
+            try:
+                lookup = self._execute(
+                    """
+                    SELECT id FROM download_log
+                    WHERE request_id = %s
+                      AND source = 'youtube'
+                      AND outcome = 'youtube_running'
+                    LIMIT 1
+                    """,
+                    (request_id,),
+                )
+                row = lookup.fetchone()
+                if row is not None:
+                    existing_id = int(row["id"])
+            except Exception:
+                pass
+            raise YoutubeInFlightError(request_id, existing_id) from exc
+        row = cur.fetchone()
+        assert row is not None, "INSERT RETURNING should always return a row"
+        return int(row["id"])
+
+    def update_youtube_terminal(
+        self,
+        download_log_id: int,
+        outcome: str,
+        metadata_dict: dict[str, Any],
+    ) -> None:
+        """Transition a ``youtube_running`` row to a terminal outcome.
+
+        ``outcome`` MUST be ``'youtube_success'`` or ``'youtube_failed'``
+        — anything else raises ``ValueError`` before touching the DB.
+        ``metadata_dict`` is merged onto the existing ``youtube_metadata``
+        blob via the PG ``||`` JSONB operator, so callers can add fields
+        (reason, stderr_excerpt, observed_track_count, ...) without
+        re-reading the submission-time payload.
+
+        The UPDATE is intentionally not guarded by a ``WHERE
+        outcome='youtube_running'`` filter — the partial unique index
+        already permits at most one such row per request, and the
+        operator-visible audit value of a possible double-write is the
+        row's final ``updated_at`` not its source state. Keeping it
+        unconditional means tests and ops queries can replay terminal-
+        write paths without first re-priming the row to running.
+        """
+        if outcome not in self._YOUTUBE_TERMINAL_OUTCOMES:
+            raise ValueError(
+                f"update_youtube_terminal: outcome must be one of "
+                f"{sorted(self._YOUTUBE_TERMINAL_OUTCOMES)!r}, got {outcome!r}"
+            )
+        self._execute(
+            """
+            UPDATE download_log
+            SET outcome = %s,
+                youtube_metadata = COALESCE(youtube_metadata, '{}'::jsonb)
+                                   || %s::jsonb
+            WHERE id = %s
+            """,
+            (outcome, psycopg2.extras.Json(metadata_dict), download_log_id),
+        )
+
+    def find_next_youtube_pending(self, limit: int = 1) -> list[dict[str, Any]]:
+        """Worker drain query — return the next ``youtube_running`` rows.
+
+        FIFO by ``created_at`` per R16. Returns full row dicts (not just
+        ids) so the caller can pull ``youtube_metadata`` without a second
+        round-trip. Empty list when nothing is pending.
+        """
+        cur = self._execute(
+            """
+            SELECT id, request_id, source, outcome, youtube_metadata,
+                   created_at
+            FROM download_log
+            WHERE source = 'youtube'
+              AND outcome = 'youtube_running'
+            ORDER BY created_at ASC, id ASC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def find_orphan_youtube_running(self) -> list[int]:
+        """Return ids of every ``youtube_running`` row.
+
+        Called by the worker's startup orphan sweep (R22). At startup
+        time every such row is by definition an orphan — a previous
+        worker process crashed mid-job and left the row in flight. The
+        caller iterates the returned ids and transitions each via
+        ``update_youtube_terminal(id, 'youtube_failed', {reason:
+        'worker_died', ...})``.
+        """
+        cur = self._execute(
+            """
+            SELECT id
+            FROM download_log
+            WHERE source = 'youtube'
+              AND outcome = 'youtube_running'
+            ORDER BY created_at ASC, id ASC
+            """,
+        )
+        return [int(row["id"]) for row in cur.fetchall()]
+
     # Evidence-overlay extension applied to every download_log read seam
     # (single entry / per-request history / batch). The legacy denorm
     # spectral / V0 columns on download_log are NULL whenever the
@@ -3531,6 +3735,10 @@ class PipelineDB:
     # build_download_history_row, the wrong-match route, ...). Doing it
     # at the read seam means there's exactly one place to maintain the
     # mapping, and downstream code keeps using the existing field names.
+    #
+    # ``dl.*`` automatically projects ``source`` and ``youtube_metadata``
+    # (migration 037) onto every consumer; no additional column list
+    # change is needed here.
     _DOWNLOAD_LOG_HISTORY_SELECT = """
         SELECT
             dl.*,

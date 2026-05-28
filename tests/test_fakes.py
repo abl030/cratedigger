@@ -4672,5 +4672,166 @@ class TestFakePipelineDBRescueCapture(unittest.TestCase):
         self.assertIsNone(row["unfindable_category"])
 
 
+class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
+    """Self-tests for FakePipelineDB YT-rescue ingest methods (U2).
+
+    Mirror the production contract exactly:
+    - ``insert_youtube_running`` raises ``YoutubeInFlightError`` on the
+      second in-flight submission for the same request_id
+    - ``update_youtube_terminal`` merges metadata (PG ``||`` operator)
+    - ``find_next_youtube_pending`` is FIFO by ``created_at, id``,
+      excludes slskd rows and terminal rows
+    - ``find_orphan_youtube_running`` returns all in-flight ids
+    """
+
+    def _payload(self, request_id: int, **overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "request_id": request_id,
+            "browse_id": "MPREb_default",
+            "audio_playlist_id": "OLAK5uy_default",
+            "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_default",
+            "expected_track_count": 10,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_insert_youtube_running_writes_row_with_metadata(self):
+        db = FakePipelineDB()
+        log_id = db.insert_youtube_running(**self._payload(42))
+        self.assertEqual(len(db.download_logs), 1)
+        row = db.download_logs[0]
+        self.assertEqual(row.id, log_id)
+        self.assertEqual(row.request_id, 42)
+        self.assertEqual(row.source, "youtube")
+        self.assertEqual(row.outcome, "youtube_running")
+        assert row.youtube_metadata is not None
+        self.assertEqual(row.youtube_metadata["browse_id"], "MPREb_default")
+        self.assertEqual(row.youtube_metadata["expected_track_count"], 10)
+
+    def test_insert_youtube_running_raises_youtube_in_flight_error(self):
+        from lib.pipeline_db import YoutubeInFlightError
+        db = FakePipelineDB()
+        first_id = db.insert_youtube_running(**self._payload(42))
+        with self.assertRaises(YoutubeInFlightError) as ctx:
+            db.insert_youtube_running(**self._payload(
+                42, browse_id="MPREb_collide",
+            ))
+        self.assertEqual(ctx.exception.existing_download_log_id, first_id)
+        self.assertEqual(ctx.exception.request_id, 42)
+
+    def test_insert_after_terminal_succeeds(self):
+        db = FakePipelineDB()
+        first_id = db.insert_youtube_running(**self._payload(42))
+        db.update_youtube_terminal(
+            first_id, "youtube_failed", {"reason": "test"},
+        )
+        # The fake mirrors the partial-unique-index contract: terminal
+        # rows do NOT block re-submission.
+        second_id = db.insert_youtube_running(**self._payload(
+            42, browse_id="MPREb_after_terminal",
+        ))
+        self.assertNotEqual(first_id, second_id)
+
+    def test_update_youtube_terminal_merges_metadata(self):
+        db = FakePipelineDB()
+        log_id = db.insert_youtube_running(**self._payload(42))
+        db.update_youtube_terminal(log_id, "youtube_success", {
+            "observed_track_count": 10,
+            "per_track_video_ids": ["v1", "v2"],
+        })
+        entry = db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_success")
+        meta = entry["youtube_metadata"]
+        self.assertIsInstance(meta, dict)
+        # Submission-time fields survive.
+        self.assertEqual(meta["browse_id"], "MPREb_default")
+        # Terminal fields are layered on top.
+        self.assertEqual(meta["observed_track_count"], 10)
+        self.assertEqual(meta["per_track_video_ids"], ["v1", "v2"])
+
+    def test_update_youtube_terminal_rejects_non_terminal_outcomes(self):
+        db = FakePipelineDB()
+        log_id = db.insert_youtube_running(**self._payload(42))
+        for bogus in ("youtube_running", "success", "rejected", ""):
+            with self.subTest(outcome=bogus):
+                with self.assertRaises(ValueError):
+                    db.update_youtube_terminal(log_id, bogus, {})
+
+    def test_find_next_youtube_pending_filters_by_source_and_outcome(self):
+        db = FakePipelineDB()
+        # An slskd-side row.
+        db.log_download(
+            42, soulseek_username="alice", outcome="success",
+        )
+        # An in-flight YT row.
+        yt_id = db.insert_youtube_running(**self._payload(42))
+        rows = db.find_next_youtube_pending(limit=10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], yt_id)
+        self.assertEqual(rows[0]["source"], "youtube")
+
+    def test_find_next_youtube_pending_excludes_terminal_rows(self):
+        db = FakePipelineDB()
+        log_id = db.insert_youtube_running(**self._payload(42))
+        self.assertEqual(
+            [r["id"] for r in db.find_next_youtube_pending(limit=10)],
+            [log_id],
+        )
+        db.update_youtube_terminal(log_id, "youtube_success", {})
+        self.assertEqual(db.find_next_youtube_pending(limit=10), [])
+
+    def test_find_next_youtube_pending_is_fifo(self):
+        db = FakePipelineDB()
+        first = db.insert_youtube_running(**self._payload(42))
+        second = db.insert_youtube_running(**self._payload(
+            43, browse_id="MPREb_43",
+        ))
+        rows = db.find_next_youtube_pending(limit=10)
+        self.assertEqual([r["id"] for r in rows], [first, second])
+
+    def test_find_orphan_youtube_running_returns_all_running_ids(self):
+        db = FakePipelineDB()
+        first = db.insert_youtube_running(**self._payload(42))
+        second = db.insert_youtube_running(**self._payload(
+            43, browse_id="MPREb_43",
+        ))
+        orphans = db.find_orphan_youtube_running()
+        self.assertEqual(sorted(orphans), sorted([first, second]))
+        for log_id in orphans:
+            db.update_youtube_terminal(
+                log_id, "youtube_failed", {"reason": "worker_died"},
+            )
+        self.assertEqual(db.find_orphan_youtube_running(), [])
+
+    def test_read_seam_includes_source_and_youtube_metadata(self):
+        db = FakePipelineDB()
+        slskd_id = db.log_download(
+            42, soulseek_username="alice", outcome="success",
+        )
+        yt_id = db.insert_youtube_running(**self._payload(42))
+
+        slskd_entry = db.get_download_log_entry(slskd_id)
+        assert slskd_entry is not None
+        self.assertEqual(slskd_entry["source"], "slskd")
+        self.assertIsNone(slskd_entry["youtube_metadata"])
+
+        yt_entry = db.get_download_log_entry(yt_id)
+        assert yt_entry is not None
+        self.assertEqual(yt_entry["source"], "youtube")
+        self.assertIsInstance(yt_entry["youtube_metadata"], dict)
+
+        # get_download_history surfaces both rows.
+        history = db.get_download_history(42)
+        sources = {r["source"] for r in history}
+        self.assertEqual(sources, {"slskd", "youtube"})
+
+        # get_download_history_batch likewise.
+        batch = db.get_download_history_batch([42])
+        self.assertEqual(
+            {r["source"] for r in batch[42]}, {"slskd", "youtube"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
