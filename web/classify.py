@@ -71,6 +71,8 @@ class LogEntry:
     request_min_bitrate: Optional[int] = None  # kbps
     search_filetype_override: Optional[str] = None
     source: Optional[str] = None
+    request_source: Optional[str] = None
+    youtube_metadata: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "LogEntry":

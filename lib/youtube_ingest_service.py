@@ -46,6 +46,7 @@ from lib.import_queue import (
     youtube_import_dedupe_key,
     youtube_import_payload,
 )
+from lib.release_identity import detect_release_source, normalize_release_id
 from lib import pipeline_db as _pipeline_db_mod  # noqa: F401 — module-import so
 # ``except _pipeline_db_mod.YoutubeInFlightError`` resolves the class at catch
 # time. A symbol import (``from lib.pipeline_db import YoutubeInFlightError``)
@@ -156,6 +157,9 @@ class YoutubeIngestMetadata(msgspec.Struct, kw_only=True):
     reason: Optional[str] = None
     stderr_excerpt: Optional[str] = None
     observed_track_count: Optional[int] = None
+    worker_claimed_at: Optional[str] = None
+    worker_id: Optional[str] = None
+    cleanup_error: Optional[str] = None
 
 
 class YoutubeImportPayload(msgspec.Struct, kw_only=True):
@@ -193,7 +197,7 @@ class RunResult(msgspec.Struct, kw_only=True):
 
     ``reason`` carries the classified failure reason on ``youtube_failed``
     (one of the R20 taxonomy values, or ``track_count_mismatch``,
-    ``worker_unhandled_exception``, ``worker_died``); ``None`` on success.
+    ``worker_unhandled_exception``, ``worker_interrupted``); ``None`` on success.
     """
 
     outcome: RunOutcome
@@ -219,6 +223,7 @@ class YtdlpRunResult(msgspec.Struct, kw_only=True):
     exit_code: int
     stderr_excerpt: Optional[str]
     staged_files: list[Path]
+    work_dir: Optional[Path] = None
 
 
 # ---------------------------------------------------------------------------
@@ -297,21 +302,24 @@ ReleaseGroupResolverFn = Callable[[dict[str, Any]], Optional[tuple[str, str]]]
 """``release_group_resolver_fn(request_row) -> (source, rg_id) | None``.
 
 Used by ``submit`` to find the ``(release_group_identifier, source)``
-key for ``pdb.get_youtube_album_mapping(...)``. For MB requests this
-typically returns ``("mb", request_row["mb_release_group_id"])``; for
-Discogs it'd resolve the master id via a Discogs mirror lookup.
+key for ``pdb.get_youtube_album_mapping(...)`` for MB requests. Discogs
+requests bridge through cached exact-distance resolver rows via
+``find_youtube_album_mapping_for_release`` instead of this port.
 
 Default implementation (:func:`_default_release_group_resolver`) reads
-``mb_release_group_id`` directly off the request row when present. When
-that field is NULL or the request is Discogs-only, the default returns
-``None`` and the service surfaces ``no_resolver_mapping`` — the
-operator-side fix is to populate ``mb_release_group_id`` via the
-existing resolver paths, or to pass a richer resolver_fn into the
-service at construction time."""
+``mb_release_group_id`` directly off the request row when present."""
 
 
 ClockFn = Callable[[], datetime]
 """``clock_fn() -> datetime``. Wall-clock seam for tests."""
+
+
+class _TrackCountPrecheckFailure(Exception):
+    """Submission-side deterministic precheck failure."""
+
+
+class _TransientPrecheckFailure(Exception):
+    """Submission-side transient dependency failure."""
 
 
 class _PipelineDB(Protocol):
@@ -327,6 +335,16 @@ class _PipelineDB(Protocol):
     def get_youtube_album_mapping(
         self, release_group_identifier: str, source: str,
     ) -> Optional[list[dict[str, Any]]]: ...
+
+    def find_youtube_album_mapping_for_release(
+        self,
+        *,
+        source: str,
+        release_id: str,
+        browse_id: str,
+    ) -> Optional[dict[str, Any]]: ...
+
+    def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
 
     def insert_youtube_running(
         self,
@@ -358,6 +376,13 @@ class _PipelineDB(Protocol):
         payload: Optional[dict[str, Any]] = None,
         message: Optional[str] = None,
     ) -> Any: ...
+
+    def find_active_youtube_import_job(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+    ) -> Any | None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -446,11 +471,16 @@ def _default_stage_dir(src: Path, dest: Path) -> None:
     """Default ``stage_dir_fn``: ``shutil.move``.
 
     Production behaviour: move the directory tree from yt-dlp's temp
-    output to ``/Incoming/auto-import/<artist>-<album>/``. ``shutil.move``
+    output to the configured auto-import staging child. ``shutil.move``
     handles cross-filesystem boundaries (copy-then-delete fallback). The
     parent directory is created if missing.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
     shutil.move(str(src), str(dest))
 
 
@@ -460,9 +490,8 @@ def _default_release_group_resolver(
     """Default release-group resolver: trust ``mb_release_group_id`` only.
 
     Returns ``("mb", rg_id)`` when the request row carries a populated
-    ``mb_release_group_id``. Returns ``None`` for Discogs-only requests
-    (the production caller threads a Discogs-aware resolver via the
-    kwarg-DI port).
+    ``mb_release_group_id``. Discogs-only requests are handled before
+    this resolver through the cached resolver-distance bridge.
     """
     mb_rg = request_row.get("mb_release_group_id")
     if isinstance(mb_rg, str) and mb_rg.strip():
@@ -546,113 +575,69 @@ class YoutubeIngestService:
                 ),
             )
 
-        # 3. Resolver-mapping lookup (R6).
-        resolver_key = self.release_group_resolver_fn(request_row)
-        if resolver_key is None:
-            return SubmitResult(
-                outcome="no_resolver_mapping",
-                detail=(
-                    f"request {request_id} has no resolvable release-group "
-                    f"identifier; populate mb_release_group_id (or thread "
-                    f"a Discogs-aware release_group_resolver_fn) and retry"
-                ),
-            )
-        source, rg_id = resolver_key
+        # 3. Import-job idempotency. Once yt-dlp has succeeded, the
+        # download_log row is terminal but the importer handoff may still be
+        # queued/running. Treat that as in-flight for the same request/browse
+        # id so repeated clicks don't stage duplicate albums.
         try:
-            mapping_rows = self.pdb.get_youtube_album_mapping(rg_id, source)
-        except Exception as exc:  # noqa: BLE001 — transient DB error
+            active_import = self.pdb.find_active_youtube_import_job(
+                request_id=int(request_id),
+                browse_id=str(browse_id),
+            )
+        except Exception as exc:  # noqa: BLE001 — surface DB hiccup as transient
             log.warning(
-                "youtube_ingest_service: get_youtube_album_mapping(%s, %s) "
-                "raised %s", rg_id, source, exc)
+                "youtube_ingest_service: find_active_youtube_import_job(%s, %s) "
+                "raised %s", request_id, browse_id, exc)
             return SubmitResult(
                 outcome="transient",
                 detail=(
-                    f"DB error reading resolver mapping for "
-                    f"({rg_id!r}, {source!r}): {exc}"
+                    f"DB error checking active youtube_import for "
+                    f"request {request_id}: {exc}"
                 ),
             )
-        if mapping_rows is None or not mapping_rows:
+        if active_import is not None:
+            import_job_id = getattr(active_import, "id", None)
             return SubmitResult(
-                outcome="no_resolver_mapping",
+                outcome="in_flight",
+                download_log_id=None,
                 detail=(
-                    f"no resolver mapping for release_group={rg_id!r} "
-                    f"source={source!r}; run the YouTube album resolver first"
-                ),
-            )
-        match: Optional[dict[str, Any]] = None
-        for row in mapping_rows:
-            if str(row.get("yt_browse_id") or "") == browse_id:
-                match = row
-                break
-        if match is None:
-            return SubmitResult(
-                outcome="no_resolver_mapping",
-                detail=(
-                    f"browse_id {browse_id!r} not in resolver mapping for "
-                    f"release_group={rg_id!r} source={source!r}"
+                    f"active youtube_import job id={import_job_id} already "
+                    f"exists for request {request_id} browse_id={browse_id!r}"
                 ),
             )
 
-        # 4. Track-count precheck (R7).
-        request_mbid = self._request_mbid(request_row)
-        if not request_mbid:
-            # Discogs-only requests don't have an MBID to precheck
-            # against — the precheck is MB-anchored. Surface as
-            # no_resolver_mapping so the operator routes the request
-            # through an MB-aware path. This is the same outcome the
-            # R10 worker gate hits when no MB count is available.
-            return SubmitResult(
-                outcome="no_resolver_mapping",
-                detail=(
-                    f"request {request_id} has no MB release id; "
-                    f"track-count precheck cannot run"
-                ),
-            )
-        expected_track_count = self._distance_total_mb_tracks(
-            match, request_mbid)
-        if expected_track_count is None:
-            return SubmitResult(
-                outcome="track_count_precheck_failed",
-                detail=(
-                    f"resolver mapping for browse_id={browse_id!r} has no "
-                    f"distance entry for mbid={request_mbid!r}; refresh "
-                    f"the resolver and retry"
-                ),
-            )
+        # 4. Resolver-mapping lookup (R6). MB requests keep the original
+        # release-group key path. Discogs-only requests bridge through cached
+        # resolver rows whose exact distance entry targets the request's
+        # Discogs release id; this works for both master-widened and orphan
+        # leaf mappings without adding schema columns.
+        mapping_result = self._lookup_submit_mapping(
+            request_id=int(request_id),
+            request_row=request_row,
+            browse_id=str(browse_id),
+        )
+        if isinstance(mapping_result, SubmitResult):
+            return mapping_result
+        source, match, target_release_id = mapping_result
+
+        # 5. Track-count precheck (R7).
         try:
-            current_mb_count = self.mb_track_count_fn(request_mbid)
-        except Exception as exc:  # noqa: BLE001 — MB mirror hiccup
-            log.warning(
-                "youtube_ingest_service: mb_track_count_fn(%s) raised %s",
-                request_mbid, exc)
-            return SubmitResult(
-                outcome="transient",
-                detail=(
-                    f"MB mirror error checking track count for "
-                    f"{request_mbid!r}: {exc}"
-                ),
+            expected_track_count = self._expected_track_count_for_submit(
+                request_id=int(request_id),
+                request_row=request_row,
+                source=source,
+                mapping_row=match,
+                target_release_id=target_release_id,
             )
-        if current_mb_count is None:
+        except _TransientPrecheckFailure as exc:
+            return SubmitResult(outcome="transient", detail=str(exc))
+        except _TrackCountPrecheckFailure as exc:
             return SubmitResult(
                 outcome="track_count_precheck_failed",
-                detail=(
-                    f"MB mirror returned no track count for "
-                    f"{request_mbid!r}; cannot R7-precheck"
-                ),
-            )
-        if int(current_mb_count) != int(expected_track_count):
-            return SubmitResult(
-                outcome="track_count_precheck_failed",
-                detail=(
-                    f"resolver cache total_mb_tracks="
-                    f"{int(expected_track_count)} != "
-                    f"current MB tracks={int(current_mb_count)} for "
-                    f"mbid={request_mbid!r}; resolver state is stale, "
-                    f"refresh first"
-                ),
+                detail=str(exc),
             )
 
-        # 5. Idempotent insert + happy-path return.
+        # 6. Idempotent insert + happy-path return.
         yt_url = str(match.get("yt_url") or "")
         audio_playlist_id_raw = match.get("yt_audio_playlist_id")
         audio_playlist_id = (
@@ -667,7 +652,7 @@ class YoutubeIngestService:
                 browse_id=browse_id,
                 audio_playlist_id=audio_playlist_id,
                 yt_url=yt_url,
-                expected_track_count=int(current_mb_count),
+                expected_track_count=int(expected_track_count),
             )
         except _pipeline_db_mod.YoutubeInFlightError as exc:
             existing_id = exc.existing_download_log_id
@@ -752,8 +737,9 @@ class YoutubeIngestService:
         request_id = int(request_id_raw)
 
         # Look up the request row for staging-target derivation + R10
-        # MB-side counter-check. (R10 uses ``mb_track_count_fn``, not
-        # the resolver's cached count — see KTD5.)
+        # source-aware count gate. MB requests keep the live MB mirror
+        # counter-check; Discogs-only rows use the submission-time expected
+        # count that came from stored tracks or the exact resolver distance.
         request_row = self.pdb.get_request(request_id)
         if request_row is None:
             return self._terminal_failed(
@@ -768,15 +754,16 @@ class YoutubeIngestService:
             )
 
         request_mbid = self._request_mbid(request_row)
-        if not request_mbid:
+        discogs_release_id = self._request_discogs_release_id(request_row)
+        if not request_mbid and not discogs_release_id:
             return self._terminal_failed(
                 download_log_id,
-                reason="missing_request_mbid",
+                reason="missing_request_release_id",
                 stderr_excerpt=None,
                 observed_track_count=None,
                 detail=(
-                    f"request {request_id} has no MB release id; R10 "
-                    f"gate cannot fire"
+                    f"request {request_id} has neither MB release id nor "
+                    f"Discogs release id; R10 gate cannot fire"
                 ),
             )
 
@@ -802,6 +789,7 @@ class YoutubeIngestService:
 
         if run.exit_code != 0 or not run.staged_files:
             reason = classify_youtube_failure(run.stderr_excerpt)
+            cleanup_error = self._cleanup_ytdlp_run(run)
             return self._terminal_failed(
                 download_log_id,
                 reason=reason,
@@ -815,32 +803,55 @@ class YoutubeIngestService:
                     f"yt-dlp exit_code={run.exit_code} "
                     f"staged_files={len(run.staged_files)}"
                 ),
+                extra_metadata=_cleanup_metadata(cleanup_error),
             )
 
         # ----- R10: track-count gate BEFORE any staging move -----
-        try:
-            expected_count = self.mb_track_count_fn(request_mbid)
-        except Exception as exc:  # noqa: BLE001 — MB mirror hiccup
-            return self._terminal_failed(
-                download_log_id,
-                reason="mb_mirror_unavailable",
-                stderr_excerpt=_safe_excerpt(str(exc)),
-                observed_track_count=len(run.staged_files),
-                detail=(
-                    f"mb_track_count_fn({request_mbid}) raised {exc}"
-                ),
-            )
-        if expected_count is None:
-            return self._terminal_failed(
-                download_log_id,
-                reason="mb_mirror_unavailable",
-                stderr_excerpt=None,
-                observed_track_count=len(run.staged_files),
-                detail=(
-                    f"MB mirror returned no track count for {request_mbid!r}"
-                ),
-            )
+        if request_mbid:
+            try:
+                expected_count = self.mb_track_count_fn(request_mbid)
+            except Exception as exc:  # noqa: BLE001 — MB mirror hiccup
+                cleanup_error = self._cleanup_ytdlp_run(run)
+                return self._terminal_failed(
+                    download_log_id,
+                    reason="mb_mirror_unavailable",
+                    stderr_excerpt=_safe_excerpt(str(exc)),
+                    observed_track_count=len(run.staged_files),
+                    detail=(
+                        f"mb_track_count_fn({request_mbid}) raised {exc}"
+                    ),
+                    extra_metadata=_cleanup_metadata(cleanup_error),
+                )
+            if expected_count is None:
+                cleanup_error = self._cleanup_ytdlp_run(run)
+                return self._terminal_failed(
+                    download_log_id,
+                    reason="mb_mirror_unavailable",
+                    stderr_excerpt=None,
+                    observed_track_count=len(run.staged_files),
+                    detail=(
+                        f"MB mirror returned no track count for "
+                        f"{request_mbid!r}"
+                    ),
+                    extra_metadata=_cleanup_metadata(cleanup_error),
+                )
+        else:
+            expected_count = _positive_int(metadata.expected_track_count)
+            if expected_count is None:
+                cleanup_error = self._cleanup_ytdlp_run(run)
+                return self._terminal_failed(
+                    download_log_id,
+                    reason="missing_expected_track_count",
+                    stderr_excerpt=None,
+                    observed_track_count=len(run.staged_files),
+                    detail=(
+                        f"Discogs request {request_id} has no positive "
+                        f"submission-time expected_track_count"
+                    ),
+                    extra_metadata=_cleanup_metadata(cleanup_error),
+                )
         if len(run.staged_files) != int(expected_count):
+            cleanup_error = self._cleanup_ytdlp_run(run)
             return self._terminal_failed(
                 download_log_id,
                 reason="track_count_mismatch",
@@ -850,6 +861,7 @@ class YoutubeIngestService:
                     f"observed_track_count={len(run.staged_files)} != "
                     f"expected_track_count={int(expected_count)}"
                 ),
+                extra_metadata=_cleanup_metadata(cleanup_error),
             )
 
         # ----- stage + enqueue -----
@@ -858,6 +870,7 @@ class YoutubeIngestService:
             src_dir = run.staged_files[0].parent
             self.stage_dir_fn(src_dir, staging_target)
         except Exception as exc:  # noqa: BLE001 — disk error
+            cleanup_error = self._cleanup_ytdlp_run(run)
             return self._terminal_failed(
                 download_log_id,
                 reason="staging_io_error",
@@ -866,6 +879,7 @@ class YoutubeIngestService:
                 detail=(
                     f"stage_dir_fn raised {type(exc).__name__}: {exc}"
                 ),
+                extra_metadata=_cleanup_metadata(cleanup_error),
             )
 
         try:
@@ -885,6 +899,8 @@ class YoutubeIngestService:
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — DB hiccup
+            cleanup_error = self._cleanup_paths(
+                [staging_target, *self._ytdlp_cleanup_paths(run)])
             return self._terminal_failed(
                 download_log_id,
                 reason="import_enqueue_failed",
@@ -893,11 +909,15 @@ class YoutubeIngestService:
                 detail=(
                     f"enqueue_import_job raised {type(exc).__name__}: {exc}"
                 ),
+                extra_metadata=_cleanup_metadata(cleanup_error),
             )
 
         terminal_metadata: dict[str, Any] = {
             "observed_track_count": len(run.staged_files),
         }
+        cleanup_error = self._cleanup_ytdlp_run(run)
+        if cleanup_error is not None:
+            terminal_metadata["cleanup_error"] = cleanup_error
         self.pdb.update_youtube_terminal(
             int(download_log_id),
             "youtube_success",
@@ -915,6 +935,7 @@ class YoutubeIngestService:
         stderr_excerpt: Optional[str],
         observed_track_count: Optional[int],
         detail: Optional[str] = None,
+        extra_metadata: Optional[dict[str, Any]] = None,
     ) -> RunResult:
         """Write the terminal ``youtube_failed`` row and return RunResult.
 
@@ -933,6 +954,8 @@ class YoutubeIngestService:
         if observed_track_count is not None:
             terminal_metadata["observed_track_count"] = int(
                 observed_track_count)
+        if extra_metadata:
+            terminal_metadata.update(extra_metadata)
         try:
             self.pdb.update_youtube_terminal(
                 int(download_log_id),
@@ -943,46 +966,288 @@ class YoutubeIngestService:
             log.error(
                 "youtube_ingest_service: update_youtube_terminal failed "
                 "for download_log_id=%s: %s", download_log_id, exc)
+            raise
         return RunResult(outcome="youtube_failed", reason=reason)
+
+    def _lookup_submit_mapping(
+        self,
+        *,
+        request_id: int,
+        request_row: dict[str, Any],
+        browse_id: str,
+    ) -> SubmitResult | tuple[str, dict[str, Any], str]:
+        request_mbid = self._request_mbid(request_row)
+        discogs_id = self._request_discogs_release_id(request_row)
+        if request_mbid is None and discogs_id is not None:
+            try:
+                row = self.pdb.find_youtube_album_mapping_for_release(
+                    source="discogs",
+                    release_id=discogs_id,
+                    browse_id=browse_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — transient DB error
+                log.warning(
+                    "youtube_ingest_service: "
+                    "find_youtube_album_mapping_for_release(%s, %s) "
+                    "raised %s", discogs_id, browse_id, exc)
+                return SubmitResult(
+                    outcome="transient",
+                    detail=(
+                        f"DB error reading Discogs resolver mapping for "
+                        f"release_id={discogs_id!r}: {exc}"
+                    ),
+                )
+            if row is None:
+                return SubmitResult(
+                    outcome="no_resolver_mapping",
+                    detail=(
+                        f"no Discogs resolver mapping for release_id="
+                        f"{discogs_id!r} browse_id={browse_id!r}; run the "
+                        f"YouTube album resolver first"
+                    ),
+                )
+            return ("discogs", row, discogs_id)
+
+        resolver_key = self.release_group_resolver_fn(request_row)
+        if resolver_key is None:
+            return SubmitResult(
+                outcome="no_resolver_mapping",
+                detail=(
+                    f"request {request_id} has no resolvable release-group "
+                    f"identifier; populate mb_release_group_id and retry"
+                ),
+            )
+        source, rg_id = resolver_key
+        try:
+            mapping_rows = self.pdb.get_youtube_album_mapping(rg_id, source)
+        except Exception as exc:  # noqa: BLE001 — transient DB error
+            log.warning(
+                "youtube_ingest_service: get_youtube_album_mapping(%s, %s) "
+                "raised %s", rg_id, source, exc)
+            return SubmitResult(
+                outcome="transient",
+                detail=(
+                    f"DB error reading resolver mapping for "
+                    f"({rg_id!r}, {source!r}): {exc}"
+                ),
+            )
+        if mapping_rows is None or not mapping_rows:
+            return SubmitResult(
+                outcome="no_resolver_mapping",
+                detail=(
+                    f"no resolver mapping for release_group={rg_id!r} "
+                    f"source={source!r}; run the YouTube album resolver first"
+                ),
+            )
+        for row in mapping_rows:
+            if str(row.get("yt_browse_id") or "") == browse_id:
+                target_release_id = request_mbid or ""
+                return (source, row, target_release_id)
+        return SubmitResult(
+            outcome="no_resolver_mapping",
+            detail=(
+                f"browse_id {browse_id!r} not in resolver mapping for "
+                f"release_group={rg_id!r} source={source!r}"
+            ),
+        )
+
+    def _expected_track_count_for_submit(
+        self,
+        *,
+        request_id: int,
+        request_row: dict[str, Any],
+        source: str,
+        mapping_row: dict[str, Any],
+        target_release_id: str,
+    ) -> int:
+        if source == "discogs":
+            distance_count = self._distance_total_tracks(
+                mapping_row, target_release_id)
+            try:
+                stored_count = self._stored_track_count(request_id)
+            except Exception as exc:  # noqa: BLE001 — DB/read hiccup
+                raise _TransientPrecheckFailure(
+                    f"DB error reading stored tracklist for request "
+                    f"{request_id}: {exc}"
+                ) from exc
+            if stored_count is None and distance_count is None:
+                raise _TrackCountPrecheckFailure(
+                    f"Discogs request {request_id} has no stored tracklist "
+                    f"and resolver mapping browse_id="
+                    f"{mapping_row.get('yt_browse_id')!r} has no exact "
+                    f"total track count for release_id={target_release_id!r}"
+                )
+            if (
+                stored_count is not None
+                and distance_count is not None
+                and int(stored_count) != int(distance_count)
+            ):
+                raise _TrackCountPrecheckFailure(
+                    f"stored Discogs track count={int(stored_count)} != "
+                    f"resolver total tracks={int(distance_count)} for "
+                    f"release_id={target_release_id!r}; refresh resolver or "
+                    f"repair album_tracks before retrying"
+                )
+            return int(stored_count if stored_count is not None else distance_count)
+
+        request_mbid = self._request_mbid(request_row)
+        if not request_mbid:
+            raise _TrackCountPrecheckFailure(
+                f"request {request_id} has no MB release id; "
+                f"track-count precheck cannot run"
+            )
+        expected_track_count = self._distance_total_tracks(
+            mapping_row, request_mbid)
+        if expected_track_count is None:
+            raise _TrackCountPrecheckFailure(
+                f"resolver mapping for browse_id="
+                f"{mapping_row.get('yt_browse_id')!r} has no distance entry "
+                f"for mbid={request_mbid!r}; refresh the resolver and retry"
+            )
+        try:
+            current_mb_count = self.mb_track_count_fn(request_mbid)
+        except Exception as exc:  # noqa: BLE001 — MB mirror hiccup
+            log.warning(
+                "youtube_ingest_service: mb_track_count_fn(%s) raised %s",
+                request_mbid, exc)
+            raise _TransientPrecheckFailure(
+                f"MB mirror error checking track count for "
+                f"{request_mbid!r}: {exc}"
+            ) from exc
+        if current_mb_count is None:
+            raise _TrackCountPrecheckFailure(
+                f"MB mirror returned no track count for "
+                f"{request_mbid!r}; cannot R7-precheck"
+            )
+        if int(current_mb_count) != int(expected_track_count):
+            raise _TrackCountPrecheckFailure(
+                f"resolver cache total_mb_tracks="
+                f"{int(expected_track_count)} != "
+                f"current MB tracks={int(current_mb_count)} for "
+                f"mbid={request_mbid!r}; resolver state is stale, "
+                f"refresh first"
+            )
+        return int(current_mb_count)
+
+    def _stored_track_count(self, request_id: int) -> Optional[int]:
+        tracks = self.pdb.get_tracks(int(request_id))
+        if not tracks:
+            return None
+        return len(tracks)
 
     @staticmethod
     def _request_mbid(request_row: dict[str, Any]) -> Optional[str]:
         """Return the request's MB release id, or ``None`` for Discogs-only.
 
-        ``mb_release_id`` is the authoritative field; if NULL, the
-        request was added via the Discogs path and has no MBID to anchor
-        the precheck / gate.
+        ``mb_release_id`` may contain a numeric Discogs id for legacy
+        pipeline compatibility. Only UUID-shaped MusicBrainz ids anchor
+        the MB precheck / gate.
         """
-        raw = request_row.get("mb_release_id")
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
+        value = normalize_release_id(request_row.get("mb_release_id"))
+        if detect_release_source(value) == "musicbrainz":
+            return value
         return None
 
     @staticmethod
-    def _distance_total_mb_tracks(
+    def _request_discogs_release_id(
+        request_row: dict[str, Any],
+    ) -> Optional[str]:
+        for key in ("discogs_release_id", "mb_release_id"):
+            value = normalize_release_id(request_row.get(key))
+            if detect_release_source(value) == "discogs":
+                return value
+        return None
+
+    @staticmethod
+    def _distance_entry(
         mapping_row: dict[str, Any],
-        target_mbid: str,
-    ) -> Optional[int]:
-        """Look up the resolver's cached ``total_mb_tracks`` for one MBID.
+        target_release_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Look up the resolver distance entry for one release id.
 
         Walks the row's ``distances`` array, returning the first entry
-        whose ``mbid`` matches ``target_mbid``. ``None`` if no entry
-        matches — the caller surfaces ``track_count_precheck_failed``.
+        whose historical ``mbid`` key matches ``target_release_id``. The
+        key name is retained by the resolver for both MB and Discogs rows.
         """
         distances = mapping_row.get("distances") or []
         for entry in distances:
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("mbid") or "") != target_mbid:
-                continue
-            tmb = entry.get("total_mb_tracks")
-            if isinstance(tmb, int):
-                return tmb
-            try:
-                return int(tmb) if tmb is not None else None
-            except (TypeError, ValueError):
-                return None
+            if str(entry.get("mbid") or "") == target_release_id:
+                return entry
         return None
+
+    @classmethod
+    def _distance_total_tracks(
+        cls,
+        mapping_row: dict[str, Any],
+        target_release_id: str,
+    ) -> Optional[int]:
+        """Look up the resolver's cached total tracks for one release id."""
+        entry = cls._distance_entry(mapping_row, target_release_id)
+        if entry is None:
+            return None
+        tmb = entry.get("total_mb_tracks")
+        if isinstance(tmb, int):
+            return tmb
+        try:
+            return int(tmb) if tmb is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _distance_total_mb_tracks(
+        cls,
+        mapping_row: dict[str, Any],
+        target_mbid: str,
+    ) -> Optional[int]:
+        """Backward-compatible wrapper for MB-named tests/callers."""
+        return cls._distance_total_tracks(mapping_row, target_mbid)
+
+    def _cleanup_ytdlp_run(self, run: YtdlpRunResult) -> Optional[str]:
+        """Best-effort delete the scratch paths used by one yt-dlp run."""
+        return self._cleanup_paths(self._ytdlp_cleanup_paths(run))
+
+    @staticmethod
+    def _ytdlp_cleanup_paths(run: YtdlpRunResult) -> list[Path]:
+        """Return scratch roots to delete for a yt-dlp result.
+
+        The worker now reports ``work_dir`` for real invocations. Tests
+        and older fakes may omit it, so fall back to each staged file's
+        parent directory.
+        """
+        if run.work_dir is not None:
+            return [Path(run.work_dir)]
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for file_path in run.staged_files or []:
+            parent = Path(file_path).parent
+            key = str(parent)
+            if key not in seen:
+                seen.add(key)
+                paths.append(parent)
+        return paths
+
+    @staticmethod
+    def _cleanup_paths(paths: list[Path]) -> Optional[str]:
+        errors: list[str] = []
+        seen: set[str] = set()
+        for raw_path in paths:
+            path = Path(raw_path)
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if not path.exists():
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+                errors.append(f"{path}: {type(exc).__name__}: {exc}")
+        return "; ".join(errors) if errors else None
 
     def _derive_staging_target(
         self,
@@ -1037,3 +1302,15 @@ def _safe_excerpt(text: Optional[str], limit: int = 4096) -> str:
     return text[:limit] + "…[truncated]"
 
 
+def _positive_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _cleanup_metadata(cleanup_error: Optional[str]) -> Optional[dict[str, Any]]:
+    if not cleanup_error:
+        return None
+    return {"cleanup_error": cleanup_error}

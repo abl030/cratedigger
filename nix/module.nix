@@ -148,6 +148,7 @@
     exec ${pyRunner} ${src}/scripts/youtube_ingest_worker.py \
       --dsn "${cfg.pipelineDb.dsn}" \
       --temp-dir "${cfg.youtubeIngest.tempDir}" \
+      --staging-dir "${cfg.beetsValidation.stagingDir}" \
       --poll-interval ${toString cfg.youtubeIngest.pollIntervalSeconds} "$@"
   '';
 
@@ -417,8 +418,9 @@ in {
     # YouTube-rescue ingest worker. Drains album_requests rows the operator
     # has marked for YouTube fallback (`pipeline-cli youtube-rescue <id>` or
     # POST /api/pipeline/<id>/youtube-rescue), invoking `yt-dlp` to stage
-    # audio into /Incoming/auto-import/ for the existing importer worker to
-    # pick up. The unit is defined here but `enable` defaults to `false` so
+    # audio into the configured beets-validation staging directory's
+    # auto-import child for the existing importer worker to pick up. The
+    # unit is defined here but `enable` defaults to `false` so
     # the in-flake module ships dormant — the downstream NixOS wrapper at
     # ~/nixosconfig/modules/nixos/services/cratedigger.nix is the right
     # layer to flip this on and layer on network-namespace hardening
@@ -440,7 +442,7 @@ in {
         defaultText = lib.literalExpression ''"''${cfg.stateDir}/youtube-ingest-temp"'';
         description = ''
           Per-process scratch directory yt-dlp downloads into before files
-          are moved to /Incoming/auto-import/. Created by systemd-tmpfiles
+          are moved to the configured auto-import staging directory. Created by systemd-tmpfiles
           with the same ownership as the cratedigger user.
         '';
       };
@@ -1151,8 +1153,9 @@ in {
     # polls album_requests for `youtube_pending` rows the operator
     # explicitly opted in via `pipeline-cli youtube-rescue <id>` or
     # POST /api/pipeline/<id>/youtube-rescue, invokes yt-dlp, stages audio
-    # under /Incoming/auto-import/, and enqueues a `youtube_import` row in
-    # `import_jobs` for the existing cratedigger-importer worker to drain.
+    # under the configured auto-import staging directory, and enqueues a
+    # `youtube_import` row in `import_jobs` for the existing
+    # cratedigger-importer worker to drain.
     #
     # Advisory-lock contention exits the process with code 0 (not 1), so
     # `Restart=on-failure` won't fire on duplicate-start. A genuine crash
@@ -1167,11 +1170,10 @@ in {
       requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
       # Deliberate `restartIfChanged = true`: deploy MUST pick up worker
-      # code changes. The advisory-lock-on-startup discipline plus
-      # `sweep_orphan_running_rows` recovery at boot makes a mid-job
-      # SIGTERM safe — orphaned `youtube_running` rows revert to
-      # `youtube_pending` so the next drain picks them up. Mirrors the
-      # importer / preview-worker posture (2026-05-16 lesson).
+      # code changes. Accepted-but-unclaimed `youtube_running` rows survive
+      # restart and remain drainable; rows claimed by a previous worker are
+      # swept to terminal `youtube_failed` on startup. Mirrors the importer /
+      # preview-worker restart posture (2026-05-16 lesson).
       restartIfChanged = true;
       # Worker-specific PATH is set inside the wrapper (yt-dlp is
       # prepended there). The unit's `path` mirrors the importer's so

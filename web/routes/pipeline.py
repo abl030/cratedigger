@@ -400,9 +400,14 @@ def get_pipeline_downloading(h, params: dict[str, list[str]]) -> None:
     rows = [s._serialize_row(r) for r in s._db().get_by_status("downloading")]
     ids = [int(str(r["id"])) for r in rows]
     history_batch = s._db().get_download_history_batch(ids)
+    youtube_ingest = [
+        s._serialize_row(r)
+        for r in s._db().list_active_youtube_rescues(limit=50)
+    ]
     h._json({
         "counts": counts,
         "downloading": _attach_latest_download_history(rows, history_batch),
+        "youtube_ingest": youtube_ingest,
     })
 
 
@@ -2757,7 +2762,8 @@ GET_DESCRIPTIONS: dict[str, str] = {
         "frozen audit rows."
     ),
     "/api/pipeline/downloading": (
-        "Pipeline requests currently in the downloading status."
+        "Pipeline requests currently in the downloading status, plus "
+        "active YouTube rescue ingests."
     ),
     "/api/pipeline/dashboard": (
         "Operational metrics for the dashboard subtab (searches, "

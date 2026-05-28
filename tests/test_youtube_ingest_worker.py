@@ -2,8 +2,9 @@
 
 Coverage matrix mirrors plan U6:
 
-* Startup orphan sweep (R22) — every ``youtube_running`` row at startup
-  is transitioned to ``youtube_failed`` with ``reason=worker_died``.
+* Startup orphan sweep (R22) — claimed ``youtube_running`` rows at startup
+  are transitioned to ``youtube_failed`` with ``reason=worker_interrupted`` while
+  accepted-but-unclaimed rows stay drainable.
 * Drain loop happy path — one ``youtube_running`` row → ``run_job``
   succeeds → terminal ``youtube_success`` + a ``youtube_import`` job in
   ``import_jobs`` carrying ``staged_path``.
@@ -114,7 +115,7 @@ def _service_with_fake_runner(
 
 
 class TestSweepOrphanRunningRows(unittest.TestCase):
-    """Every ``youtube_running`` row at startup is marked failed."""
+    """Only claimed ``youtube_running`` rows at startup are marked failed."""
 
     def test_sweeps_all_orphans(self) -> None:
         pdb = FakePipelineDB()
@@ -122,19 +123,33 @@ class TestSweepOrphanRunningRows(unittest.TestCase):
         _seed_wanted_request(pdb, request_id=43)
         log_id_1 = _seed_running_row(pdb, request_id=42)
         log_id_2 = _seed_running_row(pdb, request_id=43)
+        pdb.claim_next_youtube_pending(worker_id="worker-a", limit=2)
 
         swept = worker.sweep_orphan_running_rows(pdb)
 
         self.assertEqual(sorted(swept), sorted([log_id_1, log_id_2]))
 
-        # Both rows are now terminal with reason=worker_died.
+        # Both rows are now terminal with reason=worker_interrupted.
         for lid in (log_id_1, log_id_2):
             row = pdb.get_download_log_entry(lid)
             assert row is not None
             self.assertEqual(row["outcome"], "youtube_failed")
             meta = row["youtube_metadata"]
             assert meta is not None
-            self.assertEqual(meta["reason"], "worker_died")
+            self.assertEqual(meta["reason"], "worker_interrupted")
+
+    def test_accepted_unclaimed_rows_survive_startup_sweep(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        log_id = _seed_running_row(pdb, request_id=42)
+
+        swept = worker.sweep_orphan_running_rows(pdb)
+
+        self.assertEqual(swept, [])
+        row = pdb.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertEqual(row["outcome"], "youtube_running")
+        self.assertEqual([r["id"] for r in pdb.find_next_youtube_pending()], [log_id])
 
     def test_empty_queue_sweeps_nothing(self) -> None:
         pdb = FakePipelineDB()
@@ -182,6 +197,9 @@ class TestDrainLoopHappyPath(unittest.TestCase):
         row = pdb.get_download_log_entry(log_id)
         assert row is not None
         self.assertEqual(row["outcome"], "youtube_success")
+        meta = row["youtube_metadata"]
+        assert meta is not None
+        self.assertIsNotNone(meta.get("worker_claimed_at"))
 
         jobs = [
             j for j in pdb.list_import_jobs(limit=50)
@@ -296,17 +314,18 @@ class TestYtdlpArgvShape(unittest.TestCase):
             ytdlp_bin="/usr/bin/yt-dlp",
             url="https://music.youtube.com/playlist?list=FAKE",
             output_template="/tmp/out/%(title)s.%(ext)s",
-            max_downloads=10,
         )
         # The URL must appear at the end, prefixed by '--'.
         self.assertEqual(argv[-2], "--")
         self.assertEqual(
             argv[-1], "https://music.youtube.com/playlist?list=FAKE")
+        # Worker invocation is isolated from ambient yt-dlp config/cookies.
+        self.assertIn("--ignore-config", argv)
         # ``--no-ignore-errors`` is set (R9).
         self.assertIn("--no-ignore-errors", argv)
-        # ``--max-downloads`` set to the track count.
-        idx = argv.index("--max-downloads")
-        self.assertEqual(argv[idx + 1], "10")
+        # ``--max-downloads`` aborts with a nonzero exit as soon as the Nth
+        # file completes; rely on the post-download R10 count gate instead.
+        self.assertNotIn("--max-downloads", argv)
         # bestaudio format.
         idx = argv.index("-f")
         self.assertEqual(argv[idx + 1], "bestaudio")
@@ -336,6 +355,9 @@ class TestRunYtdlpStderrCap(unittest.TestCase):
                 subprocess_run=_fake_run,
                 ytdlp_bin_resolver=lambda: "/usr/bin/yt-dlp",
             )
+            self.assertIsNotNone(result.work_dir)
+            assert result.work_dir is not None
+            self.assertTrue(result.work_dir.is_dir())
 
         self.assertEqual(result.exit_code, 1)
         assert result.stderr_excerpt is not None
@@ -557,10 +579,9 @@ class TestMainHappyPath(unittest.TestCase):
         def _fake_build_service(db: Any, **_kw: Any) -> YoutubeIngestService:
             return _service_with_fake_runner(db, runner_result)
 
-        # Seed the running row AFTER startup sweep would have wiped it.
-        # Production behaviour: every youtube_running at startup is an
-        # orphan, so a "drains a pending job" test has to inject the
-        # pending row AT the sweep boundary — that's what we patch here.
+        # Seed an accepted, unclaimed row after the startup sweep boundary.
+        # The real sweep now only fails claimed rows, but this keeps the
+        # main() test focused on the drain path rather than setup ordering.
         def _fake_sweep(db: Any) -> list[int]:
             _seed_running_row(db)
             return []
@@ -613,6 +634,18 @@ class TestBuildService(unittest.TestCase):
             svc = worker.build_service(
                 pdb, temp_dir=Path(tmp), ytdlp_runner_fn=_runner)
         self.assertIs(svc.ytdlp_runner_fn, _runner)
+
+    def test_uses_configured_staging_dir_auto_import_child(self) -> None:
+        pdb = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = worker.build_service(
+                pdb,
+                temp_dir=Path(tmp) / "scratch",
+                staging_dir=Path(tmp) / "staging",
+                ytdlp_runner_fn=lambda **_kw: YtdlpRunResult(
+                    exit_code=0, stderr_excerpt=None, staged_files=[]),
+            )
+        self.assertEqual(svc.staging_root, Path(tmp) / "staging" / "auto-import")
 
 
 if __name__ == "__main__":  # pragma: no cover

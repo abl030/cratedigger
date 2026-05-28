@@ -2792,6 +2792,8 @@ class TestDownloadLogYoutubeSourceSchema(unittest.TestCase):
       (``youtube_running``, ``youtube_success``, ``youtube_failed``)
     - partial unique index ``one_youtube_running_per_request`` enforcing
       R4 idempotency at the DB layer
+    - widened ``import_jobs.job_type`` admitting ``youtube_import`` for the
+      worker-to-importer handoff
     """
 
     def _query(self, sql: str, params: tuple = ()):
@@ -3040,6 +3042,30 @@ class TestDownloadLogYoutubeSourceSchema(unittest.TestCase):
         self.assertEqual(len(rows), 1,
                          msg="one_youtube_running_per_request must exist on "
                              "download_log (created by 037)")
+
+    def test_import_jobs_job_type_check_admits_youtube_import(self):
+        rid = self._make_request("mig037-youtube-import-job-mbid")
+        dedupe_key = "youtube-import:mig037"
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'youtube_import', %s, %s,
+                    '{"staged_path": "/tmp/yt", "request_id": 1,
+                      "browse_id": "MPREb_mig037"}'::jsonb
+                )
+            """, (rid, dedupe_key))
+            rows = self._query("""
+                SELECT job_type, payload->>'browse_id'
+                FROM import_jobs
+                WHERE dedupe_key = %s
+            """, (dedupe_key,))
+            self.assertEqual(rows, [("youtube_import", "MPREb_mig037")])
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE dedupe_key = %s",
+                       (dedupe_key,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
 if __name__ == "__main__":

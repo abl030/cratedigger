@@ -1564,6 +1564,51 @@ class TestFakeGetWantedSearchable(unittest.TestCase):
         )
         self.assertEqual(db.get_wanted_searchable("g1"), [])
 
+    def test_active_youtube_rescue_excluded(self):
+        from lib.import_queue import (
+            IMPORT_JOB_YOUTUBE,
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        db = FakePipelineDB()
+        rid_running = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="yt-running")
+        self._make_active(db, rid_running, "g1")
+        db.insert_youtube_running(
+            request_id=rid_running,
+            browse_id="MPREb_running",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=running",
+            expected_track_count=10,
+        )
+
+        rid_import = db.add_request(
+            artist_name="A", album_title="C", source="request",
+            mb_release_id="yt-import")
+        self._make_active(db, rid_import, "g1")
+        db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=rid_import,
+            dedupe_key=youtube_import_dedupe_key(123),
+            payload=youtube_import_payload(
+                staged_path="/tmp/yt-import",
+                request_id=rid_import,
+                browse_id="MPREb_import",
+            ),
+        )
+
+        rid_clear = db.add_request(
+            artist_name="A", album_title="D", source="request",
+            mb_release_id="clear")
+        self._make_active(db, rid_clear, "g1")
+
+        self.assertEqual(
+            {r["id"] for r in db.get_wanted_searchable("g1")},
+            {rid_clear},
+        )
+
 
 class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
     """Lightweight signature parity check between PipelineDB and
@@ -2200,6 +2245,35 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertIsNone(got[0]["yt_audio_playlist_id"])
         self.assertIsNone(got[0]["yt_year"])
+
+    def test_find_mapping_for_release_matches_exact_distance(self):
+        db = FakePipelineDB()
+        db.upsert_youtube_album_mapping("discogs-master-1", "discogs", [
+            self._row(
+                yt_browse_id="MPREb_discogs",
+                distances=[
+                    {"mbid": "12345", "distance": 0.05, "error": None},
+                    {"mbid": "67890", "distance": 0.25, "error": None},
+                ],
+            )
+        ])
+
+        got = db.find_youtube_album_mapping_for_release(
+            source="discogs",
+            release_id="12345",
+            browse_id="MPREb_discogs",
+        )
+
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got["release_group_identifier"], "discogs-master-1")
+        self.assertEqual(got["source"], "discogs")
+        self.assertIsNone(db.find_youtube_album_mapping_for_release(
+            source="mb", release_id="12345", browse_id="MPREb_discogs"))
+        self.assertIsNone(db.find_youtube_album_mapping_for_release(
+            source="discogs", release_id="99999", browse_id="MPREb_discogs"))
+        self.assertIsNone(db.find_youtube_album_mapping_for_release(
+            source="discogs", release_id="12345", browse_id="MPREb_other"))
 
 
 class TestBuilders(unittest.TestCase):
@@ -3018,6 +3092,24 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(rows[0]["spectral_grade"], "genuine")
         self.assertEqual(rows[0]["final_format"], "mp3 v0")
         self.assertEqual(rows[0]["actual_min_bitrate"], 245)
+
+    def test_get_log_keeps_download_source_and_aliases_request_source(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, source="redownload"))
+        slskd_id = db.log_download(1, outcome="success")
+        yt_id = db.insert_youtube_running(
+            request_id=1,
+            browse_id="MPREb_fake_get_log",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=fake",
+            expected_track_count=10,
+        )
+        rows = db.get_log()
+        by_id = {row["id"]: row for row in rows}
+        self.assertEqual(by_id[slskd_id]["source"], "slskd")
+        self.assertEqual(by_id[slskd_id]["request_source"], "redownload")
+        self.assertEqual(by_id[yt_id]["source"], "youtube")
+        self.assertEqual(by_id[yt_id]["request_source"], "redownload")
 
     def test_get_by_status_sorts_by_created_at(self):
         db = FakePipelineDB()
@@ -4681,7 +4773,7 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
     - ``update_youtube_terminal`` merges metadata (PG ``||`` operator)
     - ``find_next_youtube_pending`` is FIFO by ``created_at, id``,
       excludes slskd rows and terminal rows
-    - ``find_orphan_youtube_running`` returns all in-flight ids
+    - ``find_orphan_youtube_running`` returns claimed in-flight ids only
     """
 
     def _payload(self, request_id: int, **overrides: Any) -> dict[str, Any]:
@@ -4790,19 +4882,67 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
         rows = db.find_next_youtube_pending(limit=10)
         self.assertEqual([r["id"] for r in rows], [first, second])
 
-    def test_find_orphan_youtube_running_returns_all_running_ids(self):
+    def test_claim_next_youtube_pending_marks_worker_metadata(self):
         db = FakePipelineDB()
         first = db.insert_youtube_running(**self._payload(42))
         second = db.insert_youtube_running(**self._payload(
             43, browse_id="MPREb_43",
         ))
+        claimed = db.claim_next_youtube_pending(worker_id="worker-1", limit=1)
+        self.assertEqual([r["id"] for r in claimed], [first])
+        self.assertEqual(
+            [r["id"] for r in db.find_next_youtube_pending(limit=10)],
+            [second],
+        )
+        meta = claimed[0]["youtube_metadata"]
+        self.assertEqual(meta["worker_id"], "worker-1")
+        self.assertIsNotNone(meta["worker_claimed_at"])
+
+    def test_find_orphan_youtube_running_returns_claimed_ids(self):
+        db = FakePipelineDB()
+        first = db.insert_youtube_running(**self._payload(42))
+        second = db.insert_youtube_running(**self._payload(
+            43, browse_id="MPREb_43",
+        ))
+        self.assertEqual(db.find_orphan_youtube_running(), [])
+        db.claim_next_youtube_pending(worker_id="worker-1", limit=1)
         orphans = db.find_orphan_youtube_running()
-        self.assertEqual(sorted(orphans), sorted([first, second]))
+        self.assertEqual(orphans, [first])
         for log_id in orphans:
             db.update_youtube_terminal(
-                log_id, "youtube_failed", {"reason": "worker_died"},
+                log_id, "youtube_failed", {"reason": "worker_interrupted"},
             )
         self.assertEqual(db.find_orphan_youtube_running(), [])
+        self.assertEqual(
+            [r["id"] for r in db.find_next_youtube_pending(limit=10)],
+            [second],
+        )
+
+    def test_list_active_youtube_rescues_returns_request_context(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, artist_name="YT Artist", album_title="YT Album",
+            mb_release_id="yt-mbid", status="wanted",
+        ))
+        yt_id = db.insert_youtube_running(**self._payload(
+            42, browse_id="MPREb_visible",
+        ))
+
+        rows = db.list_active_youtube_rescues(limit=10)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["download_log_id"], yt_id)
+        self.assertEqual(rows[0]["request_id"], 42)
+        self.assertEqual(rows[0]["artist_name"], "YT Artist")
+        self.assertEqual(rows[0]["album_title"], "YT Album")
+        self.assertEqual(rows[0]["request_status"], "wanted")
+        self.assertEqual(
+            rows[0]["youtube_metadata"]["browse_id"], "MPREb_visible")
+
+        db.update_youtube_terminal(
+            yt_id, "youtube_failed", {"reason": "operator_cancelled"},
+        )
+        self.assertEqual(db.list_active_youtube_rescues(limit=10), [])
 
     def test_read_seam_includes_source_and_youtube_metadata(self):
         db = FakePipelineDB()

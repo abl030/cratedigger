@@ -216,7 +216,8 @@ def _make_server():
             "mb_release_id": "abc-123", "year": 2024,
             "country": "US", "request_status": "imported",
             "request_min_bitrate": 320, "prev_min_bitrate": None,
-            "search_filetype_override": None, "source": "request",
+            "search_filetype_override": None, "source": "slskd",
+            "request_source": "request",
         },
     ]
     mock_db._execute.return_value = MagicMock(fetchone=MagicMock(return_value={
@@ -245,6 +246,8 @@ def _make_server():
             "staged_path": None, "download_path": None,
             "sample_rate": None, "bit_depth": None, "is_vbr": None,
             "import_result": None, "validation_result": None,
+            "source": "slskd", "request_source": "request",
+            "youtube_metadata": None,
         },
     ]
 
@@ -760,6 +763,46 @@ class TestServerEndpoints(unittest.TestCase):
 
         self.mock_db.get_by_status.side_effect = None
         self.mock_db.get_by_status.return_value = []
+        self.mock_db.get_download_history_batch.reset_mock()
+        self.mock_db.count_by_status.return_value = {
+            "wanted": 0, "imported": 1, "manual": 0}
+
+    def test_pipeline_downloading_includes_active_youtube_ingest(self):
+        self.mock_db.get_by_status.side_effect = None
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.count_by_status.return_value = {"downloading": 0}
+        self.mock_db.get_download_history_batch.return_value = {}
+        self.mock_db.list_active_youtube_rescues.return_value = [{
+            "download_log_id": 301,
+            "request_id": 202,
+            "source": "youtube",
+            "outcome": "youtube_running",
+            "youtube_metadata": {
+                "browse_id": "yt-browse",
+                "expected_track_count": 2,
+                "yt_url": "https://music.youtube.com/playlist?list=abc",
+            },
+            "created_at": datetime(2026, 5, 28, tzinfo=timezone.utc),
+            "artist_name": "YT Artist",
+            "album_title": "YT Album",
+            "mb_release_id": "yt-mbid",
+            "request_status": "wanted",
+        }]
+
+        status, data = self._get("/api/pipeline/downloading")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["downloading"], [])
+        self.assertEqual(len(data["youtube_ingest"]), 1)
+        rescue = data["youtube_ingest"][0]
+        self.assertEqual(rescue["download_log_id"], 301)
+        self.assertEqual(rescue["album_title"], "YT Album")
+        self.assertEqual(rescue["youtube_metadata"]["browse_id"], "yt-browse")
+        self.assertTrue(rescue["created_at"].startswith("2026-05-28T00:00:00"))
+        self.mock_db.list_active_youtube_rescues.assert_called_with(limit=50)
+
+        self.mock_db.get_by_status.return_value = []
+        self.mock_db.list_active_youtube_rescues.return_value = []
         self.mock_db.get_download_history_batch.reset_mock()
         self.mock_db.count_by_status.return_value = {
             "wanted": 0, "imported": 1, "manual": 0}

@@ -27,7 +27,7 @@ The product narrative this enables: a request that's been categorised `unfindabl
 
 - **`album_requests.status` is never touched by the YT ingest path.** Flipping a row to `downloading` because yt-dlp is in flight would collide with the existing `poll_active_downloads` orphan-detection logic (which expects every `downloading` row to have a matching slskd transfer). Adding a sidecar status column would force every consumer of "request state" — the web UI queue, the wrong-matches view, triage filters — to learn about the new tag. The row stays `wanted` (or `manual`) throughout; the YT attempt is visible via the new `download_log` row, which existing render paths already display under "recent attempts."
 
-- **All-or-nothing yt-dlp, with a hard track-count gate at the worker layer before staging.** Strict-pressing identity (R20) wins over partial-rescue convenience. yt-dlp is invoked without `--ignore-errors`; any single track failure aborts the run. Before files cross into `/Incoming/auto-import/`, the worker verifies `count(staged audio files) == MBID's expected track count` (sourced from the resolver's cached track count for that browse_id). Less ≠ wanted; more ≠ wanted; only equal-then-content-validated reaches the importer. This makes the YT-import success criterion fully transitive: track count + beets distance + quality gate, three aligned gates.
+- **All-or-nothing yt-dlp, with a hard track-count gate at the worker layer before staging.** Strict-pressing identity (R20) wins over partial-rescue convenience. yt-dlp is invoked without `--ignore-errors`; any single track failure aborts the run. Before files cross into `/Incoming/auto-import/`, the worker verifies `count(staged audio files) == source-aware expected track count` (MB mirror for MB requests, stored/exact cached Discogs count for Discogs-only requests). Less != wanted; more != wanted; only equal-then-content-validated reaches the importer. This makes the YT-import success criterion fully transitive: track count + beets distance + quality gate, three aligned gates.
 
 - **Resolver-required input.** The API accepts the resolver's `browse_id` (or `audio_playlist_id`), not a raw YouTube URL. Submission-time validation requires an existing resolver mapping row for the request's release group; out-of-band YT URLs are rejected. Three structural wins: every rescue is guaranteed to have been beets-scored against MB before the rescue button is even clickable; the resolver's cached `total_mb_tracks` enables the pre-yt-dlp track-count check; the audit row naturally references the resolver row.
 
@@ -52,11 +52,11 @@ The product narrative this enables: a request that's been categorised `unfindabl
   - **Trigger:** operator hits the API endpoint (or CLI subcommand) with `(request_id, browse_id)`
   - **Steps:**
     1. API validates request exists, status is `wanted` or `manual`, no `youtube_running` row already exists for this request
-    2. API validates a resolver mapping row exists for the request's release group containing the supplied browse_id, and the resolver's cached track count for that browse_id matches the request's MBID's track count
+    2. API validates a resolver mapping row exists for the request source containing the supplied browse_id, and the cached/stored track count for that browse_id matches the request source's expected count
     3. API inserts a `download_log` row with `outcome='youtube_running'`, `source='youtube'`, and a YT-metadata JSONB blob; returns 200 with the new download_log_id
     4. The ingest worker picks up the row on its next poll cycle, derives the playlist URL from the resolver's `audio_playlist_id`, runs yt-dlp (no `--ignore-errors`)
-    5. yt-dlp completes; worker verifies the actual staged track count matches the MBID's expected track count
-    6. Worker stages the directory to `/Incoming/auto-import/<artist>-<album>/`, inserts an `import_jobs` row pointing to that path with the request's MBID, updates the `download_log` row to `outcome='youtube_success'`
+    5. yt-dlp completes; worker verifies the actual staged track count matches the source-aware expected track count
+    6. Worker stages the directory to `/Incoming/auto-import/<artist>-<album>/`, inserts an `import_jobs` row pointing to that path with the request id, updates the `download_log` row to `outcome='youtube_success'`
     7. The existing importer worker picks up the import_job and runs the standard pipeline (beets validation, quality gate, auto-import OR wrong-matches routing)
     8. On import success, the existing pipeline populates `album_requests.rescued_at` + `prior_unfindable_category` per existing behavior
   - **Outcome:** the album imports (or routes to wrong-matches) through the existing pipeline; the download_log row carries the full YT audit trail
@@ -65,7 +65,7 @@ The product narrative this enables: a request that's been categorised `unfindabl
 - **F2. Hard track-count mismatch — pre-staging abort**
   - **Trigger:** yt-dlp completes; worker counts files in the temp staging dir
   - **Steps:**
-    1. Worker compares `count(staged audio files)` against the MBID's expected track count (sourced from the resolver row)
+    1. Worker compares `count(staged audio files)` against the source-aware expected track count
     2. Counts don't match
     3. Worker discards the temp directory (nothing reaches `/Incoming/auto-import/`)
     4. Worker updates the `download_log` row to `outcome='youtube_failed'` with a `track_count_mismatch` reason and the observed-vs-expected counts in the JSONB
@@ -93,7 +93,7 @@ The product narrative this enables: a request that's been categorised `unfindabl
   - **Steps:**
     1. On startup, worker scans `download_log` for rows with `outcome='youtube_running'` and `source='youtube'`
     2. Any such row represents a job that was in flight when the previous worker process died
-    3. Worker marks each orphan as `outcome='youtube_failed'` with reason `worker_died`
+    3. Worker marks each orphan as `outcome='youtube_failed'` with reason `worker_interrupted`
     4. Worker discards any partial staged files for those jobs
   - **Outcome:** the system self-recovers; requests return to their pre-rescue state; operator can retry
   - **Covers:** R23
@@ -121,14 +121,14 @@ The product narrative this enables: a request that's been categorised `unfindabl
 ### Resolver coupling
 
 - R6. The API validates at submission time that a YouTube resolver mapping row exists for the request's release group AND contains the supplied browse_id. Submissions whose browse_id is not in the resolver's mapping for that release group are rejected with 422.
-- R7. The API additionally validates at submission time that the resolver's cached `total_mb_tracks` for the supplied browse_id (against the request's specific MBID) matches the MBID's expected track count. Submissions failing this precheck are rejected with 422 BEFORE the worker is invoked. This is a cheap fail-fast; the worker still re-verifies post-yt-dlp.
+- R7. The API additionally validates at submission time that the selected resolver row has a defensible expected track count for the request source. MB requests compare the resolver's cached `total_mb_tracks` against the MB mirror; Discogs-only requests require stored `album_tracks` or an exact cached Discogs distance count. Submissions failing this precheck are rejected with 422 BEFORE the worker is invoked. This is a cheap fail-fast; the worker still re-verifies post-yt-dlp.
 - R8. The API derives the yt-dlp invocation URL from the resolver row's `yt_url` (or constructs it from `audio_playlist_id`). The operator never supplies a URL directly.
 
 ### Worker behavior
 
 - R9. yt-dlp is invoked WITHOUT `--ignore-errors`. Any single video failure in the playlist aborts the rescue. yt-dlp output codec is whatever its `bestaudio` heuristic picks (typically Opus from YouTube Music); no transcoding happens at staging time.
-- R10. After yt-dlp exits zero, the worker verifies the actual count of audio files in the temp staging directory matches the MBID's expected track count BEFORE any file moves into `/Incoming/auto-import/`. A mismatch (less or more) aborts the rescue with `outcome='youtube_failed'`, reason `track_count_mismatch`. The importer never sees a partial fileset.
-- R11. On track-count success, the worker stages files to `/Incoming/auto-import/<artist>-<album>/` (the same convention as slskd-staged auto-import rescues) and inserts a row into the existing `import_jobs` table pointing at the staged path with the request's MBID. From that point on, the existing importer worker handles everything.
+- R10. After yt-dlp exits zero, the worker verifies the actual count of audio files in the temp staging directory matches the request source's expected track count BEFORE any file moves into `/Incoming/auto-import/` (MB mirror count for MB requests; stored/exact cached Discogs count for Discogs-only requests). A mismatch (less or more) aborts the rescue with `outcome='youtube_failed'`, reason `track_count_mismatch`. The importer never sees a partial fileset.
+- R11. On track-count success, the worker stages files to `/Incoming/auto-import/<artist>-<album>/` (the same convention as slskd-staged auto-import rescues) and inserts a row into the existing `import_jobs` table pointing at the staged path with the request id. From that point on, the existing importer worker handles everything.
 - R12. The worker authenticates anonymously to YouTube (no Google account, no OAuth, no cookies). Age-gated content fails per R20's failure-mode taxonomy and is not retried with auth.
 
 ### Audit and persistence
@@ -148,7 +148,7 @@ The product narrative this enables: a request that's been categorised `unfindabl
 
 - R20. yt-dlp failures are classified into structured reasons captured in the `download_log` JSONB: `youtube_404`, `youtube_age_gated`, `youtube_region_locked`, `youtube_video_removed`, `youtube_transient_network`, `youtube_unknown`. The classification supports operator triage; verbatim stderr is also captured for debugging.
 - R21. The system does NOT auto-retry failed rescues. A failed rescue is terminal for that submission; the operator decides whether to resubmit (potentially much later, when a region-locked video might become available).
-- R22. On worker startup, the worker sweeps for orphaned `youtube_running` rows (jobs the previous worker process was running when it died) and marks them `outcome='youtube_failed'` with reason `worker_died`. Same pattern as the existing importer's "requeue running jobs on startup."
+- R22. On worker startup, the worker sweeps for orphaned `youtube_running` rows (jobs the previous worker process was running when it died) and marks them `outcome='youtube_failed'` with reason `worker_interrupted`. Same pattern as the existing importer's "requeue running jobs on startup."
 - R23. The `pipeline-cli show <request_id>` rendering surfaces YT rescue attempts in the same chronological "recent attempts" view it already uses for slskd attempts. The `source` column lets the operator visually distinguish channels; the JSONB blob carries the YT-specific details.
 
 ---
@@ -167,13 +167,13 @@ The product narrative this enables: a request that's been categorised `unfindabl
 
 - **AE6. Covers R9, R10.** Given a successful submission for a 10-track MBID, when yt-dlp completes having grabbed only 9 tracks (one video age-gated mid-playlist, the `--ignore-errors`-less invocation aborted), the worker marks the download_log row `outcome='youtube_failed'`, reason `youtube_age_gated`. Nothing moves to `/Incoming/auto-import/`. Equivalently: if yt-dlp grabbed 11 files for a 10-track MBID (YT playlist has a bonus track), the worker marks the row `outcome='youtube_failed'`, reason `track_count_mismatch`.
 
-- **AE7. Covers R10, R11.** Given a successful submission for a 10-track MBID, when yt-dlp completes successfully with exactly 10 audio files, the worker stages them to `/Incoming/auto-import/<artist>-<album>/`, inserts an `import_jobs` row pointing at that path with the request's MBID, and updates the download_log row to `outcome='youtube_success'`. The request's `status` remains `wanted` (or `manual`) until the existing importer worker processes the import_job.
+- **AE7. Covers R10, R11.** Given a successful submission for a 10-track request, when yt-dlp completes successfully with exactly 10 audio files, the worker stages them to `/Incoming/auto-import/<artist>-<album>/`, inserts an `import_jobs` row pointing at that path with the request id, and updates the download_log row to `outcome='youtube_success'`. The request's `status` remains `wanted` (or `manual`) until the existing importer worker processes the import_job.
 
 - **AE8. Covers R17.** Given a request that has been categorised `unfindable` for 3 weeks (with `unfindable_category='wrong_pressing_available'`), when a YT rescue ultimately imports successfully via the existing importer, the request's `rescued_at` is populated with the import timestamp AND `prior_unfindable_category` is populated with `'wrong_pressing_available'`. No new `youtube_rescued_at` field exists on `album_requests`. Querying `download_log` for this request shows a row with `source='youtube'`, `outcome='youtube_success'`.
 
 - **AE9. Covers R3, F3.** Given a request in `manual` status with slskd-sourced files in `/Incoming/post-validation/<this album>/`, when the operator submits a YT rescue and it ultimately imports successfully, the request transitions to `imported` via the existing importer. The slskd files in `/Incoming/post-validation/` become stale and are handled by existing convergence (NOT by code added to the YT ingest service).
 
-- **AE10. Covers R22.** Given the ingest worker process dies while a `youtube_running` row exists for request 42, when the worker process restarts, it immediately marks that row `outcome='youtube_failed'` with reason `worker_died`. The request returns to its pre-rescue state and is rescue-resubmittable.
+- **AE10. Covers R22.** Given the ingest worker process dies while a `youtube_running` row exists for request 42, when the worker process restarts, it immediately marks that row `outcome='youtube_failed'` with reason `worker_interrupted`. The request returns to its pre-rescue state and is rescue-resubmittable.
 
 - **AE11. Covers R23.** Given a request that has had three rescue attempts (one slskd success that produced a wrong-matches routing in the past, two YT rescues — one failed for region-lock, one succeeded), when the operator runs `pipeline-cli show <request_id>`, the "recent attempts" rendering shows all three rows chronologically with their respective `source` discriminators and outcomes visible.
 

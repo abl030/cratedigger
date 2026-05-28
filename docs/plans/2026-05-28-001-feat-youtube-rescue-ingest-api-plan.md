@@ -35,7 +35,7 @@ Two architectural commitments shape every decision in this plan:
 
 - **KTD4. Service layer is the source of truth; CLI and HTTP API are thin adapters.** `lib/youtube_ingest_service.py` holds all logic; `lib/search_plan_service.py::SearchPlanService.advance_for_request` is the canonical pattern to mirror. Both wrappers re-export the service's `OUTCOME_HTTP_STATUS` / `OUTCOME_EXIT_CODE` maps so the outcome → status mapping is defined exactly once.
 
-- **KTD5. R7 cross-validates resolver cache against MB; R10 gates against MB directly.** R7 (submission-time precheck) compares the resolver row's cached `total_mb_tracks` against the request MBID's canonical track count from the MB mirror; mismatch returns 422 with a "resolver state is stale, refresh first" signal. R10 (worker-side post-yt-dlp gate) compares the actual staged file count against the request MBID's canonical track count, sourcing exclusively from the MB mirror. The resolver cache is the upstream-state input to R7; it is NOT consulted by R10. Rationale: R7's drift-detection role requires comparing two sources (the resolver's snapshot vs current MB); R10's job is to verify what yt-dlp actually delivered matches what MB says we should have. Sharing a single source between the two checks defeats R7's purpose — a stale cache would silently pass R7 then produce a wrong-pressing import at R10.
+- **KTD5. R7/R10 use source-aware expected counts.** MB requests keep the original behavior: R7 compares the resolver row's cached `total_mb_tracks` against the request MBID's canonical track count from the MB mirror, and R10 gates the staged file count against the MB mirror. Discogs-only requests use the existing Discogs resolver/cache bridge: submit resolves `source='discogs'` by exact distance entry for the selected release, and expected count comes from stored `album_tracks` or the exact cached distance entry. If neither Discogs count exists, or stored/cache counts disagree, submit fails before worker invocation.
 
 - **KTD6. Two audit writes per job, no mid-flight progress.** `download_log` row goes `youtube_running` on submission (insert), transitions to `youtube_success` or `youtube_failed` on worker completion (single UPDATE). No per-track progress writes. Rationale: simplicity; matches the operator-observable affordance (download_log is the audit row, not a progress bar).
 
@@ -102,7 +102,7 @@ sequenceDiagram
 | `wrong_state` | 409 | 4 | request status is not `wanted` or `manual` |
 | `in_flight` | 409 | 4 | a `youtube_running` row already exists for this request |
 | `no_resolver_mapping` | 422 | 3 | the browse_id is not in the resolver mapping for this request's release group |
-| `track_count_precheck_failed` | 422 | 3 | resolver's cached track count ≠ request's MBID track count |
+| `track_count_precheck_failed` | 422 | 3 | resolver/stored track count cannot validate the request source |
 | `transient` | 503 | 5 | DB lock contention or transient failure during validation |
 
 The worker's terminal outcomes (`youtube_success` / `youtube_failed`) are write-only — they're not returned to a caller, they appear in subsequent `pipeline-cli show` renderings.
@@ -118,7 +118,7 @@ The worker's terminal outcomes (`youtube_success` / `youtube_failed`) are write-
         ┌─────────────────┼─────────────────┐
         │ (terminal)      │ (terminal)      │ (terminal, on worker startup)
         ▼                 ▼                 ▼
-youtube_success    youtube_failed     youtube_failed (reason=worker_died)
+youtube_success    youtube_failed     youtube_failed (reason=worker_interrupted)
 ```
 
 No intermediate states. Once terminal, the row is immutable.
@@ -140,13 +140,13 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
 ### Resolver coupling
 
 - R6. Submission validates a resolver mapping row exists for the request's release group AND contains the supplied browse_id; missing rows return 422.
-- R7. Submission additionally validates resolver's cached `total_mb_tracks` matches the MBID's expected track count; mismatch returns 422 BEFORE worker invocation.
+- R7. Submission additionally validates the selected resolver row's expected count for the request source; MB requests compare cached `total_mb_tracks` against the MB mirror, while Discogs-only requests require stored `album_tracks` or an exact cached Discogs distance count. Mismatch returns 422 BEFORE worker invocation.
 - R8. Worker derives the yt-dlp invocation URL from the resolver row's `yt_url` (or constructs from `audio_playlist_id`).
 
 ### Worker behavior
 
 - R9. yt-dlp invoked without `--ignore-errors`; output codec is whatever `bestaudio` heuristic picks (typically Opus from YouTube Music); no transcoding at staging time.
-- R10. Worker verifies `count(staged audio files) == MBID expected track count` BEFORE any file moves into `/Incoming/auto-import/`. Mismatch (less or more) aborts with `outcome='youtube_failed'`, reason `track_count_mismatch`.
+- R10. Worker verifies `count(staged audio files) == source-aware expected track count` BEFORE any file moves into `/Incoming/auto-import/`. MB rows use the MB mirror; Discogs-only rows use the submission-time expected count. Mismatch (less or more) aborts with `outcome='youtube_failed'`, reason `track_count_mismatch`.
 - R11. On track-count success, worker stages to `/Incoming/auto-import/<artist>-<album>/` and inserts a `youtube_import` row in `import_jobs` carrying the staged path AND request_id in the payload (no `active_download_state` write).
 - R12. Anonymous YT access only — no Google account, no OAuth, no cookies. Age-gated content fails per R20's taxonomy.
 
@@ -167,7 +167,7 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
 
 - R20. yt-dlp failures classified into structured reasons in the JSONB: `youtube_404`, `youtube_age_gated`, `youtube_region_locked`, `youtube_video_removed`, `youtube_transient_network`, `youtube_unknown`. Verbatim stderr also captured.
 - R21. No auto-retry. Failed rescue is terminal for that submission; operator decides whether to resubmit.
-- R22. On worker startup, sweep for orphaned `youtube_running` rows and mark them `youtube_failed` with reason `worker_died`. Mirrors `requeue_running_import_jobs` pattern in `lib/pipeline_db.py`.
+- R22. On worker startup, sweep for orphaned `youtube_running` rows and mark them `youtube_failed` with reason `worker_interrupted`. Mirrors `requeue_running_import_jobs` pattern in `lib/pipeline_db.py`.
 - R23. `pipeline-cli show <request_id>` rendering surfaces YT rescues in the same chronological "recent attempts" view it already uses for slskd attempts; `source` column distinguishes channels.
 
 ---
@@ -212,8 +212,9 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
   - New methods (full type signatures TBD during implementation):
     - `insert_youtube_running(request_id, browse_id, audio_playlist_id, yt_url, expected_track_count) -> int` — inserts the row; raises a typed exception on idempotency violation (catches `UniqueViolation` from the partial index and re-raises as `YoutubeInFlightError`)
     - `update_youtube_terminal(download_log_id, outcome, metadata_struct)` — atomic UPDATE of `outcome` + `youtube_metadata`. `metadata_struct` is encoded via `msgspec.to_builtins(...)` for the JSONB column (NOT `dataclasses.asdict` — see CLAUDE.md wire-boundary discipline)
-    - `find_next_youtube_pending(limit=1) -> list[dict]` — worker drain query; ORDER BY `created_at` to give FIFO semantics
-    - `find_orphan_youtube_running() -> list[int]` — startup sweep: returns ids of `youtube_running` rows for the worker to mark failed (mirrors `requeue_running_import_jobs` shape)
+    - `find_next_youtube_pending(limit=1) -> list[dict]` — read-only unclaimed worker queue query; ORDER BY `created_at` to give FIFO semantics
+    - `claim_next_youtube_pending(worker_id, limit=1) -> list[dict]` — worker claim transition; stamps `worker_claimed_at`/`worker_id` into `youtube_metadata` before yt-dlp starts
+    - `find_orphan_youtube_running() -> list[int]` — startup sweep: returns claimed `youtube_running` rows for the worker to mark failed; accepted-but-unclaimed rows remain drainable after downtime
   - New advisory lock namespace constant: `ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST = 0x59544942494E` (or any new unique 64-bit int — picking from the existing namespace constants in `lib/pipeline_db.py` ~line 123)
   - New job_type constant in `lib/import_queue.py`: `IMPORT_JOB_YOUTUBE = "youtube_import"` alongside existing `IMPORT_JOB_AUTOMATION` / `IMPORT_JOB_FORCE` / `IMPORT_JOB_MANUAL` constants. Typed payload builder: `youtube_import_payload(staged_path: str, request_id: int, browse_id: str) -> dict[str, Any]` that returns the `{staged_path, request_id, browse_id}` JSONB shape consumed by `execute_youtube_import_job` (U9) and `_front_gate_source_path` (U9). Payload values are typed via `msgspec.Struct` at the read seam to enforce wire-boundary discipline.
   - Read-seam updates: extend `_DOWNLOAD_LOG_HISTORY_SELECT` to include `source` and `youtube_metadata`; update `get_download_log_entry`, `get_download_history`, `get_download_history_batch` so consumers receive them. Decode `youtube_metadata` via `msgspec.convert(..., type=YoutubeIngestMetadata)` at the read seam (not in callers)
@@ -226,8 +227,9 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
   - `insert_youtube_running` writes every input field readably via `get_download_log_entry` (real-PG round-trip — **Rule A**). For each field in the input, assert it's present and equal in the read-back dict
   - `insert_youtube_running` raises `YoutubeInFlightError` when a `youtube_running` row already exists for the same request_id (DB layer's `UniqueViolation` caught and re-raised typed)
   - `update_youtube_terminal` transitions a `youtube_running` row to `youtube_success` AND writes a serializable `YoutubeIngestMetadata` blob; the blob round-trips through `msgspec.convert` after a fresh DB read (production-shape fidelity per `.claude/rules/code-quality.md` § "Contract Test Mocks")
-  - `find_next_youtube_pending(limit=N)` returns rows ORDER BY created_at; excludes terminal-state rows; excludes `source='slskd'` rows
-  - `find_orphan_youtube_running` returns the right ids; calling `update_youtube_terminal` on each with `youtube_failed`+`worker_died` resolves the orphan list to empty
+  - `find_next_youtube_pending(limit=N)` returns unclaimed rows ORDER BY created_at; excludes terminal-state rows; excludes `source='slskd'` rows
+  - `claim_next_youtube_pending(worker_id, limit=N)` stamps claim metadata and removes the row from the unclaimed query
+  - `find_orphan_youtube_running` returns only claimed ids; calling `update_youtube_terminal` on each with `youtube_failed`+`worker_interrupted` resolves the orphan list to empty
   - Read seam: a `download_log` row with `source='youtube'`, terminal outcome, and populated `youtube_metadata` renders correctly through `get_download_history` AND `get_download_history_batch`
   - `FakePipelineDB` stubs match real-method shape; `tests/test_fakes.py::TestFakePipelineDB` self-test exercises each new method
 - **Verification:** `nix-shell --run "python3 -m unittest tests.test_pipeline_db tests.test_fakes -v"` passes; `pyright` clean on the full repo.
@@ -264,7 +266,7 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
   - **In flight (Covers AE3):** prior `youtube_running` row exists → outcome `in_flight`, existing download_log_id returned in result.detail
   - **Request not found:** request_id doesn't exist → outcome `request_not_found`
   - **No resolver mapping (Covers AE4):** browse_id not in any mapping for the request's release group → outcome `no_resolver_mapping`
-  - **Track-count precheck mismatch (Covers AE5):** resolver mapping exists but `total_mb_tracks` differs from request MBID's expected → outcome `track_count_precheck_failed`
+  - **Track-count precheck mismatch (Covers AE5):** resolver mapping exists but the cached/stored source-aware expected count is missing or stale → outcome `track_count_precheck_failed`
   - **Transient DB failure:** `FakePipelineDB` raises a transient exception → outcome `transient`
   - **`run_job` happy path (Covers AE7):** mocked ytdlp_runner produces exactly N audio files for an N-track MBID; service stages them, enqueues `youtube_import` (payload contains staged path + request_id + browse_id), transitions row to `youtube_success`
   - **`run_job` track-count mismatch — too few (Covers AE6):** mocked ytdlp_runner produces N-1 files; service short-circuits BEFORE staging, transitions row to `youtube_failed` reason=`track_count_mismatch`, nothing in `/Incoming/auto-import/`
@@ -337,19 +339,19 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
   - argparse: `--poll-interval` (default 5.0s, matching importer), `--temp-dir` (where yt-dlp writes before staging), `--db-dsn` (or env var fallback)
   - Main loop:
     1. Acquire `ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST` advisory singleton lock (release on shutdown via `with` statement)
-    2. Startup orphan sweep — call `find_orphan_youtube_running`, call `update_youtube_terminal(id, 'youtube_failed', {reason: 'worker_died', ...})` on each
+    2. Startup orphan sweep — call `find_orphan_youtube_running`, call `update_youtube_terminal(id, 'youtube_failed', {reason: 'worker_interrupted', ...})` on each
     3. Poll loop:
-       - `find_next_youtube_pending(limit=1)` → if none, sleep `poll_interval`
+       - `claim_next_youtube_pending(worker_id, limit=1)` → if none, sleep `poll_interval`
        - If one, construct `YoutubeIngestService` with production deps, call `service.run_job(download_log_id)`
        - Catch unexpected exceptions, log them, write `youtube_failed` with reason `worker_unhandled_exception` and the stack trace excerpt — never let an unhandled exception kill the worker
-  - Subprocess invocation helper: `_run_ytdlp(url, output_dir, timeout_sec) -> (exit_code, stderr_excerpt, file_list)`. Uses `subprocess.run(..., text=True, errors='replace', capture_output=True, timeout=...)`. yt-dlp argv: `[ytdlp_bin, '--no-ignore-errors', '-f', 'bestaudio', '--output', '<template>', '--max-downloads', str(expected_count), '--', url]` — the `--` separator before the URL positional is required defense-in-depth so a future resolver-row drift producing a `yt_url` starting with `-` cannot be parsed as a flag. **Stderr capture is capped at 4 KiB after the `errors='replace'` decode** before being returned for storage in `YoutubeIngestMetadata.stderr_excerpt`; truncation happens in this helper so the JSONB column has a bounded shape regardless of how verbose yt-dlp gets on stuck-pattern failures (429 storms, region-locked playlists)
-  - Signal handling: graceful shutdown on SIGTERM (let in-flight job complete; release advisory lock; exit cleanly so `Restart=on-failure` doesn't fire)
+  - Subprocess invocation helper: `_run_ytdlp(url, output_dir, timeout_sec) -> (exit_code, stderr_excerpt, file_list)`. Uses `subprocess.run(..., text=True, errors='replace', capture_output=True, timeout=...)`. yt-dlp argv: `[ytdlp_bin, '--ignore-config', '--no-ignore-errors', '-f', 'bestaudio', '--output', '<template>', '--', url]` — the `--` separator before the URL positional is required defense-in-depth so a future resolver-row drift producing a `yt_url` starting with `-` cannot be parsed as a flag. Do not use `--max-downloads`: yt-dlp treats that as an abort condition at exactly N files, while the service's post-download R10 count gate owns mismatch detection. **Stderr capture is capped at 4 KiB after the `errors='replace'` decode** before being returned for storage in `YoutubeIngestMetadata.stderr_excerpt`; truncation happens in this helper so the JSONB column has a bounded shape regardless of how verbose yt-dlp gets on stuck-pattern failures (429 storms, region-locked playlists)
+  - Signal handling: accepted-but-unclaimed rows survive restart; claimed rows are recovered by the startup orphan sweep. Full graceful drain on SIGTERM remains a unit/runtime policy decision.
 - **Patterns to follow:**
   - `scripts/importer.py` — canonical long-running worker template (advisory lock acquisition, startup orphan sweep at `recover_abandoned_running_jobs`, drain loop with `--poll-interval`, signal handling)
   - `lib/pipeline_db.py::ADVISORY_LOCK_NAMESPACE_IMPORTER` constant (line ~123) — adjacent namespace constants
   - `docs/solutions/subprocess-text-mode-utf8-strict-decode-crash.md` — required for yt-dlp invocation
 - **Test scenarios:**
-  - **Startup orphan sweep:** seed `FakePipelineDB` with 2 `youtube_running` rows; run startup sweep; both transition to `youtube_failed` with reason `worker_died`
+  - **Startup orphan sweep:** seed `FakePipelineDB` with 2 `youtube_running` rows; run startup sweep; both transition to `youtube_failed` with reason `worker_interrupted`
   - **Drain loop happy path:** queue one `youtube_running` row; provide a fake `ytdlp_runner_fn` that returns N files; worker processes the row, terminal state is `youtube_success`, a `youtube_import` job_type appears in `FakePipelineDB.import_jobs` with `staged_path` populated in the payload
   - **Stderr cap (Covers KTD8 size bound):** mocked ytdlp_runner emits 100 KiB of stderr text; `_run_ytdlp` returns a 4 KiB excerpt; assert no JSONB row in `download_log` ever stores more than the cap regardless of input volume
   - **`--` separator argv shape:** assert the constructed argv list contains `'--'` immediately before the URL positional; regression guard against future implementations that drop the separator
@@ -380,7 +382,7 @@ All R-IDs carried verbatim from origin. Each maps to one or more units below.
   - `scripts/import_preview_worker.py::_front_gate_source_path` for `IMPORT_JOB_AUTOMATION` — the structural sibling for the preview-worker branch
   - `lib/pipeline_db.py::mark_imported_with_rescue` — source-agnostic terminal-state write; no change needed here, just confirmation that it's the single call site
 - **Test scenarios:**
-  - **Happy path (Covers AE7):** queue a `youtube_import` job with `staged_path=/Incoming/auto-import/<artist>-<album>/` and the request's MBID; preview worker measures → importer imports → `mark_imported_with_rescue` flips status to `imported` and writes `rescued_at`
+  - **Happy path (Covers AE7):** queue a `youtube_import` job with `staged_path=/Incoming/auto-import/<artist>-<album>/` and the request id; preview worker measures → importer imports → `mark_imported_with_rescue` flips status to `imported` and writes `rescued_at`
   - **Rescue from `manual` (Covers AE9):** same as above but the request started in `manual` status; the final state transition is `manual → imported`; rescued_at populated
   - **Long-tail rescue audit (Covers AE8):** request previously had `unfindable_category='wrong_pressing_available'`; YT rescue completes via this dispatcher; `prior_unfindable_category` is populated with the prior value atomically via the existing `mark_imported_with_rescue` write
   - **Preview-worker path resolution:** for an `IMPORT_JOB_YOUTUBE` job, `_front_gate_source_path` returns the payload's `staged_path`; for an `IMPORT_JOB_AUTOMATION` job, returns the existing `active_download_state`-derived path; the two branches are independent
@@ -510,7 +512,7 @@ Carried from `docs/brainstorms/2026-05-28-youtube-rescue-ingest-api-requirements
 - **D2. Existing convergence cleans up `/Incoming/post-validation/` orphans** when a `manual` request transitions to `imported` via YT rescue. If not yet covered, ships as a follow-up issue.
 - **D3. `pkgs.yt-dlp` available in nixpkgs.** Confirmed; no pinning needed.
 - **D4. Existing importer worker behavior unchanged.** This plan hands a staged directory + `automation_import` job to the importer; structural confidence.
-- **D5. Resolver's cached `total_mb_tracks` is accurate per browse_id.** Submission precheck (R7) trusts this; worker-side gate (R10) is the authoritative check.
+- **D5. Resolver/stored expected track count is accurate per browse_id.** Submission precheck (R7) validates this for the request source; worker-side gate (R10) is the authoritative file-count check.
 
 ---
 

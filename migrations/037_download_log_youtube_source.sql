@@ -29,6 +29,10 @@
 --      three YT outcomes have to land in the constraint or the partial
 --      unique index test (and every YT INSERT) would be unreachable.
 --      Mirrors the pattern from ``019_preview_evidence_facts.sql:31-35``.
+--
+--   5. ``import_jobs.job_type`` is widened for ``youtube_import``. The Python
+--      queue validator already accepts it; this keeps the real PostgreSQL
+--      constraint from rejecting the worker's staged-file handoff.
 
 ALTER TABLE download_log
     ADD COLUMN source TEXT NOT NULL DEFAULT 'slskd'
@@ -41,6 +45,12 @@ ALTER TABLE download_log ADD CONSTRAINT download_log_outcome_check
                        'force_import', 'manual_import', 'curator_ban',
                        'measurement_failed',
                        'youtube_running', 'youtube_success', 'youtube_failed'));
+
+ALTER TABLE import_jobs DROP CONSTRAINT IF EXISTS import_jobs_job_type_check;
+ALTER TABLE import_jobs ADD CONSTRAINT import_jobs_job_type_check
+    CHECK (job_type IN (
+        'force_import', 'manual_import', 'automation_import', 'youtube_import'
+    ));
 
 CREATE UNIQUE INDEX one_youtube_running_per_request
     ON download_log (request_id)

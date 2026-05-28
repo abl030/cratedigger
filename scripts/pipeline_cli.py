@@ -881,6 +881,52 @@ def _render_search_forensics_summary(
     return lines
 
 
+def _render_download_history_header(row):
+    source = row.get("source") or "slskd"
+    outcome = row.get("outcome")
+    created_at = row.get("created_at")
+    if source == "youtube":
+        meta = row.get("youtube_metadata")
+        meta = meta if isinstance(meta, dict) else {}
+        parts = ["via youtube"]
+        browse_id = meta.get("browse_id")
+        if browse_id:
+            parts.append(f"browse_id={browse_id}")
+        observed = meta.get("observed_track_count")
+        expected = meta.get("expected_track_count")
+        if observed is not None or expected is not None:
+            parts.append(f"tracks={observed if observed is not None else '?'}/"
+                         f"{expected if expected is not None else '?'}")
+        reason = meta.get("reason")
+        if reason:
+            parts.append(f"reason={reason}")
+        return f"    [{created_at}] {outcome} {' '.join(parts)}"
+    username = row.get("soulseek_username") or "-"
+    return (
+        f"    [{created_at}] {outcome} via slskd from {username} "
+        f"(dist={row.get('beets_distance')})"
+    )
+
+
+def _render_youtube_metadata(row):
+    if (row.get("source") or "slskd") != "youtube":
+        return []
+    meta = row.get("youtube_metadata")
+    if not isinstance(meta, dict):
+        return []
+    lines = []
+    yt_url = meta.get("yt_url")
+    if yt_url:
+        lines.append(f"      yt_url:    {yt_url}")
+    stderr = meta.get("stderr_excerpt")
+    if stderr:
+        lines.append(f"      stderr:    {str(stderr).splitlines()[-1]}")
+    cleanup_error = meta.get("cleanup_error")
+    if cleanup_error:
+        lines.append(f"      cleanup_error: {cleanup_error}")
+    return lines
+
+
 def cmd_show(db, args):
     req = db.get_request(args.id)
     if not req:
@@ -985,8 +1031,9 @@ def cmd_show(db, args):
     if history:
         print(f"\n  Download History ({len(history)}):")
         for h in history:
-            print(f"    [{h['created_at']}] {h['outcome']} from {h['soulseek_username']} "
-                  f"(dist={h['beets_distance']})")
+            print(_render_download_history_header(h))
+            for line in _render_youtube_metadata(h):
+                print(line)
             for line in _render_import_result(h.get("import_result")):
                 print(line)
 

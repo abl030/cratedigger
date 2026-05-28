@@ -1611,6 +1611,36 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("variant:        v2_artist_album_no_year", out)
         self.assertIn("(empty list)", out)
 
+    def test_show_renders_youtube_history_source_and_metadata(self):
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=5, manual_reason=None))
+        log_id = db.insert_youtube_running(
+            request_id=5,
+            browse_id="MPREb_cli_show",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=cli-show",
+            expected_track_count=10,
+        )
+        db.update_youtube_terminal(
+            log_id,
+            "youtube_failed",
+            {
+                "reason": "track_count_mismatch",
+                "observed_track_count": 9,
+                "stderr_excerpt": "line 1\nline 2",
+            },
+        )
+
+        out = self._capture(db, 5)
+
+        self.assertIn("youtube_failed via youtube", out)
+        self.assertIn("browse_id=MPREb_cli_show", out)
+        self.assertIn("tracks=9/10", out)
+        self.assertIn("reason=track_count_mismatch", out)
+        self.assertIn("yt_url:", out)
+        self.assertIn("stderr:    line 2", out)
+        self.assertNotIn("from None", out)
+
 
 class TestCmdSearchPlanShow(unittest.TestCase):
     """U6 read-only inspection CLI: ``pipeline-cli search-plan show``.

@@ -11,7 +11,8 @@ IMPORT_JOB_FORCE = "force_import"
 IMPORT_JOB_MANUAL = "manual_import"
 IMPORT_JOB_AUTOMATION = "automation_import"
 # YouTube rescue ingest (U2 of the YT rescue plan). The YT worker stages
-# audio to ``/Incoming/auto-import/<artist>-<album>/`` and enqueues a
+# audio to the configured ``auto-import/<artist>-<album>/`` directory and
+# enqueues a
 # ``youtube_import`` job with the staged path carried in ``payload``
 # rather than via ``album_requests.active_download_state``. The importer
 # dispatcher (U9) reads the path from the payload and reuses the rest of

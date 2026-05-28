@@ -30,6 +30,7 @@ import psycopg2.extras
 import msgspec
 
 from lib.import_queue import (
+    IMPORT_JOB_YOUTUBE,
     ImportJob,
     IMPORT_JOB_PREVIEW_WAITING,
     validate_preview_failure_status,
@@ -3238,7 +3239,8 @@ class PipelineDB:
                    ar.album_title, ar.artist_name, ar.mb_release_id,
                    ar.year, ar.country, ar.status AS request_status,
                    ar.min_bitrate AS request_min_bitrate,
-                   ar.prev_min_bitrate, ar.search_filetype_override, ar.source
+                   ar.prev_min_bitrate, ar.search_filetype_override,
+                   ar.source AS request_source
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
         """
@@ -3566,15 +3568,21 @@ class PipelineDB:
     #     the worker can layer reason / stderr_excerpt / observed counts
     #     on top of the submission-time blob without re-reading it.
     #
-    #   * ``find_next_youtube_pending`` — worker drain query. FIFO by
-    #     ``created_at`` per R16.
+    #   * ``find_next_youtube_pending`` — read-only unclaimed queue query.
+    #     FIFO by ``created_at`` per R16.
+    #
+    #   * ``claim_next_youtube_pending`` — worker-side claim transition. It
+    #     adds ``worker_claimed_at`` / ``worker_id`` to ``youtube_metadata``
+    #     before the worker starts yt-dlp, which lets startup recovery
+    #     distinguish accepted-but-unclaimed rows from a prior worker's
+    #     abandoned in-flight work.
     #
     #   * ``find_orphan_youtube_running`` — startup orphan sweep (R22).
-    #     At worker startup any row still in ``youtube_running`` is by
-    #     definition an orphan (the previous worker process crashed mid-
-    #     job); the worker calls this method, then transitions each id
-    #     via ``update_youtube_terminal(id, 'youtube_failed', {reason:
-    #     'worker_died', ...})``.
+    #     At worker startup only claimed rows are orphans (the previous
+    #     worker process crashed mid-job); accepted-but-unclaimed rows
+    #     remain queued. The worker transitions each orphan id via
+    #     ``update_youtube_terminal(id, 'youtube_failed', {reason:
+    #     'worker_interrupted', ...})``.
 
     _YOUTUBE_TERMINAL_OUTCOMES: frozenset[str] = frozenset({
         "youtube_success", "youtube_failed",
@@ -3682,10 +3690,10 @@ class PipelineDB:
         )
 
     def find_next_youtube_pending(self, limit: int = 1) -> list[dict[str, Any]]:
-        """Worker drain query — return the next ``youtube_running`` rows.
+        """Return the next unclaimed ``youtube_running`` rows.
 
         FIFO by ``created_at`` per R16. Returns full row dicts (not just
-        ids) so the caller can pull ``youtube_metadata`` without a second
+        ids) so callers can inspect ``youtube_metadata`` without a second
         round-trip. Empty list when nothing is pending.
         """
         cur = self._execute(
@@ -3695,6 +3703,8 @@ class PipelineDB:
             FROM download_log
             WHERE source = 'youtube'
               AND outcome = 'youtube_running'
+              AND NOT (COALESCE(youtube_metadata, '{}'::jsonb)
+                       ? 'worker_claimed_at')
             ORDER BY created_at ASC, id ASC
             LIMIT %s
             """,
@@ -3702,15 +3712,50 @@ class PipelineDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def claim_next_youtube_pending(
+        self,
+        *,
+        worker_id: str | None,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Claim the next unclaimed YT rows and return them for processing."""
+        cur = self._execute(
+            """
+            WITH candidate AS (
+                SELECT id
+                FROM download_log
+                WHERE source = 'youtube'
+                  AND outcome = 'youtube_running'
+                  AND NOT (COALESCE(youtube_metadata, '{}'::jsonb)
+                           ? 'worker_claimed_at')
+                ORDER BY created_at ASC, id ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE download_log dl
+            SET youtube_metadata = COALESCE(dl.youtube_metadata, '{}'::jsonb)
+                                   || jsonb_build_object(
+                                       'worker_claimed_at', NOW(),
+                                       'worker_id', %s
+                                   )
+            FROM candidate
+            WHERE dl.id = candidate.id
+            RETURNING dl.id, dl.request_id, dl.source, dl.outcome,
+                      dl.youtube_metadata, dl.created_at
+            """,
+            (int(limit), worker_id),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     def find_orphan_youtube_running(self) -> list[int]:
-        """Return ids of every ``youtube_running`` row.
+        """Return ids of claimed ``youtube_running`` rows.
 
         Called by the worker's startup orphan sweep (R22). At startup
-        time every such row is by definition an orphan — a previous
-        worker process crashed mid-job and left the row in flight. The
+        time only rows with ``worker_claimed_at`` are orphans — accepted
+        but unclaimed rows remain drainable across worker downtime. The
         caller iterates the returned ids and transitions each via
         ``update_youtube_terminal(id, 'youtube_failed', {reason:
-        'worker_died', ...})``.
+        'worker_interrupted', ...})``.
         """
         cur = self._execute(
             """
@@ -3718,10 +3763,65 @@ class PipelineDB:
             FROM download_log
             WHERE source = 'youtube'
               AND outcome = 'youtube_running'
+              AND COALESCE(youtube_metadata, '{}'::jsonb)
+                  ? 'worker_claimed_at'
             ORDER BY created_at ASC, id ASC
             """,
         )
         return [int(row["id"]) for row in cur.fetchall()]
+
+    def find_active_youtube_import_job(
+        self,
+        *,
+        request_id: int,
+        browse_id: str,
+    ) -> ImportJob | None:
+        """Return active ``youtube_import`` job for this request/browse id."""
+        cur = self._execute(
+            """
+            SELECT *, false AS deduped
+            FROM import_jobs
+            WHERE job_type = %s
+              AND request_id = %s
+              AND status IN ('queued', 'running')
+              AND payload->>'browse_id' = %s
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (IMPORT_JOB_YOUTUBE, int(request_id), str(browse_id)),
+        )
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row is not None else None
+
+    def list_active_youtube_rescues(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return active YouTube rescue rows for API/operator visibility."""
+        cur = self._execute(
+            """
+            SELECT
+                dl.id AS download_log_id,
+                dl.request_id,
+                dl.source,
+                dl.outcome,
+                dl.youtube_metadata,
+                dl.created_at,
+                ar.artist_name,
+                ar.album_title,
+                ar.mb_release_id,
+                ar.status AS request_status
+            FROM download_log dl
+            JOIN album_requests ar ON ar.id = dl.request_id
+            WHERE dl.source = 'youtube'
+              AND dl.outcome = 'youtube_running'
+            ORDER BY dl.created_at ASC, dl.id ASC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     # Evidence-overlay extension applied to every download_log read seam
     # (single entry / per-request history / batch). The legacy denorm
@@ -5964,6 +6064,20 @@ class PipelineDB:
               AND (ar.next_retry_after IS NULL OR ar.next_retry_after <= %s)
               AND sp.status = 'active'
               AND sp.generator_id = %s
+              AND NOT EXISTS (
+                SELECT 1
+                FROM download_log dl
+                WHERE dl.request_id = ar.id
+                  AND dl.source = 'youtube'
+                  AND dl.outcome = 'youtube_running'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM import_jobs ij
+                WHERE ij.request_id = ar.id
+                  AND ij.job_type = %s
+                  AND ij.status IN ('queued', 'running')
+              )
             ORDER BY
               CASE
                 WHEN COALESCE(ar.search_attempts, 0) = 0
@@ -5976,7 +6090,7 @@ class PipelineDB:
         """
         if limit:
             sql += f" LIMIT {int(limit)}"
-        cur = self._execute(sql, (now, generator_id))
+        cur = self._execute(sql, (now, generator_id, IMPORT_JOB_YOUTUBE))
         return [dict(r) for r in cur.fetchall()]
 
     def list_wanted_for_plan_reconciliation(
@@ -7174,6 +7288,43 @@ class PipelineDB:
         if cur2.fetchone() is not None:
             return []
         return None
+
+    def find_youtube_album_mapping_for_release(
+        self,
+        *,
+        source: str,
+        release_id: str,
+        browse_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return cached YT mapping row whose distance targets one release.
+
+        Discogs ingest uses this as the no-new-column bridge from a request's
+        release id to the resolver's widened group key. The resolver stores
+        Discogs matrices under the master id for normal releases and under the
+        leaf id for orphan releases; the exact ``distances[].mbid`` entry is
+        the stable link back to the request release.
+        """
+        cur = self._execute(
+            """
+            SELECT id, release_group_identifier, source, yt_browse_id,
+                   yt_audio_playlist_id, yt_url, yt_year, yt_track_count,
+                   album_title, album_artist,
+                   yt_tracks, distances, resolved_at
+            FROM youtube_album_mappings
+            WHERE source = %s
+              AND yt_browse_id = %s
+              AND EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(distances) AS dist
+                  WHERE dist->>'mbid' = %s
+              )
+            ORDER BY resolved_at DESC, id ASC
+            LIMIT 1
+            """,
+            (source, browse_id, str(release_id)),
+        )
+        row = cur.fetchone()
+        return dict(row) if row is not None else None
 
     def upsert_youtube_album_mapping(
         self,

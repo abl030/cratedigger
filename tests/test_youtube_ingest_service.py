@@ -46,6 +46,8 @@ BROWSE = "MPREb_happy_path"
 PLAYLIST = "OLAK5uy-happy"
 YT_URL = "https://music.youtube.com/playlist?list=OLAK5uy-happy"
 EXPECTED_TRACKS = 10
+DISCOGS_REL = "12345"
+DISCOGS_MASTER = "999"
 
 
 def _seed_resolver_row(
@@ -57,7 +59,7 @@ def _seed_resolver_row(
     yt_url: str = YT_URL,
     yt_audio_playlist_id: Optional[str] = PLAYLIST,
     distances_for_mbid: str = MB_REL,
-    total_mb_tracks: int = EXPECTED_TRACKS,
+    total_mb_tracks: Optional[int] = EXPECTED_TRACKS,
     extra_rows: Optional[list[dict[str, Any]]] = None,
 ) -> None:
     """Pre-seed ``youtube_album_mappings`` with one matching row."""
@@ -66,7 +68,7 @@ def _seed_resolver_row(
         "yt_audio_playlist_id": yt_audio_playlist_id,
         "yt_url": yt_url,
         "yt_year": 2024,
-        "yt_track_count": total_mb_tracks,
+        "yt_track_count": total_mb_tracks or EXPECTED_TRACKS,
         "album_title": "Test Album",
         "album_artist": "Test Artist",
         "yt_tracks": [],
@@ -102,6 +104,31 @@ def _seed_wanted_request(
     ))
 
 
+def _seed_discogs_request(
+    pdb: FakePipelineDB,
+    *,
+    request_id: int = 77,
+    status: str = "wanted",
+    discogs_release_id: str = DISCOGS_REL,
+    mb_release_id: Optional[str] = None,
+) -> None:
+    pdb.seed_request(make_request_row(
+        id=request_id,
+        status=status,
+        mb_release_id=mb_release_id,
+        mb_release_group_id=None,
+        discogs_release_id=discogs_release_id,
+        source="discogs",
+    ))
+
+
+def _tracks(count: int) -> list[dict[str, Any]]:
+    return [
+        {"track_number": i + 1, "title": f"Track {i + 1}"}
+        for i in range(count)
+    ]
+
+
 def _track_count_returning(value: Optional[int]):
     """Factory: deterministic ``mb_track_count_fn`` returning a fixed value."""
 
@@ -115,13 +142,18 @@ def _make_service(
     pdb: FakePipelineDB,
     *,
     mb_count: Optional[int] = EXPECTED_TRACKS,
+    mb_track_count_fn: Any = None,
     ytdlp_runner_fn: Any = None,
     stage_dir_fn: Any = None,
     staging_root: Path = Path("/tmp/cratedigger-test-staging"),
 ) -> YoutubeIngestService:
     """Construct the service with sensible test defaults for every port."""
     kwargs: dict[str, Any] = {
-        "mb_track_count_fn": _track_count_returning(mb_count),
+        "mb_track_count_fn": (
+            mb_track_count_fn
+            if mb_track_count_fn is not None
+            else _track_count_returning(mb_count)
+        ),
         "staging_root": staging_root,
     }
     if ytdlp_runner_fn is not None:
@@ -215,6 +247,41 @@ class TestSubmitHappyPath(unittest.TestCase):
         self.assertEqual(len(running), 1)
         self.assertEqual(running[0].request_id, 99)
 
+    def test_discogs_request_accepted_from_cached_mapping(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_discogs_request(
+            pdb,
+            request_id=77,
+            status="wanted",
+            mb_release_id=DISCOGS_REL,
+        )
+        pdb.set_tracks(77, _tracks(EXPECTED_TRACKS))
+        _seed_resolver_row(
+            pdb,
+            rg=DISCOGS_MASTER,
+            source="discogs",
+            distances_for_mbid=DISCOGS_REL,
+            total_mb_tracks=EXPECTED_TRACKS,
+        )
+
+        def _exploding_mb(_mbid: str) -> Optional[int]:
+            raise AssertionError("Discogs submit must not call MB mirror")
+
+        svc = _make_service(pdb, mb_track_count_fn=_exploding_mb)
+
+        result = svc.submit(request_id=77, browse_id=BROWSE)
+
+        self.assertEqual(result.outcome, "accepted")
+        self.assertIsNotNone(result.download_log_id)
+        running = [
+            e for e in pdb.download_logs
+            if e.source == "youtube" and e.outcome == "youtube_running"
+        ]
+        self.assertEqual(len(running), 1)
+        metadata = running[0].youtube_metadata
+        assert metadata is not None
+        self.assertEqual(metadata["expected_track_count"], EXPECTED_TRACKS)
+
 
 # ---------------------------------------------------------------------------
 # submit() — wrong state (R3 / AE2).
@@ -282,6 +349,33 @@ class TestSubmitInFlight(unittest.TestCase):
         assert second.detail is not None
         self.assertIn(str(first.download_log_id), second.detail)
 
+    def test_active_youtube_import_job_blocks_duplicate_submit(self) -> None:
+        from lib.import_queue import youtube_import_dedupe_key, youtube_import_payload
+
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        _seed_resolver_row(pdb)
+        pdb.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=42,
+            dedupe_key=youtube_import_dedupe_key(777),
+            payload=youtube_import_payload(
+                staged_path="/tmp/yt-staged",
+                request_id=42,
+                browse_id=BROWSE,
+            ),
+        )
+        svc = _make_service(pdb)
+
+        result = svc.submit(request_id=42, browse_id=BROWSE)
+
+        self.assertEqual(result.outcome, "in_flight")
+        self.assertIsNotNone(result.detail)
+        assert result.detail is not None
+        self.assertIn("youtube_import job", result.detail)
+        self.assertEqual(
+            [e for e in pdb.download_logs if e.source == "youtube"], [])
+
 
 # ---------------------------------------------------------------------------
 # submit() — request not found.
@@ -342,6 +436,21 @@ class TestSubmitNoResolverMapping(unittest.TestCase):
         result = svc.submit(request_id=42, browse_id=BROWSE)
         self.assertEqual(result.outcome, "no_resolver_mapping")
 
+    def test_discogs_request_without_cached_mapping(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_discogs_request(pdb, request_id=77)
+        pdb.set_tracks(77, _tracks(EXPECTED_TRACKS))
+        svc = _make_service(pdb)
+
+        result = svc.submit(request_id=77, browse_id=BROWSE)
+
+        self.assertEqual(result.outcome, "no_resolver_mapping")
+        self.assertIsNotNone(result.detail)
+        assert result.detail is not None
+        self.assertIn("Discogs resolver mapping", result.detail)
+        self.assertEqual(
+            [e for e in pdb.download_logs if e.source == "youtube"], [])
+
 
 # ---------------------------------------------------------------------------
 # submit() — track-count precheck mismatch (R7 / AE5).
@@ -388,6 +497,45 @@ class TestSubmitTrackCountPrecheckFailed(unittest.TestCase):
 
         result = svc.submit(request_id=42, browse_id=BROWSE)
         self.assertEqual(result.outcome, "track_count_precheck_failed")
+
+    def test_discogs_missing_stored_and_exact_count_rejects(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_discogs_request(pdb, request_id=77)
+        _seed_resolver_row(
+            pdb,
+            rg=DISCOGS_MASTER,
+            source="discogs",
+            distances_for_mbid=DISCOGS_REL,
+            total_mb_tracks=None,
+        )
+        svc = _make_service(pdb)
+
+        result = svc.submit(request_id=77, browse_id=BROWSE)
+
+        self.assertEqual(result.outcome, "track_count_precheck_failed")
+        self.assertIsNotNone(result.detail)
+        assert result.detail is not None
+        self.assertIn("no stored tracklist", result.detail)
+
+    def test_discogs_stored_count_mismatch_rejects(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_discogs_request(pdb, request_id=77)
+        pdb.set_tracks(77, _tracks(EXPECTED_TRACKS - 1))
+        _seed_resolver_row(
+            pdb,
+            rg=DISCOGS_MASTER,
+            source="discogs",
+            distances_for_mbid=DISCOGS_REL,
+            total_mb_tracks=EXPECTED_TRACKS,
+        )
+        svc = _make_service(pdb)
+
+        result = svc.submit(request_id=77, browse_id=BROWSE)
+
+        self.assertEqual(result.outcome, "track_count_precheck_failed")
+        self.assertIsNotNone(result.detail)
+        assert result.detail is not None
+        self.assertIn("stored Discogs track count", result.detail)
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +704,69 @@ class TestRunJobHappyPath(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertEqual(meta["observed_track_count"], EXPECTED_TRACKS)
 
+    def test_discogs_happy_path_uses_expected_count_not_mb_mirror(self) -> None:
+        import tempfile
+
+        pdb = FakePipelineDB()
+        _seed_discogs_request(
+            pdb,
+            request_id=77,
+            status="wanted",
+            mb_release_id=DISCOGS_REL,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            source = tmp / "ytdlp-scratch"
+            source.mkdir()
+            staged_files = [
+                source / "01.opus",
+                source / "02.opus",
+            ]
+            for path in staged_files:
+                path.write_bytes(b"opus")
+
+            def _exploding_mb(_mbid: str) -> Optional[int]:
+                raise AssertionError("Discogs run_job must not call MB mirror")
+
+            _seed_resolver_row(
+                pdb,
+                rg=DISCOGS_MASTER,
+                source="discogs",
+                distances_for_mbid=DISCOGS_REL,
+                total_mb_tracks=2,
+            )
+            pdb.set_tracks(77, _tracks(2))
+            runner = _StubRunner(YtdlpRunResult(
+                exit_code=0,
+                stderr_excerpt=None,
+                staged_files=staged_files,
+                work_dir=source,
+            ))
+            stager = _RecordingStager()
+            svc = _make_service(
+                pdb,
+                mb_track_count_fn=_exploding_mb,
+                ytdlp_runner_fn=runner,
+                stage_dir_fn=stager,
+                staging_root=tmp / "staging",
+            )
+            submit = svc.submit(request_id=77, browse_id=BROWSE)
+            self.assertEqual(submit.outcome, "accepted")
+            assert submit.download_log_id is not None
+
+            result = svc.run_job(submit.download_log_id)
+
+            self.assertEqual(result.outcome, "youtube_success")
+            self.assertEqual(len(stager.calls), 1)
+            self.assertFalse(source.exists())
+
+        jobs = [
+            j for j in pdb.list_import_jobs(limit=50)
+            if j.job_type == IMPORT_JOB_YOUTUBE
+        ]
+        self.assertEqual(len(jobs), 1)
+
 
 class _StubRunner:
     """A simple callable that returns a canned YtdlpRunResult."""
@@ -671,6 +882,61 @@ class TestRunJobYtdlpFailures(unittest.TestCase):
         self.assertEqual(meta["reason"], "youtube_404")
         self.assertEqual(
             meta["stderr_excerpt"], "ERROR: HTTP Error 404: Not Found")
+
+    def test_ytdlp_failure_deletes_work_dir(self) -> None:
+        import tempfile
+
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        log_id = _seed_running_row(pdb)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = Path(tmpdir) / "scratch"
+            work_dir.mkdir()
+            (work_dir / "partial.opus").write_bytes(b"partial")
+            runner = _StubRunner(YtdlpRunResult(
+                exit_code=1,
+                stderr_excerpt="ERROR: HTTP Error 404: Not Found",
+                staged_files=[],
+                work_dir=work_dir,
+            ))
+            svc = _make_service(pdb, ytdlp_runner_fn=runner)
+
+            result = svc.run_job(log_id)
+
+            self.assertEqual(result.outcome, "youtube_failed")
+            self.assertFalse(work_dir.exists())
+
+    def test_cleanup_failure_is_persisted_in_metadata(self) -> None:
+        import tempfile
+
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        log_id = _seed_running_row(pdb)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = Path(tmpdir) / "scratch"
+            work_dir.mkdir()
+            runner = _StubRunner(YtdlpRunResult(
+                exit_code=1,
+                stderr_excerpt="ERROR: HTTP Error 404: Not Found",
+                staged_files=[],
+                work_dir=work_dir,
+            ))
+            svc = _make_service(pdb, ytdlp_runner_fn=runner)
+
+            with patch(
+                "lib.youtube_ingest_service.shutil.rmtree",
+                side_effect=OSError("permission denied"),
+            ):
+                result = svc.run_job(log_id)
+
+            self.assertEqual(result.outcome, "youtube_failed")
+            row = pdb.get_download_log_entry(log_id)
+            assert row is not None
+            meta = row["youtube_metadata"]
+            self.assertIn("cleanup_error", meta)
+            self.assertIn("permission denied", meta["cleanup_error"])
 
     def test_age_gated_classified_correctly(self) -> None:
         pdb = FakePipelineDB()
@@ -846,6 +1112,76 @@ class TestRunJobRunnerUnhandled(unittest.TestCase):
              if j.job_type == IMPORT_JOB_YOUTUBE],
             [],
         )
+
+    def test_enqueue_failure_deletes_staged_directory(self) -> None:
+        import tempfile
+
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        log_id = _seed_running_row(pdb)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            source = tmp / "source"
+            source.mkdir()
+            staged_file = source / "01.opus"
+            staged_file.write_bytes(b"opus")
+            staging_root = tmp / "staging" / "auto-import"
+            moved_to: list[Path] = []
+
+            def _move(src: Path, dest: Path) -> None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                moved_to.append(dest)
+                source.rename(dest)
+
+            runner = _StubRunner(YtdlpRunResult(
+                exit_code=0,
+                stderr_excerpt=None,
+                staged_files=[staged_file],
+                work_dir=source,
+            ))
+            svc = _make_service(
+                pdb,
+                mb_count=1,
+                ytdlp_runner_fn=runner,
+                stage_dir_fn=_move,
+                staging_root=staging_root,
+            )
+
+            with patch.object(
+                pdb, "enqueue_import_job", side_effect=RuntimeError("db down"),
+            ):
+                result = svc.run_job(log_id)
+
+            self.assertEqual(result.outcome, "youtube_failed")
+            self.assertEqual(result.reason, "import_enqueue_failed")
+            row = pdb.get_download_log_entry(log_id)
+            assert row is not None
+            meta = row["youtube_metadata"]
+            self.assertNotIn("quarantine_path", meta)
+            self.assertNotIn("quarantine_error", meta)
+            self.assertNotIn("cleanup_error", meta)
+            self.assertEqual(len(moved_to), 1)
+            self.assertFalse(moved_to[0].exists())
+
+    def test_failed_terminal_write_is_visible(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        log_id = _seed_running_row(pdb)
+        runner = _StubRunner(YtdlpRunResult(
+            exit_code=1,
+            stderr_excerpt="ERROR: HTTP Error 404: Not Found",
+            staged_files=[],
+        ))
+        svc = _make_service(pdb, ytdlp_runner_fn=runner)
+
+        with patch.object(
+            pdb,
+            "update_youtube_terminal",
+            side_effect=RuntimeError("audit write failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                svc.run_job(log_id)
 
 
 # ---------------------------------------------------------------------------

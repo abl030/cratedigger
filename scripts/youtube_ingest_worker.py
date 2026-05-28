@@ -2,9 +2,9 @@
 """Long-running drainer for YouTube-rescue ingest jobs.
 
 Mirrors ``scripts/importer.py`` structurally: acquires a process-wide
-advisory lock, sweeps orphan ``youtube_running`` rows left by a previous
-worker (R22), then loops polling
-``PipelineDB.find_next_youtube_pending`` and dispatching each row to
+advisory lock, sweeps claimed ``youtube_running`` rows left by a previous
+worker (R22), then loops claiming the next unclaimed row with
+``PipelineDB.claim_next_youtube_pending`` and dispatching it to
 ``YoutubeIngestService.run_job``.
 
 Per CLAUDE.md (single-operator, no backwards-compat) the worker is the
@@ -14,8 +14,8 @@ lifecycle, stderr cap (4 KiB). The service layer accepts a kwarg-DI
 ``ytdlp_runner_fn`` so tests inject a fake; this module provides the
 production implementation via :func:`_run_ytdlp`.
 
-The worker does NOT claim importer jobs. After staging the audio into
-``/Incoming/auto-import/<artist>-<album>/`` the service enqueues a
+The worker does NOT claim importer jobs. After staging the audio into the
+configured ``auto-import/<artist>-<album>/`` staging child, the service enqueues a
 ``youtube_import`` row in ``import_jobs``; the existing
 ``cratedigger-importer`` worker (its own systemd unit) drains it via
 ``execute_youtube_import_job`` (wired in U9).
@@ -50,6 +50,7 @@ from lib.pipeline_db import (  # noqa: E402
     DEFAULT_DSN,
     PipelineDB,
 )
+from lib.processing_paths import stage_to_ai_root  # noqa: E402
 from lib.youtube_ingest_service import (  # noqa: E402
     YoutubeIngestService,
     YtdlpRunResult,
@@ -147,7 +148,6 @@ def _build_ytdlp_argv(
     ytdlp_bin: str,
     url: str,
     output_template: str,
-    max_downloads: int,
 ) -> list[str]:
     """Construct the yt-dlp argv list.
 
@@ -165,10 +165,10 @@ def _build_ytdlp_argv(
     """
     return [
         ytdlp_bin,
+        "--ignore-config",
         "--no-ignore-errors",
         "-f", "bestaudio",
         "--output", output_template,
-        "--max-downloads", str(int(max_downloads)),
         "--",
         url,
     ]
@@ -199,10 +199,8 @@ def _run_ytdlp(
     temp directory under ``temp_root`` (which defaults to
     ``DEFAULT_TEMP_DIR`` so production callers get the right host path).
     The directory is NOT cleaned up here; ``YoutubeIngestService.run_job``
-    moves the staged files via ``stage_dir_fn`` so the directory becomes
-    empty after a successful stage. Failed runs leave the directory in
-    place for ops inspection — the operator-side cleanup is one-shot
-    convergence (see CLAUDE.md scope rules).
+    stages from it and then best-effort deletes the scratch path on both
+    success and failure.
 
     The ``subprocess_run`` and ``ytdlp_bin_resolver`` kwargs are kwarg-DI
     seams that let tests inject a fake binary path + fake ``subprocess.run``
@@ -222,8 +220,7 @@ def _run_ytdlp(
         temp_root.mkdir(parents=True, exist_ok=True)
         prefix = f"ytdlp-req{request_id or 'x'}-{browse_id or 'x'}-"
         # Use mkdtemp so each job has its own isolated scratch path; the
-        # service stages from this directory and operators can inspect
-        # failures in place.
+        # service stages from this directory and then deletes it.
         work_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=str(temp_root)))
 
     # yt-dlp output template: one file per track, named with the track
@@ -235,7 +232,6 @@ def _run_ytdlp(
         ytdlp_bin=ytdlp_bin,
         url=url,
         output_template=output_template,
-        max_downloads=expected_track_count,
     )
 
     logger.info(
@@ -269,6 +265,7 @@ def _run_ytdlp(
             exit_code=-1,
             stderr_excerpt=excerpt,
             staged_files=_collect_audio_files(work_dir),
+            work_dir=work_dir,
         )
 
     excerpt = _cap_stderr_excerpt(proc.stderr)
@@ -277,6 +274,7 @@ def _run_ytdlp(
         exit_code=int(proc.returncode),
         stderr_excerpt=excerpt,
         staged_files=staged_files,
+        work_dir=work_dir,
     )
 
 
@@ -289,6 +287,7 @@ def build_service(
     pdb: Any,
     *,
     temp_dir: Path,
+    staging_dir: Path | None = None,
     ytdlp_runner_fn: Callable[..., YtdlpRunResult] | None = None,
 ) -> YoutubeIngestService:
     """Construct the production ``YoutubeIngestService`` for the worker.
@@ -306,10 +305,16 @@ def build_service(
         def _bound_runner(**kwargs: Any) -> YtdlpRunResult:
             return _run_ytdlp(temp_root=temp_dir, **kwargs)
         ytdlp_runner_fn = _bound_runner
+    staging_root = (
+        Path(stage_to_ai_root(staging_dir=str(staging_dir), auto_import=True))
+        if staging_dir is not None
+        else Path("/mnt/virtio/Music/Incoming/auto-import")
+    )
     return YoutubeIngestService(
         pdb,
         ytdlp_runner_fn=ytdlp_runner_fn,
         mb_track_count_fn=default_mb_track_count_from_mirror,
+        staging_root=staging_root,
     )
 
 
@@ -319,13 +324,13 @@ def build_service(
 
 
 def sweep_orphan_running_rows(pdb: Any) -> list[int]:
-    """Mark every in-flight ``youtube_running`` row as ``youtube_failed``.
+    """Mark claimed in-flight ``youtube_running`` rows as failed.
 
-    At worker startup, by definition every such row is orphaned — a
-    previous worker process exited (cleanly or otherwise) while a job
-    was mid-flight. We surface them as failures with reason
-    ``worker_died`` so the operator sees them in the audit trail and
-    can resubmit if desired.
+    Accepted-but-unclaimed rows remain drainable across worker downtime.
+    A claimed row means a previous worker process exited (cleanly or
+    otherwise) after taking ownership and before writing terminal state.
+    We surface those as failures with reason ``worker_interrupted`` so the
+    operator sees them in the audit trail and can resubmit if desired.
 
     Returns the list of swept ids for logging / metrics.
     """
@@ -335,7 +340,7 @@ def sweep_orphan_running_rows(pdb: Any) -> list[int]:
             pdb.update_youtube_terminal(
                 int(log_id),
                 "youtube_failed",
-                {"reason": "worker_died"},
+                {"reason": "worker_interrupted"},
             )
         except Exception:
             logger.exception(
@@ -352,6 +357,8 @@ def sweep_orphan_running_rows(pdb: Any) -> list[int]:
 def drain_one(
     pdb: Any,
     service: YoutubeIngestService,
+    *,
+    worker_id: str | None = None,
 ) -> int | None:
     """Process one pending ``youtube_running`` row.
 
@@ -361,7 +368,7 @@ def drain_one(
     ``worker_unhandled_exception`` so a single bad job cannot kill the
     worker.
     """
-    pending = pdb.find_next_youtube_pending(limit=1)
+    pending = pdb.claim_next_youtube_pending(worker_id=worker_id, limit=1)
     if not pending:
         return None
     row = pending[0]
@@ -375,8 +382,8 @@ def drain_one(
     except Exception:
         # The service itself catches contract-shaped exceptions inside
         # run_job and writes a terminal row. This block exists for the
-        # truly unexpected — a crash in find_next_youtube_pending's
-        # cursor or service construction. Persist a terminal row so the
+        # truly unexpected — a crash after the claim or inside service
+        # construction. Persist a terminal row so the
         # job doesn't bounce back as an orphan next startup.
         tb = traceback.format_exc()
         logger.exception(
@@ -409,6 +416,7 @@ def run_loop(
     *,
     service: YoutubeIngestService,
     poll_interval: float,
+    worker_id: str | None = None,
     once: bool = False,
     sleep_fn: Callable[[float], None] = time.sleep,
     iterations: int | None = None,
@@ -422,7 +430,7 @@ def run_loop(
     """
     seen = 0
     while True:
-        processed = drain_one(pdb, service)
+        processed = drain_one(pdb, service, worker_id=worker_id)
         seen += 1
         if once:
             return 0
@@ -444,7 +452,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         default=DEFAULT_TEMP_DIR,
         help=(
             "Per-process scratch directory yt-dlp downloads into before "
-            "files are moved to /Incoming/auto-import/."),
+            "files are moved to the configured auto-import staging root."),
+    )
+    parser.add_argument(
+        "--staging-dir",
+        type=Path,
+        default=Path("/mnt/virtio/Music/Incoming"),
+        help=(
+            "Shared beets staging root; YT rescues publish under its "
+            "auto-import/ child."),
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--worker-id", default=None)
@@ -482,12 +498,14 @@ def main(argv: Iterable[str] | None = None) -> int:
                     "Swept %d abandoned youtube_running row(s): %s",
                     len(swept), swept)
 
-            service = build_service(db, temp_dir=args.temp_dir)
+            service = build_service(
+                db, temp_dir=args.temp_dir, staging_dir=args.staging_dir)
             try:
                 return run_loop(
                     db,
                     service=service,
                     poll_interval=args.poll_interval,
+                    worker_id=worker_id,
                     once=args.once,
                 )
             except KeyboardInterrupt:
