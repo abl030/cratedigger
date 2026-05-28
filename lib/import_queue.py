@@ -277,6 +277,11 @@ def validate_payload(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         browse_id = payload.get("browse_id")
         if not isinstance(browse_id, str) or not browse_id:
             raise ValueError(f"{job_type} payload requires browse_id")
+        download_log_id = payload.get("download_log_id")
+        if download_log_id is not None and not isinstance(download_log_id, int):
+            raise ValueError(
+                f"{job_type} payload download_log_id must be int when present"
+            )
     return payload
 
 
@@ -335,6 +340,7 @@ def youtube_import_payload(
     staged_path: str,
     request_id: int,
     browse_id: str,
+    download_log_id: int | None = None,
 ) -> dict[str, Any]:
     """Build the payload dict for a ``youtube_import`` job.
 
@@ -346,8 +352,11 @@ def youtube_import_payload(
     All three fields are required and validated by
     ``validate_payload(IMPORT_JOB_YOUTUBE, payload)``.
     """
-    return {
+    payload: dict[str, Any] = {
         "staged_path": str(staged_path),
         "request_id": int(request_id),
         "browse_id": str(browse_id),
     }
+    if download_log_id is not None:
+        payload["download_log_id"] = int(download_log_id)
+    return payload

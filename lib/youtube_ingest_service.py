@@ -172,6 +172,9 @@ class YoutubeImportPayload(msgspec.Struct, kw_only=True):
     staged_path: str
     request_id: int
     browse_id: str
+    # Added after the original queue payload shipped. Optional so legacy
+    # queued rows still decode; new rows always carry it.
+    download_log_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +192,8 @@ class SubmitResult(msgspec.Struct, kw_only=True):
 
     outcome: SubmitOutcome
     download_log_id: Optional[int] = None
+    import_job_id: Optional[int] = None
+    blocking_resource: Optional[str] = None
     detail: Optional[str] = None
 
 
@@ -354,6 +359,8 @@ class _PipelineDB(Protocol):
         audio_playlist_id: Optional[str],
         yt_url: str,
         expected_track_count: int,
+        resolver_mapping_id: Optional[int] = None,
+        per_track_video_ids: Optional[list[str]] = None,
     ) -> int: ...
 
     def update_youtube_terminal(
@@ -375,6 +382,17 @@ class _PipelineDB(Protocol):
         dedupe_key: Optional[str] = None,
         payload: Optional[dict[str, Any]] = None,
         message: Optional[str] = None,
+    ) -> Any: ...
+
+    def enqueue_youtube_import_and_mark_success(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        message: str,
+        terminal_metadata: dict[str, Any],
     ) -> Any: ...
 
     def find_active_youtube_import_job(
@@ -597,12 +615,19 @@ class YoutubeIngestService:
             )
         if active_import is not None:
             import_job_id = getattr(active_import, "id", None)
+            blocking_download_log_id = _download_log_id_from_import_job(
+                active_import)
             return SubmitResult(
                 outcome="in_flight",
-                download_log_id=None,
+                download_log_id=blocking_download_log_id,
+                import_job_id=(
+                    int(import_job_id) if isinstance(import_job_id, int)
+                    else None
+                ),
+                blocking_resource="youtube_import",
                 detail=(
                     f"active youtube_import job id={import_job_id} already "
-                    f"exists for request {request_id} browse_id={browse_id!r}"
+                    f"exists for request {request_id}"
                 ),
             )
 
@@ -653,12 +678,15 @@ class YoutubeIngestService:
                 audio_playlist_id=audio_playlist_id,
                 yt_url=yt_url,
                 expected_track_count=int(expected_track_count),
+                resolver_mapping_id=_mapping_row_id(match),
+                per_track_video_ids=_per_track_video_ids(match),
             )
         except _pipeline_db_mod.YoutubeInFlightError as exc:
             existing_id = exc.existing_download_log_id
             return SubmitResult(
                 outcome="in_flight",
                 download_log_id=existing_id,
+                blocking_resource="youtube_running",
                 detail=(
                     f"existing download_log_id={existing_id} is in "
                     f"youtube_running state for request {request_id}"
@@ -750,6 +778,19 @@ class YoutubeIngestService:
                 detail=(
                     f"download_log_id={download_log_id} points at "
                     f"request_id={request_id} which no longer exists"
+                ),
+            )
+        request_status = str(request_row.get("status") or "")
+        if request_status not in _VALID_SUBMIT_STATUSES:
+            return self._terminal_failed(
+                download_log_id,
+                reason="request_no_longer_rescuable",
+                stderr_excerpt=None,
+                observed_track_count=None,
+                detail=(
+                    f"request_id={request_id} is now status "
+                    f"{request_status!r}; rescue requires one of "
+                    f"{sorted(_VALID_SUBMIT_STATUSES)!r}"
                 ),
             )
 
@@ -865,7 +906,39 @@ class YoutubeIngestService:
             )
 
         # ----- stage + enqueue -----
-        staging_target = self._derive_staging_target(request_row, metadata)
+        latest_request_row = self.pdb.get_request(request_id)
+        if latest_request_row is None:
+            cleanup_error = self._cleanup_ytdlp_run(run)
+            return self._terminal_failed(
+                download_log_id,
+                reason="missing_request_row",
+                stderr_excerpt=None,
+                observed_track_count=len(run.staged_files),
+                detail=(
+                    f"request_id={request_id} disappeared before staging"
+                ),
+                extra_metadata=_cleanup_metadata(cleanup_error),
+            )
+        latest_status = str(latest_request_row.get("status") or "")
+        if latest_status not in _VALID_SUBMIT_STATUSES:
+            cleanup_error = self._cleanup_ytdlp_run(run)
+            return self._terminal_failed(
+                download_log_id,
+                reason="request_no_longer_rescuable",
+                stderr_excerpt=None,
+                observed_track_count=len(run.staged_files),
+                detail=(
+                    f"request_id={request_id} became status "
+                    f"{latest_status!r} before staging"
+                ),
+                extra_metadata=_cleanup_metadata(cleanup_error),
+            )
+
+        staging_target = self._derive_staging_target(
+            latest_request_row,
+            metadata,
+            download_log_id=int(download_log_id),
+        )
         try:
             src_dir = run.staged_files[0].parent
             self.stage_dir_fn(src_dir, staging_target)
@@ -887,9 +960,16 @@ class YoutubeIngestService:
                 staged_path=str(staging_target),
                 request_id=request_id,
                 browse_id=metadata.browse_id,
+                download_log_id=int(download_log_id),
             )
-            self.pdb.enqueue_import_job(
-                IMPORT_JOB_YOUTUBE,
+            terminal_metadata: dict[str, Any] = {
+                "observed_track_count": len(run.staged_files),
+            }
+            cleanup_error = self._cleanup_ytdlp_run(run)
+            if cleanup_error is not None:
+                terminal_metadata["cleanup_error"] = cleanup_error
+            self.pdb.enqueue_youtube_import_and_mark_success(
+                download_log_id=int(download_log_id),
                 request_id=request_id,
                 dedupe_key=youtube_import_dedupe_key(int(download_log_id)),
                 payload=payload,
@@ -897,6 +977,7 @@ class YoutubeIngestService:
                     f"youtube rescue staged for request {request_id} via "
                     f"download_log {download_log_id}"
                 ),
+                terminal_metadata=terminal_metadata,
             )
         except Exception as exc:  # noqa: BLE001 — DB hiccup
             cleanup_error = self._cleanup_paths(
@@ -912,17 +993,6 @@ class YoutubeIngestService:
                 extra_metadata=_cleanup_metadata(cleanup_error),
             )
 
-        terminal_metadata: dict[str, Any] = {
-            "observed_track_count": len(run.staged_files),
-        }
-        cleanup_error = self._cleanup_ytdlp_run(run)
-        if cleanup_error is not None:
-            terminal_metadata["cleanup_error"] = cleanup_error
-        self.pdb.update_youtube_terminal(
-            int(download_log_id),
-            "youtube_success",
-            terminal_metadata,
-        )
         return RunResult(outcome="youtube_success", reason=None)
 
     # ----- helpers -------------------------------------------------------
@@ -1088,7 +1158,11 @@ class YoutubeIngestService:
                     f"release_id={target_release_id!r}; refresh resolver or "
                     f"repair album_tracks before retrying"
                 )
-            return int(stored_count if stored_count is not None else distance_count)
+            expected_count = (
+                stored_count if stored_count is not None else distance_count
+            )
+            assert expected_count is not None
+            return int(expected_count)
 
         request_mbid = self._request_mbid(request_row)
         if not request_mbid:
@@ -1253,19 +1327,22 @@ class YoutubeIngestService:
         self,
         request_row: dict[str, Any],
         metadata: YoutubeIngestMetadata,
+        *,
+        download_log_id: int,
     ) -> Path:
-        """Derive ``/Incoming/auto-import/<artist>-<album>/`` from the row.
+        """Derive a request-scoped YouTube staging target from the row.
 
-        The naming is deterministic so a re-run of the same submission
-        targets the same directory (and any orphaned partial download is
-        replaced by the new content — see ``stage_dir_fn`` which uses
-        ``shutil.move``). The ``browse_id`` suffix disambiguates two
-        distinct YT pressings being staged for the same artist+album.
+        The request id and download_log id are both included so two
+        rescues for the same YT album never share a staged source path.
         """
         artist = _slug(request_row.get("artist_name"))
         album = _slug(request_row.get("album_title"))
         suffix = _slug(metadata.browse_id)
-        return self.staging_root / f"{artist}-{album}-{suffix}"
+        request_id = int(request_row.get("id") or 0)
+        return (
+            self.staging_root
+            / f"{artist}-{album}-{suffix}-request-{request_id}-log-{download_log_id}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1308,6 +1385,52 @@ def _positive_int(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _mapping_row_id(mapping_row: dict[str, Any]) -> Optional[int]:
+    raw = mapping_row.get("id")
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _per_track_video_ids(mapping_row: dict[str, Any]) -> Optional[list[str]]:
+    ids: list[str] = []
+    for track in mapping_row.get("yt_tracks") or []:
+        if not isinstance(track, dict):
+            continue
+        raw = track.get("video_id")
+        if raw is None:
+            raw = track.get("videoId")
+        if isinstance(raw, str) and raw.strip():
+            ids.append(raw.strip())
+    return ids or None
+
+
+def _download_log_id_from_import_job(job: Any) -> Optional[int]:
+    payload = getattr(job, "payload", None)
+    if isinstance(payload, dict):
+        raw = payload.get("download_log_id")
+        if isinstance(raw, int):
+            return raw
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                pass
+    dedupe_key = getattr(job, "dedupe_key", None)
+    if not isinstance(dedupe_key, str):
+        return None
+    prefix = f"{IMPORT_JOB_YOUTUBE}:download_log:"
+    if not dedupe_key.startswith(prefix):
+        return None
+    try:
+        return int(dedupe_key[len(prefix):])
+    except ValueError:
+        return None
 
 
 def _cleanup_metadata(cleanup_error: Optional[str]) -> Optional[dict[str, Any]]:

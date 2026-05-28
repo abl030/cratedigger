@@ -397,6 +397,10 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         cached_rows = pdb.get_youtube_album_mapping(rg, "mb")
         assert cached_rows is not None
         self.assertEqual(len(cached_rows), 2)
+        self.assertEqual(
+            [t["video_id"] for t in cached_rows[0]["yt_tracks"]],
+            ["vid-0", "vid-1"],
+        )
 
     def test_ae3_release_level_mbid_auto_widens(self) -> None:
         """AE3: Input is a release-level MBID; service extracts RG from it."""

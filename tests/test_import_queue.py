@@ -31,6 +31,7 @@ from lib.import_preview import ImportPreviewResult
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
+    ValidationResult,
 )
 from lib.quality_evidence import snapshot_audio_files
 from lib.staged_album import StagedAlbum
@@ -2276,8 +2277,10 @@ class TestYoutubeImportJobType(unittest.TestCase):
             staged_path="/Incoming/auto-import/Artist - Album",
             request_id=42,  # already int
             browse_id="MPREb_abc",
+            download_log_id=99,
         )
         self.assertIsInstance(payload["request_id"], int)
+        self.assertEqual(payload["download_log_id"], 99)
 
     def test_validate_payload_youtube_rejects_missing_staged_path(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
@@ -2318,6 +2321,16 @@ class TestYoutubeImportJobType(unittest.TestCase):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
                 "request_id": 42,
+            })
+
+    def test_validate_payload_youtube_rejects_non_int_download_log_id(self):
+        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        with self.assertRaises(ValueError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "staged_path": "/Incoming/auto-import/x",
+                "request_id": 42,
+                "browse_id": "MPREb_abc",
+                "download_log_id": "99",
             })
 
     def test_dedupe_key_uses_download_log_id(self):
@@ -2382,6 +2395,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                 staged_path=staged_path,
                 request_id=request_id,
                 browse_id=browse_id,
+                download_log_id=download_log_id,
             ),
         )
 
@@ -2435,11 +2449,78 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         entry_arg = proc.call_args.args[0]
         self.assertEqual(entry_arg.import_folder, staged)
         self.assertEqual(entry_arg.db_request_id, 42)
-        self.assertEqual(entry_arg.files, [])
+        self.assertEqual([f.filename for f in entry_arg.files], ["01.opus"])
+        self.assertEqual([f.username for f in entry_arg.files], [""])
         # Terminal queue state reflects the DispatchOutcome.
         assert updated is not None
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "Imported by dispatch")
+
+    def test_youtube_staged_audio_manifest_uses_real_files(self):
+        """Real dispatcher + process_completed_album reaches beets reject
+        without the manifest guard classifying staged YT audio as
+        untracked_audio.
+        """
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = os.path.abspath(tmpdir)
+            staged = os.path.join(root, "yt-staged")
+            os.makedirs(staged)
+            for name in ("01.opus", "02.opus"):
+                with open(os.path.join(staged, name), "wb") as fp:
+                    fp.write(b"audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                active_download_state=None,
+                artist_name="Test Artist",
+                album_title="Test Album",
+                mb_release_id="mbid-yt-real-manifest",
+                search_filetype_override="opus",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=110,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+            cfg = CratediggerConfig(
+                beets_validation_enabled=True,
+                beets_harness_path="/unused",
+                beets_staging_dir=os.path.join(root, "Incoming"),
+                slskd_download_dir=os.path.join(root, "slskd"),
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+            with patch(
+                "lib.beets.beets_validate",
+                return_value=ValidationResult(
+                    valid=False,
+                    scenario="high_distance",
+                    detail="distance=1.0",
+                    target_mbid="mbid-yt-real-manifest",
+                ),
+            ):
+                updated = importer.process_claimed_job(
+                    cast(Any, db),
+                    claimed,
+                    ctx=ctx,
+                )
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            source = ctx.pipeline_db_source
+            self.assertEqual(len(source.reject_and_requeue_calls), 1)
+            rejected = source.reject_and_requeue_calls[0]["bv_result"]
+            self.assertEqual(rejected.scenario, "high_distance")
+            self.assertNotEqual(rejected.scenario, "untracked_audio")
+            self.assertFalse(
+                os.path.exists(
+                    os.path.join(root, "failed_imports", "untracked_audio")
+                )
+            )
 
     def test_happy_path_finalizes_request_to_imported_via_rescue(self):
         """AE7: when process_completed_album returns True (legacy non-

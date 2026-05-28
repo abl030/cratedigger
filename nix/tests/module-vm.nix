@@ -69,7 +69,8 @@ pkgs.testers.nixosTest {
       # Enable the YouTube-rescue ingest worker so its unit is rendered.
       # We only assert structural properties (dependencies, PATH, lock
       # contention) — the worker process itself starts but stays idle
-      # because no `youtube_pending` rows exist in the test DB.
+      # because no download_log source='youtube' outcome='youtube_running'
+      # rows exist in the test DB.
       youtubeIngest.enable = true;
       timer.enable = false;
       healthCheck.enable = false;

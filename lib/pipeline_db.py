@@ -3596,6 +3596,8 @@ class PipelineDB:
         audio_playlist_id: str | None,
         yt_url: str,
         expected_track_count: int,
+        resolver_mapping_id: int | None = None,
+        per_track_video_ids: list[str] | None = None,
     ) -> int:
         """Insert a ``download_log`` row for a YT rescue submission.
 
@@ -3615,6 +3617,12 @@ class PipelineDB:
             "audio_playlist_id": audio_playlist_id,
             "expected_track_count": int(expected_track_count),
         }
+        if resolver_mapping_id is not None:
+            metadata["resolver_mapping_id"] = int(resolver_mapping_id)
+        if per_track_video_ids is not None:
+            metadata["per_track_video_ids"] = [
+                str(video_id) for video_id in per_track_video_ids
+            ]
         try:
             cur = self._execute(
                 """
@@ -3649,6 +3657,90 @@ class PipelineDB:
         row = cur.fetchone()
         assert row is not None, "INSERT RETURNING should always return a row"
         return int(row["id"])
+
+    def enqueue_youtube_import_and_mark_success(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        message: str,
+        terminal_metadata: dict[str, Any],
+    ) -> ImportJob:
+        """Atomically hand staged YT audio to importer and mark audit success."""
+        validate_job_type(IMPORT_JOB_YOUTUBE)
+        payload = validate_payload(IMPORT_JOB_YOUTUBE, payload)
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
+        try:
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                cur.execute(
+                    """
+                    WITH inserted AS (
+                        INSERT INTO import_jobs (
+                            job_type, request_id, dedupe_key, payload, message,
+                            preview_status, preview_message,
+                            preview_completed_at, importable_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, NULL)
+                        ON CONFLICT (dedupe_key)
+                            WHERE dedupe_key IS NOT NULL
+                              AND status IN ('queued', 'running')
+                        DO NOTHING
+                        RETURNING *
+                    )
+                    SELECT inserted.*, false AS deduped
+                    FROM inserted
+                    UNION ALL
+                    SELECT import_jobs.*, true AS deduped
+                    FROM import_jobs
+                    WHERE dedupe_key = %s
+                      AND status IN ('queued', 'running')
+                      AND NOT EXISTS (SELECT 1 FROM inserted)
+                    ORDER BY deduped
+                    LIMIT 1
+                    """,
+                    (
+                        IMPORT_JOB_YOUTUBE,
+                        int(request_id),
+                        dedupe_key,
+                        psycopg2.extras.Json(payload),
+                        message,
+                        IMPORT_JOB_PREVIEW_WAITING,
+                        dedupe_key,
+                    ),
+                )
+                job_row = cur.fetchone()
+                if job_row is None:
+                    raise RuntimeError("youtube import enqueue returned no row")
+                cur.execute(
+                    """
+                    UPDATE download_log
+                    SET outcome = 'youtube_success',
+                        youtube_metadata =
+                            COALESCE(youtube_metadata, '{}'::jsonb)
+                            || %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (
+                        psycopg2.extras.Json(terminal_metadata),
+                        int(download_log_id),
+                    ),
+                )
+            self.conn.commit()
+            return ImportJob.from_row(
+                dict(job_row),
+                deduped=bool(job_row["deduped"]),
+            )
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit
 
     def update_youtube_terminal(
         self,
@@ -3776,7 +3868,7 @@ class PipelineDB:
         request_id: int,
         browse_id: str,
     ) -> ImportJob | None:
-        """Return active ``youtube_import`` job for this request/browse id."""
+        """Return active ``youtube_import`` job for this request."""
         cur = self._execute(
             """
             SELECT *, false AS deduped
@@ -3784,11 +3876,10 @@ class PipelineDB:
             WHERE job_type = %s
               AND request_id = %s
               AND status IN ('queued', 'running')
-              AND payload->>'browse_id' = %s
             ORDER BY id ASC
             LIMIT 1
             """,
-            (IMPORT_JOB_YOUTUBE, int(request_id), str(browse_id)),
+            (IMPORT_JOB_YOUTUBE, int(request_id)),
         )
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row is not None else None

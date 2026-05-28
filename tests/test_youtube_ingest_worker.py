@@ -167,6 +167,40 @@ class TestSweepOrphanRunningRows(unittest.TestCase):
         swept = worker.sweep_orphan_running_rows(pdb)
         self.assertEqual(swept, [])
 
+    def test_sweep_cleans_derived_scratch_and_staging_paths(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        log_id = _seed_running_row(pdb, request_id=42)
+        pdb.claim_next_youtube_pending(worker_id="worker-a", limit=1)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_root = Path(tmpdir) / "scratch"
+            staging_root = Path(tmpdir) / "staging"
+            scratch = temp_root / f"ytdlp-req42-{BROWSE}-abc"
+            staged = (
+                staging_root
+                / f"Test_Artist-Test_Album-{BROWSE}-request-42-log-{log_id}"
+            )
+            scratch.mkdir(parents=True)
+            staged.mkdir(parents=True)
+            (scratch / "partial.opus").write_bytes(b"partial")
+            (staged / "01.opus").write_bytes(b"opus")
+
+            swept = worker.sweep_orphan_running_rows(
+                pdb,
+                temp_dir=temp_root,
+                staging_root=staging_root,
+            )
+
+            self.assertEqual(swept, [log_id])
+            self.assertFalse(scratch.exists())
+            self.assertFalse(staged.exists())
+            row = pdb.get_download_log_entry(log_id)
+            assert row is not None
+            meta = row["youtube_metadata"]
+            self.assertEqual(meta["reason"], "worker_interrupted")
+            self.assertNotIn("cleanup_error", meta)
+
 
 # ---------------------------------------------------------------------------
 # Drain loop (drain_one + run_loop).
@@ -364,6 +398,55 @@ class TestRunYtdlpStderrCap(unittest.TestCase):
         self.assertLessEqual(
             len(result.stderr_excerpt), worker.STDERR_EXCERPT_BYTES_LIMIT)
 
+    def test_real_process_huge_stderr_is_tail_capped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shim = Path(tmpdir) / "yt-dlp"
+            with open(shim, "w") as fp:
+                fp.write(
+                    "#!/bin/sh\n"
+                    "python3 - <<'PY'\n"
+                    "import sys\n"
+                    "sys.stderr.buffer.write(b'x' * (100 * 1024))\n"
+                    "sys.stderr.buffer.write(b'TAIL-MARKER')\n"
+                    "sys.exit(1)\n"
+                    "PY\n"
+                )
+            os.chmod(shim, 0o755)
+
+            result = worker._run_ytdlp(
+                url=YT_URL,
+                expected_track_count=1,
+                temp_root=Path(tmpdir) / "scratch",
+                ytdlp_bin_resolver=lambda: str(shim),
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        assert result.stderr_excerpt is not None
+        self.assertLessEqual(
+            len(result.stderr_excerpt), worker.STDERR_EXCERPT_BYTES_LIMIT)
+        self.assertIn("TAIL-MARKER", result.stderr_excerpt)
+
+    def test_stdout_is_discarded_and_stderr_is_piped(self) -> None:
+        seen_kwargs: dict[str, Any] = {}
+
+        def _fake_run(*_args: Any, **kwargs: Any) -> Any:
+            seen_kwargs.update(kwargs)
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=None, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker._run_ytdlp(
+                url=YT_URL,
+                expected_track_count=1,
+                temp_root=Path(tmp),
+                subprocess_run=_fake_run,
+                ytdlp_bin_resolver=lambda: "/usr/bin/yt-dlp",
+            )
+
+        self.assertIs(seen_kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(seen_kwargs["stderr"], subprocess.PIPE)
+        self.assertNotIn("capture_output", seen_kwargs)
+
     def test_short_stderr_not_truncated(self) -> None:
         def _fake_run(*_args: Any, **_kwargs: Any) -> Any:
             return subprocess.CompletedProcess(
@@ -514,7 +597,7 @@ class TestMainAdvisoryLockContention(unittest.TestCase):
 
         sweep_calls: list[Any] = []
 
-        def _fake_sweep(db: Any) -> list[int]:
+        def _fake_sweep(db: Any, **_kwargs: Any) -> list[int]:
             sweep_calls.append(db)
             return []
 
@@ -582,7 +665,7 @@ class TestMainHappyPath(unittest.TestCase):
         # Seed an accepted, unclaimed row after the startup sweep boundary.
         # The real sweep now only fails claimed rows, but this keeps the
         # main() test focused on the drain path rather than setup ordering.
-        def _fake_sweep(db: Any) -> list[int]:
+        def _fake_sweep(db: Any, **_kwargs: Any) -> list[int]:
             _seed_running_row(db)
             return []
 

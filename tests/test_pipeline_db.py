@@ -7608,6 +7608,19 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
                 msg=f"field {key} was dropped at the PG boundary",
             )
 
+    def test_insert_youtube_running_persists_resolver_audit_fields(self):
+        log_id = self.db.insert_youtube_running(
+            **self._yt_payload(),
+            resolver_mapping_id=44,
+            per_track_video_ids=["v1", "v2"],
+        )
+
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        meta = entry["youtube_metadata"]
+        self.assertEqual(meta["resolver_mapping_id"], 44)
+        self.assertEqual(meta["per_track_video_ids"], ["v1", "v2"])
+
     def test_insert_youtube_running_raises_on_idempotency_violation(self):
         """Partial unique index serialises submissions per R4."""
         first_id = self.db.insert_youtube_running(**self._yt_payload())
@@ -7804,6 +7817,75 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
             yt_id, "youtube_failed", {"reason": "operator_cancelled"},
         )
         self.assertEqual(self.db.list_active_youtube_rescues(limit=10), [])
+
+    def test_active_youtube_import_guard_is_request_scoped(self):
+        from lib.import_queue import (
+            IMPORT_JOB_YOUTUBE,
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=self.request_id,
+            dedupe_key=youtube_import_dedupe_key(901),
+            payload=youtube_import_payload(
+                staged_path="/tmp/yt-a",
+                request_id=self.request_id,
+                browse_id="MPREb_a",
+                download_log_id=901,
+            ),
+        )
+
+        active = self.db.find_active_youtube_import_job(
+            request_id=self.request_id,
+            browse_id="MPREb_b",
+        )
+        assert active is not None
+        self.assertEqual(active.id, job.id)
+
+        with self.assertRaises(Exception):
+            self.db.enqueue_import_job(
+                IMPORT_JOB_YOUTUBE,
+                request_id=self.request_id,
+                dedupe_key=youtube_import_dedupe_key(902),
+                payload=youtube_import_payload(
+                    staged_path="/tmp/yt-b",
+                    request_id=self.request_id,
+                    browse_id="MPREb_b",
+                    download_log_id=902,
+                ),
+            )
+
+    def test_atomic_youtube_import_enqueue_marks_download_log_success(self):
+        from lib.import_queue import (
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        payload = youtube_import_payload(
+            staged_path="/tmp/yt-staged",
+            request_id=self.request_id,
+            browse_id="MPREb_default",
+            download_log_id=log_id,
+        )
+
+        job = self.db.enqueue_youtube_import_and_mark_success(
+            download_log_id=log_id,
+            request_id=self.request_id,
+            dedupe_key=youtube_import_dedupe_key(log_id),
+            payload=payload,
+            message="yt handoff",
+            terminal_metadata={"observed_track_count": 10},
+        )
+
+        self.assertEqual(job.request_id, self.request_id)
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_success")
+        self.assertEqual(
+            entry["youtube_metadata"]["observed_track_count"], 10)
 
     def test_read_seam_includes_source_and_youtube_metadata(self):
         """Every download_log read seam surfaces the new columns."""

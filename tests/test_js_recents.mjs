@@ -273,6 +273,28 @@ console.log('renderDownloadingItems() escapes current download fields');
   assertExcludes(html, '<album>', 'raw album is not rendered');
 }
 
+console.log('renderDownloadingItems() shows active YouTube ingest rows');
+{
+  const row = __test__.normalizeYoutubeIngestItem({
+    download_log_id: 301,
+    request_id: 202,
+    created_at: '2026-05-28T01:00:00+00:00',
+    album_title: 'YT Album',
+    artist_name: 'YT Artist',
+    youtube_metadata: {
+      browse_id: 'MPREb_yt',
+      expected_track_count: 2,
+    },
+  });
+  const html = __test__.renderDownloadingItems([row]);
+  assertContains(html, 'YT Album', 'YT album title rendered');
+  assertContains(html, 'YT Artist', 'YT artist rendered');
+  assertContains(html, 'youtube ingest', 'YouTube ingest badge rendered');
+  assertContains(html, 'YouTube · 2 tracks · browse MPREb_yt',
+    'YouTube ingest summary rendered');
+  assertContains(html, '#202 · YT #301', 'request and download log ids rendered');
+}
+
 console.log('renderRecentsItems() shows bad-extension postflight warning chip');
 {
   const html = __test__.renderRecentsItems([{

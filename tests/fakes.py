@@ -1057,6 +1057,17 @@ class FakePipelineDB:
             existing = self.get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
                 return ImportJob.from_row(existing.to_dict(), deduped=True)
+        if job_type == IMPORT_JOB_YOUTUBE and request_id is not None:
+            for row in self._import_jobs:
+                if (
+                    row.get("job_type") == IMPORT_JOB_YOUTUBE
+                    and row.get("request_id") == request_id
+                    and row.get("status") in ("queued", "running")
+                ):
+                    raise ValueError(
+                        "active youtube_import already exists for "
+                        f"request_id={request_id}"
+                    )
 
         self._next_import_job_id += 1
         now = _utcnow()
@@ -1157,7 +1168,6 @@ class FakePipelineDB:
             if row.get("job_type") == IMPORT_JOB_YOUTUBE
             and row.get("request_id") == request_id
             and row.get("status") in ("queued", "running")
-            and (row.get("payload") or {}).get("browse_id") == browse_id
         ]
         rows.sort(key=lambda row: row["id"])
         return ImportJob.from_row(copy.deepcopy(rows[0])) if rows else None
@@ -2078,6 +2088,8 @@ class FakePipelineDB:
         audio_playlist_id: str | None,
         yt_url: str,
         expected_track_count: int,
+        resolver_mapping_id: int | None = None,
+        per_track_video_ids: list[str] | None = None,
     ) -> int:
         """Mirror of ``PipelineDB.insert_youtube_running``.
 
@@ -2110,6 +2122,12 @@ class FakePipelineDB:
             "audio_playlist_id": audio_playlist_id,
             "expected_track_count": int(expected_track_count),
         }
+        if resolver_mapping_id is not None:
+            metadata["resolver_mapping_id"] = int(resolver_mapping_id)
+        if per_track_video_ids is not None:
+            metadata["per_track_video_ids"] = [
+                str(video_id) for video_id in per_track_video_ids
+            ]
         self.download_logs.append(DownloadLogRow(
             request_id=request_id,
             outcome="youtube_running",
@@ -2118,6 +2136,30 @@ class FakePipelineDB:
             id=self._next_download_log_id,
         ))
         return self._next_download_log_id
+
+    def enqueue_youtube_import_and_mark_success(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+        dedupe_key: str,
+        payload: dict[str, Any],
+        message: str,
+        terminal_metadata: dict[str, Any],
+    ) -> ImportJob:
+        job = self.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            message=message,
+        )
+        self.update_youtube_terminal(
+            download_log_id,
+            "youtube_success",
+            terminal_metadata,
+        )
+        return job
 
     def update_youtube_terminal(
         self,

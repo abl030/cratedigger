@@ -1150,8 +1150,9 @@ in {
     };
 
     # YouTube-rescue ingest drainer. Long-lived Type=simple worker that
-    # polls album_requests for `youtube_pending` rows the operator
-    # explicitly opted in via `pipeline-cli youtube-rescue <id>` or
+    # polls `download_log` rows where source='youtube' and
+    # outcome='youtube_running' that the operator explicitly opted in via
+    # `pipeline-cli youtube-rescue <id>` or
     # POST /api/pipeline/<id>/youtube-rescue, invokes yt-dlp, stages audio
     # under the configured auto-import staging directory, and enqueues a
     # `youtube_import` row in `import_jobs` for the existing

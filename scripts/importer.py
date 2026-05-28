@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import socket
 import sys
 import time
@@ -35,11 +36,13 @@ from lib.pipeline_db import (
     DEFAULT_DSN,
     PipelineDB,
 )
-from lib.quality import ActiveDownloadState
+from lib.import_manifest import audio_relative_paths
+from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.youtube_ingest_service import YoutubeImportPayload
 
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
+YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES = frozenset({"wanted", "manual"})
 
 
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
@@ -300,10 +303,10 @@ def execute_youtube_import_job(
     boundary) rather than from ``album_requests.active_download_state``.
 
     KTD1: this path never reads from nor writes to ``active_download_state``.
-    The YT staged dir lives under ``/Incoming/auto-import/<artist>-<album>/``
-    already (the U6 worker stages it there directly), so the downstream
-    pipeline observes a request-scoped auto-import staging path with
-    no slskd-resume state attached.
+    The YT staged dir lives under ``/Incoming/auto-import`` already (the
+    U6 worker stages it there directly), so the downstream pipeline
+    observes a ready local staging path with no slskd-resume state
+    attached.
 
     R17: terminal status flips run through
     ``transitions.finalize_request → mark_imported_with_rescue`` (the
@@ -314,9 +317,9 @@ def execute_youtube_import_job(
     No cooldown side effects: the slskd cooldown machinery is keyed on
     peer usernames; YT has no peers. We never call ``denylist_user`` /
     ``update_user_failure_count`` / ``check_and_apply_cooldown``. The
-    synthetic ``ActiveDownloadState`` we build has ``files=[]``, so the
-    rejection paths inside ``_handle_rejected_result`` find no usernames
-    to denylist.
+    synthetic ``ActiveDownloadState`` we build uses blank usernames for
+    the staged audio manifest, so the rejection paths inside
+    ``_handle_rejected_result`` find no peers to denylist.
     """
     from lib.download import process_completed_album, reconstruct_grab_list_entry
 
@@ -343,12 +346,24 @@ def execute_youtube_import_job(
     row = db.get_request(request_id)
     if not row:
         return DispatchOutcome(False, f"Album request {request_id} not found")
+    status = str(row.get("status") or "")
+    if status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
+        shutil.rmtree(payload.staged_path, ignore_errors=True)
+        return DispatchOutcome(
+            False,
+            (
+                f"Album request {request_id} is status {status!r}; "
+                "YouTube import requires wanted/manual"
+            ),
+        )
+
+    staged_files = _youtube_active_download_files(payload.staged_path)
 
     # Synthetic ActiveDownloadState — used ONLY to feed
-    # reconstruct_grab_list_entry. No files (yt-dlp already staged the
-    # album to disk), current_path = the payload's staged path. This
-    # struct is never persisted: KTD1 keeps active_download_state
-    # untouched on the row, and the downstream
+    # reconstruct_grab_list_entry. Files are a manifest bridge for the
+    # already-staged yt-dlp audio; current_path = the payload's staged
+    # path. This struct is never persisted: KTD1 keeps
+    # active_download_state untouched on the row, and the downstream
     # update_download_state_current_path call inside
     # _materialize_processing_dir is gated by status='downloading' so
     # it no-ops for wanted/manual rows.
@@ -356,7 +371,7 @@ def execute_youtube_import_job(
         filetype=row.get("target_format") or "opus",
         enqueued_at="",
         last_progress_at="",
-        files=[],
+        files=staged_files,
         current_path=payload.staged_path,
     )
     entry = reconstruct_grab_list_entry(row, state)
@@ -394,6 +409,24 @@ def execute_youtube_import_job(
         success=False,
         message="YouTube import processing failed",
     )
+
+
+def _youtube_active_download_files(staged_path: str) -> list[ActiveDownloadFileState]:
+    """Build the manifest bridge for a YT-staged album directory."""
+    out: list[ActiveDownloadFileState] = []
+    for rel_path in audio_relative_paths(staged_path):
+        full_path = os.path.join(staged_path, rel_path)
+        try:
+            size = os.path.getsize(full_path)
+        except OSError:
+            size = 0
+        out.append(ActiveDownloadFileState(
+            username="",
+            filename=rel_path,
+            file_dir=os.path.dirname(rel_path),
+            size=size,
+        ))
+    return out
 
 
 def process_claimed_job(

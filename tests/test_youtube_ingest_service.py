@@ -53,6 +53,7 @@ DISCOGS_MASTER = "999"
 def _seed_resolver_row(
     pdb: FakePipelineDB,
     *,
+    resolver_mapping_id: int = 501,
     rg: str = MB_RG,
     source: str = "mb",
     browse_id: str = BROWSE,
@@ -64,6 +65,7 @@ def _seed_resolver_row(
 ) -> None:
     """Pre-seed ``youtube_album_mappings`` with one matching row."""
     rows: list[dict[str, Any]] = [{
+        "id": resolver_mapping_id,
         "yt_browse_id": browse_id,
         "yt_audio_playlist_id": yt_audio_playlist_id,
         "yt_url": yt_url,
@@ -71,7 +73,10 @@ def _seed_resolver_row(
         "yt_track_count": total_mb_tracks or EXPECTED_TRACKS,
         "album_title": "Test Album",
         "album_artist": "Test Artist",
-        "yt_tracks": [],
+        "yt_tracks": [
+            {"title": f"Track {i + 1}", "video_id": f"vid-{i + 1}"}
+            for i in range(total_mb_tracks or EXPECTED_TRACKS)
+        ],
         "distances": [
             {
                 "mbid": distances_for_mbid,
@@ -228,6 +233,11 @@ class TestSubmitHappyPath(unittest.TestCase):
         self.assertEqual(metadata["yt_url"], YT_URL)
         self.assertEqual(metadata["audio_playlist_id"], PLAYLIST)
         self.assertEqual(metadata["expected_track_count"], EXPECTED_TRACKS)
+        self.assertEqual(metadata["resolver_mapping_id"], 501)
+        self.assertEqual(
+            metadata["per_track_video_ids"],
+            [f"vid-{i + 1}" for i in range(EXPECTED_TRACKS)],
+        )
 
     def test_manual_request_accepted_covers_ae9(self) -> None:
         """AE9: rescue from ``manual`` status is identical to wanted."""
@@ -370,9 +380,39 @@ class TestSubmitInFlight(unittest.TestCase):
         result = svc.submit(request_id=42, browse_id=BROWSE)
 
         self.assertEqual(result.outcome, "in_flight")
+        self.assertEqual(result.download_log_id, 777)
+        self.assertEqual(result.import_job_id, 1)
+        self.assertEqual(result.blocking_resource, "youtube_import")
         self.assertIsNotNone(result.detail)
         assert result.detail is not None
         self.assertIn("youtube_import job", result.detail)
+        self.assertEqual(
+            [e for e in pdb.download_logs if e.source == "youtube"], [])
+
+    def test_active_youtube_import_blocks_different_browse_for_request(self) -> None:
+        from lib.import_queue import youtube_import_dedupe_key, youtube_import_payload
+
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42)
+        _seed_resolver_row(pdb, browse_id="MPREb_new_choice")
+        pdb.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=42,
+            dedupe_key=youtube_import_dedupe_key(778),
+            payload=youtube_import_payload(
+                staged_path="/tmp/yt-staged",
+                request_id=42,
+                browse_id="MPREb_existing_choice",
+                download_log_id=778,
+            ),
+        )
+        svc = _make_service(pdb)
+
+        result = svc.submit(request_id=42, browse_id="MPREb_new_choice")
+
+        self.assertEqual(result.outcome, "in_flight")
+        self.assertEqual(result.download_log_id, 778)
+        self.assertEqual(result.blocking_resource, "youtube_import")
         self.assertEqual(
             [e for e in pdb.download_logs if e.source == "youtube"], [])
 
@@ -648,9 +688,7 @@ class TestRunJobHappyPath(unittest.TestCase):
 
     def test_happy_path_stages_and_enqueues(self) -> None:
         pdb = FakePipelineDB()
-        _seed_wanted_request(pdb, request_id=42, status="downloading")
-        # Note: status is irrelevant for run_job — it operates on
-        # download_log rows directly. Use any seeded request.
+        _seed_wanted_request(pdb, request_id=42, status="wanted")
 
         log_id = _seed_running_row(pdb)
 
@@ -681,6 +719,8 @@ class TestRunJobHappyPath(unittest.TestCase):
         self.assertEqual(src, tmp_dir)
         # Destination should be under the configured staging root.
         self.assertEqual(dest.parent, svc.staging_root)
+        self.assertIn("request-42", dest.name)
+        self.assertIn(f"log-{log_id}", dest.name)
 
         # Importer job enqueued with the right payload.
         jobs = [
@@ -693,6 +733,7 @@ class TestRunJobHappyPath(unittest.TestCase):
         payload = msgspec.convert(job.payload, type=YoutubeImportPayload)
         self.assertEqual(payload.request_id, 42)
         self.assertEqual(payload.browse_id, BROWSE)
+        self.assertEqual(payload.download_log_id, log_id)
         self.assertEqual(payload.staged_path, str(dest))
 
         # Terminal log row.
@@ -1073,6 +1114,61 @@ class TestRunJobUtf8SurrogateHandling(unittest.TestCase):
 
 
 class TestRunJobRunnerUnhandled(unittest.TestCase):
+    def test_imported_request_fails_before_ytdlp(self) -> None:
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42, status="imported")
+        log_id = _seed_running_row(pdb)
+        runner = _StubRunner(YtdlpRunResult(
+            exit_code=0,
+            stderr_excerpt=None,
+            staged_files=[Path("/tmp/yt/01.opus")],
+        ))
+        svc = _make_service(pdb, ytdlp_runner_fn=runner)
+
+        result = svc.run_job(log_id)
+
+        self.assertEqual(result.outcome, "youtube_failed")
+        self.assertEqual(result.reason, "request_no_longer_rescuable")
+        self.assertEqual(runner.calls, [])
+
+    def test_status_change_after_ytdlp_cleans_scratch_without_staging(self) -> None:
+        import tempfile
+
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb, request_id=42, status="wanted")
+        log_id = _seed_running_row(pdb)
+        stager = _RecordingStager()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = Path(tmpdir) / "scratch"
+            work_dir.mkdir()
+            staged_files = [
+                work_dir / f"{i:02d}.opus" for i in range(EXPECTED_TRACKS)
+            ]
+            for file_path in staged_files:
+                file_path.write_bytes(b"opus")
+
+            def _runner(**_kwargs: Any) -> YtdlpRunResult:
+                pdb.update_request_fields(42, status="imported")
+                return YtdlpRunResult(
+                    exit_code=0,
+                    stderr_excerpt=None,
+                    staged_files=staged_files,
+                    work_dir=work_dir,
+                )
+
+            svc = _make_service(
+                pdb,
+                ytdlp_runner_fn=_runner,
+                stage_dir_fn=stager,
+            )
+            result = svc.run_job(log_id)
+
+            self.assertEqual(result.outcome, "youtube_failed")
+            self.assertEqual(result.reason, "request_no_longer_rescuable")
+            self.assertFalse(work_dir.exists())
+            self.assertEqual(stager.calls, [])
+
     def test_runner_raises_classifies_as_worker_unhandled_exception(self) -> None:
         pdb = FakePipelineDB()
         _seed_wanted_request(pdb, request_id=42)
@@ -1149,7 +1245,9 @@ class TestRunJobRunnerUnhandled(unittest.TestCase):
             )
 
             with patch.object(
-                pdb, "enqueue_import_job", side_effect=RuntimeError("db down"),
+                pdb,
+                "enqueue_youtube_import_and_mark_success",
+                side_effect=RuntimeError("db down"),
             ):
                 result = svc.run_job(log_id)
 

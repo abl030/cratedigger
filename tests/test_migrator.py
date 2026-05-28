@@ -3068,5 +3068,96 @@ class TestDownloadLogYoutubeSourceSchema(unittest.TestCase):
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
+@requires_postgres
+class TestActiveYoutubeImportRequestSchema(unittest.TestCase):
+    """Migration 038 keeps active ``youtube_import`` handoffs request-scoped."""
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def test_records_applied_version_038(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 38"
+        )
+        self.assertEqual(len(rows), 1)
+
+    def test_one_active_youtube_import_per_request_index_exists(self):
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'import_jobs'
+              AND indexname = 'one_active_youtube_import_per_request'
+        """)
+        self.assertEqual(len(rows), 1)
+
+    def test_active_youtube_import_unique_by_request(self):
+        rid = self._make_request("mig038-youtube-import-active-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'youtube_import', %s, 'youtube_import:download_log:1',
+                    '{"staged_path": "/tmp/yt-a", "request_id": 1,
+                      "browse_id": "MPREb_a", "download_log_id": 1}'::jsonb
+                )
+            """, (rid,))
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, request_id, dedupe_key, payload
+                    ) VALUES (
+                        'youtube_import', %s, 'youtube_import:download_log:2',
+                        '{"staged_path": "/tmp/yt-b", "request_id": 1,
+                          "browse_id": "MPREb_b", "download_log_id": 2}'::jsonb
+                    )
+                """, (rid,))
+            self._exec("""
+                UPDATE import_jobs
+                SET status = 'completed'
+                WHERE request_id = %s
+                  AND job_type = 'youtube_import'
+            """, (rid,))
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'youtube_import', %s, 'youtube_import:download_log:3',
+                    '{"staged_path": "/tmp/yt-c", "request_id": 1,
+                      "browse_id": "MPREb_c", "download_log_id": 3}'::jsonb
+                )
+            """, (rid,))
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE request_id = %s", (rid,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
 if __name__ == "__main__":
     unittest.main()

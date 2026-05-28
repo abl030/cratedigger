@@ -111,15 +111,22 @@ completed-download processing, and CLI force/manual import all share this table.
 
 Key fields:
 
-- `job_type TEXT` — `force_import`, `manual_import`, or `automation_import`.
+- `job_type TEXT` — `force_import`, `manual_import`, `automation_import`, or `youtube_import`.
 - `status TEXT` — `queued`, `running`, `completed`, or `failed`.
 - `request_id INTEGER` — the related `album_requests.id`.
 - `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
   duplicate queued/running jobs while allowing a later job after completion.
 - `payload JSONB` — typed job input. Force/manual jobs carry `failed_path`;
   force jobs also carry `download_log_id` and optional `source_username`.
+  YouTube jobs carry `staged_path`, `request_id`, `browse_id`, and
+  `download_log_id`.
 - `result JSONB`, `message`, `error` — terminal worker result visible to web
   and CLI callers.
+- **Partial unique index `one_active_youtube_import_per_request` ON
+  `import_jobs (request_id) WHERE job_type = 'youtube_import' AND status IN
+  ('queued', 'running')`** — added by migration 038. Keeps the post-yt-dlp
+  importer handoff request-scoped, so a second browse id cannot enqueue a
+  parallel active YouTube import for the same request.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
 - `preview_status TEXT` — async readiness/audit stage: `waiting`, `running`,

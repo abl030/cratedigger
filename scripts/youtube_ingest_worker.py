@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import selectors
 import shutil
 import socket
 import subprocess
@@ -54,6 +55,7 @@ from lib.processing_paths import stage_to_ai_root  # noqa: E402
 from lib.youtube_ingest_service import (  # noqa: E402
     YoutubeIngestService,
     YtdlpRunResult,
+    _slug,
     default_mb_track_count_from_mirror,
 )
 
@@ -105,6 +107,68 @@ def _cap_stderr_excerpt(text: str | None) -> str | None:
     if len(text) <= STDERR_EXCERPT_BYTES_LIMIT:
         return text
     return text[-STDERR_EXCERPT_BYTES_LIMIT:]
+
+
+def _append_stderr_tail(tail: bytearray, chunk: bytes) -> None:
+    """Append ``chunk`` while retaining only a bounded stderr byte tail."""
+    if not chunk:
+        return
+    tail.extend(chunk)
+    max_bytes = STDERR_EXCERPT_BYTES_LIMIT * 4
+    if len(tail) > max_bytes:
+        del tail[:-max_bytes]
+
+
+def _run_ytdlp_streaming(
+    argv: list[str],
+    *,
+    timeout_sec: int,
+) -> tuple[int, str | None]:
+    """Run yt-dlp without ever buffering unbounded stdout/stderr in memory."""
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    stderr_tail = bytearray()
+    stderr = proc.stderr
+    if stderr is None:
+        returncode = proc.wait(timeout=timeout_sec)
+        return returncode, None
+
+    selector = selectors.DefaultSelector()
+    selector.register(stderr.fileno(), selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout_sec
+    timed_out = False
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                proc.kill()
+                break
+            events = selector.select(min(remaining, 0.25))
+            if not events and proc.poll() is not None:
+                break
+            for key, _events in events:
+                chunk = os.read(key.fd, 8192)
+                if chunk:
+                    _append_stderr_tail(stderr_tail, chunk)
+                else:
+                    selector.unregister(key.fileobj)
+        returncode = proc.wait()
+    finally:
+        selector.close()
+        if not stderr.closed:
+            stderr.close()
+
+    decoded_tail = stderr_tail.decode("utf-8", errors="replace")
+    if timed_out:
+        return -1, _cap_stderr_excerpt(
+            f"ERROR: yt-dlp Read timed out after {timeout_sec}s\n"
+            f"{decoded_tail}"
+        )
+    return returncode, _cap_stderr_excerpt(decoded_tail)
 
 
 def _collect_audio_files(directory: Path) -> list[Path]:
@@ -183,8 +247,7 @@ def _run_ytdlp(
     temp_root: Path = DEFAULT_TEMP_DIR,
     request_id: int | None = None,
     browse_id: str | None = None,
-    subprocess_run: Callable[..., subprocess.CompletedProcess[str]] = (
-        subprocess.run),
+    subprocess_run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ytdlp_bin_resolver: Callable[[], str] = _resolve_ytdlp_binary,
 ) -> YtdlpRunResult:
     """Invoke yt-dlp on ``url`` and return the typed result.
@@ -204,7 +267,9 @@ def _run_ytdlp(
 
     The ``subprocess_run`` and ``ytdlp_bin_resolver`` kwargs are kwarg-DI
     seams that let tests inject a fake binary path + fake ``subprocess.run``
-    without monkey-patching the module.
+    without monkey-patching the module. Production uses
+    ``_run_ytdlp_streaming`` so noisy yt-dlp output cannot accumulate
+    unbounded stdout/stderr in memory before truncation.
     """
     if expected_track_count is None or expected_track_count <= 0:
         # Defensive: the service always passes a positive int from the
@@ -238,40 +303,47 @@ def _run_ytdlp(
         "yt-dlp run: argv=%r work_dir=%s expected_track_count=%d",
         argv, work_dir, expected_track_count)
 
-    try:
-        proc = subprocess_run(
+    if subprocess_run is None:
+        returncode, excerpt = _run_ytdlp_streaming(
             argv,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout_sec,
-            check=False,
+            timeout_sec=timeout_sec,
         )
-    except subprocess.TimeoutExpired as exc:
-        # Surface as a yt-dlp failure rather than letting it propagate;
-        # the service classifies stderr_excerpt='timeout' as
-        # youtube_unknown which is acceptable, but we prepend a clearer
-        # marker so operators recognise it in triage.
-        stderr_decoded = ""
-        if exc.stderr is not None:
-            if isinstance(exc.stderr, bytes):
-                stderr_decoded = exc.stderr.decode("utf-8", errors="replace")
-            else:
-                stderr_decoded = str(exc.stderr)
-        excerpt = _cap_stderr_excerpt(
-            f"ERROR: yt-dlp Read timed out after {timeout_sec}s\n"
-            f"{stderr_decoded}")
-        return YtdlpRunResult(
-            exit_code=-1,
-            stderr_excerpt=excerpt,
-            staged_files=_collect_audio_files(work_dir),
-            work_dir=work_dir,
-        )
-
-    excerpt = _cap_stderr_excerpt(proc.stderr)
+    else:
+        try:
+            proc = subprocess_run(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                timeout=timeout_sec,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Surface as a yt-dlp failure rather than letting it propagate;
+            # the service classifies stderr_excerpt='timeout' as
+            # youtube_unknown which is acceptable, but we prepend a clearer
+            # marker so operators recognise it in triage.
+            stderr_decoded = ""
+            if exc.stderr is not None:
+                if isinstance(exc.stderr, bytes):
+                    stderr_decoded = exc.stderr.decode("utf-8", errors="replace")
+                else:
+                    stderr_decoded = str(exc.stderr)
+            excerpt = _cap_stderr_excerpt(
+                f"ERROR: yt-dlp Read timed out after {timeout_sec}s\n"
+                f"{stderr_decoded}")
+            return YtdlpRunResult(
+                exit_code=-1,
+                stderr_excerpt=excerpt,
+                staged_files=_collect_audio_files(work_dir),
+                work_dir=work_dir,
+            )
+        returncode = int(proc.returncode)
+        excerpt = _cap_stderr_excerpt(proc.stderr)
     staged_files = _collect_audio_files(work_dir)
     return YtdlpRunResult(
-        exit_code=int(proc.returncode),
+        exit_code=int(returncode),
         stderr_excerpt=excerpt,
         staged_files=staged_files,
         work_dir=work_dir,
@@ -323,7 +395,66 @@ def build_service(
 # ---------------------------------------------------------------------------
 
 
-def sweep_orphan_running_rows(pdb: Any) -> list[int]:
+def _cleanup_orphan_paths(
+    pdb: Any,
+    log_id: int,
+    *,
+    temp_dir: Path | None,
+    staging_root: Path | None,
+) -> str | None:
+    paths: list[Path] = []
+    row = pdb.get_download_log_entry(int(log_id))
+    if row is None:
+        return None
+    request_id = row.get("request_id")
+    metadata = row.get("youtube_metadata") or {}
+    browse_id = metadata.get("browse_id")
+    if temp_dir is not None and isinstance(request_id, int) and isinstance(browse_id, str):
+        prefix = f"ytdlp-req{request_id}-{browse_id}-"
+        try:
+            paths.extend(
+                child for child in temp_dir.iterdir()
+                if child.name.startswith(prefix)
+            )
+        except OSError as exc:
+            return f"{temp_dir}: {type(exc).__name__}: {exc}"
+    if staging_root is not None and isinstance(request_id, int) and isinstance(browse_id, str):
+        request_row = pdb.get_request(request_id)
+        if request_row is not None:
+            paths.append(
+                staging_root
+                / (
+                    f"{_slug(request_row.get('artist_name'))}-"
+                    f"{_slug(request_row.get('album_title'))}-"
+                    f"{_slug(browse_id)}-request-{request_id}-log-{log_id}"
+                )
+            )
+
+    errors: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not path.exists():
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+            errors.append(f"{path}: {type(exc).__name__}: {exc}")
+    return "; ".join(errors) if errors else None
+
+
+def sweep_orphan_running_rows(
+    pdb: Any,
+    *,
+    temp_dir: Path | None = None,
+    staging_root: Path | None = None,
+) -> list[int]:
     """Mark claimed in-flight ``youtube_running`` rows as failed.
 
     Accepted-but-unclaimed rows remain drainable across worker downtime.
@@ -337,10 +468,19 @@ def sweep_orphan_running_rows(pdb: Any) -> list[int]:
     orphan_ids = pdb.find_orphan_youtube_running()
     for log_id in orphan_ids:
         try:
+            cleanup_error = _cleanup_orphan_paths(
+                pdb,
+                int(log_id),
+                temp_dir=temp_dir,
+                staging_root=staging_root,
+            )
+            metadata = {"reason": "worker_interrupted"}
+            if cleanup_error is not None:
+                metadata["cleanup_error"] = cleanup_error
             pdb.update_youtube_terminal(
                 int(log_id),
                 "youtube_failed",
-                {"reason": "worker_interrupted"},
+                metadata,
             )
         except Exception:
             logger.exception(
@@ -492,7 +632,15 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "poll_interval=%ss", worker_id, args.temp_dir,
                 args.poll_interval)
 
-            swept = sweep_orphan_running_rows(db)
+            staging_root = Path(stage_to_ai_root(
+                staging_dir=str(args.staging_dir),
+                auto_import=True,
+            ))
+            swept = sweep_orphan_running_rows(
+                db,
+                temp_dir=args.temp_dir,
+                staging_root=staging_root,
+            )
             if swept:
                 logger.warning(
                     "Swept %d abandoned youtube_running row(s): %s",
