@@ -134,6 +134,23 @@
       --redis-port ${toString cfg.web.redis.port} "$@"
   '';
 
+  # YouTube-rescue ingest drainer — see scripts/youtube_ingest_worker.py.
+  # Worker-specific PATH: pkgs.yt-dlp is prepended so the worker's
+  # `shutil.which("yt-dlp")` resolves. It is deliberately NOT added to
+  # `runtimePath` (which is shared across the rest of the cratedigger
+  # units) because no other service needs yt-dlp and we want a single
+  # boundary owning the binary lookup. The worker runs `yt-dlp` via
+  # subprocess and inherits this PATH from the wrapper.
+  youtubeIngestWorkerPkg = pkgs.writeShellScriptBin "cratedigger-youtube-ingest" ''
+    export PATH="${pkgs.yt-dlp}/bin:${runtimePath}:$PATH"
+    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    ${coverageShellSetup}
+    exec ${pyRunner} ${src}/scripts/youtube_ingest_worker.py \
+      --dsn "${cfg.pipelineDb.dsn}" \
+      --temp-dir "${cfg.youtubeIngest.tempDir}" \
+      --poll-interval ${toString cfg.youtubeIngest.pollIntervalSeconds} "$@"
+  '';
+
   # Unfindable detection oneshot — see lib/unfindable_detection_service.py.
   # Runs in its own process so the R20 cadence-never-changes invariant
   # is structurally enforceable at the systemd level: this binary has
@@ -394,6 +411,47 @@ in {
         type = types.int;
         default = 2;
         description = "Number of async import preview workers to run before the serial importer lane.";
+      };
+    };
+
+    # YouTube-rescue ingest worker. Drains album_requests rows the operator
+    # has marked for YouTube fallback (`pipeline-cli youtube-rescue <id>` or
+    # POST /api/pipeline/<id>/youtube-rescue), invoking `yt-dlp` to stage
+    # audio into /Incoming/auto-import/ for the existing importer worker to
+    # pick up. The unit is defined here but `enable` defaults to `false` so
+    # the in-flake module ships dormant — the downstream NixOS wrapper at
+    # ~/nixosconfig/modules/nixos/services/cratedigger.nix is the right
+    # layer to flip this on and layer on network-namespace hardening
+    # (`serviceConfig.NetworkNamespacePath`, `BindReadOnlyPaths`, etc.).
+    youtubeIngest = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Run the long-lived YouTube-rescue ingest worker
+          (cratedigger-youtube-ingest.service). Requires `yt-dlp` on the
+          worker's PATH — the unit's wrapper prepends `${pkgs.yt-dlp}/bin`
+          for this unit only, never on the shared runtime PATH.
+        '';
+      };
+      tempDir = mkOption {
+        type = types.str;
+        default = "${cfg.stateDir}/youtube-ingest-temp";
+        defaultText = lib.literalExpression ''"''${cfg.stateDir}/youtube-ingest-temp"'';
+        description = ''
+          Per-process scratch directory yt-dlp downloads into before files
+          are moved to /Incoming/auto-import/. Created by systemd-tmpfiles
+          with the same ownership as the cratedigger user.
+        '';
+      };
+      pollIntervalSeconds = mkOption {
+        type = types.int;
+        default = 5;
+        description = ''
+          Seconds the drainer sleeps between idle queue polls. Matches the
+          importer worker's poll cadence; tune downward only if the operator
+          wants tighter latency on rescue jobs.
+        '';
       };
     };
 
@@ -876,7 +934,7 @@ in {
       }
     ];
 
-    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg pkgs.postgresql];
+    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg pkgs.postgresql];
 
     users.users = mkIf (cfg.user != "root") {
       ${cfg.user} = {
@@ -897,7 +955,9 @@ in {
     systemd.tmpfiles.rules =
       [ "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -" ]
       ++ optional cfg.coverage.enable
-        "d ${cfg.coverage.dataDir} 0755 ${cfg.user} ${cfg.group} -";
+        "d ${cfg.coverage.dataDir} 0755 ${cfg.user} ${cfg.group} -"
+      ++ optional cfg.youtubeIngest.enable
+        "d ${cfg.youtubeIngest.tempDir} 0755 ${cfg.user} ${cfg.group} -";
 
     services.cratedigger.web.redis.host = lib.mkDefault cfg.redis.host;
     services.cratedigger.web.redis.port = lib.mkDefault cfg.redis.port;
@@ -1081,6 +1141,49 @@ in {
         ExecStartPre = [preStartScript];
         Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
         ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker";
+        WorkingDirectory = cfg.stateDir;
+        Restart = "on-failure";
+        RestartSec = 5;
+      };
+    };
+
+    # YouTube-rescue ingest drainer. Long-lived Type=simple worker that
+    # polls album_requests for `youtube_pending` rows the operator
+    # explicitly opted in via `pipeline-cli youtube-rescue <id>` or
+    # POST /api/pipeline/<id>/youtube-rescue, invokes yt-dlp, stages audio
+    # under /Incoming/auto-import/, and enqueues a `youtube_import` row in
+    # `import_jobs` for the existing cratedigger-importer worker to drain.
+    #
+    # Advisory-lock contention exits the process with code 0 (not 1), so
+    # `Restart=on-failure` won't fire on duplicate-start. A genuine crash
+    # (DB unreachable at boot, etc.) exits 1 and systemd will respawn after
+    # `RestartSec=5`. There is NO `RuntimeMaxSec` — this is a long-running
+    # daemon and the per-job yt-dlp timeout lives inside the worker
+    # (DEFAULT_YTDLP_TIMEOUT_SEC = 600s). See
+    # `docs/solutions/runtimemaxsec-vs-type-oneshot-systemd-incompatibility.md`.
+    systemd.services.cratedigger-youtube-ingest = mkIf cfg.youtubeIngest.enable {
+      description = "Cratedigger YouTube-rescue ingest worker";
+      after = ["cratedigger-db-migrate.service"];
+      requires = ["cratedigger-db-migrate.service"];
+      wantedBy = ["multi-user.target"];
+      # Deliberate `restartIfChanged = true`: deploy MUST pick up worker
+      # code changes. The advisory-lock-on-startup discipline plus
+      # `sweep_orphan_running_rows` recovery at boot makes a mid-job
+      # SIGTERM safe — orphaned `youtube_running` rows revert to
+      # `youtube_pending` so the next drain picks them up. Mirrors the
+      # importer / preview-worker posture (2026-05-16 lesson).
+      restartIfChanged = true;
+      # Worker-specific PATH is set inside the wrapper (yt-dlp is
+      # prepended there). The unit's `path` mirrors the importer's so
+      # subprocess invocations have the standard toolchain available.
+      path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
+      serviceConfig = {
+        Type = "simple";
+        User = cfg.user;
+        Group = cfg.group;
+        UMask = "0000";
+        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        ExecStart = "${youtubeIngestWorkerPkg}/bin/cratedigger-youtube-ingest";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
         RestartSec = 5;
