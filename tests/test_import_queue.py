@@ -687,6 +687,139 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_force_import_extra_audio_keeps_wm_and_self_heals_end_to_end(self):
+        """Issue #387 composition: force-importing a folder with extra audio,
+        through the REAL manifest guard (no mocked dispatch).
+
+        Proves the two halves compose: the guard self-heals the request to
+        ``wanted`` (R20) AND its audit row does NOT inflate Wrong Matches,
+        while the importer preserves the original WM entry for review (the
+        ``IMPORT_MANIFEST_REJECTED`` code skips cleanup). beets never runs —
+        the guard rejects upstream of it.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            with open(os.path.join(source, "bonus.mp3"), "wb") as f:
+                f.write(b"audio")
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-123",
+                status="manual",
+            ))
+            # One expected track but two audio files on disk → extra audio.
+            db.set_tracks(42, [{"track_number": 1, "title": "One"}])
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            self._mark_importable(db, job)
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            # No dispatch patch — the real guard runs. beets is never reached.
+            updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            # R20: the album is still wanted; the request self-heals.
+            self.assertEqual(db.request(42)["status"], "wanted")
+            # The dead WM entry is preserved (extra audio → operator review),
+            # and the audit row did NOT create a second entry.
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            self.assertTrue(os.path.isdir(source))
+            outcomes = [
+                (log.outcome, log.beets_scenario) for log in db.download_logs
+            ]
+            self.assertIn(("rejected", "untracked_audio"), outcomes)
+            cleanup = self._result(updated)["cleanup"]
+            self.assertTrue(cleanup["skipped"])
+            self.assertEqual(len(db.denylist), 0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_force_import_undercount_preserves_folder_and_self_heals_end_to_end(self):
+        """Issue #387 regression: force-importing an UNDER-COUNT folder (fewer
+        audio files than the request's track rows, no extras) must NOT delete
+        the operator's partial audio.
+
+        An under-count source physically contains audio the operator chose to
+        import — it is not 'nothing to inspect'. The guard self-heals the
+        request to ``wanted`` (R20) but returns ``IMPORT_MANIFEST_REJECTED``
+        so the importer PRESERVES the folder (``_cleanup_failed_force_import``
+        skips deletion on that code). Routing it through
+        ``QUALITY_PIPELINE_REJECTED`` would ``shutil.rmtree`` the only
+        surviving copy — the exact irreversible auto-decision the archivist
+        frame forbids. Wrong-match deletion is reserved for the genuinely
+        empty (0-file) case, which routes through the evidence pipeline, not
+        this guard.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            # One disc on disk; the request expects two tracks → under-count.
+            with open(os.path.join(source, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-123",
+                status="manual",
+            ))
+            db.set_tracks(42, [
+                {"track_number": 1, "title": "One"},
+                {"track_number": 2, "title": "Two"},
+            ])
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            self._mark_importable(db, job)
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            # THE regression assertion: the operator's partial audio survives.
+            self.assertTrue(
+                os.path.isdir(source),
+                "under-count force-import must NOT delete the operator's folder")
+            self.assertTrue(os.path.isfile(os.path.join(source, "01.mp3")))
+            # R20: the album is still wanted; the request self-heals.
+            self.assertEqual(db.request(42)["status"], "wanted")
+            # WM entry preserved (something to inspect), no duplicate.
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            outcomes = [
+                (log.outcome, log.beets_scenario) for log in db.download_logs
+            ]
+            self.assertIn(("rejected", "incomplete_fileset"), outcomes)
+            cleanup = self._result(updated)["cleanup"]
+            self.assertTrue(cleanup["skipped"])
+            self.assertEqual(len(db.denylist), 0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_force_import_requeued_for_preview_does_not_mark_failed(self):
         """U2: when dispatch returns DISPATCH_CODE_REQUEUED_FOR_PREVIEW the
         importer does NOT write a terminal failed status and does NOT run

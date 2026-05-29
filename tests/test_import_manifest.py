@@ -133,8 +133,18 @@ class TestForceImportManifestGuard(unittest.TestCase):
             )
 
         self.assertFalse(outcome.success)
+        # Extra/untracked audio: keep the Wrong Matches entry for operator
+        # review (the importer skips cleanup on this code).
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("12 Wash.opus", outcome.message)
+        # R20: the album is still wanted — only this source is contaminated.
+        # The request self-heals to wanted (idempotent here) + an audit row is
+        # written, but the WM entry is preserved (code above).
+        self.assertEqual(db.request(42)["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "untracked_audio"), outcomes)
+        # Operator's folder choice, not the peer's fault — never denylist.
+        self.assertEqual(len(db.denylist), 0)
 
     def test_force_import_rejects_origin_manifest_with_extra_items(self):
         db = FakePipelineDB()
@@ -172,6 +182,10 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("manifest has 2 audio files", outcome.message)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "untracked_audio"), outcomes)
+        self.assertEqual(len(db.denylist), 0)
 
     def test_force_import_without_origin_manifest_rejects_track_count_mismatch(self):
         db = FakePipelineDB()
@@ -201,8 +215,16 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("3 audio files", outcome.message)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "untracked_audio"), outcomes)
+        self.assertEqual(len(db.denylist), 0)
 
-    def test_manual_import_without_manifest_or_tracks_fails_closed(self):
+    def test_manual_import_without_manifest_or_tracks_keeps_wm_and_self_heals(self):
+        """No manifest and no track rows for a non-empty source: we can't
+        verify the folder, so it fails closed against beets AND keeps the
+        Wrong Matches entry for review — but the request still self-heals to
+        ``wanted`` (R20), the album is still wanted."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -224,3 +246,92 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("requires either an origin audio manifest", outcome.message)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "unverifiable_source"), outcomes)
+        self.assertEqual(len(db.denylist), 0)
+
+    def test_undercount_without_manifest_self_heals_to_wanted(self):
+        """Issue #387: an under-count source (fewer audio files than the
+        request expects, no extra files) is a missing-audio integrity fault.
+        The guard self-heals the request back to ``wanted`` (R20) rather than
+        stall it, but still returns ``IMPORT_MANIFEST_REJECTED`` so the
+        importer PRESERVES the operator's partial audio (it is not 'nothing
+        to inspect' — there are real files on disk)."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+        ))
+        db.set_tracks(42, [
+            {"track_number": 1, "title": "One"},
+            {"track_number": 2, "title": "Two"},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "01.mp3"), "wb").close()
+
+            outcome = dispatch_import_from_db(
+                cast(Any, db),
+                request_id=42,
+                failed_path=root,
+                force=False,
+                import_job_id=99,
+            )
+
+        self.assertFalse(outcome.success)
+        # Preserve-folder code (importer skips deletion) — a non-empty source
+        # must never route through the rmtree-ing QUALITY_PIPELINE_REJECTED.
+        self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "incomplete_fileset"), outcomes)
+        # Missing audio is not the peer's fault — never denylist.
+        self.assertEqual(len(db.denylist), 0)
+
+    def test_manifest_subset_self_heals_to_wanted(self):
+        """Issue #387: the on-disk folder is a strict subset of the validated
+        origin manifest (some validated tracks went missing, no extra audio).
+        Missing audio → self-heal + preserve the folder, not the
+        untracked-audio framing."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="manual",
+        ))
+        db.set_tracks(42, [
+            {"track_number": 1, "title": "One"},
+            {"track_number": 2, "title": "Two"},
+        ])
+
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "01.mp3"), "wb").close()
+            log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={
+                    "failed_path": root,
+                    "items": [
+                        {"path": os.path.join(root, "01.mp3")},
+                        {"path": os.path.join(root, "02.mp3")},
+                    ],
+                },
+            )
+
+            outcome = dispatch_import_from_db(
+                cast(Any, db),
+                request_id=42,
+                failed_path=root,
+                force=True,
+                import_job_id=99,
+                download_log_id=log_id,
+            )
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "incomplete_fileset"), outcomes)
+        self.assertEqual(len(db.denylist), 0)
