@@ -6094,19 +6094,15 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         # — denylisting the peer would be unfair.
         self.assertEqual(len(db.denylist), 0)
 
-    def test_empty_fileset_force_manual_rejected_by_untracked_audio_guard(self):
-        """KNOWN REGRESSION — issue #387.
+    def test_empty_fileset_evidence_routes_through_self_heal(self):
+        """AE4 (issue #387): an empty source (0 audio files) with no request
+        track rows must self-heal, not stick.
 
-        An empty source (0 audio files) is hard-rejected by the
-        untracked-audio guard (``_guard_force_manual_audio_manifest``)
-        before the evidence-based ``empty_fileset`` decision runs, so the
-        request does NOT self-heal to ``wanted`` even though ``empty_fileset``
-        is a documented "always self-heal" integrity fact (R20).
-
-        This test pins the CURRENT (buggy) behavior so the suite stays
-        green. When #387 is fixed, restore the original assertions:
-        ``status == "wanted"`` and a ``("rejected", "empty_fileset")``
-        download_log row.
+        The untracked-audio guard no longer hard-rejects an empty source —
+        it returns None so the import reaches the canonical ``empty_fileset``
+        early-exit in ``full_pipeline_decision_from_evidence``, which
+        self-heals the request back to ``wanted`` (R20). ``empty_fileset``
+        is a documented "always self-heal" integrity fact.
         """
         db = FakePipelineDB()
         cfg = self._common_cfg()
@@ -6137,11 +6133,61 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        # The untracked-audio guard owns the rejection (not the evidence path).
-        self.assertIn("audio manifest or request track rows", result.message or "")
+        self.assertIn("empty_fileset", result.message or "")
         self.assertEqual(ext.run.call_count, 0)
-        # BUG (#387): no self-heal — the request stays out of the search loop.
-        self.assertEqual(db.request(44)["status"], "manual")
+        row = db.request(44)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "empty_fileset"), outcomes)
+        # empty_fileset is a missing-audio fault, not a peer-quality problem —
+        # denylisting the peer would be unfair.
+        self.assertEqual(len(db.denylist), 0)
+
+    def test_empty_fileset_with_track_rows_routes_through_self_heal(self):
+        """AE4 (issue #387): the auto-import shape — a ``source='request'``
+        row that DOES carry track rows but stages 0 audio files.
+
+        Previously the guard rejected with "source has 0 audio files but
+        expects N" before the evidence decision ran, stalling the request.
+        Now the empty source flows to the canonical ``empty_fileset``
+        self-heal regardless of track rows.
+        """
+        db = FakePipelineDB()
+        cfg = self._common_cfg()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+            db.seed_request(make_request_row(
+                id=46, status="manual", mb_release_id="mbid-u6-empty-tracks",
+            ))
+            db.set_tracks(46, [{"track_number": 1, "title": "Track"}])
+            job = db.enqueue_import_job(
+                IMPORT_JOB_MANUAL,
+                request_id=46,
+                payload=manual_import_payload(failed_path=tmpdir),
+            )
+            self._wire_candidate(
+                db, job.id,
+                self._build_candidate_evidence(
+                    owner_id=job.id,
+                    files=[],
+                    audio_file_count=0,
+                    folder_layout="flat",
+                ),
+            )
+            self._wire_current(db, 46, self._build_current_evidence(owner_id=46))
+
+            result, ext = self._drive_dispatch(
+                db, request_id=46, tmpdir=tmpdir,
+                import_job_id=job.id, cfg=cfg,
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn("empty_fileset", result.message or "")
+        self.assertEqual(ext.run.call_count, 0)
+        row = db.request(46)
+        self.assertEqual(row["status"], "wanted")
+        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
+        self.assertIn(("rejected", "empty_fileset"), outcomes)
 
     def test_spectral_reject_evidence_routes_through_evidence_pipeline(self):
         """likely_transcode candidate spectral matches existing transcode
