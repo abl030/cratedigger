@@ -10,11 +10,12 @@
 - [Brainstorm artifact scope](feedback_brainstorm_artifact_scope.md) — When user scopes a brainstorm to "the artifact itself," don't fish for downstream consumers — point Phase 1.2 lenses inward at the contract
 - [Extend, don't extract](feedback_extend_not_extract.md) — When a new caller wants an existing service's logic, default to one new optional parameter — not helper extraction or restructuring
 - [Test fidelity meta-pattern](feedback_test_fidelity_meta_pattern.md) — "Fix lands in code but production never sees it" smell at DB-write and external-adapter boundaries; force real-PG round-trip + real-exception fakes
-- [No worktree isolation](feedback_no_worktree_isolation.md) — Don't use isolation:"worktree" for sub-agents in cratedigger; serial sub-agents in the shared dir instead
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
 - [Pyright on the full repo](feedback_pyright_full_repo.md) — Always `nix-shell --run "pyright"` on the whole repo, never a subset; fix pre-existing errors in the same pass
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
+- [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from master, but ~/nixosconfig is usually on a dirty feature branch; do flake bumps + wrapper edits in a throwaway worktree off origin/master
+- [CI only runs GitGuardian](project_ci_only_gitguardian.md) — cratedigger CI runs ONLY GitGuardian; tests/dead-code/pyright are NOT gated in CI; a green PR check ≠ green suite, so verify locally
 - [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
 - [Audio quality type system](project_audio_quality_types.md) — AudioFileSpec + AudioQualityMeasurement deployed; AudioQualityState deferred
