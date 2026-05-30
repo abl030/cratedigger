@@ -103,29 +103,37 @@ ALLOWLIST: dict[str, str] = {
         "single FK column update",
     "set_request_current_evidence":
         "single FK column update",
-    # Methods with significant dict payloads — backfill round-trip
-    # guards in a follow-up PR. These predate the round-2 rule and
-    # are out of scope here per the rule's "forward-looking" comment.
+    # Writers that DON'T fit a typed-payload round-trip by design
+    # (permanent — NOT a TODO; #382 Layer 1 analysis):
+    "update_request_fields":
+        "dynamic field=value writer -- caller-determined column set, no fixed "
+        "payload to round-trip. Typed callers (update_spectral_state / "
+        "update_v0_probe_state) funnel through it and ARE column-checked by "
+        "tests/test_pipeline_db_column_contract.py.",
+    "record_wrong_match_triage":
+        "writes an opaque dict into one JSONB column (validation_result) via "
+        "jsonb_set -- no per-column write list to drift, and no prod caller.",
+    "update_track_artists":
+        "positional list[str|None] driving a single-scalar-column UPDATE; no "
+        "column-list payload to round-trip.",
+    # Fixed-column dict/kwargs writers — follow the AddRequestInput pattern
+    # (#382 Layer 1: derive the INSERT from a typed payload + column contract)
+    # in a follow-up. The flat ones are ALREADY column-checked by
+    # tests/test_pipeline_db_column_contract.py.
     "add_bad_audio_hashes":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
-    "add_request":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
+        "TODO: derive-from-Struct + round-trip. BadAudioHashInput already "
+        "column-checked by test_pipeline_db_column_contract.py.",
     "record_artist_probe":
         "TODO: backfill round-trip test (legacy method, predates rule)",
     "record_field_resolution":
         "TODO: backfill round-trip test (legacy method, predates rule)",
     "record_peer_dir_observations":
         "TODO: backfill round-trip test (legacy method, predates rule)",
-    "record_wrong_match_triage":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
     "set_tracks":
         "TODO: backfill round-trip test (legacy method, predates rule)",
-    "update_request_fields":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
     "update_spectral_state":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
-    "update_track_artists":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
+        "TODO: backfill round-trip test. RequestSpectralStateUpdate already "
+        "column-checked by test_pipeline_db_column_contract.py.",
     "upsert_album_quality_evidence":
         "TODO: backfill round-trip test (legacy method, predates rule)",
     # Methods whose round-trip tests exist but read via an asymmetric

@@ -1,4 +1,5 @@
 """album_requests CRUD, status state machine, and Replace/rescue."""
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 import psycopg2
@@ -11,6 +12,7 @@ if TYPE_CHECKING:
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 from lib.pipeline_db._shared import (
+    AddRequestInput,
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
     MbidCollisionError,
@@ -37,30 +39,37 @@ class _RequestsMixin(_PipelineDBBase):
                     status="wanted",
                     release_group_year=None,
                     is_va_compilation=False):
-        # ``is_va_compilation`` (migration 028) is the VA detection flag set
-        # once at enqueue (U4) or by the U3 backfill for legacy rows.
-        # Defaults FALSE; never re-resolved by automated paths.
+        """Insert one ``album_requests`` row.
+
+        The kwargs are funnelled through the typed ``AddRequestInput`` payload
+        and the INSERT column list is DERIVED from that dataclass's fields
+        (their names ARE ``album_requests`` columns) — so a column present in
+        the payload can never be silently dropped from the SQL, the
+        ``album_title`` class of bug #382 Layer 1 targets. The
+        fields-are-a-subset-of-columns invariant is held by
+        ``tests/test_pipeline_db_column_contract.py``. ``created_at`` /
+        ``updated_at`` are stamped here; ``is_va_compilation`` (migration 028)
+        defaults FALSE and is never re-resolved by automated paths.
+        """
+        request = AddRequestInput(
+            artist_name=artist_name, album_title=album_title, source=source,
+            mb_release_id=mb_release_id, mb_release_group_id=mb_release_group_id,
+            mb_artist_id=mb_artist_id, discogs_release_id=discogs_release_id,
+            year=year, release_group_year=release_group_year,
+            country=country, format=format, source_path=source_path,
+            reasoning=reasoning, status=status,
+            is_va_compilation=bool(is_va_compilation),
+        )
         now = datetime.now(timezone.utc)
-        cur = self._execute("""
-            INSERT INTO album_requests (
-                mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
-                artist_name, album_title, year, release_group_year,
-                country, format,
-                source, source_path, reasoning, status,
-                is_va_compilation,
-                created_at, updated_at
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-            )
-            RETURNING id
-        """, (
-            mb_release_id, mb_release_group_id, mb_artist_id, discogs_release_id,
-            artist_name, album_title, year, release_group_year,
-            country, format,
-            source, source_path, reasoning, status,
-            bool(is_va_compilation),
-            now, now,
-        ))
+        columns = [f.name for f in dataclasses.fields(request)]
+        values = [getattr(request, name) for name in columns]
+        col_sql = ", ".join(columns + ["created_at", "updated_at"])
+        placeholders = ", ".join(["%s"] * (len(columns) + 2))
+        cur = self._execute(
+            f"INSERT INTO album_requests ({col_sql}) "
+            f"VALUES ({placeholders}) RETURNING id",
+            tuple(values + [now, now]),
+        )
         row = cur.fetchone()
         self.conn.commit()
         assert row is not None, "INSERT RETURNING should always return a row"

@@ -248,6 +248,39 @@ class BadAudioHashRow:
     reported_at: datetime  # tz-aware
 
 
+@dataclass(frozen=True)
+class AddRequestInput:
+    """Typed payload for inserting one ``album_requests`` row.
+
+    Every field name IS an ``album_requests`` column name; ``add_request``
+    derives the INSERT column list directly from these fields, so a field can
+    never silently drift from the SQL (the ``album_title`` class of bug that
+    #382 Layer 1 targets — a column present in the payload but missing from
+    the hand-written INSERT). ``created_at`` / ``updated_at`` are stamped by
+    the write (``NOW()``), not carried here.
+
+    The fields-are-a-subset-of-columns invariant is enforced at test time by
+    ``tests/test_pipeline_db_column_contract.py``. ``@dataclass`` (not
+    ``msgspec.Struct``) because the payload never crosses JSON — it round-trips
+    Python -> PostgreSQL only, exactly like ``BadAudioHashInput`` above.
+    """
+    artist_name: str
+    album_title: str
+    source: str
+    mb_release_id: str | None = None
+    mb_release_group_id: str | None = None
+    mb_artist_id: str | None = None
+    discogs_release_id: str | None = None
+    year: int | None = None
+    release_group_year: int | None = None
+    country: str | None = None
+    format: str | None = None
+    source_path: str | None = None
+    reasoning: str | None = None
+    status: str = "wanted"
+    is_va_compilation: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Search-plan types
 # ---------------------------------------------------------------------------

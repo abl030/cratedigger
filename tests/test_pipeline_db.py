@@ -62,6 +62,43 @@ def make_db():
 
 
 @requires_postgres
+class TestAddRequestRoundTrip(unittest.TestCase):
+    """Rule A round-trip for add_request (#382 Layer 1). Every column the
+    typed AddRequestInput payload persists must read back unchanged — the
+    "column written but not read back" half of the album_title drift class.
+    Pairs with the AddRequestInput-fields-subset-of-columns check in
+    tests/test_pipeline_db_column_contract.py."""
+
+    def test_add_request_round_trip_preserves_every_field(self):
+        db = make_db()
+        expected = {
+            "artist_name": "Round Trip",
+            "album_title": "Every Field",
+            "source": "request",
+            "mb_release_id": "mb-rt-1",
+            "mb_release_group_id": "rg-rt-1",
+            "mb_artist_id": "art-rt-1",
+            "discogs_release_id": "dg-rt-1",
+            "year": 1999,
+            "release_group_year": 1998,
+            "country": "US",
+            "format": "CD",
+            "source_path": "/incoming/rt",
+            "reasoning": "why this pressing",
+            "status": "wanted",
+            "is_va_compilation": True,
+        }
+        rid = db.add_request(**expected)
+        row = db.get_request(rid)
+        self.assertIsNotNone(row)
+        assert row is not None
+        for col, val in expected.items():
+            self.assertEqual(
+                row[col], val,
+                f"add_request field {col!r} did not round-trip through PG")
+
+
+@requires_postgres
 class TestSchemaCreation(unittest.TestCase):
     def test_tables_exist(self):
         """All expected tables exist after the migrator has run."""
