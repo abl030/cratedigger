@@ -1389,9 +1389,13 @@ console.log('long_tail.js __test__ (U4 console)');
   const ytEmptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
   assert(ytEmptyHtml.includes('Not on YouTube Music'),
     'renderYoutubeBody resolved_empty renders the "not on YouTube Music" copy');
-  // resolver_failed → error message + retry (Check YouTube).
+  // resolver_failed → error message + retry affordance. The retry button
+  // is relabelled "Retry" in U5 (still wired to window.checkYoutube), so
+  // assert on the retry verb + the wired handler rather than the original
+  // "Check YouTube" label.
   const ytFailedHtml = renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9);
-  assert(ytFailedHtml.includes('mirror down') && ytFailedHtml.includes('Check YouTube'),
+  assert(ytFailedHtml.includes('mirror down') && ytFailedHtml.includes('Retry')
+    && ytFailedHtml.includes('window.checkYoutube(9)'),
     'renderYoutubeBody resolver_failed renders the error + retry affordance');
   // staleness flag on a cached matrix.
   const ytStaleHtml = renderYoutubeBody({
@@ -1439,6 +1443,151 @@ console.log('long_tail.js __test__ (U4 console)');
     + renderPanelError('sibling pressings');
   assert(composed.includes('artist_absent') && composed.includes("Couldn't load sibling pressings"),
     'a panel error and other panels\' content coexist (independent-load contract)');
+}
+
+// --- long_tail.js U5 rescue flow pure helpers ---
+console.log('long_tail.js __test__ (U5 rescue flow)');
+{
+  const {
+    youtubeBestDistance,
+    youtubeRescueTargets,
+    rescueOutcomeCopy,
+    canStartInFlight,
+    renderYoutubeBody,
+    renderRescueConfirm,
+  } = longTailTest;
+
+  // --- youtubeBestDistance: lowest ok distance, ignores non-ok rows ---
+  assertEqual(
+    youtubeBestDistance({ distances: [
+      { mbid: 'a', outcome: 'ok', distance: 0.21 },
+      { mbid: 'b', outcome: 'ok', distance: 0.07 },
+      { mbid: 'c', outcome: 'no_audio' },
+    ] }),
+    0.07,
+    'youtubeBestDistance picks the lowest ok distance');
+  assertEqual(
+    youtubeBestDistance({ distances: [{ mbid: 'a', outcome: 'no_audio' }] }),
+    null,
+    'youtubeBestDistance → null when no ok row scored');
+  assertEqual(youtubeBestDistance({}), null, 'youtubeBestDistance no distances → null');
+  assertEqual(youtubeBestDistance({ distances: null }), null, 'youtubeBestDistance null distances → null');
+
+  // --- youtubeRescueTargets: each target carries its browse id + meta ---
+  const resolverOk = {
+    outcome: 'ok', from_cache: false, youtube_releases: [
+      { yt_browse_id: 'MPREb_one', year: 2008, track_count: 14, tracks: [],
+        distances: [{ mbid: 'm', outcome: 'ok', distance: 0.07 }, { mbid: 'n', outcome: 'no_audio' }] },
+      { yt_browse_id: 'MPREb_two', year: 2000, track_count: 10, tracks: [],
+        distances: [{ mbid: 'p', outcome: 'ok', distance: 0.19 }] },
+    ],
+  };
+  const targets = youtubeRescueTargets(resolverOk);
+  assertEqual(targets.length, 2, 'youtubeRescueTargets yields one target per release');
+  assertEqual(targets[0].yt_browse_id, 'MPREb_one', 'target 0 carries its browse id');
+  assertEqual(targets[1].yt_browse_id, 'MPREb_two', 'target 1 carries its browse id');
+  assertEqual(targets[0].year, 2008, 'target carries year');
+  assertEqual(targets[0].track_count, 14, 'target carries track_count');
+  assertEqual(targets[0].best_distance, 0.07, 'target carries best ok distance');
+  assertEqual(targets[1].best_distance, 0.19, 'second target best distance');
+  // A release missing a browse id is NOT a pickable target (the submit
+  // needs the id).
+  const targetsWithBad = youtubeRescueTargets({
+    outcome: 'ok', youtube_releases: [
+      { yt_browse_id: '', year: 1999, track_count: 8, distances: [] },
+      { yt_browse_id: 'MPREb_keep', year: 2001, track_count: 9, distances: [] },
+    ],
+  });
+  assertEqual(targetsWithBad.length, 1, 'youtubeRescueTargets drops a release with no browse id');
+  assertEqual(targetsWithBad[0].yt_browse_id, 'MPREb_keep', 'kept the release that has a browse id');
+
+  // resolved_empty → NO rescue targets (rescue affordance hidden).
+  assertEqual(
+    youtubeRescueTargets({ outcome: 'ok', youtube_releases: [] }).length,
+    0,
+    'youtubeRescueTargets: resolved_empty yields no rescue targets');
+  // resolver_failed → no targets.
+  assertEqual(
+    youtubeRescueTargets({ outcome: 'transient', error_message: 'down' }).length,
+    0,
+    'youtubeRescueTargets: resolver_failed yields no targets');
+  // never_run (null) → no targets.
+  assertEqual(youtubeRescueTargets(null).length, 0, 'youtubeRescueTargets: null yields no targets');
+
+  // --- renderYoutubeBody: matrix rows are pickable rescue targets (U5) ---
+  const matrixHtml = renderYoutubeBody(resolverOk, 9);
+  assert(matrixHtml.includes('window.pickYoutubeRescue(9, ')
+    && matrixHtml.includes('MPREb_one') && matrixHtml.includes('MPREb_two'),
+    'renderYoutubeBody resolved_with_matrix makes each release a pickable rescue target');
+  assert(matrixHtml.includes('Rescue from this'),
+    'renderYoutubeBody matrix rows carry a "Rescue from this" button');
+  // resolved_empty HIDES the rescue affordance (R9 — nothing to pick).
+  const emptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
+  assert(!emptyHtml.includes('Rescue from this') && emptyHtml.includes('Not on YouTube Music'),
+    'renderYoutubeBody resolved_empty hides the rescue affordance and shows "not on YouTube Music"');
+  assert(emptyHtml.includes('Re-check'),
+    'renderYoutubeBody resolved_empty offers a re-check');
+  // resolver_failed → Retry affordance.
+  assert(renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9).includes('Retry'),
+    'renderYoutubeBody resolver_failed offers a Retry affordance');
+
+  // --- rescueOutcomeCopy: every ingest outcome → its intended copy ---
+  // accepted → success tone, "rescue queued".
+  const accepted = rescueOutcomeCopy({ outcome: 'accepted', download_log_id: 42 });
+  assertEqual(accepted.tone, 'success', 'rescueOutcomeCopy accepted → success tone');
+  assert(accepted.title.toLowerCase().includes('queued'), 'rescueOutcomeCopy accepted title says queued');
+  assert(accepted.detail.includes('42'), 'rescueOutcomeCopy accepted surfaces the download_log_id');
+  // in_flight → error tone, surfaces the existing download_log_id.
+  const inFlight = rescueOutcomeCopy({ outcome: 'in_flight', download_log_id: 7 });
+  assertEqual(inFlight.tone, 'error', 'rescueOutcomeCopy in_flight → error tone');
+  assert(inFlight.detail.includes('already running') && inFlight.detail.includes('7'),
+    'rescueOutcomeCopy in_flight surfaces the existing download_log_id');
+  // wrong_state → "request changed — refresh".
+  const wrongState = rescueOutcomeCopy({ outcome: 'wrong_state' });
+  assert(wrongState.detail.toLowerCase().includes('refresh'),
+    'rescueOutcomeCopy wrong_state tells the operator to refresh');
+  // no_resolver_mapping → "re-run Check YouTube".
+  const noMapping = rescueOutcomeCopy({ outcome: 'no_resolver_mapping' });
+  assert(noMapping.detail.toLowerCase().includes('re-run check youtube'),
+    'rescueOutcomeCopy no_resolver_mapping tells the operator to re-run Check YouTube');
+  // track_count_precheck_failed → shows the precheck mismatch detail.
+  const trackMismatch = rescueOutcomeCopy({
+    outcome: 'track_count_precheck_failed', detail: 'expected 14, got 10' });
+  assert(trackMismatch.detail.includes('expected 14, got 10'),
+    'rescueOutcomeCopy track_count_precheck_failed surfaces the mismatch detail');
+  // transient → retry.
+  const transient = rescueOutcomeCopy({ outcome: 'transient' });
+  assert(transient.detail.toLowerCase().includes('retry'),
+    'rescueOutcomeCopy transient tells the operator to retry');
+  assertEqual(transient.tone, 'error', 'rescueOutcomeCopy transient → error tone');
+  // request_not_found → refresh.
+  assert(rescueOutcomeCopy({ outcome: 'request_not_found' }).detail.toLowerCase().includes('refresh'),
+    'rescueOutcomeCopy request_not_found tells the operator to refresh');
+  // unknown outcome → generic error (never blank), surfaces the error field.
+  const unknown = rescueOutcomeCopy({ outcome: 'who_knows', error: 'boom' });
+  assertEqual(unknown.tone, 'error', 'rescueOutcomeCopy unknown → error tone');
+  assert(unknown.detail.length > 0, 'rescueOutcomeCopy unknown → non-blank detail');
+  // null result → generic error, never throws.
+  assertEqual(rescueOutcomeCopy(null).tone, 'error', 'rescueOutcomeCopy null → error tone (no throw)');
+
+  // --- canStartInFlight: double-fire guard predicate ---
+  const inFlightSet = new Set();
+  assertEqual(canStartInFlight(inFlightSet, 5), true,
+    'canStartInFlight: nothing outstanding → may start');
+  inFlightSet.add(5);
+  assertEqual(canStartInFlight(inFlightSet, 5), false,
+    'canStartInFlight: an outstanding call for the id → suppressed (double-fire guard)');
+  assertEqual(canStartInFlight(inFlightSet, 6), true,
+    'canStartInFlight: a different id is independent');
+
+  // --- renderRescueConfirm: reuses the .confirm-box shell ---
+  const confirm = renderRescueConfirm(11, 'MPREb_x', { artist_name: 'Smog', album_title: 'Knock Knock' });
+  assert(confirm.includes('confirm-box') && confirm.includes('MPREb_x'),
+    'renderRescueConfirm renders the confirm-box shell carrying the target browse id');
+  assert(confirm.includes('Smog') && confirm.includes('Knock Knock'),
+    'renderRescueConfirm labels the request being rescued');
+  assert(confirm.includes('id="lt-rescue-confirm"') && confirm.includes('id="lt-rescue-cancel"'),
+    'renderRescueConfirm wires confirm + cancel buttons');
 }
 
 // --- Summary ---

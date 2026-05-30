@@ -10,7 +10,7 @@ import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, open
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter } from './pipeline.js';
-import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers } from './long_tail.js';
+import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue } from './long_tail.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
@@ -232,11 +232,14 @@ Object.assign(window, {
   openReplacePicker: openReplacePickerAndHandle,
   togglePipelineReplacedFilter,
   toggleWrongMatchesReplacedFilter,
-  // Long-tail YouTube rescue — the console's "Check YouTube" button calls
-  // this. U4 ships only the placeholder so the click is observable and
-  // never throws; U5 replaces it with the real two-step resolver→rescue
-  // flow (the slow, side-effectful resolver GET deliberately is NOT auto-
-  // called on console open).
-  checkYoutube: (id) => toast(`Check YouTube for #${id} — coming in the next update`),
+  // Long-tail YouTube rescue (U5) — the two-step flow. `checkYoutube` runs
+  // the slow, side-effectful resolver GET (double-fire-guarded, stale-result
+  // stamped) and re-renders the YouTube panel with pickable rescue targets;
+  // `pickYoutubeRescue` opens the confirm overlay for a chosen target and
+  // submits the rescue, mapping every ingest outcome to specific console
+  // copy. The resolver GET is NOT auto-called on console open (U4 leaves the
+  // panel in `never_run` until the operator clicks).
+  checkYoutube,
+  pickYoutubeRescue,
   toast,
 });

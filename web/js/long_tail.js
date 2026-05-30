@@ -29,10 +29,32 @@
  *      with a "Check YouTube" button (U5 wires the actual resolver call —
  *      U4 must NOT auto-call the slow, side-effectful resolver GET).
  *
- * The evidence/action SUBMIT flows are out of scope here: the rescue
- * submit + live resolver call are U5; accept-sibling / set-intent /
- * re-search are U6. U4 builds the panels + the YouTube state shell + a
- * Check-YouTube stub only.
+ * U5 (this unit): the two-step YouTube rescue flow.
+ *
+ *   1. "Check YouTube" (`checkYoutube`) — replaces U4's placeholder. Calls
+ *      the SLOW, SIDE-EFFECTFUL resolver GET
+ *      (`GET /api/youtube-album?identifier=<mb_release_id>`), disables the
+ *      button + shows in-progress, GUARDS double-fire (a module-scoped
+ *      `resolveInFlight` Set keyed by request id — a second click while
+ *      outstanding fires nothing), and STAMPS the fetch with a per-row
+ *      console token so a stale result (operator collapsed the console or
+ *      moved to another row) never paints. On return the YouTube panel is
+ *      re-rendered via `youtubeSectionState`: `resolved_with_matrix` →
+ *      pickable rescue targets; `resolved_empty` → "not on YouTube Music —
+ *      re-check" (rescue affordance HIDDEN); `resolver_failed` → error +
+ *      Retry; cached-but-stale → matrix with a "cached" note.
+ *   2. Pick + confirm + submit — clicking a matrix target's "Rescue from
+ *      this" (`pickYoutubeRescue`) opens a Promise-based confirm overlay
+ *      (mirrors `web/js/replace_picker.js`'s `.confirm-overlay` shell +
+ *      backdrop-click-cancel). On confirm →
+ *      `POST /api/pipeline/<id>/youtube-rescue {browse_id}`. Every ingest
+ *      outcome maps to specific console copy (`rescueOutcomeCopy`). On
+ *      `accepted` the row is marked in-flight and a SINGLE-ROW refetch
+ *      (`GET /api/pipeline/long-tail?id=<id>`) patches just that cohort
+ *      row (KTD8 — never optimistically move the row to a band; the
+ *      importer owns the transition, KTD4).
+ *
+ * accept-sibling / set-intent / re-search remain U6.
  *
  * Pure / DOM-free helpers (band ordering, tab derivation, in-band search
  * filtering, cross-band match count, YouTube state classifier, console
@@ -47,9 +69,10 @@
  * `export const __test__ = {…}` named-object test convention.
  */
 
-import { state, API } from './state.js';
+import { state, API, toast } from './state.js';
 import {
   esc,
+  jsArg,
   renderForensicBlock,
   youtubeSectionState,
   consoleEmphasis,
@@ -824,14 +847,81 @@ function renderSiblingsBody(rgData) {
 }
 
 /**
+ * @typedef {Object} YoutubeRescueTarget
+ * @property {string} yt_browse_id  The YT Music album browseId — the value
+ *   the rescue submit (`POST .../youtube-rescue`) takes as `browse_id`.
+ * @property {number|null} year
+ * @property {number|null} track_count
+ * @property {number|null} best_distance  Lowest `ok` beets distance across
+ *   the release's `distances[]`, or `null` when none scored.
+ */
+
+/**
+ * Lowest `ok` beets distance across a YT release's `distances[]`. Pure /
+ * DOM-free. Returns `null` when no distance row scored `ok` (so callers can
+ * render "no distance" without a special-case branch).
+ *
+ * @param {{distances?: Array<{outcome?: string, distance?: number}>|null}} rel
+ * @returns {number|null}
+ */
+export function youtubeBestDistance(rel) {
+  const dists = (rel && Array.isArray(rel.distances)) ? rel.distances : [];
+  let best = /** @type {number|null} */ (null);
+  for (const d of dists) {
+    if (!d || d.outcome !== 'ok' || typeof d.distance !== 'number') continue;
+    if (best == null || d.distance < best) best = d.distance;
+  }
+  return best;
+}
+
+/**
+ * Extract the pickable rescue targets from a resolver result. Pure /
+ * DOM-free. Each target carries its `yt_browse_id` (the value the rescue
+ * submit needs) plus display meta (year / track_count / best distance).
+ *
+ * Only `resolved_with_matrix` yields targets — `resolved_empty` (ok with
+ * zero releases), `resolver_failed`, and `never_run` (null) all yield an
+ * empty list, so the rescue affordance is hidden (R9 / R10: the operator
+ * picks a target, the system never auto-picks; "not on YouTube Music"
+ * offers nothing to pick). A release missing a `yt_browse_id` is dropped —
+ * it cannot be a rescue target without the id the submit requires.
+ *
+ * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null|undefined} result
+ * @returns {YoutubeRescueTarget[]}
+ */
+export function youtubeRescueTargets(result) {
+  const cls = youtubeSectionState(result);
+  if (cls.state !== 'resolved_with_matrix') return [];
+  const releases = (result && Array.isArray(result.youtube_releases))
+    ? result.youtube_releases : [];
+  /** @type {YoutubeRescueTarget[]} */
+  const targets = [];
+  for (const rel of releases) {
+    const browseId = rel && rel.yt_browse_id ? String(rel.yt_browse_id) : '';
+    if (!browseId) continue;  // no id → not a pickable target.
+    targets.push({
+      yt_browse_id: browseId,
+      year: (rel.year != null) ? Number(rel.year) : null,
+      track_count: (rel.track_count != null) ? Number(rel.track_count) : null,
+      best_distance: youtubeBestDistance(rel),
+    });
+  }
+  return targets;
+}
+
+/**
  * Render the YouTube panel body for a given section state + payload. Pure.
  *
- * U4 renders all four states; the matrix rows are display-only (U5 makes
- * them pickable rescue targets). The default (`never_run`) state renders
- * the "Check YouTube" button whose click is a STUB wired to
- * `window.checkYoutube(id)` — U5 defines that handler and the live
- * resolver fetch. U4 must NOT auto-call the slow, side-effectful resolver
- * GET, so the panel opens in `never_run` until the operator clicks.
+ * Renders all four states. In `resolved_with_matrix` each release is a
+ * PICKABLE rescue target (U5): a "Rescue from this" button carrying the
+ * release's `yt_browse_id` opens the confirm step
+ * (`window.pickYoutubeRescue(id, browse_id)`). `resolved_empty` HIDES the
+ * rescue affordance and shows "not on YouTube Music — re-check"
+ * (R9 / R10 — nothing to pick). `never_run` / `resolver_failed` render the
+ * "Check YouTube" / retry button wired to `window.checkYoutube(id)` (U5's
+ * real resolver handler, replacing U4's placeholder). The console must NOT
+ * auto-call the slow, side-effectful resolver GET — the panel opens in
+ * `never_run` until the operator clicks.
  *
  * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null} result
  *   A cached resolver result, or `null` for the default never-run state.
@@ -840,7 +930,10 @@ function renderSiblingsBody(rgData) {
  */
 function renderYoutubeBody(result, id) {
   const cls = youtubeSectionState(result);
-  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">Check YouTube</button>`;
+  const checkLabel = (cls.state === 'resolver_failed') ? 'Retry'
+    : (cls.state === 'resolved_empty') ? 'Re-check'
+    : 'Check YouTube';
+  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">${checkLabel}</button>`;
   if (cls.state === 'never_run') {
     return `<div class="lt-yt lt-yt-never-run">
       <div class="lt-yt-prompt">Resolve this release against YouTube Music.</div>
@@ -854,33 +947,36 @@ function renderYoutubeBody(result, id) {
     </div>`;
   }
   if (cls.state === 'resolved_empty') {
+    // Not on YouTube Music — HIDE the rescue affordance (nothing to pick),
+    // offer only a re-check.
     return `<div class="lt-yt lt-yt-empty">
       <div class="lt-yt-msg">${esc(cls.message)}</div>
       ${checkBtn}
     </div>`;
   }
-  // resolved_with_matrix — display-only matrix in U4.
-  const releases = (result && Array.isArray(result.youtube_releases))
-    ? result.youtube_releases : [];
+  // resolved_with_matrix — each release is a pickable rescue target (U5).
   const staleFlag = cls.stale
     ? `<div class="lt-yt-stale">${esc(cls.message)}</div>`
     : '';
-  const rows = releases.map((rel) => {
-    const dists = Array.isArray(rel.distances) ? rel.distances : [];
-    const best = dists
-      .filter((d) => d && d.outcome === 'ok' && typeof d.distance === 'number')
-      .reduce((acc, d) => (acc == null || d.distance < acc ? d.distance : acc), /** @type {number|null} */ (null));
-    const bestStr = (best != null) ? `dist ${best.toFixed(3)}` : 'no distance';
-    const tc = (rel.track_count != null) ? `${rel.track_count}t` : '';
-    const yr = (rel.year != null) ? String(rel.year) : '';
+  const targets = youtubeRescueTargets(result);
+  const rows = targets.map((t) => {
+    const bestStr = (t.best_distance != null)
+      ? `dist ${t.best_distance.toFixed(3)}` : 'no distance';
+    const tc = (t.track_count != null) ? `${t.track_count}t` : '';
+    const yr = (t.year != null) ? String(t.year) : '';
+    const meta = [yr, tc, bestStr].filter((x) => x).join(' · ');
+    // The browse id is embedded via jsArg so a confirm picks the exact
+    // target the operator clicked (R10 — never auto-picked).
     return `<div class="lt-yt-row">
-      <span class="lt-yt-id">${esc(String(rel.yt_browse_id || '?'))}</span>
-      <span class="lt-yt-meta">${esc([yr, tc, bestStr].filter((x) => x).join(' · '))}</span>
+      <span class="lt-yt-id">${esc(t.yt_browse_id)}</span>
+      <span class="lt-yt-meta">${esc(meta)}</span>
+      <button class="lt-yt-rescue" type="button" onclick="event.stopPropagation(); window.pickYoutubeRescue(${id}, ${jsArg(t.yt_browse_id)})">Rescue from this</button>
     </div>`;
   }).join('');
   return `<div class="lt-yt lt-yt-matrix">
     ${staleFlag}
     <div class="lt-yt-rows">${rows}</div>
+    ${checkBtn}
   </div>`;
 }
 
@@ -1076,6 +1172,441 @@ export function toggleLongTailDetail(id) {
   loadPipelinePanels(id, token, inFlightFlag);
 }
 
+// --- Console rescue flow (U5) ----------------------------------------
+//
+// Two steps: "Check YouTube" runs the slow side-effectful resolver GET and
+// re-renders the YouTube panel with pickable rescue targets; picking a
+// target opens a confirm overlay and submits the rescue. Both steps are
+// double-fire-guarded (a module-scoped Set keyed by request id). The
+// resolver result is stamped with the row's console token so a stale result
+// (operator moved on) is discarded before it paints.
+
+/**
+ * @typedef {Object} RescueCopy
+ * @property {string} title    Short headline for the outcome.
+ * @property {string} detail   One-line operator-facing explanation.
+ * @property {'success'|'error'} tone  Drives toast styling (error → red).
+ */
+
+/**
+ * Map a YouTube-rescue ingest outcome to specific operator-facing console
+ * copy. Pure / DOM-free. Keys mirror the EXACT outcome vocabulary in
+ * `lib/youtube_ingest_service.py` / `web/routes/youtube.py`
+ * (`OUTCOME_HTTP_STATUS`): `accepted`, `request_not_found`, `wrong_state`,
+ * `in_flight`, `no_resolver_mapping`, `track_count_precheck_failed`,
+ * `transient`.
+ *
+ * `result` is the parsed rescue-submit response body — its `outcome`
+ * selects the copy; `download_log_id` / `detail` decorate the `in_flight`
+ * and `track_count_precheck_failed` messages with the specifics the
+ * backend returns. An unknown outcome falls back to a generic error so a
+ * future backend value never renders blank.
+ *
+ * @param {{outcome?: string, download_log_id?: number|null, detail?: string|null, error?: string|null}|null|undefined} result
+ * @returns {RescueCopy}
+ */
+export function rescueOutcomeCopy(result) {
+  const outcome = String((result && result.outcome) || '');
+  const detail = (result && result.detail) ? String(result.detail) : '';
+  const logId = (result && result.download_log_id != null)
+    ? result.download_log_id : null;
+  switch (outcome) {
+    case 'accepted':
+      return {
+        title: 'Rescue queued',
+        detail: logId != null
+          ? `Rescue queued (download_log #${logId}). The importer owns the import; the row updates when it lands.`
+          : 'Rescue queued. The importer owns the import; the row updates when it lands.',
+        tone: 'success',
+      };
+    case 'in_flight':
+      return {
+        title: 'Rescue already running',
+        detail: logId != null
+          ? `A rescue is already running for this request (download_log #${logId}).`
+          : 'A rescue is already running for this request.',
+        tone: 'error',
+      };
+    case 'wrong_state':
+      return {
+        title: 'Request changed',
+        detail: 'This request is no longer wanted/manual — refresh and try again.',
+        tone: 'error',
+      };
+    case 'no_resolver_mapping':
+      return {
+        title: 'No resolver mapping',
+        detail: 'No cached YouTube mapping for this release — re-run Check YouTube first.',
+        tone: 'error',
+      };
+    case 'track_count_precheck_failed':
+      return {
+        title: 'Track-count mismatch',
+        detail: detail
+          ? `Track-count precheck failed: ${detail}`
+          : 'Track-count precheck failed: the resolver and MB mirror disagree — refresh and re-check.',
+        tone: 'error',
+      };
+    case 'transient':
+      return {
+        title: 'Temporary failure',
+        detail: detail
+          ? `Temporary failure: ${detail}. Retry.`
+          : 'Temporary failure (DB / mirror hiccup). Retry.',
+        tone: 'error',
+      };
+    case 'request_not_found':
+      return {
+        title: 'Request not found',
+        detail: 'This request no longer exists — refresh.',
+        tone: 'error',
+      };
+    default:
+      return {
+        title: 'Rescue failed',
+        detail: detail || (result && result.error
+          ? String(result.error)
+          : `Unexpected outcome: ${outcome || 'unknown'}.`),
+        tone: 'error',
+      };
+  }
+}
+
+/**
+ * Request ids with an outstanding resolver GET. Guards the slow,
+ * side-effectful Check-YouTube call against double-fire: a second click
+ * while one is outstanding fires nothing.
+ *
+ * @type {Set<number>}
+ */
+const resolveInFlight = new Set();
+
+/**
+ * Request ids with an outstanding rescue-submit POST. Guards the confirm →
+ * submit step against double-fire.
+ *
+ * @type {Set<number>}
+ */
+const submitInFlight = new Set();
+
+/**
+ * Double-fire predicate for the resolver GET. Pure. `true` when a Check
+ * YouTube call may START for this id (none outstanding); `false` when one
+ * is already in flight (the click is suppressed).
+ *
+ * @param {Set<number>} inFlight  The in-flight id set.
+ * @param {number} id
+ * @returns {boolean}
+ */
+export function canStartInFlight(inFlight, id) {
+  return !inFlight.has(id);
+}
+
+/**
+ * Re-render just the YouTube panel body for one row's open console, guarded
+ * by the row's console token so a stale result doesn't paint. DOM-side.
+ *
+ * @param {number} id
+ * @param {number} token  The console token captured when the resolve fired.
+ * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null} result
+ * @returns {void}
+ */
+function patchYoutubePanel(id, token, result) {
+  patchPanel(id, 'youtube', token, renderYoutubeBody(result, id));
+}
+
+/**
+ * "Check YouTube" handler (U5) — replaces U4's placeholder toast. Runs the
+ * slow, side-effectful resolver GET for the row's `mb_release_id`, then
+ * re-renders the YouTube panel with the fresh classification.
+ *
+ * Guards:
+ *   * Double-fire — a module-scoped `resolveInFlight` Set keyed by request
+ *     id; a second click while outstanding returns immediately.
+ *   * Stale result — the result is only painted if the row's console token
+ *     still matches the one captured when the fetch fired (operator may
+ *     have collapsed the console or clicked another row meanwhile).
+ *   * Disabled button — the live "Check YouTube" / "Retry" button is
+ *     disabled + relabelled while outstanding so the operator sees progress
+ *     and can't re-click it.
+ *
+ * The resolver identifier is the request's `mb_release_id` (an MB release
+ * MBID or a Discogs release id) — the same id the resolver's
+ * `?identifier=` query takes. A row without one cannot be resolved; the
+ * panel shows that explicitly rather than firing a doomed fetch.
+ *
+ * @param {number} id  album_requests.id
+ * @returns {Promise<void>}
+ */
+export async function checkYoutube(id) {
+  if (!canStartInFlight(resolveInFlight, id)) return;  // double-fire guard.
+  const row = consoleRow(id);
+  const identifier = row && row.mb_release_id ? String(row.mb_release_id) : '';
+  const token = consoleTokens.get(id) || 0;
+  if (!identifier) {
+    patchYoutubePanel(id, token, /** @type {any} */ (
+      { outcome: 'transient', error_message: 'No release identifier on this request.' }));
+    return;
+  }
+  resolveInFlight.add(id);
+  setYoutubeChecking(id);
+  try {
+    const r = await fetch(
+      `${API}/api/youtube-album?identifier=${encodeURIComponent(identifier)}`);
+    // 404/503 still carry a typed body; the classifier maps any non-`ok`
+    // outcome to `resolver_failed`, so we read the body regardless of
+    // status and only fall back to a synthetic failure if the body is
+    // unreadable.
+    let result;
+    try {
+      result = await r.json();
+    } catch (_e) {
+      result = { outcome: 'transient', error_message: `HTTP ${r.status}` };
+    }
+    patchYoutubePanel(id, token, result);
+  } catch (_e) {
+    patchYoutubePanel(id, token, /** @type {any} */ (
+      { outcome: 'transient', error_message: 'Could not reach the resolver. Retry.' }));
+  } finally {
+    resolveInFlight.delete(id);
+  }
+}
+
+/**
+ * Swap the YouTube panel into an in-progress state while the resolver GET
+ * is outstanding (disabled button + spinner copy). DOM-side; no-op when the
+ * panel isn't mounted (Node tests / collapsed console).
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function setYoutubeChecking(id) {
+  if (typeof document === 'undefined') return;
+  const panel = document.getElementById(`lt-panel-youtube-${id}`);
+  if (!panel) return;
+  const body = panel.querySelector('.lt-panel-body');
+  if (!body) return;
+  body.innerHTML = `<div class="lt-yt lt-yt-checking">
+    <div class="lt-yt-msg">Resolving against YouTube Music…</div>
+    <button class="lt-yt-check" type="button" disabled>Checking…</button>
+  </div>`;
+}
+
+/**
+ * Render the rescue confirm dialog body. Pure. Mirrors the
+ * `.confirm-box` shell used by `replace_picker.js` so the visual language
+ * matches the only other destructive-confirm in the app.
+ *
+ * @param {number} id        album_requests.id
+ * @param {string} browseId  The YT Music album browseId being submitted.
+ * @param {Object|null} row  The worklist row (for the album label).
+ * @returns {string}
+ */
+export function renderRescueConfirm(id, browseId, row) {
+  const album = (row && row.album_title) ? String(row.album_title) : `request #${id}`;
+  const artist = (row && row.artist_name) ? String(row.artist_name) : '';
+  const label = artist ? `${artist} — ${album}` : album;
+  return `<div class="confirm-box" role="dialog" aria-modal="true">
+    <h3>Rescue from YouTube Music?</h3>
+    <p>Queue a YouTube-Music rescue for:<br><strong>${esc(label)}</strong></p>
+    <p>Target album:<br><code>${esc(browseId)}</code></p>
+    <p style="font-size:0.85em;color:#999;">The request stays <code>wanted</code> until the
+    importer lands the rescue (minutes later) — the row won't move bands immediately.</p>
+    <div class="actions">
+      <button class="btn" id="lt-rescue-cancel">Cancel</button>
+      <button class="btn p-btn" id="lt-rescue-confirm">Rescue</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * The dedicated mount node for the rescue confirm overlay. Reuses the
+ * shared `replace-picker-modal` host (same pattern as the Replace picker —
+ * one modal host, wiped on close).
+ *
+ * @returns {HTMLElement|null}
+ */
+function rescueModalHost() {
+  if (typeof document === 'undefined') return null;
+  return document.getElementById('replace-picker-modal');
+}
+
+/**
+ * Open the Promise-based rescue confirm overlay. Mirrors
+ * `replace_picker.js`'s overlay shell: a full-screen `.confirm-overlay`
+ * backdrop (click-to-cancel) wrapping the `.confirm-box`. Resolves `true`
+ * on confirm, `false` on cancel / backdrop click. DOM-side.
+ *
+ * @param {number} id
+ * @param {string} browseId
+ * @param {Object|null} row
+ * @returns {Promise<boolean>}
+ */
+function confirmRescue(id, browseId, row) {
+  const host = rescueModalHost();
+  if (!host) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    /** @param {boolean} ok */
+    function close(ok) {
+      if (settled) return;
+      settled = true;
+      host.style.display = 'none';
+      host.innerHTML = '';
+      resolve(ok);
+    }
+    host.innerHTML = `<div class="confirm-overlay">${renderRescueConfirm(id, browseId, row)}</div>`;
+    host.style.display = '';
+    const overlay = host.querySelector('.confirm-overlay');
+    if (overlay) {
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) close(false);  // backdrop-click cancel.
+      });
+    }
+    const cancel = host.querySelector('#lt-rescue-cancel');
+    if (cancel) cancel.addEventListener('click', () => close(false));
+    const confirm = host.querySelector('#lt-rescue-confirm');
+    if (confirm) confirm.addEventListener('click', () => close(true));
+  });
+}
+
+/**
+ * Pick a rescue target (U5) — opens the confirm overlay, and on confirm
+ * submits the rescue. Double-fire-guarded on the submit step.
+ *
+ * @param {number} id        album_requests.id
+ * @param {string} browseId  The chosen target's `yt_browse_id`.
+ * @returns {Promise<void>}
+ */
+export async function pickYoutubeRescue(id, browseId) {
+  const row = consoleRow(id);
+  const ok = await confirmRescue(id, browseId, row);
+  if (!ok) return;
+  await submitYoutubeRescue(id, browseId);
+}
+
+/**
+ * Submit the rescue (`POST /api/pipeline/<id>/youtube-rescue {browse_id}`)
+ * and map the outcome to console copy. On `accepted`, mark the row
+ * in-flight and refetch JUST that row (KTD8 — single-row patch, no
+ * full-cohort re-band, no optimistic band move; the importer owns the
+ * transition, KTD4). Every other outcome surfaces its specific copy as a
+ * toast. Double-fire-guarded.
+ *
+ * @param {number} id
+ * @param {string} browseId
+ * @returns {Promise<void>}
+ */
+async function submitYoutubeRescue(id, browseId) {
+  if (!canStartInFlight(submitInFlight, id)) return;  // double-fire guard.
+  submitInFlight.add(id);
+  try {
+    let result;
+    try {
+      const r = await fetch(`${API}/api/pipeline/${id}/youtube-rescue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ browse_id: browseId }),
+      });
+      result = await r.json();
+    } catch (_e) {
+      result = { outcome: 'transient', error_message: 'Submit failed — retry.' };
+    }
+    const copy = rescueOutcomeCopy(result);
+    if (typeof toast === 'function') {
+      toast(`${copy.title}: ${copy.detail}`, copy.tone === 'error');
+    }
+    if (result && result.outcome === 'accepted') {
+      // KTD8: mark the row in-flight locally for an immediate signal, then
+      // refetch just this row's authoritative band/flags and patch it in.
+      markRowInFlight(id);
+      await refetchLongTailRow(id);
+    }
+  } finally {
+    submitInFlight.delete(id);
+  }
+}
+
+/**
+ * Mark one cohort row `in_flight_rescue` in place (optimistic local signal
+ * only — NOT a band move). Pure-ish: mutates `state.longTail.rows`. The
+ * authoritative flags arrive via {@link refetchLongTailRow}.
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function markRowInFlight(id) {
+  const rows = Array.isArray(state.longTail.rows) ? state.longTail.rows : [];
+  const row = rows.find((r) => r && r.id === id);
+  if (row) row.in_flight_rescue = true;
+}
+
+/**
+ * Single-row refetch + patch (KTD8). Fetches just this request's
+ * authoritative banded row via `GET /api/pipeline/long-tail?id=<id>` and
+ * replaces it in `state.longTail.rows`, then re-renders the list. NO
+ * full-cohort re-band (the heaviest read in the app), NO optimistic band
+ * move — the row stays in `Missing` until the importer completes (KTD4).
+ *
+ * A 404 (the row left the `wanted` worklist — e.g. already imported)
+ * removes it from the cohort. A failed fetch is non-fatal: the local
+ * in-flight mark from {@link markRowInFlight} already gives the operator a
+ * signal; the next Refresh reconciles.
+ *
+ * @param {number} id
+ * @returns {Promise<void>}
+ */
+async function refetchLongTailRow(id) {
+  let data;
+  try {
+    const r = await fetch(`${API}/api/pipeline/long-tail?id=${encodeURIComponent(String(id))}`);
+    if (r.status === 404) {
+      removeRowFromCohort(id);
+      renderLongTail();
+      return;
+    }
+    if (!r.ok) return;
+    data = await r.json();
+  } catch (_e) {
+    return;  // non-fatal — local in-flight mark stands; Refresh reconciles.
+  }
+  const fresh = data && data.result;
+  if (!fresh) return;
+  patchRowInCohort(id, fresh);
+  renderLongTail();
+}
+
+/**
+ * Replace one row in the cohort with a freshly-refetched authoritative row.
+ * Pure-ish: mutates `state.longTail.rows`. No-op when the cohort isn't
+ * loaded or the id is gone (a concurrent full refetch already reconciled).
+ *
+ * @param {number} id
+ * @param {Object} fresh  The refetched `LongTailRow`.
+ * @returns {void}
+ */
+function patchRowInCohort(id, fresh) {
+  const rows = Array.isArray(state.longTail.rows) ? state.longTail.rows : null;
+  if (!rows) return;
+  const idx = rows.findIndex((r) => r && r.id === id);
+  if (idx === -1) return;
+  rows[idx] = fresh;
+}
+
+/**
+ * Drop one row from the cohort (the single-row refetch 404'd — the row left
+ * the `wanted` worklist). Pure-ish: mutates `state.longTail.rows`.
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function removeRowFromCohort(id) {
+  const rows = Array.isArray(state.longTail.rows) ? state.longTail.rows : null;
+  if (!rows) return;
+  const idx = rows.findIndex((r) => r && r.id === id);
+  if (idx !== -1) rows.splice(idx, 1);
+}
+
 export const __test__ = {
   MISSING_BAND,
   BAND_ORDER,
@@ -1099,4 +1630,10 @@ export const __test__ = {
   youtubeHistoryRows,
   youtubeFailureReason,
   PEERS_VISIBLE_CAP,
+  // U5 — two-step rescue flow pure helpers.
+  youtubeBestDistance,
+  youtubeRescueTargets,
+  rescueOutcomeCopy,
+  canStartInFlight,
+  renderRescueConfirm,
 };
