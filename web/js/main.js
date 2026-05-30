@@ -10,7 +10,7 @@ import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, open
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter } from './pipeline.js';
-import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue } from './long_tail.js';
+import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailReSearch } from './long_tail.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
@@ -241,5 +241,16 @@ Object.assign(window, {
   // panel in `never_run` until the operator clicks).
   checkYoutube,
   pickYoutubeRescue,
+  // Long-tail secondary actions (U6) — accept-a-sibling-pressing (the
+  // existing Replace operator action, MB-only per KTD7; disabled with a
+  // reason for Discogs requests), set-intent (lossless ⇄ default toggle via
+  // the existing set-intent surface), and re-search (regenerate-plan +
+  // reset-cursor via the existing search-plan/regenerate surface, honest
+  // next-cycle copy). Each reuses the U5 single-row refetch helper for
+  // post-action freshness; the confirmed Replace closes the console and
+  // full-cohort refetches because the old row leaves the worklist.
+  longTailAcceptSibling,
+  longTailSetIntent,
+  longTailReSearch,
   toast,
 });

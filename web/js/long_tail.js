@@ -54,7 +54,38 @@
  *      row (KTD8 — never optimistically move the row to a band; the
  *      importer owns the transition, KTD4).
  *
- * accept-sibling / set-intent / re-search remain U6.
+ * U6 (this unit): the console's three secondary operator actions, plus
+ * the shared post-action freshness model.
+ *
+ *   1. Accept-a-sibling-pressing — wires the existing Replace operator
+ *      action (`openReplacePicker`, standard mode) so the operator can
+ *      switch the request to a different pressing in the same MB release
+ *      group. MB-only (KTD7): disabled with a one-line reason for
+ *      Discogs-sourced requests or rows with no `mb_release_group_id`
+ *      (the `canAcceptSibling` predicate). On a confirmed Replace the old
+ *      request becomes a frozen `replaced` row that LEAVES the worklist —
+ *      so this is the one action that closes the console and does a FULL
+ *      cohort refetch (`loadLongTail`), not the single-row patch.
+ *   2. Set-intent — renders the request's current quality intent
+ *      (lossless vs. default, from `target_format`) as a badge with a
+ *      toggle; switching posts `{id, intent}` to the existing set-intent
+ *      surface (`intentToggleTarget` picks the opposite of the current
+ *      intent), then single-row refetch-and-patch so the badge reflects
+ *      the new value.
+ *   3. Re-search — regenerates the search plan + resets the cursor via the
+ *      existing `search-plan/regenerate` surface, with honest NEXT-CYCLE
+ *      copy (never "instant"; the watch loop owns the actual search,
+ *      KTD3). `regenerateOutcomeCopy` maps every outcome; the button
+ *      disables while outstanding (double-fire guard) and, on a sticky
+ *      `failed_deterministic` (no runnable query / incomplete metadata —
+ *      the same gap the console is triaging), surfaces the metadata gap
+ *      INLINE pointing at the field-quality detail rather than re-enabling
+ *      to fire a futile re-click.
+ *
+ * Shared freshness (KTD8): every action awaits then refetches just the
+ * acted-on row (`refetchLongTailRow`, the U5 helper) and patches it in —
+ * no optimistic band moves, no polling. The confirmed Replace is the lone
+ * exception (full-cohort refetch because the row leaves the cohort).
  *
  * Pure / DOM-free helpers (band ordering, tab derivation, in-band search
  * filtering, cross-band match count, YouTube state classifier, console
@@ -76,8 +107,10 @@ import {
   renderForensicBlock,
   youtubeSectionState,
   consoleEmphasis,
+  overrideToIntent,
   awstDateTime,
 } from './util.js';
+import { openReplacePicker } from './replace_picker.js';
 
 /**
  * The `Missing` band sentinel — a `wanted` request with no clean
@@ -1023,7 +1056,63 @@ function renderConsoleShell(row) {
   const ordered = leadUnfindable
     ? [unfindablePanel, peersPanel, rescuesPanel, siblingsPanel, youtubePanel]
     : [bandVsIntent, unfindablePanel, peersPanel, rescuesPanel, siblingsPanel, youtubePanel];
-  return `<div class="lt-console">${ordered.join('')}</div>`;
+  // The action bar (U6) renders FIRST so the operator's secondary actions
+  // (accept-sibling / set-intent / re-search) stay reachable without
+  // scrolling past the evidence panels. Accept-sibling needs the request's
+  // `mb_release_group_id`, which the console shell doesn't have yet (the
+  // cohort row doesn't carry it — `loadPipelinePanels` resolves it off the
+  // pipeline detail). So it renders disabled at open and `patchActionsBar`
+  // re-renders once the rg is known.
+  const actionsBar = renderActionsBar(row);
+  return `<div class="lt-console">${actionsBar}${ordered.join('')}</div>`;
+}
+
+/**
+ * Render the secondary-action bar (U6). Pure. Carries three controls:
+ *   * Accept-sibling — the Replace operator action, MB-only (KTD7). When
+ *     `canAcceptSibling(row, rg)` is false (Discogs-sourced or no MB
+ *     release group) the button is disabled with a one-line reason.
+ *   * Set-intent — the current intent rendered as a badge with a toggle to
+ *     the opposite intent (`intentToggleTarget`).
+ *   * Re-search — the regenerate-plan action with honest next-cycle copy.
+ *
+ * The release-group id is read from the row's `mb_release_group_id`, which
+ * is absent at shell-render time (the cohort row doesn't carry it) and
+ * stamped onto the row by `loadPipelinePanels` once the pipeline detail
+ * resolves — at which point `patchActionsBar` re-renders this bar.
+ *
+ * @param {Object} row  The worklist row (band, source, intent, rg).
+ * @returns {string}
+ */
+function renderActionsBar(row) {
+  const id = row.id;
+  const rg = row.mb_release_group_id || null;
+  const acceptOk = canAcceptSibling(row, rg);
+  // Discogs / no-rg disable reason (KTD7 — no MB↔Discogs adapter).
+  const acceptReason = acceptDisabledReason(row, rg);
+  const acceptBtn = acceptOk
+    ? `<button class="lt-act-btn lt-act-accept" type="button" onclick="event.stopPropagation(); window.longTailAcceptSibling(${id})">Accept a sibling pressing…</button>`
+    : `<button class="lt-act-btn lt-act-accept" type="button" disabled title="${esc(acceptReason)}">Accept a sibling pressing…</button>
+       <span class="lt-act-note">${esc(acceptReason)}</span>`;
+
+  const intent = overrideToIntent(row.target_format);
+  const intentLabel = intent === 'lossless' ? 'lossless' : 'default';
+  const toggleTarget = intentToggleTarget(row.target_format);
+  const toggleLabel = toggleTarget === 'lossless'
+    ? 'switch to lossless' : 'accept current floor';
+  const intentCtl = `<div class="lt-act-intent">
+      <span class="lt-act-label">intent:</span>
+      <span class="badge lt-intent-badge lt-intent-${esc(intentLabel)}">${esc(intentLabel)}</span>
+      <button class="lt-act-btn lt-act-intent-toggle" type="button" onclick="event.stopPropagation(); window.longTailSetIntent(${id})">${esc(toggleLabel)}</button>
+    </div>`;
+
+  const researchBtn = `<button class="lt-act-btn lt-act-research" type="button" onclick="event.stopPropagation(); window.longTailReSearch(${id})">Re-search (next cycle)</button>`;
+
+  return `<div class="lt-actions" id="lt-actions-${id}">
+    <div class="lt-act-group">${acceptBtn}</div>
+    <div class="lt-act-group">${intentCtl}</div>
+    <div class="lt-act-group">${researchBtn}<div class="lt-act-research-note" id="lt-research-note-${id}"></div></div>
+  </div>`;
 }
 
 /**
@@ -1086,6 +1175,13 @@ async function loadPipelinePanels(id, token, inFlightFlag) {
     patchPanel(id, 'rescues', token, renderRescuesBody(data.history, inFlightFlag));
     const req = data.request || {};
     rgId = req.mb_release_group_id || null;
+    // KTD7 reuse: stamp the resolved release-group id onto the cohort row
+    // so the U6 accept-sibling button (rendered disabled at console open,
+    // before the detail fetch) can enable for MB rows that actually have a
+    // release group. Re-render the action bar in place once known — no
+    // extra fetch (we already have the detail payload here).
+    stampRowReleaseGroup(id, rgId);
+    patchActionsBar(id, token);
   } catch (_e) {
     patchPanel(id, 'peers', token, renderPanelError('peers'));
     patchPanel(id, 'rescues', token, renderPanelError('rescue history'));
@@ -1094,6 +1190,41 @@ async function loadPipelinePanels(id, token, inFlightFlag) {
   // detail fetch failed (rgId null) we render the "no rg" state; otherwise
   // we fire the release-group fetch on its own so its latency is isolated.
   loadSiblingsPanel(id, token, rgId);
+}
+
+/**
+ * Stamp the resolved `mb_release_group_id` onto the cached cohort row so
+ * the U6 accept-sibling control can read it. Pure-ish: mutates
+ * `state.longTail.rows`. No-op when the cohort isn't loaded or the id is
+ * gone.
+ *
+ * @param {number} id
+ * @param {string|null} rgId
+ * @returns {void}
+ */
+function stampRowReleaseGroup(id, rgId) {
+  const row = consoleRow(id);
+  if (row) row.mb_release_group_id = rgId || null;
+}
+
+/**
+ * Re-render the console's action bar in place, guarded by the row's console
+ * token so a stale detail fetch (operator moved on) doesn't repaint a
+ * collapsed/replaced console. DOM-side.
+ *
+ * @param {number} id
+ * @param {number} token  The console token captured when the console opened.
+ * @returns {void}
+ */
+function patchActionsBar(id, token) {
+  if (typeof document === 'undefined') return;
+  if (consoleTokens.get(id) !== token) return;  // stale console — discard.
+  const bar = document.getElementById(`lt-actions-${id}`);
+  if (!bar) return;
+  const row = consoleRow(id) || { id };
+  // Replace the whole bar (renderActionsBar emits the same wrapper id, so
+  // we swap its outerHTML to keep the id stable for the next patch).
+  bar.outerHTML = renderActionsBar(row);
 }
 
 /**
@@ -1607,6 +1738,421 @@ function removeRowFromCohort(id) {
   if (idx !== -1) rows.splice(idx, 1);
 }
 
+// --- Console secondary actions (U6) ----------------------------------
+//
+// Three operator actions wired to EXISTING endpoints — no parallel code
+// paths (R16):
+//   * accept-sibling → `openReplacePicker` (standard mode) → `POST .../replace`
+//   * set-intent     → `POST /api/pipeline/set-intent {id, intent}`
+//   * re-search      → `POST /api/pipeline/<id>/search-plan/regenerate`
+// Shared freshness (KTD8): each awaits then refetches just the acted-on
+// row and patches it (`refetchLongTailRow`); the confirmed Replace is the
+// exception — the old row leaves the cohort so it closes the console and
+// full-cohort refetches.
+
+/**
+ * Can the operator accept a sibling pressing for this row? Pure / DOM-free.
+ *
+ * MB-only in v1 (KTD7 — sibling enumeration is MB-keyed via the release
+ * group; there is no MB↔Discogs adapter). `false` when:
+ *   * the request is Discogs-sourced (`row.source === 'discogs'`), OR
+ *   * there is no `mb_release_group_id` to enumerate siblings from.
+ * `true` otherwise (an MB-sourced request with a resolved release group).
+ *
+ * @param {Object|null|undefined} row  The worklist row.
+ * @param {string|null|undefined} releaseGroupId  The resolved MB rg id.
+ * @returns {boolean}
+ */
+export function canAcceptSibling(row, releaseGroupId) {
+  if (!row || typeof row !== 'object') return false;
+  const source = String(row.source || '').toLowerCase();
+  if (source === 'discogs') return false;
+  if (!releaseGroupId) return false;
+  return true;
+}
+
+/**
+ * One-line reason the accept-sibling action is disabled. Pure / DOM-free.
+ * Returns the empty string when the action is enabled.
+ *
+ * @param {Object|null|undefined} row
+ * @param {string|null|undefined} releaseGroupId
+ * @returns {string}
+ */
+export function acceptDisabledReason(row, releaseGroupId) {
+  if (canAcceptSibling(row, releaseGroupId)) return '';
+  const source = String((row && row.source) || '').toLowerCase();
+  if (source === 'discogs') {
+    return 'Sibling pressings are MusicBrainz-only — Discogs requests have no MB release group.';
+  }
+  return 'No MusicBrainz release group for this request — no siblings to pick from.';
+}
+
+/**
+ * The intent to POST when toggling. Pure / DOM-free. The set-intent
+ * surface is a two-value toggle (`lossless` ⇄ `default`); given the row's
+ * current `target_format`, this returns the OPPOSITE intent. A lossless
+ * `target_format` (`"lossless"` / `"flac"`) currently means "keep grinding
+ * to lossless", so the toggle target is `"default"` (accept current
+ * floor); anything else toggles to `"lossless"`.
+ *
+ * @param {string|null|undefined} targetFormat  The row's `target_format`.
+ * @returns {'lossless'|'default'}
+ */
+export function intentToggleTarget(targetFormat) {
+  return overrideToIntent(targetFormat) === 'lossless' ? 'default' : 'lossless';
+}
+
+/**
+ * @typedef {Object} RegenerateCopy
+ * @property {string} title    Short headline for the outcome.
+ * @property {string} detail   One-line operator-facing explanation.
+ * @property {'success'|'error'} tone  Drives toast styling (error → red).
+ * @property {boolean} metadataGap  When true, the failure is the sticky
+ *   `failed_deterministic` (no runnable query / incomplete metadata) — the
+ *   caller must surface the gap INLINE and NOT re-enable the button to fire
+ *   a futile re-click (KTD3). Every other outcome leaves this `false`.
+ * @property {boolean} requeued  When true, the plan was (re)generated and
+ *   the request is queued for the next 5-minute cycle — the caller refetches
+ *   the row. `noop_active_plan_exists` also sets this (a fresh plan already
+ *   exists, so the request is already searchable next cycle).
+ */
+
+/**
+ * Map a `search-plan/regenerate` outcome to next-cycle operator copy.
+ * Pure / DOM-free. Keys mirror the EXACT outcome vocabulary in
+ * `lib/search_plan_service.py` / the route
+ * `web/routes/pipeline.py::post_pipeline_search_plan_regenerate`:
+ * `success`, `noop_active_plan_exists`, `request_not_found`,
+ * `failed_deterministic` (422 — sticky metadata gap), `failed_transient`
+ * (503 — retryable).
+ *
+ * Copy is honest NEXT-CYCLE (KTD3): regenerate resets the plan + cursor,
+ * but the actual search fires on the 5-minute watch-loop cycle — never
+ * "instant". `failed_deterministic` is special-cased to the
+ * metadata-gap variant (`metadataGap: true`) so the caller surfaces the
+ * gap inline instead of re-firing.
+ *
+ * `result` is the parsed regenerate response body; its `outcome` selects
+ * the copy and `error`/`error_message`/`failure_class` decorate the
+ * deterministic-failure message. An unknown outcome falls back to a
+ * generic error so a future backend value never renders blank.
+ *
+ * @param {{outcome?: string, error?: string|null, error_message?: string|null, failure_class?: string|null}|null|undefined} result
+ * @returns {RegenerateCopy}
+ */
+export function regenerateOutcomeCopy(result) {
+  const outcome = String((result && result.outcome) || '');
+  const err = (result && (result.error_message || result.error))
+    ? String(result.error_message || result.error) : '';
+  const failureClass = (result && result.failure_class)
+    ? String(result.failure_class) : '';
+  switch (outcome) {
+    case 'success':
+      return {
+        title: 'Re-search queued',
+        detail: 'Fresh search plan generated. This request will be searched '
+          + 'fresh on the next cycle (~5 min) — not immediately.',
+        tone: 'success',
+        metadataGap: false,
+        requeued: true,
+      };
+    case 'noop_active_plan_exists':
+      return {
+        title: 'Already queued',
+        detail: 'A fresh search plan already exists for this request — it is '
+          + 'already in line for the next cycle (~5 min).',
+        tone: 'success',
+        metadataGap: false,
+        requeued: true,
+      };
+    case 'failed_deterministic':
+      return {
+        title: 'Cannot build a search plan',
+        detail: (err || 'No runnable query — the request metadata is incomplete')
+          + (failureClass ? ` (${failureClass})` : '')
+          + '. Re-clicking won’t help until the metadata gap is fixed — '
+          + 'see the field-quality detail above.',
+        tone: 'error',
+        metadataGap: true,
+        requeued: false,
+      };
+    case 'failed_transient':
+      return {
+        title: 'Temporary failure',
+        detail: (err || 'Plan generation hit a transient error (DB / mirror hiccup)')
+          + '. Retry.',
+        tone: 'error',
+        metadataGap: false,
+        requeued: false,
+      };
+    case 'request_not_found':
+      return {
+        title: 'Request not found',
+        detail: 'This request no longer exists — refresh.',
+        tone: 'error',
+        metadataGap: false,
+        requeued: false,
+      };
+    default:
+      return {
+        title: 'Re-search failed',
+        detail: err || `Unexpected outcome: ${outcome || 'unknown'}.`,
+        tone: 'error',
+        metadataGap: false,
+        requeued: false,
+      };
+  }
+}
+
+/**
+ * Build the standard-mode `openReplacePicker` options for one cohort row.
+ * Pure / DOM-free. `sourceLabel` is the "Artist — Album" the picker shows
+ * as the current request; `releaseGroupId` is the stamped MB rg (may be
+ * null — the picker lazily resolves a null rg via `resolve-rg`, but U6
+ * only enables the button when one is present, KTD7).
+ *
+ * @param {Object} row
+ * @returns {import('./replace_picker.js').ReplacePickerOptionsStandard}
+ */
+export function buildAcceptSiblingOptions(row) {
+  const artist = (row && row.artist_name) ? String(row.artist_name) : '';
+  const album = (row && row.album_title) ? String(row.album_title) : '';
+  const label = artist ? `${artist} — ${album}` : (album || `request #${row.id}`);
+  return {
+    sourceRequestId: row.id,
+    releaseGroupId: (row && row.mb_release_group_id) || null,
+    sourceLabel: label,
+    source: 'long-tail',
+  };
+}
+
+/**
+ * Request ids with an outstanding re-search (regenerate) POST. Guards the
+ * re-search button against double-fire.
+ *
+ * @type {Set<number>}
+ */
+const researchInFlight = new Set();
+
+/**
+ * Accept-a-sibling-pressing handler (U6). Opens the existing Replace picker
+ * (standard mode) for the row's MB release group; the picker owns the
+ * sibling list + confirm + `POST .../replace`. On a CONFIRMED Replace the
+ * old request becomes a frozen `replaced` row that LEAVES the worklist, so
+ * we close the console and do a FULL-cohort refetch (KTD8 exception) — not
+ * the single-row patch. Cancel / failure is a no-op (the picker toasts its
+ * own errors).
+ *
+ * Reuses the raw `openReplacePicker` (not the `window.openReplacePicker`
+ * wrapper) because the wrapper refetches the Pipeline/Manual tabs, not the
+ * long-tail cohort — and it doesn't return the confirmed result we need to
+ * decide on the full-cohort refetch.
+ *
+ * @param {number} id  album_requests.id
+ * @returns {Promise<void>}
+ */
+export async function longTailAcceptSibling(id) {
+  const row = consoleRow(id);
+  if (!row) return;
+  if (!canAcceptSibling(row, row.mb_release_group_id || null)) {
+    // Defensive — the button is disabled in this case, but a stale onclick
+    // (rg dropped between render and click) should fail loudly, not POST.
+    if (typeof toast === 'function') {
+      toast(acceptDisabledReason(row, row.mb_release_group_id || null), true);
+    }
+    return;
+  }
+  const result = await openReplacePicker(buildAcceptSiblingOptions(row));
+  if (!result || result.outcome !== 'confirmed') return;  // cancelled.
+  const resp = result.response || { status: 0, body: {} };
+  const status = resp.status;
+  const body = resp.body || {};
+  if (status === 200) {
+    if (typeof toast === 'function') {
+      const newId = body.new_request_id;
+      toast(newId != null
+        ? `Replaced — new request #${newId}. The old request is frozen for audit.`
+        : 'Replaced — the old request is frozen for audit.', false);
+    }
+    // The old row left the cohort (now `status='replaced'`). Close the
+    // console and FULL-cohort refetch (KTD8 exception — the single-row
+    // patch can't express a row leaving).
+    closeConsole(id);
+    await loadLongTail();
+    return;
+  }
+  // Non-200 confirmed POST — surface the picker's error shape (mirrors
+  // main.js::openReplacePickerAndHandle), leave the cohort untouched.
+  if (typeof toast === 'function') {
+    if (status === 409 && body && body.descendant_request_id) {
+      toast(`Already replaced. New request is #${body.descendant_request_id}.`, true);
+    } else if (body && body.error) {
+      toast(`Replace failed: ${body.error}`, true);
+    } else {
+      toast(`Replace failed (HTTP ${status})`, true);
+    }
+  }
+}
+
+/**
+ * Close one row's console (collapse `.lt-detail`, bump its token so an
+ * in-flight panel fetch is discarded on resolve). DOM-side; no-op when the
+ * console isn't mounted.
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function closeConsole(id) {
+  if (typeof document === 'undefined') return;
+  const el = document.getElementById(`lt-detail-${id}`);
+  if (el) el.classList.remove('open');
+  consoleTokens.set(id, (consoleTokens.get(id) || 0) + 1);
+}
+
+/**
+ * Set-intent handler (U6). Toggles the request's quality intent (lossless
+ * ⇄ default) via the EXISTING set-intent surface
+ * (`POST /api/pipeline/set-intent {id, intent}` — mirrors
+ * `library.js::setIntent`), then single-row refetch-and-patch so the badge
+ * reflects the new intent (KTD8). The target intent is the opposite of the
+ * row's current `target_format` (`intentToggleTarget`).
+ *
+ * @param {number} id  album_requests.id
+ * @returns {Promise<void>}
+ */
+export async function longTailSetIntent(id) {
+  const row = consoleRow(id);
+  if (!row) return;
+  const intent = intentToggleTarget(row.target_format);
+  let data;
+  try {
+    const r = await fetch(`${API}/api/pipeline/set-intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, intent }),
+    });
+    data = await r.json();
+  } catch (_e) {
+    if (typeof toast === 'function') toast('Failed to set intent', true);
+    return;
+  }
+  if (!data || data.status !== 'ok') {
+    if (typeof toast === 'function') {
+      toast((data && data.error) || 'Failed to set intent', true);
+    }
+    return;
+  }
+  if (typeof toast === 'function') {
+    toast(data.requeued ? `Intent: ${intent} (requeued)` : `Intent: ${intent}`, false);
+  }
+  // Single-row refetch-and-patch (KTD8) — the badge reflects the new intent
+  // off the authoritative refetched row.
+  await refetchLongTailRow(id);
+}
+
+/**
+ * Re-search handler (U6). Regenerates the request's search plan + resets
+ * the cursor via the EXISTING `search-plan/regenerate` surface (mirrors
+ * `search_plan.js::searchPlanRegenerate`), with honest NEXT-CYCLE copy —
+ * the watch loop owns the actual search (KTD3), never instant.
+ *
+ * Double-fire-guarded (`researchInFlight`); the button disables while
+ * outstanding. Outcome mapping via `regenerateOutcomeCopy`:
+ *   * `success` / `noop_active_plan_exists` → toast + single-row refetch.
+ *   * `failed_transient` → retry toast; re-enable.
+ *   * `failed_deterministic` → surface the metadata gap INLINE (point at the
+ *     field-quality detail) and do NOT just re-enable to re-fire (KTD3).
+ *   * `request_not_found` / unknown → error toast.
+ *
+ * @param {number} id  album_requests.id
+ * @returns {Promise<void>}
+ */
+export async function longTailReSearch(id) {
+  if (!canStartInFlight(researchInFlight, id)) return;  // double-fire guard.
+  researchInFlight.add(id);
+  setResearchDisabled(id, true);
+  clearResearchNote(id);
+  try {
+    let result;
+    try {
+      const r = await fetch(`${API}/api/pipeline/${id}/search-plan/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      result = await r.json();
+    } catch (_e) {
+      result = { outcome: 'failed_transient', error: 'Could not reach the server. Retry.' };
+    }
+    const copy = regenerateOutcomeCopy(result);
+    if (copy.metadataGap) {
+      // Sticky deterministic failure — surface the gap inline and leave the
+      // button DISABLED (re-clicking is futile until the metadata is fixed).
+      setResearchNote(id, copy.detail);
+      if (typeof toast === 'function') toast(`${copy.title}: ${copy.detail}`, true);
+      return;  // intentionally leave disabled; no refetch.
+    }
+    if (typeof toast === 'function') {
+      toast(`${copy.title}: ${copy.detail}`, copy.tone === 'error');
+    }
+    if (copy.requeued) {
+      // success / noop — refetch the row (KTD8). The list re-render closes
+      // the console; the row stays `wanted` (no optimistic band move).
+      await refetchLongTailRow(id);
+      return;
+    }
+    // Transient / not-found / unknown — re-enable so the operator can retry.
+    setResearchDisabled(id, false);
+  } finally {
+    researchInFlight.delete(id);
+  }
+}
+
+/**
+ * Enable/disable the re-search button for one row's console. DOM-side;
+ * no-op when the console isn't mounted.
+ *
+ * @param {number} id
+ * @param {boolean} disabled
+ * @returns {void}
+ */
+function setResearchDisabled(id, disabled) {
+  if (typeof document === 'undefined') return;
+  const bar = document.getElementById(`lt-actions-${id}`);
+  if (!bar) return;
+  const btn = /** @type {HTMLButtonElement|null} */ (bar.querySelector('.lt-act-research'));
+  if (!btn) return;
+  btn.disabled = disabled;
+  btn.textContent = disabled ? 'Re-searching…' : 'Re-search (next cycle)';
+}
+
+/**
+ * Surface the re-search inline note (the metadata-gap explanation on a
+ * sticky `failed_deterministic`). DOM-side; no-op when not mounted.
+ *
+ * @param {number} id
+ * @param {string} text
+ * @returns {void}
+ */
+function setResearchNote(id, text) {
+  if (typeof document === 'undefined') return;
+  const note = document.getElementById(`lt-research-note-${id}`);
+  if (note) note.textContent = text;
+}
+
+/**
+ * Clear the re-search inline note (on a fresh re-search attempt). DOM-side.
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function clearResearchNote(id) {
+  if (typeof document === 'undefined') return;
+  const note = document.getElementById(`lt-research-note-${id}`);
+  if (note) note.textContent = '';
+}
+
 export const __test__ = {
   MISSING_BAND,
   BAND_ORDER,
@@ -1636,4 +2182,11 @@ export const __test__ = {
   rescueOutcomeCopy,
   canStartInFlight,
   renderRescueConfirm,
+  // U6 — secondary action pure helpers.
+  canAcceptSibling,
+  acceptDisabledReason,
+  intentToggleTarget,
+  regenerateOutcomeCopy,
+  buildAcceptSiblingOptions,
+  renderActionsBar,
 };

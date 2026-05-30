@@ -1590,6 +1590,182 @@ console.log('long_tail.js __test__ (U5 rescue flow)');
     'renderRescueConfirm wires confirm + cancel buttons');
 }
 
+// --- long_tail.js U6 secondary-action pure helpers ---
+console.log('long_tail.js __test__ (U6 secondary actions)');
+{
+  const {
+    canAcceptSibling,
+    acceptDisabledReason,
+    intentToggleTarget,
+    regenerateOutcomeCopy,
+    buildAcceptSiblingOptions,
+    renderActionsBar,
+  } = longTailTest;
+
+  // --- canAcceptSibling: MB-only predicate (KTD7) ---
+  assertEqual(
+    canAcceptSibling({ source: 'request' }, 'rg-1'),
+    true,
+    'canAcceptSibling: MB request with a release group → true');
+  assertEqual(
+    canAcceptSibling({ source: 'discogs' }, 'rg-1'),
+    false,
+    'canAcceptSibling: Discogs-sourced request → false (no MB↔Discogs adapter)');
+  assertEqual(
+    canAcceptSibling({ source: 'DISCOGS' }, 'rg-1'),
+    false,
+    'canAcceptSibling: Discogs source is case-insensitive');
+  assertEqual(
+    canAcceptSibling({ source: 'request' }, null),
+    false,
+    'canAcceptSibling: no release group → false even for an MB request');
+  assertEqual(
+    canAcceptSibling({ source: 'request' }, ''),
+    false,
+    'canAcceptSibling: empty release group → false');
+  assertEqual(
+    canAcceptSibling(null, 'rg-1'),
+    false,
+    'canAcceptSibling: null row → false (no throw)');
+
+  // --- acceptDisabledReason: one-line reason, empty when enabled ---
+  assertEqual(
+    acceptDisabledReason({ source: 'request' }, 'rg-1'),
+    '',
+    'acceptDisabledReason: enabled → empty string');
+  assert(
+    acceptDisabledReason({ source: 'discogs' }, 'rg-1').toLowerCase().includes('discogs'),
+    'acceptDisabledReason: Discogs reason mentions Discogs');
+  assert(
+    acceptDisabledReason({ source: 'request' }, null).toLowerCase().includes('release group'),
+    'acceptDisabledReason: no-rg reason mentions the missing release group');
+
+  // --- intentToggleTarget: lossless ⇄ default toggle ---
+  assertEqual(
+    intentToggleTarget('lossless'),
+    'default',
+    'intentToggleTarget: lossless target_format → toggle to default (accept floor)');
+  assertEqual(
+    intentToggleTarget('flac'),
+    'default',
+    'intentToggleTarget: flac target_format reads as lossless → toggle to default');
+  assertEqual(
+    intentToggleTarget(null),
+    'lossless',
+    'intentToggleTarget: no target_format (default intent) → toggle to lossless');
+  assertEqual(
+    intentToggleTarget(''),
+    'lossless',
+    'intentToggleTarget: empty target_format → toggle to lossless');
+  assertEqual(
+    intentToggleTarget('mp3'),
+    'lossless',
+    'intentToggleTarget: non-lossless target_format → toggle to lossless');
+
+  // --- regenerateOutcomeCopy: every outcome → next-cycle copy (KTD3) ---
+  const regenSuccess = regenerateOutcomeCopy({ outcome: 'success' });
+  assertEqual(regenSuccess.tone, 'success', 'regenerateOutcomeCopy success → success tone');
+  assertEqual(regenSuccess.requeued, true, 'regenerateOutcomeCopy success → requeued (refetch)');
+  assertEqual(regenSuccess.metadataGap, false, 'regenerateOutcomeCopy success → not a metadata gap');
+  assert(
+    regenSuccess.detail.toLowerCase().includes('next cycle')
+      && !regenSuccess.detail.toLowerCase().includes('instant'),
+    'regenerateOutcomeCopy success copy is honest next-cycle, never "instant"');
+
+  const regenNoop = regenerateOutcomeCopy({ outcome: 'noop_active_plan_exists' });
+  assertEqual(regenNoop.tone, 'success', 'regenerateOutcomeCopy noop → success tone');
+  assertEqual(regenNoop.requeued, true, 'regenerateOutcomeCopy noop → requeued (already queued)');
+  assertEqual(regenNoop.metadataGap, false, 'regenerateOutcomeCopy noop → not a metadata gap');
+  assert(
+    regenNoop.detail.toLowerCase().includes('already'),
+    'regenerateOutcomeCopy noop says a fresh plan already exists');
+
+  // failed_deterministic is the METADATA-GAP variant — NOT a re-fire.
+  const regenDet = regenerateOutcomeCopy({
+    outcome: 'failed_deterministic',
+    error_message: 'no runnable query',
+    failure_class: 'incomplete_metadata',
+  });
+  assertEqual(regenDet.tone, 'error', 'regenerateOutcomeCopy failed_deterministic → error tone');
+  assertEqual(regenDet.metadataGap, true,
+    'regenerateOutcomeCopy failed_deterministic → metadataGap=true (surface inline, do NOT re-fire)');
+  assertEqual(regenDet.requeued, false,
+    'regenerateOutcomeCopy failed_deterministic → not requeued (no refetch)');
+  assert(regenDet.detail.includes('no runnable query'),
+    'regenerateOutcomeCopy failed_deterministic surfaces the API error');
+  assert(regenDet.detail.includes('incomplete_metadata'),
+    'regenerateOutcomeCopy failed_deterministic surfaces the failure class');
+  assert(regenDet.detail.toLowerCase().includes('field-quality'),
+    'regenerateOutcomeCopy failed_deterministic points at the field-quality detail');
+
+  const regenTrans = regenerateOutcomeCopy({ outcome: 'failed_transient', error: 'db hiccup' });
+  assertEqual(regenTrans.tone, 'error', 'regenerateOutcomeCopy failed_transient → error tone');
+  assertEqual(regenTrans.metadataGap, false,
+    'regenerateOutcomeCopy failed_transient → not a metadata gap (retryable)');
+  assertEqual(regenTrans.requeued, false, 'regenerateOutcomeCopy failed_transient → not requeued');
+  assert(regenTrans.detail.toLowerCase().includes('retry'),
+    'regenerateOutcomeCopy failed_transient tells the operator to retry');
+
+  const regenNotFound = regenerateOutcomeCopy({ outcome: 'request_not_found' });
+  assertEqual(regenNotFound.tone, 'error', 'regenerateOutcomeCopy request_not_found → error tone');
+  assert(regenNotFound.detail.toLowerCase().includes('refresh'),
+    'regenerateOutcomeCopy request_not_found tells the operator to refresh');
+
+  const regenUnknown = regenerateOutcomeCopy({ outcome: 'who_knows' });
+  assertEqual(regenUnknown.tone, 'error', 'regenerateOutcomeCopy unknown → error tone');
+  assert(regenUnknown.detail.length > 0, 'regenerateOutcomeCopy unknown → non-blank detail');
+  assertEqual(regenerateOutcomeCopy(null).tone, 'error',
+    'regenerateOutcomeCopy null → error tone (no throw)');
+
+  // --- buildAcceptSiblingOptions: standard-mode picker options ---
+  const opts = buildAcceptSiblingOptions({
+    id: 77, artist_name: 'Smog', album_title: 'Knock Knock', mb_release_group_id: 'rg-9' });
+  assertEqual(opts.sourceRequestId, 77, 'buildAcceptSiblingOptions carries the source request id');
+  assertEqual(opts.releaseGroupId, 'rg-9', 'buildAcceptSiblingOptions carries the release group id');
+  assert(opts.sourceLabel.includes('Smog') && opts.sourceLabel.includes('Knock Knock'),
+    'buildAcceptSiblingOptions builds an "Artist — Album" source label');
+  assertEqual(
+    buildAcceptSiblingOptions({ id: 5, artist_name: 'A', album_title: 'B' }).releaseGroupId,
+    null,
+    'buildAcceptSiblingOptions: no rg on row → null (picker lazily resolves)');
+
+  // --- renderActionsBar: enable/disable + intent badge + research btn ---
+  const mbBar = renderActionsBar({
+    id: 12, source: 'request', mb_release_group_id: 'rg-1', target_format: null });
+  assert(mbBar.includes('window.longTailAcceptSibling(12)'),
+    'renderActionsBar: MB row wires the accept-sibling handler');
+  assert(!/lt-act-accept[^>]*disabled/.test(mbBar),
+    'renderActionsBar: MB row accept-sibling is enabled');
+  assert(mbBar.includes('window.longTailSetIntent(12)'),
+    'renderActionsBar wires the set-intent toggle');
+  assert(mbBar.includes('window.longTailReSearch(12)'),
+    'renderActionsBar wires the re-search button');
+  assert(mbBar.includes('next cycle'),
+    'renderActionsBar re-search copy is honest next-cycle');
+  // default intent (no target_format) → toggle offers "switch to lossless".
+  assert(mbBar.includes('switch to lossless') && mbBar.includes('lt-intent-default'),
+    'renderActionsBar: default intent renders a default badge + "switch to lossless"');
+
+  const discogsBar = renderActionsBar({
+    id: 13, source: 'discogs', mb_release_group_id: null, target_format: 'lossless' });
+  assert(/lt-act-accept[^>]*disabled/.test(discogsBar),
+    'renderActionsBar: Discogs row disables accept-sibling');
+  assert(discogsBar.toLowerCase().includes('musicbrainz-only')
+    || discogsBar.toLowerCase().includes('discogs'),
+    'renderActionsBar: Discogs row shows the one-line disable reason');
+  assert(!discogsBar.includes('window.longTailAcceptSibling(13)'),
+    'renderActionsBar: disabled accept-sibling does not wire the handler onclick');
+  // lossless intent → badge + "accept current floor" toggle.
+  assert(discogsBar.includes('lt-intent-lossless') && discogsBar.includes('accept current floor'),
+    'renderActionsBar: lossless intent renders a lossless badge + "accept current floor"');
+
+  // MB row with no release group → accept-sibling disabled.
+  const noRgBar = renderActionsBar({
+    id: 14, source: 'request', mb_release_group_id: null, target_format: null });
+  assert(/lt-act-accept[^>]*disabled/.test(noRgBar),
+    'renderActionsBar: MB row with no release group disables accept-sibling');
+}
+
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
