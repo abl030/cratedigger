@@ -15,7 +15,7 @@ Cratedigger is a **music archival tool first, an acquisition pipeline second**. 
 - **The system never auto-decides anything irreversible.** Surfacing is fine ("we couldn't find this exact pressing but a sibling is available in FLAC"). Replace, remove-request, accept-different-pressing — those decisions belong to the operator. Cratedigger does not get to be "smart" on the operator's behalf.
 - **No adapter code between MB and Discogs.** Both feed the same columns in the same shape. Curation is data-source-agnostic — a Discogs-sourced Kid A request gets the same strict-pressing treatment as an MB-sourced one.
 - **Long-tail-rescue is a celebrated event.** When a request that's been categorised unfindable for weeks transitions to `imported` because a peer finally appeared with it, that's first-class audit data (`rescued_at` + `prior_unfindable_category` on `album_requests`). The product narrative justifies the watch-loop's existence; the audit trail proves it works.
-- **Single-operator, no backwards-compat for the rest of the world.** Cratedigger has exactly one user: the operator who runs this fork. There is no "other people's installs" to worry about. Backfills aren't product code — they're one-shots the agent (or operator) runs during a deploy window and then throws away. Schema migrations are forward-only; once applied, the code assumes the new state with no defensive fallback for "what if the migration didn't run." No retry-window machinery in long-lived scripts for re-running operations that happen exactly once. No `if old_shape_exists: …` compatibility shims. If a follow-up PR makes the previous one's helper obsolete, **delete the helper**, don't leave it behind as deprecated code for a phantom audience. The pattern of accumulating one-shot operational machinery is itself a product bug.
+- **Single-operator, no backwards-compat for the rest of the world.** Cratedigger has exactly one user: the operator who runs this fork. There is no "other people's installs." Forward-only migrations, no compat shims, no deprecated-but-kept helpers, backfills as throwaway one-shots (never committed scripts), no one-shot operational machinery carried for a phantom audience. The full rules — and why the accumulation of that machinery is itself a product bug — are in `.claude/rules/scope.md` (always loaded).
 
 If a future design decision drifts toward "good enough" matches, "smart" defaults, auto-throttling apparently-dead requests, or carrying around dead one-shot infrastructure for "what if we need to rerun it," that drift is a bug. Push back.
 
@@ -29,11 +29,11 @@ If a future design decision drifts toward "good enough" matches, "smart" default
    ```
    The key works for both machines. You may need `-o StrictHostKeyChecking=no` on first use.
 3. **nixosconfig changes MUST be made on doc1.** The repo lives at `~/nixosconfig` on doc1. Doc1 has the git push credentials; doc2 and Windows do not. SSH to doc1 first, edit, commit, push, then deploy to doc2.
-4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`, migrated from SQLite 2026-03-25). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH; for non-root SSH sessions, source `/run/secrets/cratedigger-pgpass` and export `PGPASSWORD` before running `pipeline-cli` (example below). Raw TCP reachability to `192.168.100.11:5432` exists on doc1/doc2, not on the Framework laptop by default. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
+4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH; for non-root SSH sessions, source `/run/secrets/cratedigger-pgpass` and export `PGPASSWORD` before running `pipeline-cli` (example below). Raw TCP reachability to `192.168.100.11:5432` exists on doc1/doc2, not on the Framework laptop by default. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
 5. **This is a curated music collection.** Multiple editions/pressings of the same album are intentional. NEVER delete or merge duplicate albums — they are different MusicBrainz releases (countries, track counts, labels) and the user wants them all. Beets must disambiguate them into separate folders.
 6. **The pipeline self-heals — the request is the source of truth, everything else is derived.** Files, beets entries, wrong-matches folders, search plans, denylist, overrides, evidence — all derived state. Operator actions that touch identity supersede the row rather than mutate it, and let the pipeline rebuild from the new row. Audit trail (the frozen old row and its content-addressed child rows) is preserved by virtue of the old row never being mutated or deleted. The Replace operator action (`lib/mbid_replace_service.py`) is the canonical example: it flips the old row to `status='replaced'`, inserts a new row with `replaces_request_id` pointing back, and lets the next 5-minute cycle re-source from the new MBID. Request statuses also include `replaced` (terminal, frozen audit row).
-7. **Don't duplicate convergence — reuse the cleanup paths that already exist.** When an operator action could leave behind orphans (in-flight slskd transfers, stale staging, dangling rows), prefer letting existing convergence pick them up over adding bespoke teardown to the action. Where convergence does not yet exist, file an issue and ship the closest direct cleanup in the action itself. Replace deliberately leaves in-flight slskd transfers running (cleanup tracked at issue #278) rather than building a partial cancellation path that would duplicate that work.
-8. **Wildcard-all-artist-tokens stays.** `lib/search.py::wildcard_artist_tokens` replaces the first char of every artist token with `*` (not just the first token). Bypasses Soulseek's server-side artist-name bans, which are keyed on exact strings — "Mountain Goats" might be banned while "*ountain *oats" is not. Single-token wildcarding (just the first token) would leave second-token bans unaddressed. The all-tokens behaviour is deliberate and stays unchanged through the PR2 generator restructure. See `docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md` for the trade-off against precision loss.
+7. **Don't duplicate convergence — reuse the cleanup paths that already exist.** When an operator action could leave behind orphans (in-flight slskd transfers, stale staging, dangling rows), prefer letting existing convergence pick them up over adding bespoke teardown to the action. Where convergence does not yet exist, file an issue and ship the closest direct cleanup in the action itself. Replace deliberately leaves in-flight slskd transfers running rather than building a partial cancellation path that would duplicate that work.
+8. **Wildcard-all-artist-tokens stays.** `lib/search.py::wildcard_artist_tokens` replaces the first char of every artist token with `*` (not just the first token). Bypasses Soulseek's server-side artist-name bans, which are keyed on exact strings — "Mountain Goats" might be banned while "*ountain *oats" is not. Single-token wildcarding (just the first token) would leave second-token bans unaddressed. The all-tokens behaviour is deliberate and stays. See `docs/brainstorms/2026-05-25-search-plan-iteration-2-requirements.md` for the trade-off against precision loss.
 
 ## Subsystems
 
@@ -45,9 +45,9 @@ If a future design decision drifts toward "good enough" matches, "smart" default
 - **MusicBrainz mirror** (`http://192.168.1.35:5200`) — local MB mirror. See `docs/musicbrainz-mirror.md`.
 - **Quality model** — codec-aware rank comparison (LOSSLESS > TRANSPARENT > EXCELLENT > ...). Every measurement classifies into a `QualityRank` band; gate compares against `cfg.quality_ranks.gate_min_rank` (default EXCELLENT). See `docs/quality-ranks.md` and `docs/quality-verification.md`.
 - **User cooldowns** — global 3-day cooldowns for Soulseek users with 5 consecutive failures. See `docs/cooldowns.md`.
-- **Persisted search plans** — every `wanted` request carries a deterministic plan generated by `lib.search.generate_search_plan` and persisted via `lib.search_plan_service.SearchPlanService`. Phase 2 reads `get_wanted_searchable(SEARCH_PLAN_GENERATOR_ID, ...)` and consumes plan-items by ordinal; the executor never recomputes variants. Atomic consumed-attempt writes guard against stale completions after mid-flight regeneration. New `outcome='exhausted'` rows are no longer emitted (cycle wrap replaces them); historical rows remain. Bump `SEARCH_PLAN_GENERATOR_ID` in `lib/search.py` whenever generator output changes. See `docs/persisted-search-plans-rollout.md`, `docs/pipeline-db-schema.md`.
-- **Unfindable detection** — dedicated `cratedigger-unfindable.service` oneshot on a daily systemd timer (K=100 rows/run, ~7d per-request cadence, ~9d cohort coverage). Categorises wanted requests into a 4-bucket taxonomy (`artist_absent`, `album_absent_artist_present`, `one_track_structural`, `wrong_pressing_available`) and writes `album_requests.unfindable_category`. **Lives in its own systemd unit, NOT inline in the 5-min `cratedigger.service` loop**, because R20 ("the system never stops searching") forbids the regular search cadence from being throttled by detection state — the structural separation makes that invariant enforceable at the systemd level. Long-tail rescues (a previously-unfindable request that finally imports) populate `rescued_at` + `prior_unfindable_category` atomically with the import. See `lib/unfindable_detection_service.py`, `docs/search-plan-iter2-deploy.md`.
-- **Triage subsystem** — `lib/triage_service.py` composes unfindable categorisation + field-resolution telemetry + search-log forensics into one typed `TriageResult: msgspec.Struct`. Operator-facing via `pipeline-cli triage show <id>` / `pipeline-cli triage list --filter=<spec>` and `GET /api/triage/<id>` / `GET /api/triage/list`. Filter syntax: `all`, `unfindable[:<category>]`, `data_quality[:<field>]`, `data_quality:status=<status>` (the primary handle for the #374 sticky 4xx cohort — `unresolved_4xx_client` lives in the **status** column, not `reason_code`), `data_quality:reason=<code>` (e.g. `http_400`), `search_not_converting`. `list_triage` is bounded to 4 DB queries at any page size (N+1 mitigation enforced by `tests/test_triage_service.py::TestListTriageN1Guard`). Read-only — operator actions (`triage replace`, `triage skip`) are deferred. Replaced-row (frozen audit) inclusion is pinned by `test_list_includes_replaced_rows`. See `docs/search-plan-iter2-deploy.md` § "PR4 — Operator surface".
+- **Persisted search plans** — every `wanted` request carries a deterministic plan generated by `lib.search.generate_search_plan` and persisted via `lib.search_plan_service.SearchPlanService`. Phase 2 reads `get_wanted_searchable(SEARCH_PLAN_GENERATOR_ID, ...)` and consumes plan-items by ordinal; the executor never recomputes variants. Atomic consumed-attempt writes guard against stale completions after mid-flight regeneration. Bump `SEARCH_PLAN_GENERATOR_ID` in `lib/search.py` whenever generator output changes. See `docs/persisted-search-plans-rollout.md`, `docs/pipeline-db-schema.md`.
+- **Unfindable detection** — dedicated `cratedigger-unfindable.service` oneshot on a daily systemd timer (bounded batch per run, roughly weekly per-request cadence). Categorises wanted requests into a 4-bucket taxonomy (`artist_absent`, `album_absent_artist_present`, `one_track_structural`, `wrong_pressing_available`) and writes `album_requests.unfindable_category`. **Lives in its own systemd unit, NOT inline in the 5-min `cratedigger.service` loop**, because R20 ("the system never stops searching") forbids the regular search cadence from being throttled by detection state — the structural separation makes that invariant enforceable at the systemd level. Long-tail rescues (a previously-unfindable request that finally imports) populate `rescued_at` + `prior_unfindable_category` atomically with the import. See `lib/unfindable_detection_service.py`, `docs/search-plan-iter2-deploy.md`.
+- **Triage subsystem** — `lib/triage_service.py` composes unfindable categorisation + field-resolution telemetry + search-log forensics into one typed `TriageResult: msgspec.Struct`. Operator-facing via `pipeline-cli triage show <id>` / `pipeline-cli triage list --filter=<spec>` and `GET /api/triage/<id>` / `GET /api/triage/list`. Filter syntax: `all`, `unfindable[:<category>]`, `data_quality[:<field>]`, `data_quality:status=<status>` (note `unresolved_4xx_client` lives in the **status** column, not `reason_code`), `data_quality:reason=<code>` (e.g. `http_400`), `search_not_converting`. `list_triage` is bounded to 4 DB queries at any page size (N+1 mitigation enforced by `tests/test_triage_service.py::TestListTriageN1Guard`). Read-only (`show`/`list`); replaced-row (frozen audit) inclusion is pinned by `test_list_includes_replaced_rows`. See `docs/search-plan-iter2-deploy.md`.
 - **YouTube Music resolver + rescue ingest** — two adjacent subsystems for the long-tail rescue narrative. The **resolver** (`lib/youtube_album_service.py`, `web/routes/youtube.py`, `pipeline-cli youtube-album`) takes any MB release MBID or Discogs release ID and returns the set of matching YT Music album entities annotated with beets distance scores against every MB pressing in the release group; results cached in `youtube_album_mappings` (no TTL, refresh on demand). See `docs/brainstorms/2026-05-27-youtube-music-album-resolver-requirements.md`. The **rescue ingest** (`lib/youtube_ingest_service.py`, `scripts/youtube_ingest_worker.py`, `pipeline-cli youtube-rescue`, `POST /api/pipeline/<id>/youtube-rescue`) takes `(request_id, browse_id)` against an existing `wanted`/`manual` request, runs yt-dlp on the resolver-supplied playlist, enforces a hard track-count gate before staging, and enqueues a new `youtube_import` job_type for the existing preview→importer chain. `download_log` doubles as both queue (`outcome='youtube_running'`) and audit (`source='youtube'` + `youtube_metadata` JSONB); `album_requests.status` is NEVER touched by this code path — `mark_imported_with_rescue` performs the only status write on import success, source-agnostically. The worker is a separate systemd unit (`cratedigger-youtube-ingest.service`) so the downstream Nix wrapper can network-namespace its YouTube egress without touching the other services. See `docs/plans/2026-05-28-001-feat-youtube-rescue-ingest-api-plan.md` + `docs/brainstorms/2026-05-28-youtube-rescue-ingest-api-requirements.md`.
 - **API discoverability** — `GET /api/_index` and `pipeline-cli routes` self-document every registered route / CLI subcommand with descriptions + Pydantic request models (POST routes). `TestRouteContractAudit::test_every_registered_route_has_a_description` enforces non-empty descriptions on every route. Description metadata lives in parallel `GET_DESCRIPTIONS` / `POST_DESCRIPTIONS` / `PATTERN_DESCRIPTIONS` dicts per `web/routes/*.py` module, merged in `web/server.py::Handler` mirroring the existing dispatch-table block.
 
@@ -85,76 +85,31 @@ ssh doc2 'sudo cat /var/lib/cratedigger/config.ini'
 
 ### Web dev server
 
-Use `scripts/web_dev_server.py` in two layers:
-
-- `--data live-db` runs local route code against a real read-only PostgreSQL
-  session and the backend host's filesystem.
-- `--data prod-api` serves your checked-out frontend files locally while
-  proxying `/api/*` to another read-only backend. Despite the name, it can
-  target any remote base URL, not just prod.
-
-For Wrong Matches, `live-db` must run on a host that can see the rejected
-folders on disk. DB reachability alone is not enough because
-`/api/wrong-matches/explorer` and `/api/wrong-matches/audio` open real files.
-In this homelab, `doc1` and `doc2` qualify as backend hosts; Framework and
-Windows do not unless the relevant paths are mounted locally.
-
-Canonical remote-dev flow from any machine with SSH access:
-
-1. Start a `live-db` backend on a host that can see the files. If that host
-   does not have direct DB reachability, tunnel PostgreSQL first:
-   ```bash
-   ssh -N -L 15432:192.168.100.11:5432 doc2
-   PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
-     nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
-   ```
-2. Tunnel that backend to your local machine if `8096` is not already reachable:
-   ```bash
-   ssh -N -L 18096:127.0.0.1:8096 <backend-host>
-   ```
-3. On your local checkout, serve the frontend against the tunneled backend:
-   ```bash
-   nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --prod-base-url http://127.0.0.1:18096 --host 127.0.0.1 --port 8096"
-   ```
-
-Open `http://127.0.0.1:8096`. This gives live reload for local `web/` edits
-without exposing the Postgres port to the laptop. The proxy forwards `Range`
-headers, so Wrong Matches audio playback and scrubbing still work through the
-tunnel.
-
-`--beets-db` is optional in this flow. Wrong Matches does not need it; only
-beets-backed library badges and lookups do.
+`scripts/web_dev_server.py` runs local route code against a real read-only PostgreSQL (`--data live-db`) or proxies `/api/*` to a remote backend while serving local frontend files (`--data prod-api`). Wrong Matches needs `live-db` on a host that can see the rejected folders on disk (`doc1`/`doc2` qualify; Framework/Windows don't). Canonical remote-dev flow (PG tunnel + double SSH forward + Range-header passthrough for audio scrubbing) in `docs/web-dev-server.md`.
 
 ## Repository layout
 
 ```
-cratedigger.py          — Main loop + thin wrappers; delegates to lib/
-album_source.py         — AlbumRecord, DatabaseSource abstraction
-web/                    — Web UI (server.py, mb.py, discogs.py, index.html, js/)
-lib/                    — Pipeline modules (see below)
-harness/                — beets_harness.py (JSON protocol), import_one.py (one-shot)
-migrations/             — Versioned SQL (NNN_name.sql), run by lib/migrator.py
-scripts/                — pipeline_cli.py, migrate_db.py, run_tests.sh, populate_tracks.py
-tests/                  — 1400+ tests; fakes.py + helpers.py shared infra
-nix/                    — slskd-api build, package.nix, shell.nix, module.nix, VM check
-flake.nix               — Outputs: slskd-api, devShell, nixosModules.default, checks.moduleVm
-docs/                   — Subsystem docs referenced from this file
-docs/solutions/         — Compounding lessons from past bugs/decisions, organized by category with YAML frontmatter (module, tags, problem_type). Worth a grep when debugging in a documented area.
-.claude/rules/          — Path-scoped auto-loaded rules (code-quality, nix-shell, deploy, ...)
+cratedigger.py    — Main loop + thin wrappers; delegates to lib/
+album_source.py   — AlbumRecord, DatabaseSource abstraction
+web/              — Web UI (server.py, routes/, mb.py, discogs.py, js/)
+lib/              — Pipeline modules (see below)
+harness/          — beets_harness.py (JSON protocol), import_one.py
+migrations/       — Versioned SQL (NNN_name.sql), run by lib/migrator.py
+scripts/          — pipeline_cli.py + dev/ops scripts
+tests/            — shared infra in fakes.py + helpers.py
+nix/              — slskd-api build, package.nix, shell.nix, module.nix, VM check
+flake.nix         — Outputs: slskd-api, devShell, nixosModules.default, checks.moduleVm
+docs/             — Subsystem docs referenced from this file
+docs/solutions/   — Compounding lessons from past bugs (YAML frontmatter; grep when debugging)
+.claude/rules/    — Path-scoped auto-loaded rules
 ```
 
-Key `lib/` modules:
-- `config.py` — typed `CratediggerConfig` (loaded from config.ini)
-- `context.py` — `CratediggerContext` (replaces module globals; caches cooled_down_users)
-- `pipeline_db.py` — PostgreSQL CRUD + advisory locks (see `docs/advisory-locks.md`)
-- `migrator.py` — versioned schema migrator
-- `quality.py` — pure decision functions + all typed dataclasses (`ImportResult`, `ValidationResult`, `DispatchAction`, `QualityRankConfig`, `CooldownConfig`, ...)
-- `measurement.py` — pure measurement helpers (`measure_preimport_state`, `inspect_local_files`, `spectral_analyze`, bad-audio-hash gate). No decision logic — the importer reads persisted evidence and decides via `full_pipeline_decision_from_evidence`.
-- `download.py` — async polling + completion processing + slskd transfers
-- `import_queue.py` — typed shared queue payload/result helpers
-- `import_dispatch.py` — decision tree + quality gate + dispatch_import_from_db
-- `import_service.py` — force-import / manual-import service layer
-- `grab_list.py`, `search.py`, `beets.py`, `beets_db.py`, `spectral_check.py`, `util.py`
+Decision-critical modules: `quality.py` (pure decision functions + typed dataclasses),
+`measurement.py` (pure measurement, no decision logic), `import_dispatch.py`
+(`dispatch_import_from_db` + quality gate), `pipeline_db.py` (PostgreSQL CRUD +
+advisory locks — see `docs/advisory-locks.md`). `config.py`/`context.py` hold the
+typed `CratediggerConfig` and the `CratediggerContext` that replaced module globals.
 
 ## Pipeline flow
 
@@ -204,93 +159,11 @@ Schema fields, JSONB audit blobs, search_log outcomes, and the force-import flow
 
 ## CLI ⇄ API surface symmetry
 
-Operator capabilities should appear on **both** `pipeline-cli` and the web API. When you add an operator action to one, add it to the other in the same PR. Both surfaces wrap the same service-layer method (e.g. `SearchPlanService.advance_for_request`); the CLI command and the HTTP endpoint are thin adapters with matching exit-code/status-code mappings.
-
-Why: operators frequently start in the web UI, escalate to CLI when they want a script, or vice versa. A capability that exists in only one surface is a trap — the team learns to expect parity, then trips when it isn't there. A drifted contract (CLI returns one shape, API returns another) is worse than no parity, because tests usually catch only one side.
-
-Concrete pattern (see `search-plan advance` for a worked example):
-
-| Layer | File | Responsibility |
-|-------|------|----------------|
-| Service | `lib/<thing>_service.py` | Holds logic; returns a typed `Result` dataclass |
-| DB | `lib/pipeline_db.py` | Atomic mutations + `FOR UPDATE` row locks |
-| CLI | `scripts/pipeline_cli.py` | Wraps service; maps `Result.outcome` to exit code |
-| API | `web/routes/<thing>.py` | Wraps service; maps `Result.outcome` to HTTP status |
-| Tests | `tests/test_<thing>_service.py` + `tests/test_pipeline_cli.py` + `tests/test_web_server.py` | Service tests are authoritative; CLI + API tests check the wrapper mapping |
-| Audit | `tests/test_web_server.py::TestRouteContractAudit::CLASSIFIED_ROUTES` | Every new route must be added — guard test fails otherwise |
-
-Status/exit code mapping should follow the existing convention:
-- 200 / exit 0 — success
-- 400 / exit 3 — input validation error (API only — CLI argparse catches this)
-- 404 / exit 2 — not found
-- 409 / exit 4 — wrong state (e.g. no active plan when one is required)
-- 422 / exit 3 — semantic validation error (e.g. forward-only violated)
-- 503 / exit 5 — transient (lock contention, retry)
-
-If you only need the capability from one surface in this PR, expose it on both anyway. The cost of adding the second surface is small; the cost of explaining "why is X CLI-only?" to a future operator is larger.
+Every operator action lives on **both** `pipeline-cli` and the web API, wrapping the same service-layer method (e.g. `SearchPlanService.advance_for_request`); the CLI command and HTTP endpoint are thin adapters with matched exit-code/status-code mappings. Adding a capability to only one surface is a trap operators will trip on. The full layer-responsibility table, the worked example (`search-plan advance`), and the status/exit-code convention are in `.claude/rules/code-quality.md` § "CLI ⇄ API Surface Symmetry" (always loaded).
 
 ## Decision architecture
 
-**Quality decisions live in ONE place.** `full_pipeline_decision_from_evidence`
-in `lib/quality.py` (and its flat-kwargs simulator twin `full_pipeline_decision`)
-is the single source of truth for every importer decision — folder/audio
-integrity (audio_corrupt, bad_audio_hash, nested_layout, empty_fileset) AND
-quality (spectral, codec rank, V0 probe, provisional lossless, verified
-lossless, transcode detection, quality gate). **Never re-create import
-decisions elsewhere.** If a code path needs to know "should this be
-imported", it must call the full pipeline — not invent its own narrower
-check.
-
-This bit us twice. First (PR #257): a parallel `preimport_decide` spectral
-branch fell back to existing container bitrate when spectral evidence was
-missing, rejecting legitimate FLAC provisional-lossless upgrades. Fixed by
-deleting the parallel decision. Second (the evidence-canonical-cleanup
-refactor, PR landing #258 + this PR): `preimport_decide` still owned four
-folder/audio-integrity branches alongside `full_pipeline_decision_from_evidence`.
-That asterisk on "quality decisions live in ONE place" — "except these four
-facts, which live in `preimport_decide`" — was hair-splitting. The four
-branches were folded into `full_pipeline_decision_from_evidence` as early
-exits at the top of the function (U11). One decider, one rejection helper,
-one denylist policy.
-
-**Preview produces evidence. Importer decides.** The two-worker contract:
-
-- **Preview worker** (`lib/import_preview.py`): measures via
-  `measure_preimport_state` + `run_import_one`, persists
-  `AlbumQualityEvidence`, marks the job `evidence_ready` (or
-  `measurement_failed`). Never emits a verdict. Never decides accept/reject.
-  Never writes the denylist.
-- **Importer worker** (`lib/import_dispatch.py::dispatch_import_from_db`):
-  reads persisted evidence and decides via
-  `full_pipeline_decision_from_evidence`. The single function makes every
-  import decision — the four folder/audio-integrity early branches
-  (`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) and
-  the quality branches (spectral, codec rank, V0, gate). Rejects route
-  through one helper (`_reject_import_from_evidence_decision`) with one
-  denylist policy (`dispatch_action` returns `denylist=True` for source-
-  quality rejects and the two integrity reasons that warrant peer
-  denylisting). The "always self-heal on four-fact reject" invariant is
-  enforced via `_PREIMPORT_FACT_REJECT_DECISIONS` inside the unified
-  helper.
-
-If you find yourself writing a new function that compares spectral / bitrate
-/ codec ranks, stop. Either call `full_pipeline_decision_from_evidence` or
-extend the pure decision helpers it already composes (`spectral_import_decision`,
-`measured_import_decision`, `provisional_lossless_decision`,
-`quality_gate_decision`). The function does NOT accept container-bitrate
-fallback — spectral compares to spectral evidence only (invariant of #257).
-
-**The album test set is what defines behavior.** Live-bug scenarios go in
-`tests/test_quality_classification.py::TestLiveBugReproductions` (Bride,
-Flux, Taboo, Tyler Lambert, BoC, Heretic Pride, etc.) and the
-preimport-fact scenarios (audio_corrupt, bad_audio_hash, nested_layout,
-empty_fileset, mixed_source) go in `TestPreimportFactRejects` (same file).
-Every scenario
-MUST also be exercised through the production decider via
-`TestLiveBugReproductionsThroughEvidencePipeline` — the parity contract is
-that the simulator and the evidence pipeline reach the same outcome on the
-same album. If you change import policy, update the album test set first;
-the live code follows.
+**Quality decisions live in ONE place** — `full_pipeline_decision_from_evidence` in `lib/quality.py` (simulator twin `full_pipeline_decision`) is the single source of truth for every importer decision. The two-worker contract (preview measures + persists `AlbumQualityEvidence`; importer reads evidence and decides), the "never re-create the decision elsewhere / never add a narrower check upstream" rule, the no-container-bitrate-fallback invariant (#257), and the album-test-set parity contract are all in `.claude/rules/code-quality.md` § "Quality decisions live in ONE place" (always loaded). The material below is the part that lives only here: how evidence is addressed, propagated, and owned.
 
 **Evidence is content-addressed.** `album_quality_evidence` rows are keyed
 by `(mb_release_id, snapshot_fingerprint)`; addressing entities reference
@@ -359,20 +232,7 @@ not `@dataclass` — see `.claude/rules/code-quality.md` § "Wire-boundary types
 
 ## Deploying changes
 
-Flake input updates MUST happen on doc1. Doc2 has no git push credentials.
-
-```bash
-# 1. commit + push code (anywhere)
-git add <files> && git commit -m "..." && git push
-
-# 2. bump flake input (on doc1)
-ssh doc1 'cd ~/nixosconfig && nix flake update cratedigger-src && git add flake.lock && git commit -m "cratedigger: ..." && git push'
-
-# 3. rebuild doc2 — runs cratedigger-db-migrate AND restarts cratedigger-web
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
-```
-
-`cratedigger.service` has `restartIfChanged = false` — deploys don't restart it. The 5-min timer picks up new code. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and restart on switch. Before deploying `nix/module.nix` changes, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`. Full flow + verification in `.claude/rules/deploy.md`; `/deploy` command runs the whole sequence.
+All code deploys via Nix flake: push → `nix flake update cratedigger-src` on doc1 → `nixos-rebuild switch` doc2. Flake input updates MUST happen on doc1 (doc2 has no git push credentials). `cratedigger.service` has `restartIfChanged = false` — the 5-min timer picks up new code; `cratedigger-web` and `cratedigger-db-migrate` restart on switch. Before `nix/module.nix` changes, run the VM check (`nix build .#checks.x86_64-linux.moduleVm`). Full command sequence + verification in `.claude/rules/deploy.md` (always loaded); the `/deploy` command runs it end-to-end.
 
 ## GitHub PR merges
 
@@ -384,9 +244,7 @@ individual commits that landed in the PR.
 
 ## Database migrations
 
-Schema lives in `migrations/NNN_name.sql`. `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs on every `nixos-rebuild switch` BEFORE `cratedigger.service`, `cratedigger-web.service`, and `cratedigger-importer.service`. These services require the migrate unit, so a failed migration blocks the app from coming up.
-
-To add a schema change: drop a new numbered SQL file in `migrations/`, test with `nix-shell --run "python3 -m unittest tests.test_migrator -v"`, commit, deploy. No manual psql. **Never** edit an already-shipped migration — frozen history. **Never** add DDL inside `PipelineDB` methods. For destructive changes, back up first: `ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' > /tmp/backup.sql`. Verify after deploy: `ssh doc2 'pipeline-cli query "SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5"'`.
+Schema lives in `migrations/NNN_name.sql`; `cratedigger-db-migrate.service` runs them on every `nixos-rebuild switch` before the app services start (a failed migration blocks the app). Add a change by dropping a new numbered SQL file — no manual psql, **never** edit a shipped migration (frozen history), **never** add DDL inside `PipelineDB` methods. Full workflow (test with `tests.test_migrator`, back-up-before-destructive, post-deploy verify) in `.claude/rules/deploy.md` § "Database migrations" (always loaded).
 
 ## Running tests
 
@@ -441,91 +299,11 @@ Browser automation for testing `music.ablz.au`. Configured per-machine in `.mcp.
 
 ## Debugging quality decisions
 
-```bash
-pipeline-cli show <request_id>               # quality columns + download history with import decisions
-pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / V0 / CBR 320 / suspect FLAC
-pipeline-cli debug-download <download_log_id>  # raw JSONB audit for one attempt
-pipeline-cli search-plan show <request_id>   # active plan + cursor + per-slot usefulness stats (--json for machine output)
-pipeline-cli search-plan regenerate <request_id>  # operator repair path; resets cursor on success, preserves old plan on failure
-pipeline-cli query "SELECT ..."              # ad-hoc read-only SQL (add --json for machine output)
-pipeline-cli query - <<'SQL'                 # multi-line SQL without shell quoting
-SELECT id, artist_name, album_title, min_bitrate, current_spectral_bitrate
-FROM album_requests
-WHERE current_spectral_bitrate IS NOT NULL
-ORDER BY updated_at DESC LIMIT 10
-SQL
-```
-
-From doc1, run the CLI over SSH by sourcing doc2's sops-managed PG dotenv
-inside a `sudo bash -c` (the secret is `-r-------- root root`, so a plain
-`. /run/secrets/cratedigger-pgpass` in a user shell will get
-`permission denied` and `pipeline-cli` will then fail with
-`fe_sendauth: no password supplied`). `sudo` is NOPASSWD for `wheel` on
-doc2, so this is non-interactive:
-
-```bash
-ssh doc2 'sudo bash -c "set -a; . /run/secrets/cratedigger-pgpass; set +a; export PGPASSWORD=\${PGPASSWORD:-\${PIPELINE_DB_PASSWORD:-\${POSTGRES_PASSWORD:-}}}; pipeline-cli query --json \"SELECT 1 AS ok\""'
-```
-
-Note the escaped `\$` and `\"` — they are evaluated inside the inner
-`bash -c`, not by the outer ssh-side shell. For multi-line SQL, prefer
-`pipeline-cli query - <<'SQL' ... SQL` *inside* the `sudo bash -c` body, or
-write the query to a temp file and pass it as an argument.
-
-`pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD".
-
-For search-plan iter2 triage signals, `album_requests.failure_class` (5-bucket cycle classification, written at plan-wrap) and `album_requests.unfindable_category` (4-bucket cohort taxonomy, written by the daily detection service) are queryable via `pipeline-cli query` — `GROUP BY failure_class` surfaces stuck-pattern distribution; `GROUP BY unfindable_category` surfaces unfindable-cohort distribution. `search_log.rejection_reason` (PR3 R22) is the per-search scalar that lets `GROUP BY` skip JSONB introspection into `candidates`. Full column inventory in `docs/pipeline-db-schema.md` § "Search-plan iteration 2".
+`pipeline-cli show / quality / debug-download / search-plan show / query` are the diagnostic entry points (`query` is read-only). Start with the simulator (`pipeline-cli quality <id>`) and add a failing scenario FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD". Command reference, the doc1→doc2 sops-pgpass SSH incantation, and the search-plan iter2 triage signals (`failure_class`, `unfindable_category`, `search_log.rejection_reason`) are in `docs/debugging-cli.md`.
 
 ## Finding dead code
 
-Two complementary tools — use them together when the test suite starts feeling like a tax on code nobody runs in production.
-
-**Static (fast, noisy):** vulture flags unreferenced functions / classes / variables.
-
-```bash
-nix-shell --run "bash scripts/find_dead_code.sh"             # diff vs whitelist — only new findings
-nix-shell --run "bash scripts/find_dead_code.sh --baseline"  # all candidates (initial hunt)
-```
-
-The whitelist at `tools/vulture/whitelist.py` masks the 166 known false positives on main (msgspec Struct fields, beets ImportSession overrides, route handler dispatch, SQL DictRow attribute access). After deleting genuinely-dead code, regenerate the baseline:
-
-```bash
-nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py > tools/vulture/whitelist.py"
-```
-
-**Runtime (slow, unambiguous):** coverage.py against production traffic, then diff against test coverage.
-
-1. Enable in `~/nixosconfig/modules/nixos/services/cratedigger.nix` (downstream wrapper): `services.cratedigger.coverage.enable = true;`. Deploy. Data accumulates at `/var/lib/cratedigger/coverage/` from the cratedigger oneshot, importer, preview worker, and web server. ~5-10% CPU overhead per process. The subprocess `.pth` shim (`nix/coverage-subprocess.nix`) makes `import_one.py` runs participate too.
-2. After a representative window (a week, including at least one operator action: Replace, force-import, ban-source — otherwise rare operator paths look dead):
-   ```bash
-   nix-shell --run "bash scripts/run_tests_with_coverage.sh"   # populates build/test-coverage/
-   nix-shell --run "bash scripts/coverage_report.sh doc2"      # rsyncs from prod, builds build/coverage-html/
-   nix-shell --run "python3 scripts/coverage_diff.py"          # the test-only-lines report
-   ```
-3. `build/test-only-lines.txt` lists every line that tests cover but production never executed. That's the actionable dead-code candidates — either delete or demote from unit tests to a manual smoke procedure.
-
-**Caveat:** coverage.py traces only Python; the `beet` subprocess is third-party and unmeasured. Anything reachable only via `beet` plugins won't appear in either side of the diff.
-
-### Cascading orphans — regen the whitelist after every deletion
-
-Deleting a vulture-flagged helper frequently exposes a **deeper orphan** that was kept alive solely by the thing you just deleted. The pattern has now bitten this audit four times:
-
-- **PR #358** — deleting `finalize_request_if_plan_current` orphaned `PipelineDB.is_request_plan_current` (its only reader)
-- **PR #360** — deleting `move_album` orphaned `BeetsOpResult.new_path` (only set by `move_album`)
-- **PR #363 → #364** — deleting `_select_variant_for_album` (in #356) exposed `build_query` and `select_variant`; deleting those exposed `strip_short_tokens`
-- **PR #355** — deleting all three public exports of `lib/import_service.py` left `_apply_request_spectral_fields` as a cascading orphan that justified deleting the whole module
-
-The mechanic is simple but easy to miss: vulture's whitelist contains an entry per known orphan, keyed by name. When a helper goes away, its callees lose their last reference but aren't in the whitelist yet (they were "used" before). The next `vulture --make-whitelist` run will surface them, and `bash scripts/find_dead_code.sh` will go red until you either delete them or accept them as new whitelist entries.
-
-**Workflow per deletion PR:**
-1. Make the deletion + delete the tests that exercised it.
-2. Regenerate the whitelist: `nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py" 2>/dev/null > tools/vulture/whitelist.py` (then prepend the 22-line header back from the previous version).
-3. Diff the whitelist (`git diff tools/vulture/whitelist.py`). New entries are cascading orphans you exposed.
-4. For each new entry, decide:
-   - **Fold into this PR** if the orphan is small, contained, and the test cleanup is bounded (~50 LOC). Best when the orphan is structurally tied to the deletion (`strip_short_tokens` was the canonical example — its body matched what only the deleted callers needed).
-   - **Park in the whitelist** if it'd double the PR. Document the cascade in the PR description and the umbrella issue so the next pass picks it up.
-
-**Anti-pattern:** deleting a helper, leaving the cascading orphans in the whitelist, and forgetting about them. The whitelist grows silently and the audit goes stale.
+vulture (static, `nix-shell --run "bash scripts/find_dead_code.sh"` — diffs against `tools/vulture/whitelist.py`) plus coverage.py against production traffic (runtime). After deleting dead code, regenerate the whitelist and watch for **cascading orphans** — deleting one helper frequently exposes its now-unreferenced callees, so the next `vulture --make-whitelist` run surfaces them. Full tooling, the runtime-coverage flow, and the per-deletion cascading-orphan workflow are in `docs/dead-code.md`.
 
 ## Critical rules
 
@@ -535,19 +313,15 @@ The mechanic is simple but easy to miss: vulture's whitelist contains an entry p
 4. **NEVER match by release group** — always exact MB release ID. Release groups conflate pressings.
 5. **Auto-import only for `source='request'`** — redownloads always stage for manual review.
 6. **All scripts deploy via Nix** — no manual `cp` to virtiofs. Change code → push → flake update → rebuild.
-7. **PostgreSQL must use `autocommit=True`** — prevents idle-in-transaction deadlocks. DDL migrations use separate short-lived connections with `lock_timeout` (commit ca579e3).
-
-## Known issues
-
-- **Track name matching**: `album_match()` uses fuzzy filename matching — can match wrong pressings with same title. Track title cross-check added as post-match gate but won't catch all cases.
-- **Discogs analysis tab**: disambiguate/analysis tab requires MusicBrainz recording IDs; not available for Discogs-browsed artists (#81).
-- **Discogs cover art**: the CC0 dump has no images. Discogs-only releases have no cover art in browse UI (#82).
+7. **PostgreSQL must use `autocommit=True`** — prevents idle-in-transaction deadlocks. DDL migrations use separate short-lived connections with `lock_timeout`.
 
 ## Resolved — canonical RCs (don't re-investigate)
 
-- **2026-04-20 Palo Santo data loss**: NOT a beets upstream bug. The user's `duplicate_keys` block was at the top level of `~/.config/beets/config.yaml` instead of under `import:`. Beets reads strictly from `config["import"]["duplicate_keys"]["album"]` (`beets/importer/tasks.py:385`); the misplaced block was silently ignored and beets fell back to the default `[albumartist, album]` — no `mb_albumid`. `find_duplicates()` then matched cross-MBID siblings on album title alone, the harness sent `{"action":"remove"}` thinking it was a same-MBID stale entry, and beets' `task.should_remove_duplicates` blast radius wiped the sibling. Fixed by `beets.nix` YAML relocation + harness startup assertion in `_assert_duplicate_keys_include_mb_albumid`, then superseded by guarded Beets-owned replacement: Cratedigger answers `remove` only when Beets reports exactly one same-release duplicate and otherwise fails before mutation. The `03bfc63` Cratedigger-owned replacement state machine (pre-flight surgical remove + always-keep + post-import sibling `beet move`) has been removed; do not reintroduce it as fallback architecture.
-- **2026-04-14 Lucksmiths MBID drift**: NOT a bug. `tagging-workspace/scripts/fix_reissues.py` deliberately retagged "First Tape" to its cassette sibling via `harness --search-id`. The drift was invisible to cratedigger's audit trail because the harness was driven out-of-band. Mitigated by the harness MBID-swap audit log at `/mnt/virtio/Music/.harness-mutations.jsonl` (see `_mbid_swap_event`).
-- **2026-05-18 asciify_paths Plex mass-split**: Enabling `asciify_paths = true` in beets + running a full-library `beet move` renamed thousands of file paths through unidecode but left ID3 tags untouched (paths-only by design). Plex's scanner doesn't reconcile mass renames — it created ghost album rows for the renamed files alongside the original rows (still pointing at dead curly-path tracks). Affected ~12% of the library (1,178 albums split). Empty Trash + Clean Bundles made it WORSE (surfaced additional splits the prior partial scans had missed on the remote SMB mount). Fixed via the Plex metadata merge API (`scripts/plex_dupes_audit.py` + `plex_dupes_merge.py`). See `docs/solutions/runtime-errors/plex-asciify-paths-album-split.md`. **Footgun:** any future beets change that mutates rendered paths (asciify, `paths:` template, `path_sep_replace`) followed by `beet move` will re-trigger this — plan to run the merge scripts after the next full Plex scan.
+These are settled. Don't reopen the investigation; read the linked solution doc.
+
+- **2026-04-20 Palo Santo data loss** — misplaced `duplicate_keys` block (top-level instead of under `import:`) made beets fall back to `[albumartist, album]` and the harness `remove` wiped a cross-MBID sibling. NOT a beets bug; do not reintroduce the `03bfc63` Cratedigger-owned replacement state machine. `docs/solutions/runtime-errors/palo-santo-duplicate-keys-data-loss.md`.
+- **2026-04-14 Lucksmiths MBID drift** — deliberate out-of-band retag via `tagging-workspace/scripts/fix_reissues.py`, invisible to the audit trail. NOT a bug. `docs/solutions/runtime-errors/lucksmiths-mbid-drift-out-of-band-harness.md`.
+- **2026-05-18 asciify_paths Plex mass-split** — `asciify_paths = true` + `beet move` renamed paths but not tags, splitting 1,178 albums into Plex ghost rows; fix is the Plex merge API, not Empty Trash. **Footgun:** any beets change that mutates rendered paths followed by `beet move` re-triggers this. `docs/solutions/runtime-errors/plex-asciify-paths-album-split.md`.
 
 ## Secrets
 
