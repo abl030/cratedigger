@@ -24,7 +24,6 @@ added, and everything that ships after).
 from __future__ import annotations
 
 import ast
-import inspect
 import pathlib
 import re
 import unittest
@@ -240,9 +239,10 @@ class TestPipelineDBWriteAudit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # Parse tests/test_pipeline_db.py once and reuse the AST.
-        test_path = pathlib.Path(inspect.getfile(pdb_mod)).parent.parent \
-            / "tests" / "test_pipeline_db.py"
+        # Parse tests/test_pipeline_db.py once and reuse the AST. Derive the
+        # path from this test file's own location — robust to lib.pipeline_db
+        # being a package (#379) rather than a single module.
+        test_path = pathlib.Path(__file__).resolve().parent / "test_pipeline_db.py"
         cls._test_tree = ast.parse(test_path.read_text())
 
     def test_every_write_method_has_a_round_trip_guard(self) -> None:
