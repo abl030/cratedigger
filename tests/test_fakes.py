@@ -3907,11 +3907,21 @@ class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
 
 
 def _public_methods(cls: type) -> set[str]:
-    """Return the set of non-underscore method names defined on ``cls``."""
-    return {
-        name for name, obj in vars(cls).items()
-        if callable(obj) and not name.startswith("_")
-    }
+    """Return the set of non-underscore method names provided by ``cls``,
+    including those contributed by base classes / mixins.
+
+    ``PipelineDB`` is composed from cluster mixins under ``lib/pipeline_db/``
+    (#379), so its public API lives on the mixins, not in ``vars(PipelineDB)``.
+    Walk the MRO (skipping ``object``) to recover the full surface — for a
+    flat class like ``FakePipelineDB`` this is identical to ``vars(cls)``."""
+    names: set[str] = set()
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        for name, obj in vars(klass).items():
+            if callable(obj) and not name.startswith("_"):
+                names.add(name)
+    return names
 
 
 class TestPipelineDBFakeContract(unittest.TestCase):

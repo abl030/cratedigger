@@ -15,7 +15,14 @@ from tests.helpers import make_request_row
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_ROOTS = ("lib", "web", "harness", "scripts")
 PRODUCTION_FILES = ("album_source.py", "cratedigger.py")
-RAW_SQL_ALLOWED_PATHS = {"lib/pipeline_db.py"}
+
+
+def _is_pipeline_db_seam(rel_path: str) -> bool:
+    """The PostgreSQL persistence layer is the allowed home for raw request-
+    status SQL and direct transition calls. Originally one file
+    (``lib/pipeline_db.py``); decomposed into the ``lib/pipeline_db/`` package
+    of cluster mixins (#379). Either form is the seam."""
+    return rel_path == "lib/pipeline_db.py" or rel_path.startswith("lib/pipeline_db/")
 
 
 class TestDispatchOutcomeSummary(unittest.TestCase):
@@ -120,7 +127,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
         return None
 
     def _allow_direct_transition_call(self, func_name: str, node: ast.Call) -> bool:
-        if self.rel_path in {"lib/pipeline_db.py", "lib/transitions.py"}:
+        if _is_pipeline_db_seam(self.rel_path) or self.rel_path == "lib/transitions.py":
             return True
 
         return False
@@ -134,7 +141,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
 
         if func_name not in {"execute", "_execute"}:
             return
-        if self.rel_path in RAW_SQL_ALLOWED_PATHS or not node.args:
+        if _is_pipeline_db_seam(self.rel_path) or not node.args:
             return
 
         sql = node.args[0]
