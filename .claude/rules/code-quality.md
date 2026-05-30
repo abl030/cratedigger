@@ -319,5 +319,5 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
 - One logical change per commit
 - Run full test suite + pyright before committing
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
-- PRs are merged via **rebase merge** (squash and merge commits are disabled). This preserves individual commit messages on main, so write them well.
+- PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
