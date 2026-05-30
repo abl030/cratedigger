@@ -1103,6 +1103,10 @@ class TestRouteContractAudit(unittest.TestCase):
         r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$",
         r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$",
         "/api/pipeline/active-rgs",
+        # U1: Long-Tail Triage Console worklist read. Wraps
+        # ``lib.long_tail_service.list_long_tail`` — same service as
+        # ``pipeline-cli long-tail`` per CLI ⇄ API symmetry.
+        "/api/pipeline/long-tail",
         "/api/pipeline/add",
         "/api/pipeline/update",
         "/api/pipeline/upgrade",
@@ -1374,6 +1378,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
         "existing_spectral_bitrate",
+        "source", "youtube_metadata",
         "wrong_match_triage_action", "wrong_match_triage_summary",
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
         "wrong_match_triage_preview_decision",
@@ -1768,7 +1773,8 @@ class TestPipelineRouteContracts(_WebServerCase):
 
     def test_pipeline_detail_surfaces_last_search_top_candidates(self):
         """When the latest search_log row has candidates, the route emits the
-        top-3 by (matched_tracks DESC, avg_ratio DESC) via msgspec.to_builtins."""
+        full slice (up to 20) by (matched_tracks DESC, avg_ratio DESC) via
+        msgspec.to_builtins."""
         candidates_blob = [
             {"username": "u1", "dir": "A", "filetype": "flac",
              "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.95,
@@ -1804,14 +1810,42 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(last["variant"], "v3_artist_only")
         self.assertEqual(last["final_state"], "Completed")
         self.assertEqual(last["outcome"], "no_match")
-        # Top-3, sorted by (matched_tracks DESC, avg_ratio DESC):
-        # u1 (26, 0.95) → u3 (26, 0.85) → u2 (22, 0.80)
+        # All 4 (≤20 cap), sorted by (matched_tracks DESC, avg_ratio DESC):
+        # u1 (26, 0.95) → u3 (26, 0.85) → u2 (22, 0.80) → u4 (20, 0.99)
         usernames = [c["username"] for c in last["top_candidates"]]
-        self.assertEqual(usernames, ["u1", "u3", "u2"])
+        self.assertEqual(usernames, ["u1", "u3", "u2", "u4"])
         for cand in last["top_candidates"]:
             _assert_required_fields(self, cand,
                                     self.CANDIDATE_SCORE_REQUIRED_FIELDS,
                                     "candidate score")
+
+    def test_pipeline_detail_caps_top_candidates_at_twenty(self):
+        """U2: the peers panel widened from 3 to the full stored cap (20). A
+        search row with >20 candidates surfaces exactly 20, still ranked."""
+        blob = [
+            {"username": f"u{i:02d}", "dir": f"D{i}", "filetype": "flac",
+             "matched_tracks": 26, "total_tracks": 26,
+             "avg_ratio": 1.0 - i / 100.0,
+             "missing_titles": [], "file_count": 26}
+            for i in range(25)
+        ]
+        self.mock_db.get_search_history.return_value = [{
+            "id": 99, "request_id": 100, "query": "q",
+            "result_count": 100, "elapsed_s": 1.0, "outcome": "no_match",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": blob,
+            "variant": "v3_artist_only", "final_state": "Completed",
+        }]
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_search_history.return_value = []
+        self.assertEqual(status, 200)
+        top = data["last_search"]["top_candidates"]
+        self.assertEqual(len(top), 20)
+        # All matched_tracks equal → highest avg_ratio first: u00..u19
+        self.assertEqual(top[0]["username"], "u00")
+        self.assertEqual(top[-1]["username"], "u19")
 
     def test_pipeline_detail_handles_null_candidates_gracefully(self):
         """Historical search_log row with NULL candidates → top_candidates=[]."""
@@ -10099,6 +10133,183 @@ class TestTriageRouteContracts(_WebServerCase):
     def test_list_rejects_non_int_after(self):
         status, data = self._get(
             "/api/triage/list?filter=all&after=not-an-int")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+
+class TestLongTailRouteContracts(_WebServerCase):
+    """U1 contract for ``GET /api/pipeline/long-tail``.
+
+    Wraps ``lib.long_tail_service.list_long_tail`` — the same service
+    ``pipeline-cli long-tail`` wraps (CLI ⇄ API symmetry). Drives the
+    real service + DB cohort query against a fresh :class:`FakePipelineDB`
+    (no service mocking, per MOCKS: LEAF-SEAM ONLY). Banding's beets
+    collaborators (``check_beets_library`` / ``_beets_db`` /
+    ``compute_library_rank``) are the leaf seam — patched at
+    ``web.server`` only when a test exercises an in-library band.
+    """
+
+    # The frontend long-tail list renders these fields per row out of the
+    # serialized ``LongTailRow``. Pin every one so a rename can't silently
+    # break the JS.
+    ROW_REQUIRED_FIELDS = {
+        "id", "artist_name", "album_title", "year", "status", "source",
+        "mb_release_id", "discogs_release_id", "target_format",
+        "min_bitrate", "search_filetype_override", "unfindable_category",
+        "band", "in_flight_rescue",
+    }
+    ENVELOPE_REQUIRED_FIELDS = {"results", "band", "count"}
+
+    _LONG_TAIL_DB_METHODS = (
+        "get_long_tail_cohort",
+        "get_long_tail_request",
+    )
+
+    def setUp(self) -> None:
+        fresh = FakePipelineDB()
+        self._old_backing = self.mock_db._fake
+        self.mock_db._mock_wraps = fresh
+        self.mock_db._fake = fresh
+        self._lt_method_state: dict[str, MagicMock] = {}
+        for name in self._LONG_TAIL_DB_METHODS:
+            self._lt_method_state[name] = getattr(self.mock_db, name)
+            forwarder = MagicMock(side_effect=getattr(fresh, name))
+            setattr(self.mock_db, name, forwarder)
+
+    def tearDown(self) -> None:
+        for name, prev in self._lt_method_state.items():
+            setattr(self.mock_db, name, prev)
+        self.mock_db._mock_wraps = self._old_backing
+        self.mock_db._fake = self._old_backing
+
+    @property
+    def _fake(self) -> "FakePipelineDB":
+        return self.mock_db._fake
+
+    def test_missing_row_bands_missing_and_imported_absent(self):
+        """AE1 at the HTTP boundary: a wanted row with no beets album
+        bands ``missing``; an imported request is absent from the
+        result. (No beets configured → everything Missing.)"""
+        from lib.long_tail_service import LongTailRow
+        self._fake.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            artist_name="Vanishing", album_title="Lost"))
+        self._fake.seed_request(make_request_row(
+            id=2, status="imported", mb_release_id="rel-2"))
+
+        status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.ENVELOPE_REQUIRED_FIELDS,
+                                "long-tail envelope")
+        self.assertEqual(data["count"], 1)
+        self.assertIsNone(data["band"])
+        row = data["results"][0]
+        _assert_required_fields(self, row, self.ROW_REQUIRED_FIELDS,
+                                "long-tail row")
+        self.assertEqual(row["id"], 1)
+        self.assertEqual(row["band"], "missing")
+        self.assertFalse(row["in_flight_rescue"])
+        # Wire shape IS the Struct shape — round-trips cleanly.
+        back = msgspec.convert(row, type=LongTailRow)
+        self.assertEqual(back.id, 1)
+
+    def test_transparent_band_via_beets_seam(self):
+        """AE2 at the HTTP boundary: a wanted row whose beets copy
+        classifies Transparent bands ``transparent``. The beets leaf
+        seam is patched to report the release in-library with a
+        lossless detail row."""
+        import web.server as srv
+        self._fake.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1"))
+
+        mock_beets = MagicMock()
+        # MP3 @ 256 kbps classifies TRANSPARENT in the default rank model
+        # (Opus 128 / MP3 V0 are transparent; see docs/quality-ranks.md).
+        mock_beets.check_mbids_detail.return_value = {
+            "rel-1": {"beets_format": "MP3", "beets_bitrate": 256},
+        }
+        with patch("web.server.check_beets_library",
+                   return_value={"rel-1"}), \
+                patch("web.server._beets_db", return_value=mock_beets):
+            status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["results"][0]["band"], "transparent")
+
+    def test_unknown_band_when_in_library_but_unrankable(self):
+        """In-library but no detail / unrankable → ``unknown``, not
+        ``missing``."""
+        self._fake.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1"))
+
+        mock_beets = MagicMock()
+        mock_beets.check_mbids_detail.return_value = {}  # no detail row
+        with patch("web.server.check_beets_library",
+                   return_value={"rel-1"}), \
+                patch("web.server._beets_db", return_value=mock_beets):
+            status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["results"][0]["band"], "unknown")
+
+    def test_in_flight_rescue_stamped(self):
+        self._fake.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1"))
+        self._fake.insert_youtube_running(
+            request_id=1, browse_id="MPREb_z", audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=z",
+            expected_track_count=10,
+        )
+        status, data = self._get("/api/pipeline/long-tail")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["results"][0]["in_flight_rescue"])
+
+    def test_band_filter_narrows_result(self):
+        self._fake.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1"))
+        self._fake.seed_request(make_request_row(
+            id=2, status="wanted", mb_release_id="rel-2"))
+        # No beets → both Missing.
+        status, data = self._get("/api/pipeline/long-tail?band=missing")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["band"], "missing")
+        self.assertEqual({r["id"] for r in data["results"]}, {1, 2})
+        # A band with no members returns an empty cohort, still 200.
+        status, data = self._get("/api/pipeline/long-tail?band=transparent")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["count"], 0)
+
+    def test_empty_cohort_returns_200(self):
+        status, data = self._get("/api/pipeline/long-tail")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["count"], 0)
+        self.assertEqual(data["results"], [])
+
+    def test_single_id_returns_one_banded_row(self):
+        """KTD8: ``?id=`` returns just that request's authoritative band."""
+        from lib.long_tail_service import LongTailRow
+        self._fake.seed_request(make_request_row(
+            id=42, status="wanted", mb_release_id="rel-42",
+            artist_name="One", album_title="Row"))
+        status, data = self._get("/api/pipeline/long-tail?id=42")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, {"result", "id"},
+                                "long-tail single-id envelope")
+        self.assertEqual(data["id"], 42)
+        row = msgspec.convert(data["result"], type=LongTailRow)
+        self.assertEqual(row.id, 42)
+        self.assertEqual(row.band, "missing")
+
+    def test_single_id_404_when_not_wanted(self):
+        self._fake.seed_request(make_request_row(
+            id=42, status="imported", mb_release_id="rel-42"))
+        status, data = self._get("/api/pipeline/long-tail?id=42")
+        self.assertEqual(status, 404)
+        self.assertEqual(data["id"], 42)
+
+    def test_single_id_400_on_non_int(self):
+        status, data = self._get("/api/pipeline/long-tail?id=not-an-int")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
 

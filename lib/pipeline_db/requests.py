@@ -1198,6 +1198,76 @@ class _RequestsMixin(_PipelineDBBase):
         return {r["status"]: r["cnt"] for r in cur.fetchall()}
 
 
+    # --- Long-tail worklist cohort (U1) ---------------------------------
+    #
+    # The Long-Tail Triage Console opens on the ``wanted`` set. Both methods
+    # below return the row UNbanded — banding is the beets-only concern of the
+    # web layer (``compute_library_rank`` keyed by ``mb_release_id``) and lives
+    # in the service's injected ``band_fn``. The DB layer's only
+    # banding-adjacent responsibility is stamping ``in_flight_rescue`` via the
+    # ``youtube_running`` EXISTS predicate (KTD4) — backed by the partial unique
+    # index ``one_youtube_running_per_request`` (migration 037), so it probes a
+    # tiny index, not a seq scan — so the service doesn't issue an N-query loop.
+    #
+    # Operator-facing column projection shared by the cohort + single-id reads.
+    # ``ar.*`` would carry the full row, but the worklist only renders this
+    # subset plus ``in_flight_rescue``; pinning the list keeps the wire payload
+    # narrow and the contract explicit.
+    _LONG_TAIL_SELECT = """
+        SELECT
+            ar.id,
+            ar.artist_name,
+            ar.album_title,
+            ar.year,
+            ar.status,
+            ar.source,
+            ar.mb_release_id,
+            ar.discogs_release_id,
+            ar.target_format,
+            ar.min_bitrate,
+            ar.search_filetype_override,
+            ar.unfindable_category,
+            EXISTS (
+                SELECT 1 FROM download_log dl
+                WHERE dl.request_id = ar.id
+                  AND dl.source = 'youtube'
+                  AND dl.outcome = 'youtube_running'
+            ) AS in_flight_rescue
+        FROM album_requests ar
+    """
+
+    def get_long_tail_cohort(self) -> list[dict[str, Any]]:
+        """Return the full ``wanted`` cohort, each row stamped with
+        ``in_flight_rescue``.
+
+        One Postgres query regardless of cohort size. Banding happens
+        downstream in the service (beets-only, batched). Ordered by id ASC for
+        stable rendering. ``replaced`` / ``imported`` / ``manual`` /
+        ``downloading`` rows are correctly excluded (R2 — worklist is the
+        ``wanted`` set only).
+        """
+        sql = (self._LONG_TAIL_SELECT
+               + " WHERE ar.status = 'wanted' ORDER BY ar.id ASC")
+        cur = self._execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_long_tail_request(
+        self, request_id: int,
+    ) -> dict[str, Any] | None:
+        """Return a single ``wanted`` request stamped with ``in_flight_rescue``,
+        or ``None``.
+
+        Single-id variant of ``get_long_tail_cohort`` (KTD8 / R16 — backs the
+        post-action single-row refetch). Returns ``None`` when the row doesn't
+        exist OR is no longer ``wanted`` (an imported / replaced row is
+        correctly absent from the worklist).
+        """
+        sql = self._LONG_TAIL_SELECT + " WHERE ar.id = %s AND ar.status = 'wanted'"
+        cur = self._execute(sql, (int(request_id),))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
     def list_requests_by_artist(
         self,
         artist_name: str,

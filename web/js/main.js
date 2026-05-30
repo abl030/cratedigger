@@ -10,6 +10,7 @@ import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, open
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter } from './pipeline.js';
+import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailReSearch } from './long_tail.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
@@ -169,6 +170,16 @@ Object.assign(window, {
   toggleDetail,
   deleteRequest,
   updateStatus,
+  // Long-tail triage worklist: nav + tab/search/list handlers (U3) plus
+  // the per-row action console (U4 — toggleLongTailDetail opens the
+  // evidence console; toggleLongTailPeers flips the capped/full peers
+  // view). renderPipeline (already exposed) re-emits the nav for the
+  // long-tail sub-view; long_tail.js calls it via window.renderPipeline.
+  loadLongTail,
+  setLongTailBand,
+  onLongTailSearchInput,
+  toggleLongTailDetail,
+  toggleLongTailPeers,
   renderLibraryResults,
   renderLibraryResultsInto,
   toggleLibDetail,
@@ -221,5 +232,25 @@ Object.assign(window, {
   openReplacePicker: openReplacePickerAndHandle,
   togglePipelineReplacedFilter,
   toggleWrongMatchesReplacedFilter,
+  // Long-tail YouTube rescue (U5) — the two-step flow. `checkYoutube` runs
+  // the slow, side-effectful resolver GET (double-fire-guarded, stale-result
+  // stamped) and re-renders the YouTube panel with pickable rescue targets;
+  // `pickYoutubeRescue` opens the confirm overlay for a chosen target and
+  // submits the rescue, mapping every ingest outcome to specific console
+  // copy. The resolver GET is NOT auto-called on console open (U4 leaves the
+  // panel in `never_run` until the operator clicks).
+  checkYoutube,
+  pickYoutubeRescue,
+  // Long-tail secondary actions (U6) — accept-a-sibling-pressing (the
+  // existing Replace operator action, MB-only per KTD7; disabled with a
+  // reason for Discogs requests), set-intent (lossless ⇄ default toggle via
+  // the existing set-intent surface), and re-search (regenerate-plan +
+  // reset-cursor via the existing search-plan/regenerate surface, honest
+  // next-cycle copy). Each reuses the U5 single-row refetch helper for
+  // post-action freshness; the confirmed Replace closes the console and
+  // full-cohort refetches because the old row leaves the worklist.
+  longTailAcceptSibling,
+  longTailSetIntent,
+  longTailReSearch,
   toast,
 });

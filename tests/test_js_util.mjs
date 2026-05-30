@@ -3,9 +3,10 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
+import { __test__ as longTailTest } from '../web/js/long_tail.js';
 
 let passed = 0;
 let failed = 0;
@@ -531,6 +532,73 @@ assert(!xssBlock.includes('<script>x</script>'),
 assert(!xssBlock.includes('"><img>'),
   'malicious dir escaped');
 
+// --- youtubeSectionState tests (U4 four-state classifier) ---
+console.log('youtubeSectionState()');
+// null / undefined / non-object → never_run (the side-effectful GET has
+// not been run; U4 must NOT auto-call it).
+assertEqual(youtubeSectionState(null).state, 'never_run', 'null → never_run');
+assertEqual(youtubeSectionState(undefined).state, 'never_run', 'undefined → never_run');
+// A truthy object with no `outcome` field is a malformed/failed resolve
+// (its outcome is not "ok"), NOT never_run — only null/undefined defaults
+// to the not-yet-run state.
+assertEqual(youtubeSectionState({}).state, 'resolver_failed', 'object with no outcome → resolver_failed');
+assertEqual(youtubeSectionState(null).stale, false, 'never_run is never stale');
+// ok + releases → resolved_with_matrix.
+const ytMatrix = youtubeSectionState({
+  outcome: 'ok',
+  youtube_releases: [{ yt_browse_id: 'MPREb_x', distances: [] }],
+  from_cache: false,
+});
+assertEqual(ytMatrix.state, 'resolved_with_matrix', 'ok + releases>0 → resolved_with_matrix');
+assertEqual(ytMatrix.stale, false, 'fresh matrix not stale');
+assertEqual(ytMatrix.message, '', 'fresh matrix needs no message');
+// ok + empty releases → resolved_empty.
+const ytEmpty = youtubeSectionState({ outcome: 'ok', youtube_releases: [], from_cache: false });
+assertEqual(ytEmpty.state, 'resolved_empty', 'ok + releases==0 → resolved_empty');
+assert(ytEmpty.message.includes('Not on YouTube Music'), 'resolved_empty surfaces "not on YouTube Music" copy');
+// ok + missing youtube_releases key → resolved_empty (no releases).
+assertEqual(youtubeSectionState({ outcome: 'ok' }).state, 'resolved_empty', 'ok + no releases key → resolved_empty');
+// transient / 503 outcomes → resolver_failed.
+assertEqual(youtubeSectionState({ outcome: 'transient' }).state, 'resolver_failed', 'transient → resolver_failed');
+assertEqual(youtubeSectionState({ outcome: 'unresolved_timeout' }).state, 'resolver_failed', 'unresolved_timeout → resolver_failed');
+assertEqual(youtubeSectionState({ outcome: 'unresolved_mirror_unavailable' }).state, 'resolver_failed', 'mirror unavailable → resolver_failed');
+assertEqual(youtubeSectionState({ outcome: 'not_found' }).state, 'resolver_failed', 'not_found → resolver_failed');
+const ytFail = youtubeSectionState({ outcome: 'transient', error_message: 'mirror down' });
+assert(ytFail.message.includes('mirror down'), 'resolver_failed surfaces the error_message');
+// from_cache + error_message → staleness flag on an otherwise-resolved state.
+const ytStaleMatrix = youtubeSectionState({
+  outcome: 'ok',
+  youtube_releases: [{ yt_browse_id: 'MPREb_y', distances: [] }],
+  from_cache: true,
+  error_message: 'live YT fetch failed; served cache',
+});
+assertEqual(ytStaleMatrix.state, 'resolved_with_matrix', 'cached matrix still resolves with matrix');
+assertEqual(ytStaleMatrix.stale, true, 'from_cache + error_message sets the staleness flag');
+assert(ytStaleMatrix.message.includes('stale'), 'stale matrix surfaces a staleness message');
+// from_cache WITHOUT error_message is a clean cache hit, not stale.
+assertEqual(
+  youtubeSectionState({ outcome: 'ok', youtube_releases: [{ yt_browse_id: 'z', distances: [] }], from_cache: true }).stale,
+  false,
+  'from_cache alone (no error_message) is not stale',
+);
+
+// --- consoleEmphasis tests (U4 band-aware emphasis selector) ---
+console.log('consoleEmphasis()');
+assertEqual(consoleEmphasis({ band: 'missing' }).lead, 'unfindable', 'Missing band leads with unfindable panel');
+assertEqual(consoleEmphasis({ band: 'MISSING' }).lead, 'unfindable', 'Missing band is case-insensitive');
+assertEqual(consoleEmphasis({ band: '' }).lead, 'unfindable', 'no band (treated Missing-like) leads with unfindable');
+assertEqual(consoleEmphasis({}).lead, 'unfindable', 'missing band key leads with unfindable');
+assertEqual(consoleEmphasis(null).lead, 'unfindable', 'null row leads with unfindable');
+assertEqual(consoleEmphasis({ band: 'poor' }).lead, 'band_vs_intent', 'on-disk band leads with band-vs-intent');
+assertEqual(consoleEmphasis({ band: 'transparent' }).lead, 'band_vs_intent', 'on-disk transparent leads with band-vs-intent');
+// An on-disk row carrying an unfindable_category still leads with unfindable
+// (the operator's first question is "why stuck", even if a copy exists).
+assertEqual(
+  consoleEmphasis({ band: 'poor', unfindable_category: 'wrong_pressing_available' }).lead,
+  'unfindable',
+  'on-disk row with an unfindable_category leads with unfindable',
+);
+
 // --- parsePastedId tests (search-by-ID) ---
 console.log('parsePastedId()');
 
@@ -974,6 +1042,734 @@ assertEqual(stdNoSource, '',
 const activeRgSet = new Set(['rg-1', 'rg-2']);
 assertEqual(activeRgSet.has('rg-1'), true, 'active-RG Set hit');
 assertEqual(activeRgSet.has('rg-not-active'), false, 'active-RG Set miss');
+
+// --- long_tail.js pure helpers (U3) ---
+console.log('long_tail.js __test__');
+{
+  const {
+    bandLabel,
+    deriveBandTabs,
+    defaultBand,
+    filterRows,
+    countOtherBandMatches,
+    renderLongTailRow,
+  } = longTailTest;
+
+  // A mixed cohort spanning Missing + several on-disk bands, deliberately
+  // out of canonical order so the ordering assertion is meaningful.
+  const cohort = [
+    { id: 1, artist_name: 'Mount Eerie', album_title: 'Clear Moon', band: 'transparent' },
+    { id: 2, artist_name: 'The Mountain Goats', album_title: 'Tallahassee', band: 'missing' },
+    { id: 3, artist_name: 'Bill Callahan', album_title: 'Apocalypse', band: 'poor' },
+    { id: 4, artist_name: 'Smog', album_title: 'Knock Knock', band: 'missing' },
+    { id: 5, artist_name: 'Grouper', album_title: 'Dragging a Dead Deer', band: 'unknown' },
+    { id: 6, artist_name: 'Tim Hecker', album_title: 'Ravedeath, 1972', band: 'transparent' },
+    { id: 7, artist_name: 'Loscil', album_title: 'Submers', band: 'lossless' },
+  ];
+
+  // --- bandLabel ---
+  assertEqual(bandLabel('missing'), 'Missing', 'bandLabel capitalises missing');
+  assertEqual(bandLabel('transparent'), 'Transparent', 'bandLabel capitalises transparent');
+  assertEqual(bandLabel(''), '?', 'bandLabel empty -> ?');
+  assertEqual(bandLabel(null), '?', 'bandLabel null -> ?');
+  assertEqual(bandLabel('LOSSLESS'), 'Lossless', 'bandLabel lower-cases then capitalises');
+
+  // --- deriveBandTabs: ordering Missing-first + ascending QualityRank ---
+  const tabs = deriveBandTabs(cohort);
+  assertEqual(
+    tabs.map((t) => t.band).join(','),
+    'missing,unknown,poor,transparent,lossless',
+    'deriveBandTabs orders Missing first, then ascending by rank (only present bands)',
+  );
+  // Counts are correct per band.
+  const countOf = (b) => (tabs.find((t) => t.band === b) || {}).count;
+  assertEqual(countOf('missing'), 2, 'deriveBandTabs counts Missing rows');
+  assertEqual(countOf('transparent'), 2, 'deriveBandTabs counts Transparent rows');
+  assertEqual(countOf('poor'), 1, 'deriveBandTabs counts Poor rows');
+  assertEqual(countOf('unknown'), 1, 'deriveBandTabs counts Unknown rows');
+  assertEqual(countOf('lossless'), 1, 'deriveBandTabs counts Lossless rows');
+  // Bands not present in the cohort produce no tab.
+  assert(!tabs.some((t) => t.band === 'good'), 'deriveBandTabs omits absent bands');
+  // Each tab carries a display label.
+  assertEqual((tabs[0]).label, 'Missing', 'deriveBandTabs first tab label is Missing');
+  // Empty cohort -> no tabs.
+  assertEqual(deriveBandTabs([]).length, 0, 'deriveBandTabs empty cohort -> no tabs');
+  // Unrecognised band sorts to the end, not dropped.
+  const withWeird = deriveBandTabs([
+    { band: 'missing' }, { band: 'sparkle' }, { band: 'good' },
+  ]);
+  assertEqual(
+    withWeird.map((t) => t.band).join(','),
+    'missing,good,sparkle',
+    'deriveBandTabs sorts unrecognised band to the end',
+  );
+
+  // --- defaultBand ---
+  assertEqual(defaultBand(tabs), 'missing', 'defaultBand prefers Missing when present');
+  assertEqual(
+    defaultBand(deriveBandTabs([{ band: 'good' }, { band: 'poor' }])),
+    'poor',
+    'defaultBand falls back to first canonical band when Missing absent',
+  );
+  assertEqual(defaultBand([]), null, 'defaultBand empty -> null');
+
+  // --- filterRows: within-band substring match ---
+  const missingRows = filterRows(cohort, 'missing', '');
+  assertEqual(missingRows.length, 2, 'filterRows missing band, no query -> 2 rows');
+  assert(
+    missingRows.every((r) => r.band === 'missing'),
+    'filterRows only returns rows of the selected band',
+  );
+  // Substring matches artist.
+  const goatHits = filterRows(cohort, 'missing', 'mountain');
+  assertEqual(goatHits.length, 1, 'filterRows substring matches artist within band');
+  assertEqual(goatHits[0].id, 2, 'filterRows artist-substring hit is the right row');
+  // Substring matches album, case-insensitively.
+  const knockHits = filterRows(cohort, 'missing', 'KNOCK');
+  assertEqual(knockHits.length, 1, 'filterRows substring matches album (case-insensitive)');
+  assertEqual(knockHits[0].id, 4, 'filterRows album-substring hit is the right row');
+  // A query that only matches rows in OTHER bands -> empty in-band result.
+  assertEqual(
+    filterRows(cohort, 'missing', 'hecker').length,
+    0,
+    'filterRows cross-band query -> empty for the selected band',
+  );
+  // Null band -> no rows (no tab selected).
+  assertEqual(filterRows(cohort, null, '').length, 0, 'filterRows null band -> no rows');
+
+  // --- countOtherBandMatches: cross-band hint count ---
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', 'hecker'),
+    1,
+    'countOtherBandMatches counts matches in other bands',
+  );
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', 'eerie'),
+    1,
+    'countOtherBandMatches: Mount Eerie (transparent) matches "eerie" outside Missing',
+  );
+  // Selected-band matches are excluded from the cross-band count.
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', 'goats'),
+    0,
+    'countOtherBandMatches excludes the selected band',
+  );
+  // Blank query -> 0 (no hint while not searching).
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', ''),
+    0,
+    'countOtherBandMatches blank query -> 0',
+  );
+
+  // --- renderLongTailRow: sanity (clickable + detail container) ---
+  const rowHtml = renderLongTailRow(cohort[1]);
+  assert(
+    rowHtml.includes('window.toggleLongTailDetail(2)'),
+    'renderLongTailRow wires the row click to toggleLongTailDetail',
+  );
+  assert(
+    rowHtml.includes('id="lt-detail-2"'),
+    'renderLongTailRow emits the per-row detail container',
+  );
+  assert(
+    rowHtml.includes('badge-wanted') && rowHtml.includes('Missing'),
+    'renderLongTailRow renders a Missing band chip for a missing row',
+  );
+  // An on-disk-band row gets the rank colour class + capitalised label.
+  const transparentRow = renderLongTailRow(cohort[0]);
+  assert(
+    transparentRow.includes('badge-rank-transparent') && transparentRow.includes('Transparent'),
+    'renderLongTailRow renders a rank-coloured chip for an on-disk band',
+  );
+
+  // --- renderLongTailBody: the three list states (DOM-free string paint) ---
+  const { renderLongTailBody } = longTailTest;
+  // Empty cohort -> empty-cohort affordance, never blank.
+  state.longTail = { rows: [], band: null, query: '' };
+  const emptyCohort = renderLongTailBody();
+  assert(
+    emptyCohort.includes('No wanted releases in the long tail'),
+    'renderLongTailBody empty cohort shows the empty-cohort affordance',
+  );
+  // Populated cohort -> tab strip + rows for the default (Missing) band.
+  state.longTail = { rows: cohort, band: null, query: '' };
+  const populated = renderLongTailBody();
+  assert(
+    populated.includes('lt-band-tabs') && populated.includes('lt-search-input'),
+    'renderLongTailBody renders band tabs + search box for a populated cohort',
+  );
+  assert(
+    populated.includes(
+      `lt-band-tab active-status" type="button" onclick="window.setLongTailBand('missing')`),
+    'renderLongTailBody renders Missing as the default active tab',
+  );
+  assertEqual(
+    state.longTail.band, null,
+    'renderLongTailBody is pure — it does not mutate state.longTail.band',
+  );
+  // Empty-band -> a search filters the selected band to zero; the
+  // affordance + cross-band hint show, never a blank area.
+  state.longTail = { rows: cohort, band: 'missing', query: 'hecker' };
+  const emptyBand = renderLongTailBody();
+  assert(
+    emptyBand.includes('No Missing releases match'),
+    'renderLongTailBody empty-band shows the per-band no-match affordance',
+  );
+  assert(
+    emptyBand.includes('1 match in other bands'),
+    'renderLongTailBody empty-band surfaces the cross-band match hint',
+  );
+  // Reset shared state so later tests are not affected.
+  state.longTail = { rows: null, band: null, query: '' };
+}
+
+// --- long_tail.js action console pure helpers (U4) ---
+console.log('long_tail.js __test__ (U4 console)');
+{
+  const {
+    renderUnfindableBody,
+    renderPeersBody,
+    renderRescuesBody,
+    renderSiblingsBody,
+    renderYoutubeBody,
+    renderConsoleShell,
+    renderPanelError,
+    youtubeHistoryRows,
+    youtubeFailureReason,
+    PEERS_VISIBLE_CAP,
+  } = longTailTest;
+
+  // --- renderUnfindableBody: categorised vs not-yet-categorised ---
+  // Categorised → category badge + forensics rollup.
+  const categorised = renderUnfindableBody({
+    unfindable: { category: 'wrong_pressing_available', categorised_at: '2026-05-20T00:00:00Z',
+      last_artist_probe_match_count: 3, last_artist_probe_at: '2026-05-21T00:00:00Z' },
+    search_forensics: { total_searches: 40, with_cands_count: 12, zero_results_count: 5,
+      dominant_rejection_reason: 'strict_count', last_search_at: '2026-05-22T00:00:00Z' },
+  });
+  assert(categorised.includes('wrong_pressing_available'),
+    'renderUnfindableBody renders the category for a categorised request');
+  assert(categorised.includes('40 searches') && categorised.includes('dominant reject: strict_count'),
+    'renderUnfindableBody renders the search-forensics rollup');
+  assert(categorised.includes('artist probe: 3 matches'),
+    'renderUnfindableBody renders the artist-probe rollup');
+  // Not-yet-categorised (unfindable == null) → daily-detection state, NOT
+  // an error, NOT blank (R7).
+  const uncategorised = renderUnfindableBody({
+    unfindable: null,
+    search_forensics: { total_searches: 2, with_cands_count: 0, zero_results_count: 2 },
+  });
+  assert(uncategorised.includes('not yet categorised') && uncategorised.includes('detection runs daily'),
+    'renderUnfindableBody renders the not-yet-categorised daily-detection state');
+  assert(!uncategorised.toLowerCase().includes("couldn't load"),
+    'not-yet-categorised is distinct from an error affordance');
+  // category explicitly absent on the unfindable struct also → uncategorised.
+  const catNull = renderUnfindableBody({ unfindable: { category: null }, search_forensics: {} });
+  assert(catNull.includes('not yet categorised'),
+    'renderUnfindableBody treats a null category as not-yet-categorised');
+
+  // --- youtubeHistoryRows: only source==="youtube" rows ---
+  // Production-shaped: a youtube_failed row carries its reason in the
+  // youtube_metadata JSONB blob (per YoutubeIngestMetadata.reason), NOT in
+  // a top-level field.
+  const mixedHistory = [
+    { source: 'youtube', outcome: 'youtube_failed', created_at: '2026-05-25T00:00:00Z',
+      youtube_metadata: { reason: 'track_count_mismatch' } },
+    { source: 'request', outcome: 'rejected' },
+    { source: 'youtube', outcome: 'youtube_running', created_at: '2026-05-26T00:00:00Z' },
+  ];
+  assertEqual(youtubeHistoryRows(mixedHistory).length, 2,
+    'youtubeHistoryRows keeps only source==="youtube" rows');
+  assertEqual(youtubeHistoryRows([]).length, 0, 'youtubeHistoryRows empty → []');
+  assertEqual(youtubeHistoryRows(null).length, 0, 'youtubeHistoryRows null → []');
+
+  // --- youtubeFailureReason: reads the production-shaped reason field ---
+  assertEqual(
+    youtubeFailureReason({ youtube_metadata: { reason: 'track_count_mismatch' } }),
+    'track_count_mismatch',
+    'youtubeFailureReason reads youtube_metadata.reason (the production field)');
+  assertEqual(
+    youtubeFailureReason({ error_message: 'yt-dlp died' }),
+    'yt-dlp died',
+    'youtubeFailureReason falls back to error_message');
+  assertEqual(
+    youtubeFailureReason({ verdict: 'rejected' }),
+    'rejected',
+    'youtubeFailureReason falls back to verdict');
+  assertEqual(
+    youtubeFailureReason({}),
+    'unknown',
+    'youtubeFailureReason → "unknown" when no reason field present');
+
+  // --- renderRescuesBody: running / failed / success / none ---
+  // Active youtube_running row → "rescue running".
+  const running = renderRescuesBody(
+    [{ source: 'youtube', outcome: 'youtube_running', created_at: '2026-05-26T00:00:00Z' }], false);
+  assert(running.includes('rescue running'), 'renderRescuesBody shows "rescue running" for an active youtube_running row');
+  // in_flight flag alone (no history) → "rescue running" (KTD4 same predicate).
+  assert(renderRescuesBody([], true).includes('rescue running'),
+    'renderRescuesBody honours the in_flight_rescue flag with no history');
+  // Latest terminal youtube_failed → "last rescue failed: <reason>".
+  // Reason comes from the production-shaped youtube_metadata.reason blob.
+  const failed = renderRescuesBody(
+    [{ source: 'youtube', outcome: 'youtube_failed', created_at: '2026-05-25T00:00:00Z',
+       youtube_metadata: { reason: 'track_count_mismatch' } }], false);
+  assert(failed.includes('last rescue failed') && failed.includes('track_count_mismatch'),
+    'renderRescuesBody shows the failure reason (from youtube_metadata) for a terminal youtube_failed row');
+  // A terminal youtube_success is NOT a failure (distinct from youtube_failed).
+  const succeeded = renderRescuesBody(
+    [{ source: 'youtube', outcome: 'youtube_success', created_at: '2026-05-24T00:00:00Z' }], false);
+  assert(!succeeded.includes('last rescue failed'),
+    'renderRescuesBody does NOT render a failure for a youtube_success row');
+  assert(succeeded.includes('youtube_success'),
+    'renderRescuesBody lists a youtube_success attempt');
+  // No youtube rows at all → "no rescue attempts".
+  assert(renderRescuesBody([{ source: 'request', outcome: 'success' }], false).includes('No rescue attempts'),
+    'renderRescuesBody shows "no rescue attempts" when there are no youtube rows');
+
+  // --- renderPeersBody: cap + show-all toggle ---
+  const fewPeers = {
+    variant: 'v1', final_state: 'Completed', outcome: 'no_match',
+    top_candidates: [
+      { username: 'a', dir: 'x', filetype: 'flac', matched_tracks: 1, total_tracks: 1, avg_ratio: 1, missing_titles: [], file_count: 1 },
+    ],
+  };
+  const fewHtml = renderPeersBody(fewPeers, 7);
+  assert(fewHtml.includes('p-forensic') && !fewHtml.includes('show all'),
+    'renderPeersBody under the cap renders the plain forensic block (no show-all)');
+  const manyCands = [];
+  for (let i = 0; i < PEERS_VISIBLE_CAP + 4; i++) {
+    manyCands.push({ username: `u${i}`, dir: `d${i}`, filetype: 'flac',
+      matched_tracks: 1, total_tracks: 1, avg_ratio: 1, missing_titles: [], file_count: 1 });
+  }
+  const manyHtml = renderPeersBody(
+    { variant: 'v1', final_state: 'Completed', outcome: 'no_match', top_candidates: manyCands }, 7);
+  assert(manyHtml.includes(`show all ${manyCands.length} peers`),
+    'renderPeersBody over the cap offers a show-all toggle with the full count');
+  assert(manyHtml.includes('window.toggleLongTailPeers(7)'),
+    'renderPeersBody wires the show-all toggle to toggleLongTailPeers with the row id');
+  assert(manyHtml.includes('lt-peers-full'),
+    'renderPeersBody pre-renders the full block for the toggle');
+  // Null last_search → forensic block "no data yet" (not a crash).
+  assert(renderPeersBody(null, 7).includes('No search forensic data yet'),
+    'renderPeersBody null last_search → forensic "no data yet"');
+
+  // --- renderSiblingsBody: rows + empty ---
+  const siblings = renderSiblingsBody({ releases: [
+    { id: 'r1', title: 'Pressing A', date: '2008-01-01', country: 'US', track_count: 14, format: 'CD',
+      in_library: true, library_rank: 'transparent', pipeline_status: null },
+    { id: 'r2', title: 'Pressing B', date: '2000-01-01', country: 'GB', track_count: 10, format: 'CD',
+      in_library: false, pipeline_status: 'wanted' },
+  ] });
+  assert(siblings.includes('Pressing A') && siblings.includes('Pressing B'),
+    'renderSiblingsBody renders each sibling pressing');
+  assert(siblings.includes('in library') && siblings.includes('badge-rank-transparent'),
+    'renderSiblingsBody renders the in-library badge with the rank colour');
+  assert(siblings.includes('badge-wanted') || siblings.includes('wanted'),
+    'renderSiblingsBody renders the pipeline status for a sibling already requested');
+  assert(renderSiblingsBody({ releases: [] }).includes('No sibling pressings'),
+    'renderSiblingsBody empty → "no sibling pressings"');
+  assert(renderSiblingsBody(null).includes('No sibling pressings'),
+    'renderSiblingsBody null → "no sibling pressings"');
+
+  // --- renderYoutubeBody: four states (display-only matrix in U4) ---
+  // never_run (null result) → Check YouTube button, no matrix.
+  const ytNever = renderYoutubeBody(null, 9);
+  assert(ytNever.includes('Check YouTube') && ytNever.includes('window.checkYoutube(9)'),
+    'renderYoutubeBody never_run renders the Check-YouTube stub wired to window.checkYoutube');
+  assert(!ytNever.includes('lt-yt-row'),
+    'renderYoutubeBody never_run renders no matrix rows (no auto-resolve)');
+  // resolved_with_matrix → display-only matrix rows.
+  const ytMatrixHtml = renderYoutubeBody({
+    outcome: 'ok', from_cache: false, youtube_releases: [
+      { yt_browse_id: 'MPREb_z', year: 2008, track_count: 14, tracks: [],
+        distances: [{ mbid: 'm', outcome: 'ok', distance: 0.07 }, { mbid: 'n', outcome: 'no_audio' }] },
+    ],
+  }, 9);
+  assert(ytMatrixHtml.includes('MPREb_z') && ytMatrixHtml.includes('lt-yt-row'),
+    'renderYoutubeBody resolved_with_matrix renders the display-only matrix rows');
+  assert(ytMatrixHtml.includes('dist 0.070'),
+    'renderYoutubeBody matrix surfaces the best ok distance');
+  // resolved_empty → "not on YouTube Music".
+  const ytEmptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
+  assert(ytEmptyHtml.includes('Not on YouTube Music'),
+    'renderYoutubeBody resolved_empty renders the "not on YouTube Music" copy');
+  // resolver_failed → error message + retry affordance. The retry button
+  // is relabelled "Retry" in U5 (still wired to window.checkYoutube), so
+  // assert on the retry verb + the wired handler rather than the original
+  // "Check YouTube" label.
+  const ytFailedHtml = renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9);
+  assert(ytFailedHtml.includes('mirror down') && ytFailedHtml.includes('Retry')
+    && ytFailedHtml.includes('window.checkYoutube(9)'),
+    'renderYoutubeBody resolver_failed renders the error + retry affordance');
+  // staleness flag on a cached matrix.
+  const ytStaleHtml = renderYoutubeBody({
+    outcome: 'ok', from_cache: true, error_message: 'live fetch failed',
+    youtube_releases: [{ yt_browse_id: 'b', track_count: 1, tracks: [], distances: [] }],
+  }, 9);
+  assert(ytStaleHtml.includes('lt-yt-stale'),
+    'renderYoutubeBody surfaces a staleness flag on a cached-but-stale matrix');
+
+  // --- renderConsoleShell: band-aware emphasis + panel containers ---
+  // Missing row → why-unfindable leads; the per-panel containers exist.
+  const missingShell = renderConsoleShell({ id: 11, band: 'missing', source: 'mb', target_format: 'lossless' });
+  assert(missingShell.includes('id="lt-panel-unfindable-11"'),
+    'renderConsoleShell emits the why-unfindable panel container');
+  assert(missingShell.includes('id="lt-panel-peers-11"')
+    && missingShell.includes('id="lt-panel-rescues-11"')
+    && missingShell.includes('id="lt-panel-siblings-11"')
+    && missingShell.includes('id="lt-panel-youtube-11"'),
+    'renderConsoleShell emits all five evidence-panel containers');
+  // Lead emphasis: the unfindable panel carries the lead class for a Missing row.
+  assert(/lt-panel-unfindable[^"]*lt-panel-lead|lt-panel-lead[^"]*lt-panel-unfindable/.test(missingShell.replace(/\n/g, ' '))
+    || missingShell.includes('lt-panel lt-panel-unfindable lt-panel-lead'),
+    'renderConsoleShell makes why-unfindable the lead panel for a Missing row');
+  // The YouTube panel opens in never_run (no auto-resolve) — Check button present.
+  assert(missingShell.includes('window.checkYoutube(11)'),
+    'renderConsoleShell opens the YouTube panel in never_run (Check-YouTube stub, no auto-resolve)');
+  // On-disk row → band-vs-intent leads (R8), why-unfindable does not.
+  const onDiskShell = renderConsoleShell({ id: 12, band: 'poor', source: 'mb', target_format: 'lossless' });
+  assert(onDiskShell.includes('Quality vs intent') && onDiskShell.includes('lt-band-intent'),
+    'renderConsoleShell leads an on-disk row with the band-vs-intent header');
+  assert(onDiskShell.indexOf('lt-band-intent') < onDiskShell.indexOf('lt-panel-unfindable-12'),
+    'renderConsoleShell orders band-vs-intent BEFORE why-unfindable for an on-disk row');
+
+  // --- partial-failure render: one panel error, others still render ---
+  // Simulate the loaders' per-panel catch: the siblings panel gets the
+  // error affordance while the other panels render their content. The pure
+  // pieces guarantee a failing panel never blanks or drops its siblings.
+  const errBody = renderPanelError('sibling pressings');
+  assert(errBody.includes("Couldn't load sibling pressings") && errBody.includes('other panels are unaffected'),
+    'renderPanelError renders the isolated per-panel error affordance');
+  // Compose the shell + a per-panel error swap + a sibling content render,
+  // proving the three coexist (the independent-load contract).
+  const composed = renderConsoleShell({ id: 13, band: 'missing' })
+    + renderUnfindableBody({ unfindable: { category: 'artist_absent' }, search_forensics: {} })
+    + renderPanelError('sibling pressings');
+  assert(composed.includes('artist_absent') && composed.includes("Couldn't load sibling pressings"),
+    'a panel error and other panels\' content coexist (independent-load contract)');
+}
+
+// --- long_tail.js U5 rescue flow pure helpers ---
+console.log('long_tail.js __test__ (U5 rescue flow)');
+{
+  const {
+    youtubeBestDistance,
+    youtubeRescueTargets,
+    rescueOutcomeCopy,
+    canStartInFlight,
+    renderYoutubeBody,
+    renderRescueConfirm,
+  } = longTailTest;
+
+  // --- youtubeBestDistance: lowest ok distance, ignores non-ok rows ---
+  assertEqual(
+    youtubeBestDistance({ distances: [
+      { mbid: 'a', outcome: 'ok', distance: 0.21 },
+      { mbid: 'b', outcome: 'ok', distance: 0.07 },
+      { mbid: 'c', outcome: 'no_audio' },
+    ] }),
+    0.07,
+    'youtubeBestDistance picks the lowest ok distance');
+  assertEqual(
+    youtubeBestDistance({ distances: [{ mbid: 'a', outcome: 'no_audio' }] }),
+    null,
+    'youtubeBestDistance → null when no ok row scored');
+  assertEqual(youtubeBestDistance({}), null, 'youtubeBestDistance no distances → null');
+  assertEqual(youtubeBestDistance({ distances: null }), null, 'youtubeBestDistance null distances → null');
+
+  // --- youtubeRescueTargets: each target carries its browse id + meta ---
+  const resolverOk = {
+    outcome: 'ok', from_cache: false, youtube_releases: [
+      { yt_browse_id: 'MPREb_one', year: 2008, track_count: 14, tracks: [],
+        distances: [{ mbid: 'm', outcome: 'ok', distance: 0.07 }, { mbid: 'n', outcome: 'no_audio' }] },
+      { yt_browse_id: 'MPREb_two', year: 2000, track_count: 10, tracks: [],
+        distances: [{ mbid: 'p', outcome: 'ok', distance: 0.19 }] },
+    ],
+  };
+  const targets = youtubeRescueTargets(resolverOk);
+  assertEqual(targets.length, 2, 'youtubeRescueTargets yields one target per release');
+  assertEqual(targets[0].yt_browse_id, 'MPREb_one', 'target 0 carries its browse id');
+  assertEqual(targets[1].yt_browse_id, 'MPREb_two', 'target 1 carries its browse id');
+  assertEqual(targets[0].year, 2008, 'target carries year');
+  assertEqual(targets[0].track_count, 14, 'target carries track_count');
+  assertEqual(targets[0].best_distance, 0.07, 'target carries best ok distance');
+  assertEqual(targets[1].best_distance, 0.19, 'second target best distance');
+  // A release missing a browse id is NOT a pickable target (the submit
+  // needs the id).
+  const targetsWithBad = youtubeRescueTargets({
+    outcome: 'ok', youtube_releases: [
+      { yt_browse_id: '', year: 1999, track_count: 8, distances: [] },
+      { yt_browse_id: 'MPREb_keep', year: 2001, track_count: 9, distances: [] },
+    ],
+  });
+  assertEqual(targetsWithBad.length, 1, 'youtubeRescueTargets drops a release with no browse id');
+  assertEqual(targetsWithBad[0].yt_browse_id, 'MPREb_keep', 'kept the release that has a browse id');
+
+  // resolved_empty → NO rescue targets (rescue affordance hidden).
+  assertEqual(
+    youtubeRescueTargets({ outcome: 'ok', youtube_releases: [] }).length,
+    0,
+    'youtubeRescueTargets: resolved_empty yields no rescue targets');
+  // resolver_failed → no targets.
+  assertEqual(
+    youtubeRescueTargets({ outcome: 'transient', error_message: 'down' }).length,
+    0,
+    'youtubeRescueTargets: resolver_failed yields no targets');
+  // never_run (null) → no targets.
+  assertEqual(youtubeRescueTargets(null).length, 0, 'youtubeRescueTargets: null yields no targets');
+
+  // --- renderYoutubeBody: matrix rows are pickable rescue targets (U5) ---
+  const matrixHtml = renderYoutubeBody(resolverOk, 9);
+  assert(matrixHtml.includes('window.pickYoutubeRescue(9, ')
+    && matrixHtml.includes('MPREb_one') && matrixHtml.includes('MPREb_two'),
+    'renderYoutubeBody resolved_with_matrix makes each release a pickable rescue target');
+  assert(matrixHtml.includes('Rescue from this'),
+    'renderYoutubeBody matrix rows carry a "Rescue from this" button');
+  // resolved_empty HIDES the rescue affordance (R9 — nothing to pick).
+  const emptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
+  assert(!emptyHtml.includes('Rescue from this') && emptyHtml.includes('Not on YouTube Music'),
+    'renderYoutubeBody resolved_empty hides the rescue affordance and shows "not on YouTube Music"');
+  assert(emptyHtml.includes('Re-check'),
+    'renderYoutubeBody resolved_empty offers a re-check');
+  // resolver_failed → Retry affordance.
+  assert(renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9).includes('Retry'),
+    'renderYoutubeBody resolver_failed offers a Retry affordance');
+
+  // --- rescueOutcomeCopy: every ingest outcome → its intended copy ---
+  // accepted → success tone, "rescue queued".
+  const accepted = rescueOutcomeCopy({ outcome: 'accepted', download_log_id: 42 });
+  assertEqual(accepted.tone, 'success', 'rescueOutcomeCopy accepted → success tone');
+  assert(accepted.title.toLowerCase().includes('queued'), 'rescueOutcomeCopy accepted title says queued');
+  assert(accepted.detail.includes('42'), 'rescueOutcomeCopy accepted surfaces the download_log_id');
+  // in_flight → error tone, surfaces the existing download_log_id.
+  const inFlight = rescueOutcomeCopy({ outcome: 'in_flight', download_log_id: 7 });
+  assertEqual(inFlight.tone, 'error', 'rescueOutcomeCopy in_flight → error tone');
+  assert(inFlight.detail.includes('already running') && inFlight.detail.includes('7'),
+    'rescueOutcomeCopy in_flight surfaces the existing download_log_id');
+  // wrong_state → "request changed — refresh".
+  const wrongState = rescueOutcomeCopy({ outcome: 'wrong_state' });
+  assert(wrongState.detail.toLowerCase().includes('refresh'),
+    'rescueOutcomeCopy wrong_state tells the operator to refresh');
+  // no_resolver_mapping → "re-run Check YouTube".
+  const noMapping = rescueOutcomeCopy({ outcome: 'no_resolver_mapping' });
+  assert(noMapping.detail.toLowerCase().includes('re-run check youtube'),
+    'rescueOutcomeCopy no_resolver_mapping tells the operator to re-run Check YouTube');
+  // track_count_precheck_failed → shows the precheck mismatch detail.
+  const trackMismatch = rescueOutcomeCopy({
+    outcome: 'track_count_precheck_failed', detail: 'expected 14, got 10' });
+  assert(trackMismatch.detail.includes('expected 14, got 10'),
+    'rescueOutcomeCopy track_count_precheck_failed surfaces the mismatch detail');
+  // transient → retry.
+  const transient = rescueOutcomeCopy({ outcome: 'transient' });
+  assert(transient.detail.toLowerCase().includes('retry'),
+    'rescueOutcomeCopy transient tells the operator to retry');
+  assertEqual(transient.tone, 'error', 'rescueOutcomeCopy transient → error tone');
+  // request_not_found → refresh.
+  assert(rescueOutcomeCopy({ outcome: 'request_not_found' }).detail.toLowerCase().includes('refresh'),
+    'rescueOutcomeCopy request_not_found tells the operator to refresh');
+  // unknown outcome → generic error (never blank), surfaces the error field.
+  const unknown = rescueOutcomeCopy({ outcome: 'who_knows', error: 'boom' });
+  assertEqual(unknown.tone, 'error', 'rescueOutcomeCopy unknown → error tone');
+  assert(unknown.detail.length > 0, 'rescueOutcomeCopy unknown → non-blank detail');
+  // null result → generic error, never throws.
+  assertEqual(rescueOutcomeCopy(null).tone, 'error', 'rescueOutcomeCopy null → error tone (no throw)');
+
+  // --- canStartInFlight: double-fire guard predicate ---
+  const inFlightSet = new Set();
+  assertEqual(canStartInFlight(inFlightSet, 5), true,
+    'canStartInFlight: nothing outstanding → may start');
+  inFlightSet.add(5);
+  assertEqual(canStartInFlight(inFlightSet, 5), false,
+    'canStartInFlight: an outstanding call for the id → suppressed (double-fire guard)');
+  assertEqual(canStartInFlight(inFlightSet, 6), true,
+    'canStartInFlight: a different id is independent');
+
+  // --- renderRescueConfirm: reuses the .confirm-box shell ---
+  const confirm = renderRescueConfirm(11, 'MPREb_x', { artist_name: 'Smog', album_title: 'Knock Knock' });
+  assert(confirm.includes('confirm-box') && confirm.includes('MPREb_x'),
+    'renderRescueConfirm renders the confirm-box shell carrying the target browse id');
+  assert(confirm.includes('Smog') && confirm.includes('Knock Knock'),
+    'renderRescueConfirm labels the request being rescued');
+  assert(confirm.includes('id="lt-rescue-confirm"') && confirm.includes('id="lt-rescue-cancel"'),
+    'renderRescueConfirm wires confirm + cancel buttons');
+}
+
+// --- long_tail.js U6 secondary-action pure helpers ---
+console.log('long_tail.js __test__ (U6 secondary actions)');
+{
+  const {
+    canAcceptSibling,
+    acceptDisabledReason,
+    intentToggleTarget,
+    regenerateOutcomeCopy,
+    buildAcceptSiblingOptions,
+    renderActionsBar,
+  } = longTailTest;
+
+  // --- canAcceptSibling: MB-only predicate (KTD7) ---
+  assertEqual(
+    canAcceptSibling({ source: 'request' }, 'rg-1'),
+    true,
+    'canAcceptSibling: MB request with a release group → true');
+  assertEqual(
+    canAcceptSibling({ source: 'discogs' }, 'rg-1'),
+    false,
+    'canAcceptSibling: Discogs-sourced request → false (no MB↔Discogs adapter)');
+  assertEqual(
+    canAcceptSibling({ source: 'DISCOGS' }, 'rg-1'),
+    false,
+    'canAcceptSibling: Discogs source is case-insensitive');
+  assertEqual(
+    canAcceptSibling({ source: 'request' }, null),
+    false,
+    'canAcceptSibling: no release group → false even for an MB request');
+  assertEqual(
+    canAcceptSibling({ source: 'request' }, ''),
+    false,
+    'canAcceptSibling: empty release group → false');
+  assertEqual(
+    canAcceptSibling(null, 'rg-1'),
+    false,
+    'canAcceptSibling: null row → false (no throw)');
+
+  // --- acceptDisabledReason: one-line reason, empty when enabled ---
+  assertEqual(
+    acceptDisabledReason({ source: 'request' }, 'rg-1'),
+    '',
+    'acceptDisabledReason: enabled → empty string');
+  assert(
+    acceptDisabledReason({ source: 'discogs' }, 'rg-1').toLowerCase().includes('discogs'),
+    'acceptDisabledReason: Discogs reason mentions Discogs');
+  assert(
+    acceptDisabledReason({ source: 'request' }, null).toLowerCase().includes('release group'),
+    'acceptDisabledReason: no-rg reason mentions the missing release group');
+
+  // --- intentToggleTarget: lossless ⇄ default toggle ---
+  assertEqual(
+    intentToggleTarget('lossless'),
+    'default',
+    'intentToggleTarget: lossless target_format → toggle to default (accept floor)');
+  assertEqual(
+    intentToggleTarget('flac'),
+    'default',
+    'intentToggleTarget: flac target_format reads as lossless → toggle to default');
+  assertEqual(
+    intentToggleTarget(null),
+    'lossless',
+    'intentToggleTarget: no target_format (default intent) → toggle to lossless');
+  assertEqual(
+    intentToggleTarget(''),
+    'lossless',
+    'intentToggleTarget: empty target_format → toggle to lossless');
+  assertEqual(
+    intentToggleTarget('mp3'),
+    'lossless',
+    'intentToggleTarget: non-lossless target_format → toggle to lossless');
+
+  // --- regenerateOutcomeCopy: every outcome → next-cycle copy (KTD3) ---
+  const regenSuccess = regenerateOutcomeCopy({ outcome: 'success' });
+  assertEqual(regenSuccess.tone, 'success', 'regenerateOutcomeCopy success → success tone');
+  assertEqual(regenSuccess.requeued, true, 'regenerateOutcomeCopy success → requeued (refetch)');
+  assertEqual(regenSuccess.metadataGap, false, 'regenerateOutcomeCopy success → not a metadata gap');
+  assert(
+    regenSuccess.detail.toLowerCase().includes('next cycle')
+      && !regenSuccess.detail.toLowerCase().includes('instant'),
+    'regenerateOutcomeCopy success copy is honest next-cycle, never "instant"');
+
+  const regenNoop = regenerateOutcomeCopy({ outcome: 'noop_active_plan_exists' });
+  assertEqual(regenNoop.tone, 'success', 'regenerateOutcomeCopy noop → success tone');
+  assertEqual(regenNoop.requeued, true, 'regenerateOutcomeCopy noop → requeued (already queued)');
+  assertEqual(regenNoop.metadataGap, false, 'regenerateOutcomeCopy noop → not a metadata gap');
+  assert(
+    regenNoop.detail.toLowerCase().includes('already'),
+    'regenerateOutcomeCopy noop says a fresh plan already exists');
+
+  // failed_deterministic is the METADATA-GAP variant — NOT a re-fire.
+  const regenDet = regenerateOutcomeCopy({
+    outcome: 'failed_deterministic',
+    error_message: 'no runnable query',
+    failure_class: 'incomplete_metadata',
+  });
+  assertEqual(regenDet.tone, 'error', 'regenerateOutcomeCopy failed_deterministic → error tone');
+  assertEqual(regenDet.metadataGap, true,
+    'regenerateOutcomeCopy failed_deterministic → metadataGap=true (surface inline, do NOT re-fire)');
+  assertEqual(regenDet.requeued, false,
+    'regenerateOutcomeCopy failed_deterministic → not requeued (no refetch)');
+  assert(regenDet.detail.includes('no runnable query'),
+    'regenerateOutcomeCopy failed_deterministic surfaces the API error');
+  assert(regenDet.detail.includes('incomplete_metadata'),
+    'regenerateOutcomeCopy failed_deterministic surfaces the failure class');
+  assert(regenDet.detail.toLowerCase().includes('field-quality'),
+    'regenerateOutcomeCopy failed_deterministic points at the field-quality detail');
+
+  const regenTrans = regenerateOutcomeCopy({ outcome: 'failed_transient', error: 'db hiccup' });
+  assertEqual(regenTrans.tone, 'error', 'regenerateOutcomeCopy failed_transient → error tone');
+  assertEqual(regenTrans.metadataGap, false,
+    'regenerateOutcomeCopy failed_transient → not a metadata gap (retryable)');
+  assertEqual(regenTrans.requeued, false, 'regenerateOutcomeCopy failed_transient → not requeued');
+  assert(regenTrans.detail.toLowerCase().includes('retry'),
+    'regenerateOutcomeCopy failed_transient tells the operator to retry');
+
+  const regenNotFound = regenerateOutcomeCopy({ outcome: 'request_not_found' });
+  assertEqual(regenNotFound.tone, 'error', 'regenerateOutcomeCopy request_not_found → error tone');
+  assert(regenNotFound.detail.toLowerCase().includes('refresh'),
+    'regenerateOutcomeCopy request_not_found tells the operator to refresh');
+
+  const regenUnknown = regenerateOutcomeCopy({ outcome: 'who_knows' });
+  assertEqual(regenUnknown.tone, 'error', 'regenerateOutcomeCopy unknown → error tone');
+  assert(regenUnknown.detail.length > 0, 'regenerateOutcomeCopy unknown → non-blank detail');
+  assertEqual(regenerateOutcomeCopy(null).tone, 'error',
+    'regenerateOutcomeCopy null → error tone (no throw)');
+
+  // --- buildAcceptSiblingOptions: standard-mode picker options ---
+  const opts = buildAcceptSiblingOptions({
+    id: 77, artist_name: 'Smog', album_title: 'Knock Knock', mb_release_group_id: 'rg-9' });
+  assertEqual(opts.sourceRequestId, 77, 'buildAcceptSiblingOptions carries the source request id');
+  assertEqual(opts.releaseGroupId, 'rg-9', 'buildAcceptSiblingOptions carries the release group id');
+  assert(opts.sourceLabel.includes('Smog') && opts.sourceLabel.includes('Knock Knock'),
+    'buildAcceptSiblingOptions builds an "Artist — Album" source label');
+  assertEqual(
+    buildAcceptSiblingOptions({ id: 5, artist_name: 'A', album_title: 'B' }).releaseGroupId,
+    null,
+    'buildAcceptSiblingOptions: no rg on row → null (picker lazily resolves)');
+
+  // --- renderActionsBar: enable/disable + intent badge + research btn ---
+  const mbBar = renderActionsBar({
+    id: 12, source: 'request', mb_release_group_id: 'rg-1', target_format: null });
+  assert(mbBar.includes('window.longTailAcceptSibling(12)'),
+    'renderActionsBar: MB row wires the accept-sibling handler');
+  assert(!/lt-act-accept[^>]*disabled/.test(mbBar),
+    'renderActionsBar: MB row accept-sibling is enabled');
+  assert(mbBar.includes('window.longTailSetIntent(12)'),
+    'renderActionsBar wires the set-intent toggle');
+  assert(mbBar.includes('window.longTailReSearch(12)'),
+    'renderActionsBar wires the re-search button');
+  assert(mbBar.includes('next cycle'),
+    'renderActionsBar re-search copy is honest next-cycle');
+  // default intent (no target_format) → toggle offers "switch to lossless".
+  assert(mbBar.includes('switch to lossless') && mbBar.includes('lt-intent-default'),
+    'renderActionsBar: default intent renders a default badge + "switch to lossless"');
+
+  const discogsBar = renderActionsBar({
+    id: 13, source: 'discogs', mb_release_group_id: null, target_format: 'lossless' });
+  assert(/lt-act-accept[^>]*disabled/.test(discogsBar),
+    'renderActionsBar: Discogs row disables accept-sibling');
+  assert(discogsBar.toLowerCase().includes('musicbrainz-only')
+    || discogsBar.toLowerCase().includes('discogs'),
+    'renderActionsBar: Discogs row shows the one-line disable reason');
+  assert(!discogsBar.includes('window.longTailAcceptSibling(13)'),
+    'renderActionsBar: disabled accept-sibling does not wire the handler onclick');
+  // lossless intent → badge + "accept current floor" toggle.
+  assert(discogsBar.includes('lt-intent-lossless') && discogsBar.includes('accept current floor'),
+    'renderActionsBar: lossless intent renders a lossless badge + "accept current floor"');
+
+  // MB row with no release group → accept-sibling disabled.
+  const noRgBar = renderActionsBar({
+    id: 14, source: 'request', mb_release_group_id: null, target_format: null });
+  assert(/lt-act-accept[^>]*disabled/.test(noRgBar),
+    'renderActionsBar: MB row with no release group disables accept-sibling');
+}
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

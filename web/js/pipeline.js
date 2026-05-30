@@ -4,6 +4,7 @@ import { esc, awstDate, awstDateTime, awstTime, qualityLabel, externalReleaseUrl
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
+import { loadLongTail, renderLongTailBody } from './long_tail.js';
 
 /**
  * Load pipeline data from API and render.
@@ -12,6 +13,13 @@ import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js
 export async function loadPipeline() {
   if (state.pipelineView === 'dashboard') {
     await loadPipelineDashboard();
+    return;
+  }
+  if (state.pipelineView === 'long-tail') {
+    // U3: the long-tail worklist owns its own fetch lifecycle. It paints
+    // a loading affordance, fetches the banded cohort, then routes back
+    // through renderPipeline (which re-emits the Pipeline nav).
+    await loadLongTail();
     return;
   }
   if (state.pipelineView === 'search-plan-detail') {
@@ -60,6 +68,17 @@ export function setPipelineView(view) {
   if (view === 'dashboard') {
     state.pipelineView = 'dashboard';
     loadPipelineDashboard();
+    return;
+  }
+  if (view === 'long-tail') {
+    state.pipelineView = 'long-tail';
+    // Re-render from cache if we already have a cohort (cheap band/search
+    // re-paint); otherwise kick the initial fetch.
+    if (state.longTail.rows) {
+      renderPipeline();
+    } else {
+      loadLongTail();
+    }
     return;
   }
   if (view === 'search-plan-detail') {
@@ -120,12 +139,17 @@ export function setFilter(f) {
  * Dispatches on `state.pipelineView`:
  *   * `'queue'` (default)  → list of pipeline rows
  *   * `'dashboard'`        → metrics dashboard
+ *   * `'long-tail'`        → banded long-tail triage worklist
  *   * `'search-plan-detail'` → per-request inspector (U4)
  */
 export function renderPipeline() {
   const el = document.getElementById('pipeline-content');
   if (state.pipelineView === 'dashboard') {
     renderPipelineDashboard();
+    return;
+  }
+  if (state.pipelineView === 'long-tail') {
+    el.innerHTML = `${renderPipelineNav()}${renderLongTailBody()}`;
     return;
   }
   if (state.pipelineView === 'search-plan-detail') {
@@ -204,12 +228,15 @@ export function renderPipeline() {
 function renderPipelineNav() {
   const refreshAction = state.pipelineView === 'dashboard'
     ? 'window.loadPipelineDashboard()'
-    : 'window.loadPipeline()';
+    : state.pipelineView === 'long-tail'
+      ? 'window.loadLongTail()'
+      : 'window.loadPipeline()';
 
   return `
     <div class="pipeline-subtabs">
       <button class="p-btn ${state.pipelineView === 'queue' ? 'active-status' : ''}" onclick="window.setPipelineView('queue')">Queue</button>
       <button class="p-btn ${state.pipelineView === 'dashboard' ? 'active-status' : ''}" onclick="window.setPipelineView('dashboard')">Dashboard</button>
+      <button class="p-btn ${state.pipelineView === 'long-tail' ? 'active-status' : ''}" onclick="window.setPipelineView('long-tail')">Long Tail</button>
       <button class="p-btn subtab-refresh" onclick="${refreshAction}">Refresh</button>
     </div>
   `;
