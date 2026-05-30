@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import psycopg2
+
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.insert(0, os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
@@ -7963,6 +7965,137 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         batch = self.db.get_download_history_batch([self.request_id])
         rows = batch[self.request_id]
         self.assertEqual({r["source"] for r in rows}, {"slskd", "youtube"})
+
+
+def _terminate_backend(dsn, pid):
+    """Kill a PostgreSQL backend from a *second* session so the next statement
+    on the original connection dies mid-flight (``conn.closed`` flips truthy).
+
+    This is the real "server closed the socket unexpectedly" failure mode the
+    ``_execute`` reconnect branch and the ``_atomic`` rollback handler must
+    survive — reproduced deterministically instead of via a fake socket.
+    """
+    killer = psycopg2.connect(dsn)
+    killer.autocommit = True
+    try:
+        with killer.cursor() as cur:
+            cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
+            cur.fetchone()
+    finally:
+        killer.close()
+
+
+@requires_postgres
+class TestAtomicAndExecuteHardening(unittest.TestCase):
+    """Issue #395 — error-path hardening for the shared transaction
+    primitives in ``lib/pipeline_db/_core.py``, exercised against real PG.
+
+    Item 1: ``_execute`` must NOT silently reconnect onto a fresh
+    ``autocommit=True`` connection when it dies mid-statement *inside* a
+    transaction (``autocommit=False``) — that would drop the in-flight
+    transaction's partial writes. It must re-raise so ``_atomic`` rolls back.
+    Outside a transaction the reconnect-and-retry heal must still fire.
+
+    Item 2: when the connection is dead, both ``rollback()`` and the
+    autocommit-restore in ``_atomic``'s ``finally`` raise a *secondary*
+    ``InterfaceError``. Neither may mask the ORIGINAL exception the caller
+    should see.
+    """
+
+    @staticmethod
+    def _backend_pid(db):
+        with db.conn.cursor() as cur:
+            cur.execute("SELECT pg_backend_pid()")
+            return cur.fetchone()[0]
+
+    def test_execute_inside_transaction_reraises_instead_of_reconnecting(self):
+        """Item 1 guard: a mid-statement socket death while ``autocommit=False``
+        re-raises and leaves the connection object untouched — no silent swap
+        to a fresh autocommit=True connection that would lose the transaction.
+        """
+        db = make_db()
+        self.addCleanup(db.close)
+        original_conn = db.conn
+        # Simulate being inside `with self._atomic():` — explicit transaction.
+        db.conn.autocommit = False
+        pid = self._backend_pid(db)  # also opens the transaction
+        _terminate_backend(db.dsn, pid)
+        with self.assertRaises((psycopg2.OperationalError, psycopg2.InterfaceError)):
+            db._execute("SELECT 1")
+        # The guard held: _execute did NOT reconnect.
+        self.assertIs(db.conn, original_conn)
+
+    def test_execute_reconnects_outside_transaction(self):
+        """Item 1 scope check: outside a transaction (``autocommit=True``) a
+        dead socket must still heal via reconnect-and-retry. The guard is
+        scoped to ``autocommit=False`` only and must not regress this — the
+        live failure mode the reconnect branch exists for.
+        """
+        db = make_db()
+        self.addCleanup(db.close)
+        original_conn = db.conn
+        self.assertTrue(db.conn.autocommit)
+        pid = self._backend_pid(db)
+        _terminate_backend(db.dsn, pid)
+        cur = db._execute("SELECT 1 AS one")
+        self.assertEqual(cur.fetchone()["one"], 1)
+        self.assertIsNot(db.conn, original_conn)  # reconnected
+        self.assertTrue(db.conn.autocommit)
+
+    def test_atomic_rollback_failure_preserves_original_exception(self):
+        """Item 2: a dead connection makes both ``rollback()`` and the
+        autocommit-restore raise ``InterfaceError``. The ORIGINAL exception
+        from the block body must still propagate.
+        """
+        db = make_db()
+        self.addCleanup(db.close)
+
+        class _Boom(Exception):
+            pass
+
+        with self.assertRaises(_Boom):
+            with db._atomic():
+                # Kill the connection so BOTH rollback() (except handler) and
+                # autocommit-restore (finally) raise a secondary InterfaceError.
+                db.conn.close()
+                raise _Boom("the real failure the operator must see")
+
+    def test_atomic_commit_failure_propagates_commit_error(self):
+        """Item 2: when the caller's ``commit()`` raises ``OperationalError``
+        because the backend died, that commit error propagates — not a
+        secondary ``InterfaceError`` from the guarded rollback / restore.
+        (``InterfaceError`` is a sibling of ``OperationalError``, so a leak
+        would fail this assertion.)
+        """
+        db = make_db()
+        self.addCleanup(db.close)
+        with self.assertRaises(psycopg2.OperationalError):
+            with db._atomic():
+                pid = self._backend_pid(db)
+                _terminate_backend(db.dsn, pid)
+                db.conn.commit()  # backend gone -> raises OperationalError
+
+    def test_atomic_happy_path_commits_and_restores_autocommit(self):
+        """No behaviour change on the happy path: flip to ``autocommit=False``
+        for the block, caller commits, autocommit is restored, write persists.
+        """
+        db = make_db()
+        self.addCleanup(db.close)
+        self.assertTrue(db.conn.autocommit)
+        rid = db.add_request(
+            artist_name="Atomic", album_title="Happy Path", source="request")
+        with db._atomic():
+            self.assertFalse(db.conn.autocommit)  # flipped for the block
+            with db.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE album_requests SET reasoning = %s WHERE id = %s",
+                    ("atomic-write", rid),
+                )
+            db.conn.commit()
+        self.assertTrue(db.conn.autocommit)  # restored
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["reasoning"], "atomic-write")
 
 
 if __name__ == "__main__":
