@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
@@ -531,6 +531,73 @@ assert(!xssBlock.includes('<script>x</script>'),
   'malicious username escaped');
 assert(!xssBlock.includes('"><img>'),
   'malicious dir escaped');
+
+// --- youtubeSectionState tests (U4 four-state classifier) ---
+console.log('youtubeSectionState()');
+// null / undefined / non-object → never_run (the side-effectful GET has
+// not been run; U4 must NOT auto-call it).
+assertEqual(youtubeSectionState(null).state, 'never_run', 'null → never_run');
+assertEqual(youtubeSectionState(undefined).state, 'never_run', 'undefined → never_run');
+// A truthy object with no `outcome` field is a malformed/failed resolve
+// (its outcome is not "ok"), NOT never_run — only null/undefined defaults
+// to the not-yet-run state.
+assertEqual(youtubeSectionState({}).state, 'resolver_failed', 'object with no outcome → resolver_failed');
+assertEqual(youtubeSectionState(null).stale, false, 'never_run is never stale');
+// ok + releases → resolved_with_matrix.
+const ytMatrix = youtubeSectionState({
+  outcome: 'ok',
+  youtube_releases: [{ yt_browse_id: 'MPREb_x', distances: [] }],
+  from_cache: false,
+});
+assertEqual(ytMatrix.state, 'resolved_with_matrix', 'ok + releases>0 → resolved_with_matrix');
+assertEqual(ytMatrix.stale, false, 'fresh matrix not stale');
+assertEqual(ytMatrix.message, '', 'fresh matrix needs no message');
+// ok + empty releases → resolved_empty.
+const ytEmpty = youtubeSectionState({ outcome: 'ok', youtube_releases: [], from_cache: false });
+assertEqual(ytEmpty.state, 'resolved_empty', 'ok + releases==0 → resolved_empty');
+assert(ytEmpty.message.includes('Not on YouTube Music'), 'resolved_empty surfaces "not on YouTube Music" copy');
+// ok + missing youtube_releases key → resolved_empty (no releases).
+assertEqual(youtubeSectionState({ outcome: 'ok' }).state, 'resolved_empty', 'ok + no releases key → resolved_empty');
+// transient / 503 outcomes → resolver_failed.
+assertEqual(youtubeSectionState({ outcome: 'transient' }).state, 'resolver_failed', 'transient → resolver_failed');
+assertEqual(youtubeSectionState({ outcome: 'unresolved_timeout' }).state, 'resolver_failed', 'unresolved_timeout → resolver_failed');
+assertEqual(youtubeSectionState({ outcome: 'unresolved_mirror_unavailable' }).state, 'resolver_failed', 'mirror unavailable → resolver_failed');
+assertEqual(youtubeSectionState({ outcome: 'not_found' }).state, 'resolver_failed', 'not_found → resolver_failed');
+const ytFail = youtubeSectionState({ outcome: 'transient', error_message: 'mirror down' });
+assert(ytFail.message.includes('mirror down'), 'resolver_failed surfaces the error_message');
+// from_cache + error_message → staleness flag on an otherwise-resolved state.
+const ytStaleMatrix = youtubeSectionState({
+  outcome: 'ok',
+  youtube_releases: [{ yt_browse_id: 'MPREb_y', distances: [] }],
+  from_cache: true,
+  error_message: 'live YT fetch failed; served cache',
+});
+assertEqual(ytStaleMatrix.state, 'resolved_with_matrix', 'cached matrix still resolves with matrix');
+assertEqual(ytStaleMatrix.stale, true, 'from_cache + error_message sets the staleness flag');
+assert(ytStaleMatrix.message.includes('stale'), 'stale matrix surfaces a staleness message');
+// from_cache WITHOUT error_message is a clean cache hit, not stale.
+assertEqual(
+  youtubeSectionState({ outcome: 'ok', youtube_releases: [{ yt_browse_id: 'z', distances: [] }], from_cache: true }).stale,
+  false,
+  'from_cache alone (no error_message) is not stale',
+);
+
+// --- consoleEmphasis tests (U4 band-aware emphasis selector) ---
+console.log('consoleEmphasis()');
+assertEqual(consoleEmphasis({ band: 'missing' }).lead, 'unfindable', 'Missing band leads with unfindable panel');
+assertEqual(consoleEmphasis({ band: 'MISSING' }).lead, 'unfindable', 'Missing band is case-insensitive');
+assertEqual(consoleEmphasis({ band: '' }).lead, 'unfindable', 'no band (treated Missing-like) leads with unfindable');
+assertEqual(consoleEmphasis({}).lead, 'unfindable', 'missing band key leads with unfindable');
+assertEqual(consoleEmphasis(null).lead, 'unfindable', 'null row leads with unfindable');
+assertEqual(consoleEmphasis({ band: 'poor' }).lead, 'band_vs_intent', 'on-disk band leads with band-vs-intent');
+assertEqual(consoleEmphasis({ band: 'transparent' }).lead, 'band_vs_intent', 'on-disk transparent leads with band-vs-intent');
+// An on-disk row carrying an unfindable_category still leads with unfindable
+// (the operator's first question is "why stuck", even if a copy exists).
+assertEqual(
+  consoleEmphasis({ band: 'poor', unfindable_category: 'wrong_pressing_available' }).lead,
+  'unfindable',
+  'on-disk row with an unfindable_category leads with unfindable',
+);
 
 // --- parsePastedId tests (search-by-ID) ---
 console.log('parsePastedId()');
@@ -1149,6 +1216,229 @@ console.log('long_tail.js __test__');
   );
   // Reset shared state so later tests are not affected.
   state.longTail = { rows: null, band: null, query: '' };
+}
+
+// --- long_tail.js action console pure helpers (U4) ---
+console.log('long_tail.js __test__ (U4 console)');
+{
+  const {
+    renderUnfindableBody,
+    renderPeersBody,
+    renderRescuesBody,
+    renderSiblingsBody,
+    renderYoutubeBody,
+    renderConsoleShell,
+    renderPanelError,
+    youtubeHistoryRows,
+    youtubeFailureReason,
+    PEERS_VISIBLE_CAP,
+  } = longTailTest;
+
+  // --- renderUnfindableBody: categorised vs not-yet-categorised ---
+  // Categorised → category badge + forensics rollup.
+  const categorised = renderUnfindableBody({
+    unfindable: { category: 'wrong_pressing_available', categorised_at: '2026-05-20T00:00:00Z',
+      last_artist_probe_match_count: 3, last_artist_probe_at: '2026-05-21T00:00:00Z' },
+    search_forensics: { total_searches: 40, with_cands_count: 12, zero_results_count: 5,
+      dominant_rejection_reason: 'strict_count', last_search_at: '2026-05-22T00:00:00Z' },
+  });
+  assert(categorised.includes('wrong_pressing_available'),
+    'renderUnfindableBody renders the category for a categorised request');
+  assert(categorised.includes('40 searches') && categorised.includes('dominant reject: strict_count'),
+    'renderUnfindableBody renders the search-forensics rollup');
+  assert(categorised.includes('artist probe: 3 matches'),
+    'renderUnfindableBody renders the artist-probe rollup');
+  // Not-yet-categorised (unfindable == null) → daily-detection state, NOT
+  // an error, NOT blank (R7).
+  const uncategorised = renderUnfindableBody({
+    unfindable: null,
+    search_forensics: { total_searches: 2, with_cands_count: 0, zero_results_count: 2 },
+  });
+  assert(uncategorised.includes('not yet categorised') && uncategorised.includes('detection runs daily'),
+    'renderUnfindableBody renders the not-yet-categorised daily-detection state');
+  assert(!uncategorised.toLowerCase().includes("couldn't load"),
+    'not-yet-categorised is distinct from an error affordance');
+  // category explicitly absent on the unfindable struct also → uncategorised.
+  const catNull = renderUnfindableBody({ unfindable: { category: null }, search_forensics: {} });
+  assert(catNull.includes('not yet categorised'),
+    'renderUnfindableBody treats a null category as not-yet-categorised');
+
+  // --- youtubeHistoryRows: only source==="youtube" rows ---
+  // Production-shaped: a youtube_failed row carries its reason in the
+  // youtube_metadata JSONB blob (per YoutubeIngestMetadata.reason), NOT in
+  // a top-level field.
+  const mixedHistory = [
+    { source: 'youtube', outcome: 'youtube_failed', created_at: '2026-05-25T00:00:00Z',
+      youtube_metadata: { reason: 'track_count_mismatch' } },
+    { source: 'request', outcome: 'rejected' },
+    { source: 'youtube', outcome: 'youtube_running', created_at: '2026-05-26T00:00:00Z' },
+  ];
+  assertEqual(youtubeHistoryRows(mixedHistory).length, 2,
+    'youtubeHistoryRows keeps only source==="youtube" rows');
+  assertEqual(youtubeHistoryRows([]).length, 0, 'youtubeHistoryRows empty → []');
+  assertEqual(youtubeHistoryRows(null).length, 0, 'youtubeHistoryRows null → []');
+
+  // --- youtubeFailureReason: reads the production-shaped reason field ---
+  assertEqual(
+    youtubeFailureReason({ youtube_metadata: { reason: 'track_count_mismatch' } }),
+    'track_count_mismatch',
+    'youtubeFailureReason reads youtube_metadata.reason (the production field)');
+  assertEqual(
+    youtubeFailureReason({ error_message: 'yt-dlp died' }),
+    'yt-dlp died',
+    'youtubeFailureReason falls back to error_message');
+  assertEqual(
+    youtubeFailureReason({ verdict: 'rejected' }),
+    'rejected',
+    'youtubeFailureReason falls back to verdict');
+  assertEqual(
+    youtubeFailureReason({}),
+    'unknown',
+    'youtubeFailureReason → "unknown" when no reason field present');
+
+  // --- renderRescuesBody: running / failed / success / none ---
+  // Active youtube_running row → "rescue running".
+  const running = renderRescuesBody(
+    [{ source: 'youtube', outcome: 'youtube_running', created_at: '2026-05-26T00:00:00Z' }], false);
+  assert(running.includes('rescue running'), 'renderRescuesBody shows "rescue running" for an active youtube_running row');
+  // in_flight flag alone (no history) → "rescue running" (KTD4 same predicate).
+  assert(renderRescuesBody([], true).includes('rescue running'),
+    'renderRescuesBody honours the in_flight_rescue flag with no history');
+  // Latest terminal youtube_failed → "last rescue failed: <reason>".
+  // Reason comes from the production-shaped youtube_metadata.reason blob.
+  const failed = renderRescuesBody(
+    [{ source: 'youtube', outcome: 'youtube_failed', created_at: '2026-05-25T00:00:00Z',
+       youtube_metadata: { reason: 'track_count_mismatch' } }], false);
+  assert(failed.includes('last rescue failed') && failed.includes('track_count_mismatch'),
+    'renderRescuesBody shows the failure reason (from youtube_metadata) for a terminal youtube_failed row');
+  // A terminal youtube_success is NOT a failure (distinct from youtube_failed).
+  const succeeded = renderRescuesBody(
+    [{ source: 'youtube', outcome: 'youtube_success', created_at: '2026-05-24T00:00:00Z' }], false);
+  assert(!succeeded.includes('last rescue failed'),
+    'renderRescuesBody does NOT render a failure for a youtube_success row');
+  assert(succeeded.includes('youtube_success'),
+    'renderRescuesBody lists a youtube_success attempt');
+  // No youtube rows at all → "no rescue attempts".
+  assert(renderRescuesBody([{ source: 'request', outcome: 'success' }], false).includes('No rescue attempts'),
+    'renderRescuesBody shows "no rescue attempts" when there are no youtube rows');
+
+  // --- renderPeersBody: cap + show-all toggle ---
+  const fewPeers = {
+    variant: 'v1', final_state: 'Completed', outcome: 'no_match',
+    top_candidates: [
+      { username: 'a', dir: 'x', filetype: 'flac', matched_tracks: 1, total_tracks: 1, avg_ratio: 1, missing_titles: [], file_count: 1 },
+    ],
+  };
+  const fewHtml = renderPeersBody(fewPeers, 7);
+  assert(fewHtml.includes('p-forensic') && !fewHtml.includes('show all'),
+    'renderPeersBody under the cap renders the plain forensic block (no show-all)');
+  const manyCands = [];
+  for (let i = 0; i < PEERS_VISIBLE_CAP + 4; i++) {
+    manyCands.push({ username: `u${i}`, dir: `d${i}`, filetype: 'flac',
+      matched_tracks: 1, total_tracks: 1, avg_ratio: 1, missing_titles: [], file_count: 1 });
+  }
+  const manyHtml = renderPeersBody(
+    { variant: 'v1', final_state: 'Completed', outcome: 'no_match', top_candidates: manyCands }, 7);
+  assert(manyHtml.includes(`show all ${manyCands.length} peers`),
+    'renderPeersBody over the cap offers a show-all toggle with the full count');
+  assert(manyHtml.includes('window.toggleLongTailPeers(7)'),
+    'renderPeersBody wires the show-all toggle to toggleLongTailPeers with the row id');
+  assert(manyHtml.includes('lt-peers-full'),
+    'renderPeersBody pre-renders the full block for the toggle');
+  // Null last_search → forensic block "no data yet" (not a crash).
+  assert(renderPeersBody(null, 7).includes('No search forensic data yet'),
+    'renderPeersBody null last_search → forensic "no data yet"');
+
+  // --- renderSiblingsBody: rows + empty ---
+  const siblings = renderSiblingsBody({ releases: [
+    { id: 'r1', title: 'Pressing A', date: '2008-01-01', country: 'US', track_count: 14, format: 'CD',
+      in_library: true, library_rank: 'transparent', pipeline_status: null },
+    { id: 'r2', title: 'Pressing B', date: '2000-01-01', country: 'GB', track_count: 10, format: 'CD',
+      in_library: false, pipeline_status: 'wanted' },
+  ] });
+  assert(siblings.includes('Pressing A') && siblings.includes('Pressing B'),
+    'renderSiblingsBody renders each sibling pressing');
+  assert(siblings.includes('in library') && siblings.includes('badge-rank-transparent'),
+    'renderSiblingsBody renders the in-library badge with the rank colour');
+  assert(siblings.includes('badge-wanted') || siblings.includes('wanted'),
+    'renderSiblingsBody renders the pipeline status for a sibling already requested');
+  assert(renderSiblingsBody({ releases: [] }).includes('No sibling pressings'),
+    'renderSiblingsBody empty → "no sibling pressings"');
+  assert(renderSiblingsBody(null).includes('No sibling pressings'),
+    'renderSiblingsBody null → "no sibling pressings"');
+
+  // --- renderYoutubeBody: four states (display-only matrix in U4) ---
+  // never_run (null result) → Check YouTube button, no matrix.
+  const ytNever = renderYoutubeBody(null, 9);
+  assert(ytNever.includes('Check YouTube') && ytNever.includes('window.checkYoutube(9)'),
+    'renderYoutubeBody never_run renders the Check-YouTube stub wired to window.checkYoutube');
+  assert(!ytNever.includes('lt-yt-row'),
+    'renderYoutubeBody never_run renders no matrix rows (no auto-resolve)');
+  // resolved_with_matrix → display-only matrix rows.
+  const ytMatrixHtml = renderYoutubeBody({
+    outcome: 'ok', from_cache: false, youtube_releases: [
+      { yt_browse_id: 'MPREb_z', year: 2008, track_count: 14, tracks: [],
+        distances: [{ mbid: 'm', outcome: 'ok', distance: 0.07 }, { mbid: 'n', outcome: 'no_audio' }] },
+    ],
+  }, 9);
+  assert(ytMatrixHtml.includes('MPREb_z') && ytMatrixHtml.includes('lt-yt-row'),
+    'renderYoutubeBody resolved_with_matrix renders the display-only matrix rows');
+  assert(ytMatrixHtml.includes('dist 0.070'),
+    'renderYoutubeBody matrix surfaces the best ok distance');
+  // resolved_empty → "not on YouTube Music".
+  const ytEmptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
+  assert(ytEmptyHtml.includes('Not on YouTube Music'),
+    'renderYoutubeBody resolved_empty renders the "not on YouTube Music" copy');
+  // resolver_failed → error message + retry (Check YouTube).
+  const ytFailedHtml = renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9);
+  assert(ytFailedHtml.includes('mirror down') && ytFailedHtml.includes('Check YouTube'),
+    'renderYoutubeBody resolver_failed renders the error + retry affordance');
+  // staleness flag on a cached matrix.
+  const ytStaleHtml = renderYoutubeBody({
+    outcome: 'ok', from_cache: true, error_message: 'live fetch failed',
+    youtube_releases: [{ yt_browse_id: 'b', track_count: 1, tracks: [], distances: [] }],
+  }, 9);
+  assert(ytStaleHtml.includes('lt-yt-stale'),
+    'renderYoutubeBody surfaces a staleness flag on a cached-but-stale matrix');
+
+  // --- renderConsoleShell: band-aware emphasis + panel containers ---
+  // Missing row → why-unfindable leads; the per-panel containers exist.
+  const missingShell = renderConsoleShell({ id: 11, band: 'missing', source: 'mb', target_format: 'lossless' });
+  assert(missingShell.includes('id="lt-panel-unfindable-11"'),
+    'renderConsoleShell emits the why-unfindable panel container');
+  assert(missingShell.includes('id="lt-panel-peers-11"')
+    && missingShell.includes('id="lt-panel-rescues-11"')
+    && missingShell.includes('id="lt-panel-siblings-11"')
+    && missingShell.includes('id="lt-panel-youtube-11"'),
+    'renderConsoleShell emits all five evidence-panel containers');
+  // Lead emphasis: the unfindable panel carries the lead class for a Missing row.
+  assert(/lt-panel-unfindable[^"]*lt-panel-lead|lt-panel-lead[^"]*lt-panel-unfindable/.test(missingShell.replace(/\n/g, ' '))
+    || missingShell.includes('lt-panel lt-panel-unfindable lt-panel-lead'),
+    'renderConsoleShell makes why-unfindable the lead panel for a Missing row');
+  // The YouTube panel opens in never_run (no auto-resolve) — Check button present.
+  assert(missingShell.includes('window.checkYoutube(11)'),
+    'renderConsoleShell opens the YouTube panel in never_run (Check-YouTube stub, no auto-resolve)');
+  // On-disk row → band-vs-intent leads (R8), why-unfindable does not.
+  const onDiskShell = renderConsoleShell({ id: 12, band: 'poor', source: 'mb', target_format: 'lossless' });
+  assert(onDiskShell.includes('Quality vs intent') && onDiskShell.includes('lt-band-intent'),
+    'renderConsoleShell leads an on-disk row with the band-vs-intent header');
+  assert(onDiskShell.indexOf('lt-band-intent') < onDiskShell.indexOf('lt-panel-unfindable-12'),
+    'renderConsoleShell orders band-vs-intent BEFORE why-unfindable for an on-disk row');
+
+  // --- partial-failure render: one panel error, others still render ---
+  // Simulate the loaders' per-panel catch: the siblings panel gets the
+  // error affordance while the other panels render their content. The pure
+  // pieces guarantee a failing panel never blanks or drops its siblings.
+  const errBody = renderPanelError('sibling pressings');
+  assert(errBody.includes("Couldn't load sibling pressings") && errBody.includes('other panels are unaffected'),
+    'renderPanelError renders the isolated per-panel error affordance');
+  // Compose the shell + a per-panel error swap + a sibling content render,
+  // proving the three coexist (the independent-load contract).
+  const composed = renderConsoleShell({ id: 13, band: 'missing' })
+    + renderUnfindableBody({ unfindable: { category: 'artist_absent' }, search_forensics: {} })
+    + renderPanelError('sibling pressings');
+  assert(composed.includes('artist_absent') && composed.includes("Couldn't load sibling pressings"),
+    'a panel error and other panels\' content coexist (independent-load contract)');
 }
 
 // --- Summary ---

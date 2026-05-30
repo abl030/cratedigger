@@ -3,18 +3,44 @@
 /**
  * Long-tail triage worklist (Pipeline sub-view).
  *
- * U3 (this unit): the list shell — band tabs (with live counts), a
- * search box, and the row list. Fetches `GET /api/pipeline/long-tail`
- * once (KTD2 — one server-banded fetch, all tab/search filtering happens
- * client-side over that single payload), derives the band tab set from
- * the bands present in the cohort, and renders the rows for the selected
- * band. Rows are clickable and carry an (empty) `.lt-detail` container;
- * U4 fleshes the in-place action console out.
+ * U3: the list shell — band tabs (with live counts), a search box, and
+ * the row list. Fetches `GET /api/pipeline/long-tail` once (KTD2 — one
+ * server-banded fetch, all tab/search filtering happens client-side over
+ * that single payload), derives the band tab set from the bands present
+ * in the cohort, and renders the rows for the selected band.
+ *
+ * U4 (this unit): the in-place action console. Selecting a row expands
+ * its `.lt-detail` container into a band-aware evidence console with five
+ * panels, each loading INDEPENDENTLY (per-panel loading + error states)
+ * so a slow / failing `GET /api/release-group/<rg>` (the 15s MB-mirror
+ * timeout) never blanks the console or silently drops another panel:
+ *
+ *   1. Why-unfindable  ← `GET /api/triage/<id>` (unfindable category +
+ *      reason + search-forensics rollup; "not yet categorised" rendered
+ *      distinctly from an error).
+ *   2. Soulseek peers  ← `GET /api/pipeline/<id>` `last_search.top_candidates`
+ *      (reuses `renderForensicBlock`; a few rows with a "show all" toggle).
+ *   3. Recent rescues  ← `GET /api/pipeline/<id>` `history` rows where
+ *      `source==='youtube'` ("rescue running" / "last rescue failed: …").
+ *   4. Sibling pressings ← `GET /api/release-group/<rg>` (rg taken from the
+ *      pipeline-detail `request.mb_release_group_id`; skipped for rows
+ *      without one, e.g. Discogs-sourced).
+ *   5. YouTube matrix  ← the four-state shell. Defaults to `never_run`
+ *      with a "Check YouTube" button (U5 wires the actual resolver call —
+ *      U4 must NOT auto-call the slow, side-effectful resolver GET).
+ *
+ * The evidence/action SUBMIT flows are out of scope here: the rescue
+ * submit + live resolver call are U5; accept-sibling / set-intent /
+ * re-search are U6. U4 builds the panels + the YouTube state shell + a
+ * Check-YouTube stub only.
  *
  * Pure / DOM-free helpers (band ordering, tab derivation, in-band search
- * filtering, cross-band match count) are exported via `__test__` for the
- * Node unit suite. Rendering and fetch live alongside them but never
- * leak into the pure helpers.
+ * filtering, cross-band match count, YouTube state classifier, console
+ * emphasis selector) are exported via `__test__` for the Node unit suite.
+ * The classifier + emphasis selector live in `util.js` (the shared pure
+ * home) and are re-exported through `__test__` here for convenience.
+ * Rendering and fetch live alongside them but never leak into the pure
+ * helpers.
  *
  * Shape mirrors `web/js/search_plan.js` / `web/js/recents.js`:
  * `// @ts-check`, ES6 module, JSDoc on exports, the
@@ -22,7 +48,13 @@
  */
 
 import { state, API } from './state.js';
-import { esc } from './util.js';
+import {
+  esc,
+  renderForensicBlock,
+  youtubeSectionState,
+  consoleEmphasis,
+  awstDateTime,
+} from './util.js';
 
 /**
  * The `Missing` band sentinel — a `wanted` request with no clean
@@ -494,10 +526,528 @@ export function onLongTailSearchInput(value) {
   }
 }
 
+// --- Action console (U4) --------------------------------------------
+//
+// Five evidence panels rendered in place, each loading independently. The
+// pure render helpers below take already-fetched data (or an error
+// sentinel) and return an HTML string; the DOM-side loaders fetch each
+// source and patch only that panel's container. A per-row token guard
+// discards a console fetch that resolves after the operator has clicked a
+// different row (or re-collapsed this one).
+
 /**
- * Toggle the in-place action console for one row. U3 ships the stub:
- * locate the `.lt-detail` container and toggle its `.open` class with an
- * empty body. U4 fills the console (evidence + actions) in.
+ * Per-row console-fetch token. Bumped every time a row's console is
+ * (re)opened so a slow panel fetch that resolves against a stale console
+ * is discarded before it paints. Keyed by `album_requests.id`.
+ *
+ * @type {Map<number, number>}
+ */
+const consoleTokens = new Map();
+
+/**
+ * Visible-row cap for the Soulseek peers panel before the "show all"
+ * expansion. The peers list shows a few rows so the action buttons (U5/U6)
+ * stay reachable without scrolling past a long candidate table.
+ *
+ * @type {number}
+ */
+const PEERS_VISIBLE_CAP = 5;
+
+/**
+ * Format an ISO timestamp for the console, defensively. Falls back to the
+ * raw string when it can't be parsed (never throws into a render).
+ *
+ * @param {string|null|undefined} iso
+ * @returns {string}
+ */
+function consoleTimestamp(iso) {
+  if (!iso) return '';
+  try {
+    return awstDateTime(String(iso));
+  } catch (_e) {
+    return String(iso);
+  }
+}
+
+/**
+ * A small panel scaffold: a titled section with a body. Used by every
+ * panel so the console reads consistently. Pure.
+ *
+ * @param {string} name   Stable slug for the panel container id.
+ * @param {number} id     album_requests.id (namespaces the container).
+ * @param {string} title  Panel heading.
+ * @param {string} body   Inner HTML (already escaped where needed).
+ * @param {boolean} [lead]  When true, flag the panel as the console's
+ *   lead panel (band-aware emphasis).
+ * @returns {string}
+ */
+function renderPanel(name, id, title, body, lead) {
+  const leadCls = lead ? ' lt-panel-lead' : '';
+  return `<div class="lt-panel lt-panel-${esc(name)}${leadCls}" id="lt-panel-${esc(name)}-${id}">
+    <div class="lt-panel-title">${esc(title)}</div>
+    <div class="lt-panel-body">${body}</div>
+  </div>`;
+}
+
+/**
+ * Per-panel loading affordance (distinct from empty/error). Pure.
+ *
+ * @param {string} label
+ * @returns {string}
+ */
+function renderPanelLoading(label) {
+  return `<div class="lt-panel-loading">Loading ${esc(label)}…</div>`;
+}
+
+/**
+ * Per-panel error affordance — the independent-load contract: one panel's
+ * fetch failing renders THIS, never blanking the console or dropping
+ * another panel. Pure.
+ *
+ * @param {string} label
+ * @returns {string}
+ */
+function renderPanelError(label) {
+  return `<div class="lt-panel-error">Couldn't load ${esc(label)}. <span class="lt-panel-error-hint">(other panels are unaffected)</span></div>`;
+}
+
+/**
+ * Render the why-unfindable panel body from a triage payload. Pure.
+ *
+ * Three states:
+ *   * `triage == null` → caller passed nothing yet (defensive; the loader
+ *     uses the loading/error affordances instead).
+ *   * `triage.unfindable == null` → NOT yet categorised. Rendered as an
+ *     explicit "detection runs daily" state — not an error, not blank
+ *     (R7).
+ *   * categorised → the category + a search-forensics rollup.
+ *
+ * @param {Object|null} triage  The `TriageResult` payload.
+ * @returns {string}
+ */
+function renderUnfindableBody(triage) {
+  if (!triage || typeof triage !== 'object') {
+    return '<div class="lt-panel-empty">No triage data.</div>';
+  }
+  const unfindable = triage.unfindable;
+  const sf = triage.search_forensics || {};
+  const rollupParts = [];
+  if (sf.total_searches != null) rollupParts.push(`${sf.total_searches} searches`);
+  if (sf.with_cands_count != null) rollupParts.push(`${sf.with_cands_count} with candidates`);
+  if (sf.zero_results_count != null) rollupParts.push(`${sf.zero_results_count} zero-result`);
+  if (sf.dominant_rejection_reason) rollupParts.push(`dominant reject: ${sf.dominant_rejection_reason}`);
+  const lastAt = sf.last_search_at ? consoleTimestamp(sf.last_search_at) : '';
+  const rollup = rollupParts.length
+    ? `<div class="lt-rollup">${esc(rollupParts.join(' · '))}${lastAt ? ` · last ${esc(lastAt)}` : ''}</div>`
+    : '';
+  if (!unfindable || unfindable.category == null) {
+    // Not-yet-categorised — daily detection state, distinct from an error.
+    return `<div class="lt-uncategorised">
+      <span class="lt-meta-chip">not yet categorised</span>
+      <span class="lt-uncategorised-note">detection runs daily</span>
+    </div>${rollup}`;
+  }
+  const catAt = unfindable.categorised_at ? consoleTimestamp(unfindable.categorised_at) : '';
+  const probe = (unfindable.last_artist_probe_match_count != null)
+    ? `<div class="lt-rollup">artist probe: ${unfindable.last_artist_probe_match_count} match${unfindable.last_artist_probe_match_count === 1 ? '' : 'es'}${unfindable.last_artist_probe_at ? ` · ${esc(consoleTimestamp(unfindable.last_artist_probe_at))}` : ''}</div>`
+    : '';
+  return `<div class="lt-unfindable-cat">
+      <span class="badge badge-manual">${esc(String(unfindable.category))}</span>
+      ${catAt ? `<span class="lt-meta-chip">categorised ${esc(catAt)}</span>` : ''}
+    </div>${rollup}${probe}`;
+}
+
+/**
+ * Pluck the YouTube rescue rows out of a pipeline-detail history list.
+ * Pure. Returns the `source==='youtube'` rows newest-first (the history
+ * already arrives newest-first; we preserve order).
+ *
+ * @param {Array<Object>|null|undefined} history
+ * @returns {Array<Object>}
+ */
+function youtubeHistoryRows(history) {
+  return (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.source === 'youtube');
+}
+
+/**
+ * Extract the classified failure reason for a terminal `youtube_failed`
+ * download-history row. Pure. The reason is persisted in the
+ * `youtube_metadata` JSONB blob (`reason`) by the ingest worker's terminal
+ * write — see `lib/youtube_ingest_service.py::YoutubeIngestMetadata.reason`.
+ * Falls back to the row's `error_message` then `verdict` (the shared
+ * download-history-view fields) and finally a generic sentinel so the
+ * panel never shows an empty reason.
+ *
+ * @param {Object} row  A `source==='youtube'` download-history row.
+ * @returns {string}
+ */
+function youtubeFailureReason(row) {
+  const meta = row && row.youtube_metadata;
+  if (meta && typeof meta === 'object' && meta.reason) {
+    return String(meta.reason);
+  }
+  if (row && row.error_message) return String(row.error_message);
+  if (row && row.verdict) return String(row.verdict);
+  return 'unknown';
+}
+
+/**
+ * Render the "recent rescue attempts" panel body. Pure.
+ *
+ * Reads the `source==='youtube'` history rows (KTD4 — rescues never move
+ * the request row; their state lives in `download_log`). Surfaces:
+ *   * "rescue running" when an active `youtube_running` row exists, OR the
+ *     worklist row carried `in_flight_rescue` (the same predicate).
+ *   * "last rescue failed: <reason>" when the latest terminal youtube row
+ *     is `youtube_failed` SPECIFICALLY (distinct from `youtube_success`).
+ *   * the recent attempts list otherwise.
+ *
+ * @param {Array<Object>|null|undefined} history  Pipeline-detail history.
+ * @param {boolean} inFlightFlag  The worklist row's `in_flight_rescue`.
+ * @returns {string}
+ */
+function renderRescuesBody(history, inFlightFlag) {
+  const rows = youtubeHistoryRows(history);
+  const running = rows.find((h) => h.outcome === 'youtube_running');
+  if (running || inFlightFlag) {
+    return `<div class="lt-rescue-status"><span class="badge badge-new">rescue running</span>${running && running.created_at ? `<span class="lt-meta-chip">since ${esc(consoleTimestamp(running.created_at))}</span>` : ''}</div>`;
+  }
+  // The latest TERMINAL youtube row (youtube_failed / youtube_success).
+  const terminal = rows.find(
+    (h) => h.outcome === 'youtube_failed' || h.outcome === 'youtube_success');
+  if (terminal && terminal.outcome === 'youtube_failed') {
+    const reason = youtubeFailureReason(terminal);
+    return `<div class="lt-rescue-status"><span class="badge badge-manual">last rescue failed</span> <span class="lt-rescue-reason">${esc(reason)}</span></div>`;
+  }
+  if (rows.length === 0) {
+    return '<div class="lt-panel-empty">No rescue attempts yet.</div>';
+  }
+  // Some succeeded / mixed — list the recent attempts.
+  const items = rows.slice(0, 5).map((h) => {
+    const when = h.created_at ? consoleTimestamp(h.created_at) : '';
+    return `<div class="lt-rescue-item">${esc(String(h.outcome || '?'))}${when ? ` · ${esc(when)}` : ''}</div>`;
+  }).join('');
+  return `<div class="lt-rescue-list">${items}</div>`;
+}
+
+/**
+ * Render the Soulseek peers panel body. Reuses `renderForensicBlock` for
+ * the candidates table; caps the visible rows with a "show all" toggle so
+ * the action buttons stay reachable (IA per the plan). Pure.
+ *
+ * @param {Object|null|undefined} lastSearch  `last_search` payload.
+ * @param {number} id  album_requests.id (namespaces the show-all toggle).
+ * @returns {string}
+ */
+function renderPeersBody(lastSearch, id) {
+  if (!lastSearch) {
+    return renderForensicBlock(null);
+  }
+  const cands = Array.isArray(lastSearch.top_candidates)
+    ? lastSearch.top_candidates : [];
+  if (cands.length <= PEERS_VISIBLE_CAP) {
+    return renderForensicBlock(/** @type {any} */ (lastSearch));
+  }
+  // Cap the visible candidates; offer a "show all" toggle that swaps in
+  // the full block. The capped + full blocks are both pre-rendered; the
+  // toggle flips which is shown without a refetch.
+  const capped = { ...lastSearch, top_candidates: cands.slice(0, PEERS_VISIBLE_CAP) };
+  const cappedHtml = renderForensicBlock(/** @type {any} */ (capped));
+  const fullHtml = renderForensicBlock(/** @type {any} */ (lastSearch));
+  return `<div class="lt-peers" id="lt-peers-${id}">
+    <div class="lt-peers-capped">${cappedHtml}
+      <button class="lt-link-btn" type="button" onclick="event.stopPropagation(); window.toggleLongTailPeers(${id})">show all ${cands.length} peers</button>
+    </div>
+    <div class="lt-peers-full" style="display:none;">${fullHtml}
+      <button class="lt-link-btn" type="button" onclick="event.stopPropagation(); window.toggleLongTailPeers(${id})">show fewer</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * Toggle the capped ⇄ full Soulseek peers view in place. No refetch — both
+ * blocks are already rendered; this flips visibility.
+ *
+ * @param {number} id  album_requests.id
+ * @returns {void}
+ */
+export function toggleLongTailPeers(id) {
+  if (typeof document === 'undefined') return;
+  const wrap = document.getElementById(`lt-peers-${id}`);
+  if (!wrap) return;
+  const capped = /** @type {HTMLElement|null} */ (wrap.querySelector('.lt-peers-capped'));
+  const full = /** @type {HTMLElement|null} */ (wrap.querySelector('.lt-peers-full'));
+  if (!capped || !full) return;
+  const showFull = full.style.display === 'none';
+  full.style.display = showFull ? 'block' : 'none';
+  capped.style.display = showFull ? 'none' : 'block';
+}
+
+/**
+ * Render one sibling-pressing row for the siblings panel. Pure.
+ *
+ * @param {Object} rel  A release row from `/api/release-group/<rg>`.
+ * @returns {string}
+ */
+function renderSiblingRow(rel) {
+  const title = rel.title || '?';
+  const meta = [rel.country, (rel.date || '').slice(0, 4), rel.format,
+    (rel.track_count != null ? `${rel.track_count}t` : '')]
+    .filter((x) => x).join(' · ');
+  const inLib = rel.in_library
+    ? `<span class="badge badge-rank-${esc(String(rel.library_rank || 'library').toLowerCase())}">in library</span>`
+    : '';
+  const pStatus = rel.pipeline_status
+    ? `<span class="badge badge-${esc(String(rel.pipeline_status))}">${esc(String(rel.pipeline_status))}</span>`
+    : '';
+  return `<div class="lt-sibling">
+    <span class="lt-sibling-title">${esc(String(title))}</span>
+    <span class="lt-sibling-meta">${esc(meta)}</span>
+    ${inLib}${pStatus}
+  </div>`;
+}
+
+/**
+ * Render the sibling-pressings panel body from a release-group payload.
+ * Pure. Evidence-only in U4 — the accept-sibling action is U6.
+ *
+ * @param {Object|null|undefined} rgData  `{releases:[...]}`.
+ * @returns {string}
+ */
+function renderSiblingsBody(rgData) {
+  const releases = (rgData && Array.isArray(rgData.releases)) ? rgData.releases : [];
+  if (releases.length === 0) {
+    return '<div class="lt-panel-empty">No sibling pressings found.</div>';
+  }
+  return releases.map(renderSiblingRow).join('');
+}
+
+/**
+ * Render the YouTube panel body for a given section state + payload. Pure.
+ *
+ * U4 renders all four states; the matrix rows are display-only (U5 makes
+ * them pickable rescue targets). The default (`never_run`) state renders
+ * the "Check YouTube" button whose click is a STUB wired to
+ * `window.checkYoutube(id)` — U5 defines that handler and the live
+ * resolver fetch. U4 must NOT auto-call the slow, side-effectful resolver
+ * GET, so the panel opens in `never_run` until the operator clicks.
+ *
+ * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null} result
+ *   A cached resolver result, or `null` for the default never-run state.
+ * @param {number} id  album_requests.id
+ * @returns {string}
+ */
+function renderYoutubeBody(result, id) {
+  const cls = youtubeSectionState(result);
+  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">Check YouTube</button>`;
+  if (cls.state === 'never_run') {
+    return `<div class="lt-yt lt-yt-never-run">
+      <div class="lt-yt-prompt">Resolve this release against YouTube Music.</div>
+      ${checkBtn}
+    </div>`;
+  }
+  if (cls.state === 'resolver_failed') {
+    return `<div class="lt-yt lt-yt-failed">
+      <div class="lt-yt-msg">${esc(cls.message)}</div>
+      ${checkBtn}
+    </div>`;
+  }
+  if (cls.state === 'resolved_empty') {
+    return `<div class="lt-yt lt-yt-empty">
+      <div class="lt-yt-msg">${esc(cls.message)}</div>
+      ${checkBtn}
+    </div>`;
+  }
+  // resolved_with_matrix — display-only matrix in U4.
+  const releases = (result && Array.isArray(result.youtube_releases))
+    ? result.youtube_releases : [];
+  const staleFlag = cls.stale
+    ? `<div class="lt-yt-stale">${esc(cls.message)}</div>`
+    : '';
+  const rows = releases.map((rel) => {
+    const dists = Array.isArray(rel.distances) ? rel.distances : [];
+    const best = dists
+      .filter((d) => d && d.outcome === 'ok' && typeof d.distance === 'number')
+      .reduce((acc, d) => (acc == null || d.distance < acc ? d.distance : acc), /** @type {number|null} */ (null));
+    const bestStr = (best != null) ? `dist ${best.toFixed(3)}` : 'no distance';
+    const tc = (rel.track_count != null) ? `${rel.track_count}t` : '';
+    const yr = (rel.year != null) ? String(rel.year) : '';
+    return `<div class="lt-yt-row">
+      <span class="lt-yt-id">${esc(String(rel.yt_browse_id || '?'))}</span>
+      <span class="lt-yt-meta">${esc([yr, tc, bestStr].filter((x) => x).join(' · '))}</span>
+    </div>`;
+  }).join('');
+  return `<div class="lt-yt lt-yt-matrix">
+    ${staleFlag}
+    <div class="lt-yt-rows">${rows}</div>
+  </div>`;
+}
+
+/**
+ * Render the full console shell synchronously on open. Each panel starts
+ * in its loading state; the independent loaders patch them as their
+ * fetches settle. Band-aware emphasis (`consoleEmphasis`) decides which
+ * panel leads: `Missing` / unfindable rows lead with why-unfindable;
+ * on-disk rows lead with the band-vs-intent header. Pure.
+ *
+ * @param {Object} row  The worklist row (carries band, source, intent).
+ * @returns {string}
+ */
+function renderConsoleShell(row) {
+  const id = row.id;
+  const emphasis = consoleEmphasis(row);
+  const leadUnfindable = emphasis.lead === 'unfindable';
+  // Band-vs-intent header for on-disk rows (R8). `band` is the on-disk
+  // band; `target_format` is the request's intent. The console surfaces
+  // the comparison; the exact on-disk codec is in the peers/quality data.
+  const band = String(row.band || '').toLowerCase();
+  const intent = row.target_format || (row.min_bitrate ? `${row.min_bitrate}k` : 'default');
+  const bandVsIntent = !leadUnfindable
+    ? `<div class="lt-band-intent lt-panel-lead">
+        <div class="lt-panel-title">Quality vs intent</div>
+        <div class="lt-panel-body">on disk: <strong>${esc(bandLabel(band))}</strong> · intent: <strong>${esc(String(intent))}</strong></div>
+      </div>`
+    : '';
+  const unfindablePanel = renderPanel(
+    'unfindable', id, 'Why unfindable',
+    renderPanelLoading('triage'), leadUnfindable);
+  const peersPanel = renderPanel(
+    'peers', id, 'Soulseek peers seen', renderPanelLoading('peers'), false);
+  const rescuesPanel = renderPanel(
+    'rescues', id, 'Recent rescue attempts', renderPanelLoading('rescues'), false);
+  const siblingsPanel = renderPanel(
+    'siblings', id, 'Sibling pressings', renderPanelLoading('siblings'), false);
+  // The YouTube panel opens in `never_run` immediately — no fetch (U4 must
+  // not auto-call the side-effectful resolver GET).
+  const youtubePanel = renderPanel(
+    'youtube', id, 'YouTube Music', renderYoutubeBody(null, id), false);
+  // Order: lead panel first. For Missing/unfindable, why-unfindable leads;
+  // for on-disk rows, the band-vs-intent header leads, then why-unfindable.
+  const ordered = leadUnfindable
+    ? [unfindablePanel, peersPanel, rescuesPanel, siblingsPanel, youtubePanel]
+    : [bandVsIntent, unfindablePanel, peersPanel, rescuesPanel, siblingsPanel, youtubePanel];
+  return `<div class="lt-console">${ordered.join('')}</div>`;
+}
+
+/**
+ * Patch one panel's body in place, guarded by the row's console token so a
+ * stale fetch (operator moved on) doesn't paint. DOM-side.
+ *
+ * @param {number} id     album_requests.id
+ * @param {string} name   Panel slug.
+ * @param {number} token  The token captured when the console opened.
+ * @param {string} html   New body HTML.
+ * @returns {void}
+ */
+function patchPanel(id, name, token, html) {
+  if (typeof document === 'undefined') return;
+  if (consoleTokens.get(id) !== token) return;  // stale console — discard.
+  const panel = document.getElementById(`lt-panel-${name}-${id}`);
+  if (!panel) return;
+  const body = panel.querySelector('.lt-panel-body');
+  if (body) body.innerHTML = html;
+}
+
+/**
+ * Load the why-unfindable panel from `GET /api/triage/<id>`. Independent —
+ * a failure renders only this panel's error affordance.
+ *
+ * @param {number} id
+ * @param {number} token
+ * @returns {Promise<void>}
+ */
+async function loadUnfindablePanel(id, token) {
+  try {
+    const r = await fetch(`${API}/api/triage/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    patchPanel(id, 'unfindable', token, renderUnfindableBody(data));
+  } catch (_e) {
+    patchPanel(id, 'unfindable', token, renderPanelError('triage'));
+  }
+}
+
+/**
+ * Load the peers + rescues panels from one `GET /api/pipeline/<id>` fetch,
+ * and kick off the (independent) sibling-pressings fetch using the
+ * release-group id off the detail payload. Peers + rescues are patched
+ * from this fetch; siblings is fired separately so a slow release-group
+ * (the 15s MB-mirror timeout) blocks only its own panel.
+ *
+ * @param {number} id
+ * @param {number} token
+ * @param {boolean} inFlightFlag  The worklist row's `in_flight_rescue`.
+ * @returns {Promise<void>}
+ */
+async function loadPipelinePanels(id, token, inFlightFlag) {
+  let rgId = null;
+  try {
+    const r = await fetch(`${API}/api/pipeline/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    patchPanel(id, 'peers', token, renderPeersBody(data.last_search, id));
+    patchPanel(id, 'rescues', token, renderRescuesBody(data.history, inFlightFlag));
+    const req = data.request || {};
+    rgId = req.mb_release_group_id || null;
+  } catch (_e) {
+    patchPanel(id, 'peers', token, renderPanelError('peers'));
+    patchPanel(id, 'rescues', token, renderPanelError('rescue history'));
+  }
+  // Siblings is dependent on the rg id but loads independently: if the
+  // detail fetch failed (rgId null) we render the "no rg" state; otherwise
+  // we fire the release-group fetch on its own so its latency is isolated.
+  loadSiblingsPanel(id, token, rgId);
+}
+
+/**
+ * Load the sibling-pressings panel from `GET /api/release-group/<rg>`.
+ * Independent — a slow / failing release-group renders only this panel's
+ * error affordance and never blocks the others. Rows without a release
+ * group (Discogs-sourced, or a legacy MB row with none) render an explicit
+ * "no sibling data" state rather than firing a doomed fetch (KTD7).
+ *
+ * @param {number} id
+ * @param {number} token
+ * @param {string|null} rgId  The request's `mb_release_group_id`, or null.
+ * @returns {Promise<void>}
+ */
+async function loadSiblingsPanel(id, token, rgId) {
+  if (!rgId) {
+    patchPanel(id, 'siblings', token,
+      '<div class="lt-panel-empty">No release group — sibling pressings unavailable for this request.</div>');
+    return;
+  }
+  try {
+    const r = await fetch(`${API}/api/release-group/${encodeURIComponent(rgId)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    patchPanel(id, 'siblings', token, renderSiblingsBody(data));
+  } catch (_e) {
+    patchPanel(id, 'siblings', token, renderPanelError('sibling pressings'));
+  }
+}
+
+/**
+ * Look up the cached worklist row for an id (band-aware console needs the
+ * row's band / source / intent). Returns `null` when the cohort isn't
+ * loaded or the id is gone.
+ *
+ * @param {number} id
+ * @returns {Object|null}
+ */
+function consoleRow(id) {
+  const rows = Array.isArray(state.longTail.rows) ? state.longTail.rows : [];
+  return rows.find((r) => r && r.id === id) || null;
+}
+
+/**
+ * Toggle the in-place action console for one row (U4). Opening renders the
+ * console shell synchronously (band-aware), then fires the evidence panels
+ * INDEPENDENTLY — each patches its own container as it settles, so a slow
+ * or failing panel never blanks the console or drops another panel. A
+ * per-row token stamps the fetch so a stale console (operator clicked
+ * another row, or re-collapsed this one) is discarded before it paints.
  *
  * @param {number} id  album_requests.id
  * @returns {void}
@@ -508,11 +1058,22 @@ export function toggleLongTailDetail(id) {
   if (!el) return;
   if (el.classList.contains('open')) {
     el.classList.remove('open');
+    // Bump the token so any in-flight panel fetch is discarded on resolve.
+    consoleTokens.set(id, (consoleTokens.get(id) || 0) + 1);
     return;
   }
-  // U4 will populate this; for now the container just opens empty so the
-  // click is observable and the wiring is in place.
+  const token = (consoleTokens.get(id) || 0) + 1;
+  consoleTokens.set(id, token);
+  const row = consoleRow(id) || { id };
+  el.innerHTML = renderConsoleShell(row);
   el.classList.add('open');
+  const inFlightFlag = !!row.in_flight_rescue;
+  // Independent panel loads — no Promise.all, no shared await. One panel's
+  // rejection can't reject another's promise (each loader try/catches and
+  // patches its own error affordance). The YouTube panel is already in its
+  // never_run state from the shell (no fetch in U4).
+  loadUnfindablePanel(id, token);
+  loadPipelinePanels(id, token, inFlightFlag);
 }
 
 export const __test__ = {
@@ -525,4 +1086,17 @@ export const __test__ = {
   countOtherBandMatches,
   renderLongTailRow,
   renderLongTailBody,
+  // U4 — console pure render helpers + re-exported util classifiers.
+  youtubeSectionState,
+  consoleEmphasis,
+  renderConsoleShell,
+  renderUnfindableBody,
+  renderPeersBody,
+  renderRescuesBody,
+  renderSiblingsBody,
+  renderYoutubeBody,
+  renderPanelError,
+  youtubeHistoryRows,
+  youtubeFailureReason,
+  PEERS_VISIBLE_CAP,
 };

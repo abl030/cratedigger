@@ -251,6 +251,117 @@ export function renderForensicBlock(last) {
 }
 
 /**
+ * @typedef {Object} YoutubeSectionState
+ * @property {'never_run'|'resolved_with_matrix'|'resolved_empty'|'resolver_failed'} state
+ *   The four-state YouTube section machine (HLD "YouTube section state
+ *   machine"). `never_run` — no resolver result yet (the side-effectful
+ *   GET has not been run; the console renders the "Check YouTube" button).
+ *   `resolved_with_matrix` — resolver returned `ok` with at least one YT
+ *   release. `resolved_empty` — resolver returned `ok` with zero releases
+ *   ("not on YouTube Music"). `resolver_failed` — any non-`ok` outcome
+ *   (404 / 503 / transient), which the console renders with a retry
+ *   affordance.
+ * @property {boolean} stale  True when a cached matrix is served alongside
+ *   an `error_message` describing a fresh upstream YT failure
+ *   (`from_cache && error_message`). The matrix is still real and shown,
+ *   but flagged as potentially stale. Only ever true together with
+ *   `resolved_with_matrix` / `resolved_empty` (an `ok` cached row).
+ * @property {string} message  Operator-facing copy for the state (empty
+ *   for the happy `resolved_with_matrix` case where the matrix speaks for
+ *   itself).
+ */
+
+/**
+ * Classify a YouTube-album resolver result into the four-state console
+ * section machine. Pure / DOM-free — the renderer branches on the
+ * returned `state`.
+ *
+ * IMPORTANT: the resolver GET is slow and side-effectful (it runs the
+ * resolve + caches). U4 must NOT auto-call it; `null` (no result yet)
+ * always maps to `never_run` so the console defaults to the "Check
+ * YouTube" button. U5 wires the actual fetch and re-classifies the
+ * fresh result here.
+ *
+ * Service-level outcomes (from `lib/youtube_album_service.py`
+ * `OUTCOME_HTTP_STATUS`): `ok`, `not_found`, `unresolved_4xx_client`,
+ * `unresolved_mirror_unavailable`, `unresolved_timeout`,
+ * `youtube_parse_failed`, `transient`. Only `ok` is a success; every
+ * other value is a `resolver_failed`.
+ *
+ * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null|undefined} result
+ *   The `YoutubeAlbumResolverResult` payload, or `null`/`undefined` when
+ *   the resolver has not been run yet.
+ * @returns {YoutubeSectionState}
+ */
+export function youtubeSectionState(result) {
+  if (!result || typeof result !== 'object') {
+    return { state: 'never_run', stale: false, message: '' };
+  }
+  const outcome = String(result.outcome || '');
+  const releases = Array.isArray(result.youtube_releases)
+    ? result.youtube_releases : [];
+  // `from_cache` with a non-empty error_message means the cache served a
+  // real matrix while the latest live resolve failed upstream — the matrix
+  // is shown but flagged potentially stale (HLD staleness flag).
+  const stale = !!(result.from_cache && result.error_message);
+  if (outcome === 'ok') {
+    if (releases.length > 0) {
+      return {
+        state: 'resolved_with_matrix',
+        stale,
+        message: stale
+          ? 'Showing a cached match — the latest live check failed, this may be stale.'
+          : '',
+      };
+    }
+    return {
+      state: 'resolved_empty',
+      stale,
+      message: 'Not on YouTube Music. Re-check later.',
+    };
+  }
+  // Any non-ok outcome — transient mirror/YT failure. Retryable.
+  return {
+    state: 'resolver_failed',
+    stale: false,
+    message: result.error_message
+      ? String(result.error_message)
+      : 'Could not reach YouTube Music. Retry.',
+  };
+}
+
+/**
+ * @typedef {Object} ConsoleEmphasis
+ * @property {'unfindable'|'band_vs_intent'} lead  Which panel leads the
+ *   console. `unfindable` — `Missing` / unfindable rows lead with the
+ *   why-unfindable panel (the operator's first question is "why is this
+ *   stuck?"). `band_vs_intent` — an on-disk row whose copy is below intent
+ *   leads with current-band-vs-target-format (the operator's first
+ *   question is "what better is available?").
+ */
+
+/**
+ * Select the console's lead panel for one worklist row. Pure / DOM-free.
+ *
+ * `Missing` rows (no on-disk copy) and any row carrying an
+ * `unfindable_category` lead with the why-unfindable panel. Every other
+ * on-disk row leads with band-vs-intent (R8). A row with no band value at
+ * all is treated as `Missing`-like (lead with unfindable) — there is no
+ * on-disk copy to compare against intent.
+ *
+ * @param {{band?: string|null, unfindable_category?: string|null}|null|undefined} row
+ * @returns {ConsoleEmphasis}
+ */
+export function consoleEmphasis(row) {
+  const band = String((row && row.band) || '').toLowerCase();
+  const unfindable = !!(row && row.unfindable_category);
+  if (!band || band === 'missing' || unfindable) {
+    return { lead: 'unfindable' };
+  }
+  return { lead: 'band_vs_intent' };
+}
+
+/**
  * Parse pasted text for the Browse > Search-by-ID flow.
  *
  * Accepts a bare MBID, bare Discogs ID, or a canonical MB / Discogs URL

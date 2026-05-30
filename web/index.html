@@ -124,6 +124,41 @@
   .lt-detail.open { display: block; padding: 10px 12px; }
   .lt-empty-band { padding: 4px 0; }
   .lt-empty-hint { color: #888; font-size: 0.82em; padding: 4px 0; }
+  /* Long-tail action console (U4) — in-place evidence panels rendered
+     inside `.lt-detail`. Mirrors the .p-detail / .p-forensic visual
+     language: dark surface, small type, per-panel sections that each load
+     independently (loading / error / content states). */
+  .lt-console { display: flex; flex-direction: column; gap: 10px; }
+  .lt-panel { background: #161616; border-radius: 6px; padding: 8px 10px; }
+  .lt-panel-lead { border-left: 3px solid #56b; }
+  .lt-panel-title { color: #888; font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 5px; }
+  .lt-panel-body { font-size: 0.82em; color: #bbb; }
+  .lt-panel-loading { color: #777; font-size: 0.82em; }
+  .lt-panel-error { color: #d88; font-size: 0.82em; }
+  .lt-panel-error-hint { color: #777; font-size: 0.92em; }
+  .lt-panel-empty { color: #777; font-size: 0.82em; }
+  .lt-band-intent { background: #161616; border-radius: 6px; padding: 8px 10px; }
+  .lt-rollup { color: #888; font-size: 0.92em; margin-top: 4px; }
+  .lt-uncategorised { display: flex; gap: 8px; align-items: center; }
+  .lt-uncategorised-note { color: #777; font-size: 0.92em; }
+  .lt-unfindable-cat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .lt-rescue-status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .lt-rescue-reason { color: #d88; }
+  .lt-rescue-item { color: #999; padding: 1px 0; }
+  .lt-sibling { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 2px 0; border-bottom: 1px solid #222; }
+  .lt-sibling:last-child { border-bottom: none; }
+  .lt-sibling-title { color: #ccc; }
+  .lt-sibling-meta { color: #888; font-size: 0.92em; }
+  .lt-yt-prompt, .lt-yt-msg { color: #999; margin-bottom: 6px; }
+  .lt-yt-stale { color: #ca8; font-size: 0.92em; margin-bottom: 6px; }
+  .lt-yt-row { display: flex; gap: 8px; align-items: center; padding: 2px 0; border-bottom: 1px solid #222; }
+  .lt-yt-row:last-child { border-bottom: none; }
+  .lt-yt-id { color: #ccc; font-family: monospace; font-size: 0.92em; }
+  .lt-yt-meta { color: #888; font-size: 0.92em; }
+  .lt-yt-check { padding: 5px 12px; background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 0.85em; }
+  .lt-yt-check:hover { background: #333; border-color: #56b; }
+  .lt-link-btn { background: none; border: none; color: #6af; cursor: pointer; font-size: 0.82em; padding: 4px 0; }
+  .lt-link-btn:hover { text-decoration: underline; }
   /* Search-plan inspector — per-row magnifier button, in-place summary
      panel rendered as a sibling of the row (mirrors `.p-detail` shape but
      kept visually distinct so a row with both expanded is readable). */

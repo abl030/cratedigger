@@ -10,7 +10,7 @@ import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, open
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter } from './pipeline.js';
-import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail } from './long_tail.js';
+import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers } from './long_tail.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
@@ -170,14 +170,16 @@ Object.assign(window, {
   toggleDetail,
   deleteRequest,
   updateStatus,
-  // Long-tail triage worklist (U3): nav + tab/search/list handlers. The
-  // per-row action console expansion lands in U4 (toggleLongTailDetail is
-  // a stub for now). renderPipeline (already exposed) re-emits the nav for
-  // the long-tail sub-view; long_tail.js calls it via window.renderPipeline.
+  // Long-tail triage worklist: nav + tab/search/list handlers (U3) plus
+  // the per-row action console (U4 — toggleLongTailDetail opens the
+  // evidence console; toggleLongTailPeers flips the capped/full peers
+  // view). renderPipeline (already exposed) re-emits the nav for the
+  // long-tail sub-view; long_tail.js calls it via window.renderPipeline.
   loadLongTail,
   setLongTailBand,
   onLongTailSearchInput,
   toggleLongTailDetail,
+  toggleLongTailPeers,
   renderLibraryResults,
   renderLibraryResultsInto,
   toggleLibDetail,
@@ -230,5 +232,11 @@ Object.assign(window, {
   openReplacePicker: openReplacePickerAndHandle,
   togglePipelineReplacedFilter,
   toggleWrongMatchesReplacedFilter,
+  // Long-tail YouTube rescue — the console's "Check YouTube" button calls
+  // this. U4 ships only the placeholder so the click is observable and
+  // never throws; U5 replaces it with the real two-step resolver→rescue
+  // flow (the slow, side-effectful resolver GET deliberately is NOT auto-
+  // called on console open).
+  checkYoutube: (id) => toast(`Check YouTube for #${id} — coming in the next update`),
   toast,
 });
