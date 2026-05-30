@@ -867,8 +867,9 @@ def _render_search_forensics_summary(
         lines.append("    candidates:     (empty list)")
         return lines
 
-    # Top-3 by (matched_tracks DESC, avg_ratio DESC) — same ordering as the
-    # web UI route, so CLI and web surfaces show the same scoring. Shared
+    # Top-3 by (matched_tracks DESC, avg_ratio DESC) for the compact CLI
+    # glance; the web long-tail console's "peers seen" panel renders the full
+    # stored slice (top-20). Same ranking, different surface depth. Shared
     # ranking lives in lib/quality.py.
     top = top_candidates(candidates, limit=3)
     lines.append(f"    top candidates ({len(top)} of {len(candidates)}):")

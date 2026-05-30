@@ -110,7 +110,7 @@ import {
   overrideToIntent,
   awstDateTime,
 } from './util.js';
-import { openReplacePicker } from './replace_picker.js';
+import { openReplacePicker, pressingMeta } from './replace_picker.js';
 
 /**
  * The `Missing` band sentinel — a `wanted` request with no clean
@@ -848,9 +848,9 @@ export function toggleLongTailPeers(id) {
  */
 function renderSiblingRow(rel) {
   const title = rel.title || '?';
-  const meta = [rel.country, (rel.date || '').slice(0, 4), rel.format,
-    (rel.track_count != null ? `${rel.track_count}t` : '')]
-    .filter((x) => x).join(' · ');
+  // Reuse the Replace picker's pressing-summary formatter so the siblings
+  // panel and the picker render the same "country · year · format · Nt".
+  const meta = pressingMeta(rel);
   const inLib = rel.in_library
     ? `<span class="badge badge-rank-${esc(String(rel.library_rank || 'library').toLowerCase())}">in library</span>`
     : '';
@@ -1084,16 +1084,30 @@ function renderConsoleShell(row) {
  * @param {Object} row  The worklist row (band, source, intent, rg).
  * @returns {string}
  */
-function renderActionsBar(row) {
+/**
+ * Render the accept-a-sibling-pressing control (active button, or disabled
+ * button + reason). Split out so `patchActionsBar` can refresh ONLY this
+ * group after the detail fetch stamps the release group — without clobbering
+ * the re-search button's independently-managed disabled / metadata-gap state
+ * (set by `longTailReSearch` on a sticky `failed_deterministic`). Pure.
+ *
+ * @param {Object} row
+ * @returns {string}
+ */
+function renderAcceptGroup(row) {
   const id = row.id;
   const rg = row.mb_release_group_id || null;
-  const acceptOk = canAcceptSibling(row, rg);
   // Discogs / no-rg disable reason (KTD7 — no MB↔Discogs adapter).
   const acceptReason = acceptDisabledReason(row, rg);
-  const acceptBtn = acceptOk
+  return canAcceptSibling(row, rg)
     ? `<button class="lt-act-btn lt-act-accept" type="button" onclick="event.stopPropagation(); window.longTailAcceptSibling(${id})">Accept a sibling pressing…</button>`
     : `<button class="lt-act-btn lt-act-accept" type="button" disabled title="${esc(acceptReason)}">Accept a sibling pressing…</button>
        <span class="lt-act-note">${esc(acceptReason)}</span>`;
+}
+
+function renderActionsBar(row) {
+  const id = row.id;
+  const acceptBtn = renderAcceptGroup(row);
 
   const intent = overrideToIntent(row.target_format);
   const intentLabel = intent === 'lossless' ? 'lossless' : 'default';
@@ -1109,7 +1123,7 @@ function renderActionsBar(row) {
   const researchBtn = `<button class="lt-act-btn lt-act-research" type="button" onclick="event.stopPropagation(); window.longTailReSearch(${id})">Re-search (next cycle)</button>`;
 
   return `<div class="lt-actions" id="lt-actions-${id}">
-    <div class="lt-act-group">${acceptBtn}</div>
+    <div class="lt-act-group" id="lt-act-accept-${id}">${acceptBtn}</div>
     <div class="lt-act-group">${intentCtl}</div>
     <div class="lt-act-group">${researchBtn}<div class="lt-act-research-note" id="lt-research-note-${id}"></div></div>
   </div>`;
@@ -1219,12 +1233,14 @@ function stampRowReleaseGroup(id, rgId) {
 function patchActionsBar(id, token) {
   if (typeof document === 'undefined') return;
   if (consoleTokens.get(id) !== token) return;  // stale console — discard.
-  const bar = document.getElementById(`lt-actions-${id}`);
-  if (!bar) return;
+  // Only the accept-sibling group depends on the release group that the
+  // detail fetch stamps. Patch JUST that group — rebuilding the whole bar
+  // would clobber the re-search button's disabled / metadata-gap state, which
+  // longTailReSearch sets independently on a sticky failed_deterministic.
+  const group = document.getElementById(`lt-act-accept-${id}`);
+  if (!group) return;
   const row = consoleRow(id) || { id };
-  // Replace the whole bar (renderActionsBar emits the same wrapper id, so
-  // we swap its outerHTML to keep the id stable for the next patch).
-  bar.outerHTML = renderActionsBar(row);
+  group.innerHTML = renderAcceptGroup(row);
 }
 
 /**
