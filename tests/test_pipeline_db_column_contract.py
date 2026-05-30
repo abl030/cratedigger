@@ -37,13 +37,13 @@ from lib.pipeline_db import (
 )
 from lib.quality import SpectralMeasurement, V0ProbeEvidence
 
+# conftest boots an ephemeral PostgreSQL and exports TEST_DB_DSN for the whole
+# suite, so this runs unconditionally — NO skip gate (CLAUDE.md § "Skipped tests
+# are an anti-pattern"; the programmatic `unittest.skip()` form used elsewhere is
+# also invisible to test_skip_audit.py). If the DSN is genuinely absent,
+# setUpClass's connection fails loudly — the intended "a test runs or it doesn't
+# exist" behaviour.
 TEST_DSN = os.environ.get("TEST_DB_DSN")
-
-
-def requires_postgres(cls):
-    if not TEST_DSN:
-        return unittest.skip("TEST_DB_DSN not set — skipping PostgreSQL tests")(cls)
-    return cls
 
 
 def _dataclass_columns(struct_cls) -> set[str]:
@@ -77,7 +77,6 @@ CONTRACTS: list[tuple[str, str, set[str]]] = [
 ]
 
 
-@requires_postgres
 class TestWritePayloadColumnContract(unittest.TestCase):
     db: PipelineDB
 

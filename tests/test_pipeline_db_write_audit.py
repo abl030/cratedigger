@@ -112,7 +112,8 @@ ALLOWLIST: dict[str, str] = {
         "tests/test_pipeline_db_column_contract.py.",
     "record_wrong_match_triage":
         "writes an opaque dict into one JSONB column (validation_result) via "
-        "jsonb_set -- no per-column write list to drift, and no prod caller.",
+        "jsonb_set -- no per-column write list to drift. The sole caller, "
+        "wrong_match_cleanup_service.py, invokes it via getattr.",
     "update_track_artists":
         "positional list[str|None] driving a single-scalar-column UPDATE; no "
         "column-list payload to round-trip.",
