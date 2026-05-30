@@ -1,6 +1,6 @@
 ---
 title: "feat: Long-Tail Triage Console"
-status: active
+status: completed
 date: 2026-05-30
 type: feat
 origin: docs/brainstorms/2026-05-30-long-tail-triage-console-requirements.md
