@@ -1378,6 +1378,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
         "existing_spectral_bitrate",
+        "source", "youtube_metadata",
         "wrong_match_triage_action", "wrong_match_triage_summary",
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
         "wrong_match_triage_preview_decision",

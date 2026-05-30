@@ -3470,6 +3470,15 @@ class TestPipelineCliLongTail(unittest.TestCase):
         self.assertEqual(payload["band"], "missing")
         self.assertEqual(payload["count"], 2)
 
+    def test_cli_band_fn_degrades_to_missing_when_beets_unavailable(self):
+        """The production band_fn (_cli_band_fn) bands every id "missing" when
+        BeetsDB raises (locked / missing DB) rather than propagating — matches
+        band_release_ids' web fallback, so a beets hiccup degrades the worklist
+        instead of erroring it."""
+        with patch("lib.beets_db.BeetsDB", side_effect=OSError("db locked")):
+            out = pipeline_cli._cli_band_fn(["rel-1", "rel-2"])
+        self.assertEqual(out, {"rel-1": "missing", "rel-2": "missing"})
+
     def test_empty_cohort_exit_zero(self):
         db = FakePipelineDB()
         rc, out, err = self._run(db, band_fn=self._band_fn({}))

@@ -186,15 +186,12 @@ def compute_library_rank(format_str: str | None, bitrate_kbps: int | None) -> st
     'poor', 'unknown'). Treats MP3 as VBR — cratedigger's pipeline only
     produces VBR-V0 MP3, and for the bitrate buckets the badge cares
     about the VBR-vs-CBR distinction barely matters at the display level.
+
+    Thin wrapper supplying the web process's cached rank cfg; the pure
+    decision lives in ``lib.banding`` so the CLI bands without importing web.
     """
-    if not format_str:
-        return "unknown"
-    fmt = format_str.split(",")[0].strip()
-    if not fmt:
-        return "unknown"
-    from lib.quality import quality_rank
-    rank = quality_rank(fmt, bitrate_kbps, is_cbr=False, cfg=_rank_cfg())
-    return rank.name.lower()
+    from lib.banding import compute_library_rank as _band_rank
+    return _band_rank(format_str, bitrate_kbps, _rank_cfg())
 
 
 def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:

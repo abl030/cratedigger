@@ -3053,12 +3053,11 @@ def _cli_band_fn(release_ids):
     """Build the long-tail band map for the CLI.
 
     Reuses the SAME banding decision the web overlay uses
-    (``web.routes._overlay._band_from_detail`` →
-    ``web.server.compute_library_rank``) but sources beets membership /
+    (``lib.banding.band_from_detail``) but sources beets membership /
     detail from a directly-opened ``BeetsDB`` rather than the web
     server's module-level ``_beets`` global (which the CLI process never
-    sets). No parallel banding logic — only the beets-access seam
-    differs between the two surfaces.
+    sets). No parallel banding logic — only the beets-access seam and the
+    rank-config source differ between the two surfaces.
 
     Returns ``{release_id: band}`` (``"missing"`` / a lowercase
     ``QualityRank`` / ``"unknown"``). Best-effort: if beets is
@@ -3066,11 +3065,12 @@ def _cli_band_fn(release_ids):
     is the honest fallback).
     """
     from lib.beets_db import BeetsDB
-    from web.routes._overlay import _band_from_detail
+    from lib.banding import band_from_detail, load_rank_config
 
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
         return {}
+    cfg = load_rank_config()
     try:
         with BeetsDB() as beets:
             in_library = beets.check_mbids(ids_list)
@@ -3081,7 +3081,8 @@ def _cli_band_fn(release_ids):
     except Exception:
         return {rid: "missing" for rid in ids_list}
     return {
-        rid: _band_from_detail(rid, in_library, quality) for rid in ids_list
+        rid: band_from_detail(rid, in_library, quality, cfg)
+        for rid in ids_list
     }
 
 

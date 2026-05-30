@@ -15,7 +15,10 @@ contract in `web/routes/browse.py`).
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable
+
+log = logging.getLogger(__name__)
 
 
 def _band_from_detail(
@@ -33,17 +36,12 @@ def _band_from_detail(
     once); this is pure given them.
     """
     from web import server as srv
+    from lib.banding import band_from_detail
 
-    if rid not in in_library:
-        return "missing"
-    q = quality.get(rid)
-    if not q:
-        return "unknown"
-    fmt_raw = q.get("beets_format")
-    fmt = fmt_raw if isinstance(fmt_raw, str) else ""
-    br_raw = q.get("beets_bitrate")
-    br = br_raw if isinstance(br_raw, int) else 0
-    return srv.compute_library_rank(fmt, br)
+    # Delegate to the shared lib decision, supplying the web process's cached
+    # rank cfg. The decision lives in lib/ so the CLI bands without importing
+    # web (no parallel three-way logic).
+    return band_from_detail(rid, in_library, quality, srv._rank_cfg())
 
 
 def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
@@ -75,9 +73,20 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
         return {}
-    in_library = srv.check_beets_library(ids_list)
-    b = srv._beets_db()
-    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
+    try:
+        in_library = srv.check_beets_library(ids_list)
+        b = srv._beets_db()
+        quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
+    except Exception:
+        # Beets unavailable (locked / missing DB) — degrade to all-"missing"
+        # rather than 500-ing the whole worklist (matches the CLI's
+        # _cli_band_fn fallback). "No clean copy to upgrade" is the honest
+        # default; the long-tail view still renders.
+        log.warning(
+            "band_release_ids: beets unavailable, banding all-missing",
+            exc_info=True,
+        )
+        return {rid: "missing" for rid in ids_list}
 
     return {rid: _band_from_detail(rid, in_library, quality) for rid in ids_list}
 

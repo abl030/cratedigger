@@ -1198,9 +1198,14 @@ console.log('long_tail.js __test__');
     populated.includes('lt-band-tabs') && populated.includes('lt-search-input'),
     'renderLongTailBody renders band tabs + search box for a populated cohort',
   );
+  assert(
+    populated.includes(
+      `lt-band-tab active-status" type="button" onclick="window.setLongTailBand('missing')`),
+    'renderLongTailBody renders Missing as the default active tab',
+  );
   assertEqual(
-    state.longTail.band, 'missing',
-    'renderLongTailBody defaults the selected band to Missing',
+    state.longTail.band, null,
+    'renderLongTailBody is pure — it does not mutate state.longTail.band',
   );
   // Empty-band -> a search filters the selected band to zero; the
   // affordance + cross-band hint show, never a blank area.

@@ -427,12 +427,12 @@ export function renderLongTailBody() {
   const lt = state.longTail;
   const rows = Array.isArray(lt.rows) ? lt.rows : [];
   const tabs = deriveBandTabs(rows);
-  // If the selected band is no longer present (e.g. after a refetch
-  // dropped it), fall back to the default.
+  // Display band: fall back to the default when the selected band is absent
+  // (e.g. a refetch dropped it). Pure — does NOT write state.longTail.band;
+  // the canonical default is set by loadLongTail / setLongTailBand.
   let band = lt.band;
   if (band == null || !tabs.some((t) => t.band === band)) {
     band = defaultBand(tabs);
-    lt.band = band;
   }
   const tabStrip = renderBandTabs(tabs, band);
   const searchBox = tabs.length ? renderSearchBox(lt.query) : '';
@@ -1299,6 +1299,10 @@ export function toggleLongTailDetail(id) {
   if (typeof document === 'undefined') return;
   const el = document.getElementById(`lt-detail-${id}`);
   if (!el) return;
+  // Re-opening or collapsing this console: drop stale action guards so the
+  // fresh console's buttons aren't silently dead from a prior mid-flight op
+  // (LT-R1). Any outstanding fetch's result is still token-discarded below.
+  clearActionGuards(id);
   if (el.classList.contains('open')) {
     el.classList.remove('open');
     // Bump the token so any in-flight panel fetch is discarded on resolve.
@@ -1435,6 +1439,41 @@ const resolveInFlight = new Set();
  * @type {Set<number>}
  */
 const submitInFlight = new Set();
+
+/**
+ * Request ids with an outstanding set-intent POST. Guards the intent toggle
+ * against double-fire (two rapid clicks racing opposite intents at the DB).
+ *
+ * @type {Set<number>}
+ */
+const intentInFlight = new Set();
+
+/**
+ * True while a rescue confirm overlay is open. The overlay mounts into the
+ * single shared modal host, so a second `pickYoutubeRescue` would overwrite
+ * the first overlay's DOM and orphan its promise — this boolean serialises
+ * them (one confirm at a time).
+ */
+let rescueConfirmOpen = false;
+
+/**
+ * Clear any stale per-id action guards when a console is (re)opened or
+ * collapsed (LT-R1). The guards' `finally` blocks delete on settle, but a
+ * console destroyed mid-flight (collapse/reopen, list re-render) would
+ * otherwise leave a stale entry that silently no-ops the re-opened button
+ * until the orphaned fetch settles. The outstanding fetch's result is still
+ * token-discarded; clearing just re-enables the fresh console's buttons (a
+ * duplicate resolver call hits the server-side cache, so it's harmless).
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function clearActionGuards(id) {
+  resolveInFlight.delete(id);
+  submitInFlight.delete(id);
+  researchInFlight.delete(id);
+  intentInFlight.delete(id);
+}
 
 /**
  * Double-fire predicate for the resolver GET. Pure. `true` when a Check
@@ -1626,10 +1665,16 @@ function confirmRescue(id, browseId, row) {
  * @returns {Promise<void>}
  */
 export async function pickYoutubeRescue(id, browseId) {
-  const row = consoleRow(id);
-  const ok = await confirmRescue(id, browseId, row);
-  if (!ok) return;
-  await submitYoutubeRescue(id, browseId);
+  if (rescueConfirmOpen) return;  // one confirm overlay at a time (shared host).
+  rescueConfirmOpen = true;
+  try {
+    const row = consoleRow(id);
+    const ok = await confirmRescue(id, browseId, row);
+    if (!ok) return;
+    await submitYoutubeRescue(id, browseId);
+  } finally {
+    rescueConfirmOpen = false;
+  }
 }
 
 /**
@@ -2040,31 +2085,37 @@ function closeConsole(id) {
 export async function longTailSetIntent(id) {
   const row = consoleRow(id);
   if (!row) return;
+  if (!canStartInFlight(intentInFlight, id)) return;  // double-fire guard.
+  intentInFlight.add(id);
   const intent = intentToggleTarget(row.target_format);
-  let data;
   try {
-    const r = await fetch(`${API}/api/pipeline/set-intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, intent }),
-    });
-    data = await r.json();
-  } catch (_e) {
-    if (typeof toast === 'function') toast('Failed to set intent', true);
-    return;
-  }
-  if (!data || data.status !== 'ok') {
-    if (typeof toast === 'function') {
-      toast((data && data.error) || 'Failed to set intent', true);
+    let data;
+    try {
+      const r = await fetch(`${API}/api/pipeline/set-intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, intent }),
+      });
+      data = await r.json();
+    } catch (_e) {
+      if (typeof toast === 'function') toast('Failed to set intent', true);
+      return;
     }
-    return;
+    if (!data || data.status !== 'ok') {
+      if (typeof toast === 'function') {
+        toast((data && data.error) || 'Failed to set intent', true);
+      }
+      return;
+    }
+    if (typeof toast === 'function') {
+      toast(data.requeued ? `Intent: ${intent} (requeued)` : `Intent: ${intent}`, false);
+    }
+    // Single-row refetch-and-patch (KTD8) — the badge reflects the new intent
+    // off the authoritative refetched row.
+    await refetchLongTailRow(id);
+  } finally {
+    intentInFlight.delete(id);
   }
-  if (typeof toast === 'function') {
-    toast(data.requeued ? `Intent: ${intent} (requeued)` : `Intent: ${intent}`, false);
-  }
-  // Single-row refetch-and-patch (KTD8) — the badge reflects the new intent
-  // off the authoritative refetched row.
-  await refetchLongTailRow(id);
 }
 
 /**
@@ -2103,11 +2154,14 @@ export async function longTailReSearch(id) {
     }
     const copy = regenerateOutcomeCopy(result);
     if (copy.metadataGap) {
-      // Sticky deterministic failure — surface the gap inline and leave the
-      // button DISABLED (re-clicking is futile until the metadata is fixed).
+      // Sticky deterministic failure — surface the gap inline and put the
+      // button into a TERMINAL disabled state (re-clicking is futile until the
+      // metadata is fixed). Not the 'Re-searching…' spinner label, which would
+      // imply work is still happening.
       setResearchNote(id, copy.detail);
+      setResearchTerminal(id);
       if (typeof toast === 'function') toast(`${copy.title}: ${copy.detail}`, true);
-      return;  // intentionally leave disabled; no refetch.
+      return;
     }
     if (typeof toast === 'function') {
       toast(`${copy.title}: ${copy.detail}`, copy.tone === 'error');
@@ -2141,6 +2195,25 @@ function setResearchDisabled(id, disabled) {
   if (!btn) return;
   btn.disabled = disabled;
   btn.textContent = disabled ? 'Re-searching…' : 'Re-search (next cycle)';
+}
+
+/**
+ * Put the re-search button into a TERMINAL disabled state — a sticky
+ * `failed_deterministic` (the search plan can't be built until the metadata
+ * gap is fixed). Distinct from `setResearchDisabled(id, true)`'s
+ * 'Re-searching…' in-progress label. DOM-side; no-op when not mounted.
+ *
+ * @param {number} id
+ * @returns {void}
+ */
+function setResearchTerminal(id) {
+  if (typeof document === 'undefined') return;
+  const bar = document.getElementById(`lt-actions-${id}`);
+  if (!bar) return;
+  const btn = /** @type {HTMLButtonElement|null} */ (bar.querySelector('.lt-act-research'));
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Re-search blocked (metadata gap)';
 }
 
 /**

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from web.routes._overlay import overlay_release_rows_in_place
+from web.routes._overlay import band_release_ids, overlay_release_rows_in_place
 
 
 class TestOverlayReleaseRowsInPlace(unittest.TestCase):
@@ -86,6 +86,34 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                 patch("web.server._beets_db", return_value=None):
             with self.assertRaises(KeyError):
                 overlay_release_rows_in_place([{"title": "No ID"}], [])
+
+
+class TestBandReleaseIds(unittest.TestCase):
+    def test_degrades_to_missing_on_beets_error(self):
+        """Beets unavailable (locked / missing DB) → all-"missing" rather than
+        propagating the exception (which would 500 the worklist). Matches the
+        CLI's _cli_band_fn fallback (REL-002)."""
+        with patch("web.server.check_beets_library",
+                   side_effect=OSError("db locked")):
+            out = band_release_ids(["rel-1", "rel-2"])
+        self.assertEqual(out, {"rel-1": "missing", "rel-2": "missing"})
+
+    def test_bands_three_way_from_membership_and_detail(self):
+        """Direct coverage of the three-way (missing / unknown / band) the
+        long-tail worklist depends on (previously only indirect via the route
+        contract test)."""
+        mock_beets = MagicMock()
+        mock_beets.check_mbids_detail.return_value = {
+            "on-disk": {"beets_format": "FLAC", "beets_bitrate": 1100},
+            "no-detail": {},
+        }
+        with patch("web.server.check_beets_library",
+                   return_value={"on-disk", "no-detail"}), \
+                patch("web.server._beets_db", return_value=mock_beets):
+            out = band_release_ids(["on-disk", "no-detail", "gone"])
+        self.assertEqual(out["on-disk"], "lossless")   # FLAC 1100 → lossless
+        self.assertEqual(out["no-detail"], "unknown")  # in library, no detail
+        self.assertEqual(out["gone"], "missing")       # absent from membership
 
 
 if __name__ == "__main__":
