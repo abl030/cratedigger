@@ -85,6 +85,17 @@ class _CoreMixin(_PipelineDBBase):
             # connection open — re-raise those so the caller sees them.
             if not self.conn.closed:
                 raise
+            # The reconnect below returns a fresh ``autocommit=True``
+            # connection (see ``_connect``). That heal is only safe OUTSIDE a
+            # transaction. If we are mid-transaction (``autocommit=False`` —
+            # i.e. called inside ``with self._atomic():``), silently swapping
+            # to a fresh connection would drop the in-flight transaction's
+            # partial writes onto a connection that doesn't know it is
+            # supposed to be in a transaction. Re-raise so ``_atomic`` sees
+            # the error and rolls back. (Latent today — no ``_atomic`` body
+            # calls ``_execute`` — but nothing else enforces the invariant.)
+            if not self.conn.autocommit:
+                raise
             self.conn = self._connect()
             cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             if params:
@@ -157,14 +168,23 @@ class _CoreMixin(_PipelineDBBase):
 
         Contract: the **caller commits explicitly** inside the block (every
         site already does, exactly once on its success path). On any exception
-        the transaction is rolled back and re-raised; the prior autocommit
-        mode is ALWAYS restored on the way out. Because the body commits
-        (success) or this rolls back (failure) before the ``finally``,
+        the transaction is rolled back and the ORIGINAL exception is re-raised;
+        the prior autocommit mode is restored on the way out. Because the body
+        commits (success) or this rolls back (failure) before the ``finally``,
         autocommit is only ever restored with no transaction in flight —
         matching the original per-method ordering. A caller that needs to
         abort with no writes may ``rollback()`` and return early inside the
         block (``abandon_auto_import_request`` does this); that path is
         preserved unchanged.
+
+        Dead-connection error paths (issue #395): if the connection died
+        mid-transaction (or the caller's ``commit()`` raised), both the
+        ``rollback()`` and the autocommit-restore raise a *secondary*
+        ``InterfaceError``. Both are wrapped so the secondary error can never
+        mask the original — the same shape as ``advisory_lock``'s unlock
+        guard. A dead connection that fails to restore autocommit is harmless:
+        the next ``_ensure_conn`` reconnects with a fresh ``autocommit=True``
+        connection.
 
         Yields the live connection for convenience; callers continue to use
         ``self.conn`` directly.
@@ -175,7 +195,28 @@ class _CoreMixin(_PipelineDBBase):
         try:
             yield self.conn
         except Exception:
-            self.conn.rollback()  # discard partial writes; re-raise to caller
-            raise
+            # The connection may have died mid-transaction (or the caller's
+            # ``commit()`` itself raised). ``rollback()`` on a dead connection
+            # raises a *secondary* ``InterfaceError`` that would replace the
+            # original error the caller must see. Swallow it — same shape as
+            # ``advisory_lock``'s unlock guard.
+            try:
+                self.conn.rollback()  # discard partial writes
+            except Exception:  # noqa: BLE001 — never mask the original error
+                logger.debug(
+                    "rollback failed during _atomic (connection likely "
+                    "dead); original error propagates")
+            raise  # re-raise the ORIGINAL exception to the caller
         finally:
-            self.conn.autocommit = old_autocommit  # restore one-statement mode
+            # Restoring autocommit on a dead connection ALSO raises
+            # ``InterfaceError``, and from a ``finally`` block that would
+            # re-mask the original error. Guard it the same way; the next
+            # ``_ensure_conn`` reconnects with a fresh ``autocommit=True``
+            # connection regardless of whether this restore landed.
+            try:
+                self.conn.autocommit = old_autocommit  # restore one-stmt mode
+            except Exception:  # noqa: BLE001 — never mask the original error
+                logger.debug(
+                    "autocommit restore failed during _atomic (connection "
+                    "likely dead); a fresh connection will be established on "
+                    "next use")
