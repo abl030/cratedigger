@@ -1069,6 +1069,45 @@ class PipelineDB:
                         namespace, key,
                     )
 
+    @contextmanager
+    def _atomic(self) -> Iterator[Any]:
+        """Run a multi-row write in one explicit transaction.
+
+        ``PipelineDB`` runs ``autocommit=True`` — one statement per implicit
+        transaction (see ``_connect``). The handful of methods that must
+        write several rows atomically (Replace / supersede, rescue-import,
+        search-plan create / supersede / cursor-advance, the consumed-attempt
+        log+advance, the YouTube enqueue / mapping upsert) temporarily flip to
+        ``autocommit=False`` for the duration. This context manager is the one
+        place that flip lives — it replaces ten hand-rolled copies of the same
+        ``old_autocommit = … ; try/except rollback/raise ; finally restore``
+        boilerplate, each of which risked forgetting the ``finally`` restore.
+
+        Contract: the **caller commits explicitly** inside the block (every
+        site already does, exactly once on its success path). On any exception
+        the transaction is rolled back and re-raised; the prior autocommit
+        mode is ALWAYS restored on the way out. Because the body commits
+        (success) or this rolls back (failure) before the ``finally``,
+        autocommit is only ever restored with no transaction in flight —
+        matching the original per-method ordering. A caller that needs to
+        abort with no writes may ``rollback()`` and return early inside the
+        block (``abandon_auto_import_request`` does this); that path is
+        preserved unchanged.
+
+        Yields the live connection for convenience; callers continue to use
+        ``self.conn`` directly.
+        """
+        self._ensure_conn()
+        old_autocommit = self.conn.autocommit
+        self.conn.autocommit = False  # explicit transaction for this block
+        try:
+            yield self.conn
+        except Exception:
+            self.conn.rollback()  # discard partial writes; re-raise to caller
+            raise
+        finally:
+            self.conn.autocommit = old_autocommit  # restore one-statement mode
+
     # --- import_jobs queue ---
 
     def enqueue_import_job(
@@ -1928,10 +1967,7 @@ class PipelineDB:
                 ``album_requests`` (UNIQUE violation defensively caught).
             Any other exception triggers automatic rollback and re-raises.
         """
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -2024,11 +2060,6 @@ class PipelineDB:
 
             self.conn.commit()
             return new_id
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def delete_request(self, request_id: int) -> None:
         # Evidence rows are content-addressed after migration 021 — they are
@@ -2326,10 +2357,7 @@ class PipelineDB:
                 + ", ".join(sorted(bad))
             )
 
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -2389,11 +2417,6 @@ class PipelineDB:
                 )
 
             self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def set_manual(
         self,
@@ -3463,10 +3486,7 @@ class PipelineDB:
         validation_result: str | None,
     ) -> int | None:
         """Atomically audit and reset an owned interrupted auto-import row."""
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -3545,11 +3565,6 @@ class PipelineDB:
                 log_id = int(log_row["id"])
             self.conn.commit()
             return log_id
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     # --- YouTube rescue ingest (download_log doubles as queue + audit) ---
     #
@@ -3668,10 +3683,7 @@ class PipelineDB:
         """Atomically hand staged YT audio to importer and mark audit success."""
         validate_job_type(IMPORT_JOB_YOUTUBE)
         payload = validate_payload(IMPORT_JOB_YOUTUBE, payload)
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -3733,11 +3745,6 @@ class PipelineDB:
                 dict(job_row),
                 deduped=bool(job_row["deduped"]),
             )
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def update_youtube_terminal(
         self,
@@ -5649,10 +5656,7 @@ class PipelineDB:
             raise ValueError(
                 "create_successful_search_plan requires at least one item; "
                 "use create_failed_search_plan for empty results.")
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -5716,11 +5720,6 @@ class PipelineDB:
                     )
             self.conn.commit()
             return plan_id
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def create_failed_search_plan(
         self,
@@ -5797,10 +5796,7 @@ class PipelineDB:
         if not items:
             raise ValueError(
                 "supersede_search_plan_with_replacement requires items.")
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -5900,11 +5896,6 @@ class PipelineDB:
                 )
             self.conn.commit()
             return new_plan_id
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def get_active_search_plan(
         self,
@@ -6032,10 +6023,7 @@ class PipelineDB:
             raise ValueError(
                 f"target_ordinal {target_ordinal} out of range "
                 f"[0, {plan_item_count})")
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -6065,11 +6053,6 @@ class PipelineDB:
                 )
             self.conn.commit()
             return (int(active_plan_id), previous_ordinal, target_ordinal)
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def _fetch_plan_items(self, plan_id: int) -> list[SearchPlanItemRow]:
         cur = self._execute(
@@ -6438,10 +6421,7 @@ class PipelineDB:
         sets backoff inside the same transaction, so the legacy
         ``search_attempts`` field stays a scheduler-only counter.
         """
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -6703,11 +6683,6 @@ class PipelineDB:
                 new_cycle_count=new_cycle,
                 is_stale=is_stale,
             )
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     def record_non_consuming_search_attempt(
         self,
@@ -6724,10 +6699,7 @@ class PipelineDB:
 
         Returns the new ``search_log.id``.
         """
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -6833,11 +6805,6 @@ class PipelineDB:
                     )
             self.conn.commit()
             return search_log_id
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
 
     # --- Retry logic ---
 
@@ -7415,10 +7382,7 @@ class PipelineDB:
         is non-empty (a later resolve that found albums supersedes the
         empty flag).
         """
-        self._ensure_conn()
-        old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False
-        try:
+        with self._atomic():
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -7481,8 +7445,3 @@ class PipelineDB:
                         (release_group_identifier, source),
                     )
             self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        finally:
-            self.conn.autocommit = old_autocommit
