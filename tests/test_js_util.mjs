@@ -6,6 +6,7 @@
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
+import { __test__ as longTailTest } from '../web/js/long_tail.js';
 
 let passed = 0;
 let failed = 0;
@@ -974,6 +975,181 @@ assertEqual(stdNoSource, '',
 const activeRgSet = new Set(['rg-1', 'rg-2']);
 assertEqual(activeRgSet.has('rg-1'), true, 'active-RG Set hit');
 assertEqual(activeRgSet.has('rg-not-active'), false, 'active-RG Set miss');
+
+// --- long_tail.js pure helpers (U3) ---
+console.log('long_tail.js __test__');
+{
+  const {
+    bandLabel,
+    deriveBandTabs,
+    defaultBand,
+    filterRows,
+    countOtherBandMatches,
+    renderLongTailRow,
+  } = longTailTest;
+
+  // A mixed cohort spanning Missing + several on-disk bands, deliberately
+  // out of canonical order so the ordering assertion is meaningful.
+  const cohort = [
+    { id: 1, artist_name: 'Mount Eerie', album_title: 'Clear Moon', band: 'transparent' },
+    { id: 2, artist_name: 'The Mountain Goats', album_title: 'Tallahassee', band: 'missing' },
+    { id: 3, artist_name: 'Bill Callahan', album_title: 'Apocalypse', band: 'poor' },
+    { id: 4, artist_name: 'Smog', album_title: 'Knock Knock', band: 'missing' },
+    { id: 5, artist_name: 'Grouper', album_title: 'Dragging a Dead Deer', band: 'unknown' },
+    { id: 6, artist_name: 'Tim Hecker', album_title: 'Ravedeath, 1972', band: 'transparent' },
+    { id: 7, artist_name: 'Loscil', album_title: 'Submers', band: 'lossless' },
+  ];
+
+  // --- bandLabel ---
+  assertEqual(bandLabel('missing'), 'Missing', 'bandLabel capitalises missing');
+  assertEqual(bandLabel('transparent'), 'Transparent', 'bandLabel capitalises transparent');
+  assertEqual(bandLabel(''), '?', 'bandLabel empty -> ?');
+  assertEqual(bandLabel(null), '?', 'bandLabel null -> ?');
+  assertEqual(bandLabel('LOSSLESS'), 'Lossless', 'bandLabel lower-cases then capitalises');
+
+  // --- deriveBandTabs: ordering Missing-first + ascending QualityRank ---
+  const tabs = deriveBandTabs(cohort);
+  assertEqual(
+    tabs.map((t) => t.band).join(','),
+    'missing,unknown,poor,transparent,lossless',
+    'deriveBandTabs orders Missing first, then ascending by rank (only present bands)',
+  );
+  // Counts are correct per band.
+  const countOf = (b) => (tabs.find((t) => t.band === b) || {}).count;
+  assertEqual(countOf('missing'), 2, 'deriveBandTabs counts Missing rows');
+  assertEqual(countOf('transparent'), 2, 'deriveBandTabs counts Transparent rows');
+  assertEqual(countOf('poor'), 1, 'deriveBandTabs counts Poor rows');
+  assertEqual(countOf('unknown'), 1, 'deriveBandTabs counts Unknown rows');
+  assertEqual(countOf('lossless'), 1, 'deriveBandTabs counts Lossless rows');
+  // Bands not present in the cohort produce no tab.
+  assert(!tabs.some((t) => t.band === 'good'), 'deriveBandTabs omits absent bands');
+  // Each tab carries a display label.
+  assertEqual((tabs[0]).label, 'Missing', 'deriveBandTabs first tab label is Missing');
+  // Empty cohort -> no tabs.
+  assertEqual(deriveBandTabs([]).length, 0, 'deriveBandTabs empty cohort -> no tabs');
+  // Unrecognised band sorts to the end, not dropped.
+  const withWeird = deriveBandTabs([
+    { band: 'missing' }, { band: 'sparkle' }, { band: 'good' },
+  ]);
+  assertEqual(
+    withWeird.map((t) => t.band).join(','),
+    'missing,good,sparkle',
+    'deriveBandTabs sorts unrecognised band to the end',
+  );
+
+  // --- defaultBand ---
+  assertEqual(defaultBand(tabs), 'missing', 'defaultBand prefers Missing when present');
+  assertEqual(
+    defaultBand(deriveBandTabs([{ band: 'good' }, { band: 'poor' }])),
+    'poor',
+    'defaultBand falls back to first canonical band when Missing absent',
+  );
+  assertEqual(defaultBand([]), null, 'defaultBand empty -> null');
+
+  // --- filterRows: within-band substring match ---
+  const missingRows = filterRows(cohort, 'missing', '');
+  assertEqual(missingRows.length, 2, 'filterRows missing band, no query -> 2 rows');
+  assert(
+    missingRows.every((r) => r.band === 'missing'),
+    'filterRows only returns rows of the selected band',
+  );
+  // Substring matches artist.
+  const goatHits = filterRows(cohort, 'missing', 'mountain');
+  assertEqual(goatHits.length, 1, 'filterRows substring matches artist within band');
+  assertEqual(goatHits[0].id, 2, 'filterRows artist-substring hit is the right row');
+  // Substring matches album, case-insensitively.
+  const knockHits = filterRows(cohort, 'missing', 'KNOCK');
+  assertEqual(knockHits.length, 1, 'filterRows substring matches album (case-insensitive)');
+  assertEqual(knockHits[0].id, 4, 'filterRows album-substring hit is the right row');
+  // A query that only matches rows in OTHER bands -> empty in-band result.
+  assertEqual(
+    filterRows(cohort, 'missing', 'hecker').length,
+    0,
+    'filterRows cross-band query -> empty for the selected band',
+  );
+  // Null band -> no rows (no tab selected).
+  assertEqual(filterRows(cohort, null, '').length, 0, 'filterRows null band -> no rows');
+
+  // --- countOtherBandMatches: cross-band hint count ---
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', 'hecker'),
+    1,
+    'countOtherBandMatches counts matches in other bands',
+  );
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', 'eerie'),
+    1,
+    'countOtherBandMatches: Mount Eerie (transparent) matches "eerie" outside Missing',
+  );
+  // Selected-band matches are excluded from the cross-band count.
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', 'goats'),
+    0,
+    'countOtherBandMatches excludes the selected band',
+  );
+  // Blank query -> 0 (no hint while not searching).
+  assertEqual(
+    countOtherBandMatches(cohort, 'missing', ''),
+    0,
+    'countOtherBandMatches blank query -> 0',
+  );
+
+  // --- renderLongTailRow: sanity (clickable + detail container) ---
+  const rowHtml = renderLongTailRow(cohort[1]);
+  assert(
+    rowHtml.includes('window.toggleLongTailDetail(2)'),
+    'renderLongTailRow wires the row click to toggleLongTailDetail',
+  );
+  assert(
+    rowHtml.includes('id="lt-detail-2"'),
+    'renderLongTailRow emits the per-row detail container',
+  );
+  assert(
+    rowHtml.includes('badge-wanted') && rowHtml.includes('Missing'),
+    'renderLongTailRow renders a Missing band chip for a missing row',
+  );
+  // An on-disk-band row gets the rank colour class + capitalised label.
+  const transparentRow = renderLongTailRow(cohort[0]);
+  assert(
+    transparentRow.includes('badge-rank-transparent') && transparentRow.includes('Transparent'),
+    'renderLongTailRow renders a rank-coloured chip for an on-disk band',
+  );
+
+  // --- renderLongTailBody: the three list states (DOM-free string paint) ---
+  const { renderLongTailBody } = longTailTest;
+  // Empty cohort -> empty-cohort affordance, never blank.
+  state.longTail = { rows: [], band: null, query: '' };
+  const emptyCohort = renderLongTailBody();
+  assert(
+    emptyCohort.includes('No wanted releases in the long tail'),
+    'renderLongTailBody empty cohort shows the empty-cohort affordance',
+  );
+  // Populated cohort -> tab strip + rows for the default (Missing) band.
+  state.longTail = { rows: cohort, band: null, query: '' };
+  const populated = renderLongTailBody();
+  assert(
+    populated.includes('lt-band-tabs') && populated.includes('lt-search-input'),
+    'renderLongTailBody renders band tabs + search box for a populated cohort',
+  );
+  assertEqual(
+    state.longTail.band, 'missing',
+    'renderLongTailBody defaults the selected band to Missing',
+  );
+  // Empty-band -> a search filters the selected band to zero; the
+  // affordance + cross-band hint show, never a blank area.
+  state.longTail = { rows: cohort, band: 'missing', query: 'hecker' };
+  const emptyBand = renderLongTailBody();
+  assert(
+    emptyBand.includes('No Missing releases match'),
+    'renderLongTailBody empty-band shows the per-band no-match affordance',
+  );
+  assert(
+    emptyBand.includes('1 match in other bands'),
+    'renderLongTailBody empty-band surfaces the cross-band match hint',
+  );
+  // Reset shared state so later tests are not affected.
+  state.longTail = { rows: null, band: null, query: '' };
+}
 
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);

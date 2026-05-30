@@ -107,6 +107,23 @@
   .p-detail-row { display: flex; gap: 8px; margin-bottom: 4px; font-size: 0.8em; }
   .p-detail-label { color: #666; min-width: 80px; }
   .p-detail-value { color: #bbb; }
+  /* Long-tail triage worklist (Pipeline sub-view). Band tabs + search
+     box + clickable rows. Reuses the .p-item / .p-detail visual language
+     and the shared badge-rank-* colours for the per-row band badge. */
+  .lt-band-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .lt-band-tab { display: inline-flex; align-items: center; gap: 6px; }
+  .lt-band-count { color: #888; font-weight: 400; font-size: 0.85em; }
+  .lt-band-tab.active-status .lt-band-count { color: #cde; }
+  .lt-search { margin-bottom: 10px; }
+  .lt-search-input { width: 100%; box-sizing: border-box; padding: 7px 10px; background: #1a1a1a; color: #ddd; border: 1px solid #333; border-radius: 6px; font-size: 0.9em; }
+  .lt-search-input:focus { outline: none; border-color: #56b; }
+  .lt-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #444; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
+  .lt-item:hover { background: #252525; }
+  .lt-meta-chip { color: #888; font-size: 0.9em; }
+  .lt-detail { background: #191919; padding: 0; margin: 0 0 4px 0; border-radius: 0 0 6px 6px; display: none; border-left: 3px solid #333; }
+  .lt-detail.open { display: block; padding: 10px 12px; }
+  .lt-empty-band { padding: 4px 0; }
+  .lt-empty-hint { color: #888; font-size: 0.82em; padding: 4px 0; }
   /* Search-plan inspector — per-row magnifier button, in-place summary
      panel rendered as a sibling of the row (mirrors `.p-detail` shape but
      kept visually distinct so a row with both expanded is readable). */

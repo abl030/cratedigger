@@ -10,6 +10,7 @@ import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, open
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter } from './pipeline.js';
+import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail } from './long_tail.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
@@ -169,6 +170,14 @@ Object.assign(window, {
   toggleDetail,
   deleteRequest,
   updateStatus,
+  // Long-tail triage worklist (U3): nav + tab/search/list handlers. The
+  // per-row action console expansion lands in U4 (toggleLongTailDetail is
+  // a stub for now). renderPipeline (already exposed) re-emits the nav for
+  // the long-tail sub-view; long_tail.js calls it via window.renderPipeline.
+  loadLongTail,
+  setLongTailBand,
+  onLongTailSearchInput,
+  toggleLongTailDetail,
   renderLibraryResults,
   renderLibraryResultsInto,
   toggleLibDetail,
