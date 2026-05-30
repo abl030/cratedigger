@@ -3151,6 +3151,43 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(
             db.count_by_status(), {"wanted": 2, "imported": 1})
 
+    def test_get_long_tail_cohort_returns_only_wanted_stamped(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1"))
+        db.seed_request(make_request_row(
+            id=2, status="imported", mb_release_id="rel-2"))
+        db.seed_request(make_request_row(
+            id=3, status="wanted", mb_release_id="rel-3"))
+        # Row 3 has an in-flight youtube rescue.
+        db.insert_youtube_running(
+            request_id=3, browse_id="MPREb_x", audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=x",
+            expected_track_count=10,
+        )
+        rows = db.get_long_tail_cohort()
+        self.assertEqual([r["id"] for r in rows], [1, 3])
+        by_id = {r["id"]: r for r in rows}
+        self.assertFalse(by_id[1]["in_flight_rescue"])
+        self.assertTrue(by_id[3]["in_flight_rescue"])
+        # Projection is narrow — must not carry the full request row.
+        self.assertNotIn("reasoning", by_id[1])
+        self.assertIn("target_format", by_id[1])
+
+    def test_get_long_tail_request_single_id(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5, status="wanted", mb_release_id="rel-5"))
+        db.seed_request(make_request_row(
+            id=6, status="imported", mb_release_id="rel-6"))
+        row = db.get_long_tail_request(5)
+        assert row is not None
+        self.assertEqual(row["id"], 5)
+        self.assertFalse(row["in_flight_rescue"])
+        # Non-wanted and missing ids return None.
+        self.assertIsNone(db.get_long_tail_request(6))
+        self.assertIsNone(db.get_long_tail_request(999))
+
     def test_count_by_status_preserves_none_bucket(self):
         """Real SQL ``GROUP BY status`` keeps NULL as its own key; the
         fake must not collapse it to an empty string."""

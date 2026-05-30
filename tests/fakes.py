@@ -3514,6 +3514,68 @@ class FakePipelineDB:
                 key=lambda r: _as_datetime(r.get("created_at")))
         ]
 
+    def _has_youtube_running(self, request_id: int) -> bool:
+        """Mirror of the ``_LONG_TAIL_SELECT`` ``youtube_running`` EXISTS.
+
+        A request has an in-flight rescue iff a ``download_log`` row with
+        ``source='youtube' AND outcome='youtube_running'`` exists for it.
+        """
+        return any(
+            entry.source == "youtube"
+            and entry.outcome == "youtube_running"
+            and entry.request_id == request_id
+            for entry in self.download_logs
+        )
+
+    def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Project a request row to the long-tail cohort SELECT shape.
+
+        Mirrors ``PipelineDB._LONG_TAIL_SELECT``'s narrow column list +
+        the ``in_flight_rescue`` stamp so tests can't rely on a column
+        the production query doesn't return.
+        """
+        keys = (
+            "id", "artist_name", "album_title", "year", "status", "source",
+            "mb_release_id", "discogs_release_id", "target_format",
+            "min_bitrate", "search_filetype_override", "unfindable_category",
+        )
+        out: dict[str, Any] = {k: row.get(k) for k in keys}
+        out["in_flight_rescue"] = self._has_youtube_running(int(row["id"]))
+        return out
+
+    def get_long_tail_cohort(self) -> list[dict[str, Any]]:
+        """In-memory mirror of ``PipelineDB.get_long_tail_cohort``.
+
+        Returns every ``wanted`` request projected to the cohort SELECT
+        shape, id ASC, each stamped with ``in_flight_rescue``. Counts as
+        ONE query for the N+1 guard.
+        """
+        self.query_counts["get_long_tail_cohort"] = (
+            self.query_counts.get("get_long_tail_cohort", 0) + 1
+        )
+        rows = sorted(
+            (r for r in self._requests.values()
+             if r.get("status") == "wanted"),
+            key=lambda r: int(r["id"]),
+        )
+        return [self._long_tail_projection(r) for r in rows]
+
+    def get_long_tail_request(
+        self, request_id: int,
+    ) -> dict[str, Any] | None:
+        """In-memory mirror of ``PipelineDB.get_long_tail_request``.
+
+        Single-id variant — returns ``None`` when the row is missing or
+        no longer ``wanted``.
+        """
+        self.query_counts["get_long_tail_request"] = (
+            self.query_counts.get("get_long_tail_request", 0) + 1
+        )
+        row = self._requests.get(int(request_id))
+        if row is None or row.get("status") != "wanted":
+            return None
+        return self._long_tail_projection(row)
+
     def get_recent(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return requests that have at least one download_log row."""
         with_history = {row.request_id for row in self.download_logs}

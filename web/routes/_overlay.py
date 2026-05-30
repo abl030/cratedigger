@@ -18,6 +18,70 @@ from __future__ import annotations
 from typing import Iterable
 
 
+def _band_from_detail(
+    rid: str,
+    in_library: set[str],
+    quality: dict[str, dict],
+) -> str:
+    """Three-way band for one release id given already-fetched membership
+    + ``check_mbids_detail`` output (KTD1).
+
+    The single banding decision both ``band_release_ids`` and
+    ``overlay_release_rows_in_place`` route through — header, list, and
+    sibling panel can never diverge because they share this function. The
+    membership / detail queries are the caller's responsibility (batched
+    once); this is pure given them.
+    """
+    from web import server as srv
+
+    if rid not in in_library:
+        return "missing"
+    q = quality.get(rid)
+    if not q:
+        return "unknown"
+    fmt_raw = q.get("beets_format")
+    fmt = fmt_raw if isinstance(fmt_raw, str) else ""
+    br_raw = q.get("beets_bitrate")
+    br = br_raw if isinstance(br_raw, int) else 0
+    return srv.compute_library_rank(fmt, br)
+
+
+def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
+    """Map each release id to its beets-library quality band.
+
+    The beets-only banding core, factored out of
+    ``overlay_release_rows_in_place`` so the long-tail worklist (U1) and
+    the overlay both band through one function — header and list always
+    agree. Three-way (KTD1):
+
+    * release id absent from the beets membership set → ``"missing"``.
+    * present but no detail row / ``compute_library_rank`` returns
+      ``"unknown"`` → ``"unknown"`` (has audio, never ``"missing"``).
+    * otherwise → the lowercase ``QualityRank`` band.
+
+    Bounded query fan-out: one membership query (``check_beets_library``)
+    + one ``check_mbids_detail`` batch over the in-library subset — never
+    per row. Skips the overlay's ``check_pipeline`` query: the long-tail
+    cohort row already carries the pipeline columns, and the band depends
+    only on the on-disk copy.
+
+    Returns a dict keyed by the release id string. Ids that are
+    ``"missing"`` ARE present in the dict (banded ``"missing"``) so a
+    caller can distinguish "banded missing" from "not asked about" — but
+    the long-tail service treats both the same (absent → ``Missing``).
+    """
+    from web import server as srv
+
+    ids_list = [str(rid) for rid in release_ids]
+    if not ids_list:
+        return {}
+    in_library = srv.check_beets_library(ids_list)
+    b = srv._beets_db()
+    quality = b.check_mbids_detail(list(in_library)) if in_library and b else {}
+
+    return {rid: _band_from_detail(rid, in_library, quality) for rid in ids_list}
+
+
 def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) -> None:
     """Annotate each release row with library + pipeline state in place.
 
@@ -60,7 +124,12 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
             br = br_raw if isinstance(br_raw, int) else 0
             r["library_format"] = fmt
             r["library_min_bitrate"] = br
-            r["library_rank"] = srv.compute_library_rank(fmt, br)
+            # Band through the one shared decision so the overlay's
+            # ``library_rank`` and the long-tail worklist's band can
+            # never diverge. ``rid`` is in ``in_library`` here (we're
+            # inside ``if q:`` on a detail row), so this returns the
+            # lowercase QualityRank, identical to the prior inline call.
+            r["library_rank"] = _band_from_detail(rid, in_library, quality)
         pi = in_pipeline.get(rid)
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None

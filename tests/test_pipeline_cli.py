@@ -3396,6 +3396,105 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertNotIn("--after=", out)
 
 
+class TestPipelineCliLongTail(unittest.TestCase):
+    """``pipeline-cli long-tail`` — the worklist read counterpart of
+    ``GET /api/pipeline/long-tail`` (CLI ⇄ API symmetry, U1).
+
+    Both surfaces wrap ``lib.long_tail_service.list_long_tail``. Tests
+    inject a deterministic ``band_fn`` via the kwarg-DI seam so they
+    don't need a live beets library.
+    """
+
+    @staticmethod
+    def _band_fn(mapping):
+        def _fn(release_ids):
+            return {rid: mapping[rid] for rid in release_ids if rid in mapping}
+        return _fn
+
+    def _seed(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            artist_name="Missing Artist", album_title="Gone"))
+        db.seed_request(make_request_row(
+            id=2, status="wanted", mb_release_id="rel-2",
+            artist_name="On Disk", album_title="Have It"))
+        db.seed_request(make_request_row(
+            id=3, status="imported", mb_release_id="rel-3"))
+        return db
+
+    def _run(self, db, *, band=None, request_id=None, json_out=False,
+             band_fn=None):
+        args = SimpleNamespace(band=band, id=request_id, json=json_out)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_long_tail(
+                cast(Any, db), args, band_fn=band_fn)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_band_missing_filter_returns_only_missing_rows(self):
+        db = self._seed()
+        band_fn = self._band_fn({"rel-2": "transparent"})  # rel-1 missing
+        rc, out, err = self._run(db, band="missing", band_fn=band_fn)
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Missing Artist", out)
+        self.assertNotIn("On Disk", out)  # transparent, filtered out
+
+    def test_json_emits_typed_envelope(self):
+        db = self._seed()
+        band_fn = self._band_fn({"rel-2": "transparent"})
+        rc, out, err = self._run(db, json_out=True, band_fn=band_fn)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(set(payload), {"results", "band", "count"})
+        self.assertIsNone(payload["band"])
+        self.assertEqual(payload["count"], 2)
+        # Both wanted rows present; imported row absent. Round-trips into
+        # the Struct (wire shape == Struct shape).
+        from lib.long_tail_service import LongTailRow
+        rows = [msgspec.convert(r, type=LongTailRow) for r in payload["results"]]
+        by_id = {r.id: r for r in rows}
+        self.assertEqual(set(by_id), {1, 2})
+        self.assertEqual(by_id[1].band, "missing")
+        self.assertEqual(by_id[2].band, "transparent")
+
+    def test_json_band_filter_echoed(self):
+        db = self._seed()
+        band_fn = self._band_fn({"rel-1": "missing", "rel-2": "missing"})
+        rc, out, _ = self._run(
+            db, band="missing", json_out=True, band_fn=band_fn)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["band"], "missing")
+        self.assertEqual(payload["count"], 2)
+
+    def test_empty_cohort_exit_zero(self):
+        db = FakePipelineDB()
+        rc, out, err = self._run(db, band_fn=self._band_fn({}))
+        self.assertEqual(rc, 0)
+        self.assertIn("No wanted rows", out)
+
+    def test_single_id_exit_zero_with_band(self):
+        db = self._seed()
+        band_fn = self._band_fn({"rel-2": "transparent"})
+        rc, out, err = self._run(
+            db, request_id=2, json_out=True, band_fn=band_fn)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(set(payload), {"result", "id"})
+        self.assertEqual(payload["id"], 2)
+        self.assertEqual(payload["result"]["band"], "transparent")
+
+    def test_single_id_not_wanted_exit_two(self):
+        db = self._seed()
+        rc, out, err = self._run(
+            db, request_id=3, band_fn=self._band_fn({}))  # id 3 is imported
+        self.assertEqual(rc, 2)
+        self.assertIn("not found or not wanted", err)
+
+
 class TestPipelineCliRoutes(unittest.TestCase):
     """U18 step 3: ``pipeline-cli routes`` self-documents the CLI surface."""
 
