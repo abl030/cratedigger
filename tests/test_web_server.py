@@ -1772,7 +1772,8 @@ class TestPipelineRouteContracts(_WebServerCase):
 
     def test_pipeline_detail_surfaces_last_search_top_candidates(self):
         """When the latest search_log row has candidates, the route emits the
-        top-3 by (matched_tracks DESC, avg_ratio DESC) via msgspec.to_builtins."""
+        full slice (up to 20) by (matched_tracks DESC, avg_ratio DESC) via
+        msgspec.to_builtins."""
         candidates_blob = [
             {"username": "u1", "dir": "A", "filetype": "flac",
              "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.95,
@@ -1808,14 +1809,42 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertEqual(last["variant"], "v3_artist_only")
         self.assertEqual(last["final_state"], "Completed")
         self.assertEqual(last["outcome"], "no_match")
-        # Top-3, sorted by (matched_tracks DESC, avg_ratio DESC):
-        # u1 (26, 0.95) → u3 (26, 0.85) → u2 (22, 0.80)
+        # All 4 (≤20 cap), sorted by (matched_tracks DESC, avg_ratio DESC):
+        # u1 (26, 0.95) → u3 (26, 0.85) → u2 (22, 0.80) → u4 (20, 0.99)
         usernames = [c["username"] for c in last["top_candidates"]]
-        self.assertEqual(usernames, ["u1", "u3", "u2"])
+        self.assertEqual(usernames, ["u1", "u3", "u2", "u4"])
         for cand in last["top_candidates"]:
             _assert_required_fields(self, cand,
                                     self.CANDIDATE_SCORE_REQUIRED_FIELDS,
                                     "candidate score")
+
+    def test_pipeline_detail_caps_top_candidates_at_twenty(self):
+        """U2: the peers panel widened from 3 to the full stored cap (20). A
+        search row with >20 candidates surfaces exactly 20, still ranked."""
+        blob = [
+            {"username": f"u{i:02d}", "dir": f"D{i}", "filetype": "flac",
+             "matched_tracks": 26, "total_tracks": 26,
+             "avg_ratio": 1.0 - i / 100.0,
+             "missing_titles": [], "file_count": 26}
+            for i in range(25)
+        ]
+        self.mock_db.get_search_history.return_value = [{
+            "id": 99, "request_id": 100, "query": "q",
+            "result_count": 100, "elapsed_s": 1.0, "outcome": "no_match",
+            "created_at": "2026-04-29T00:00:00+00:00",
+            "candidates": blob,
+            "variant": "v3_artist_only", "final_state": "Completed",
+        }]
+        try:
+            status, data = self._get("/api/pipeline/100")
+        finally:
+            self.mock_db.get_search_history.return_value = []
+        self.assertEqual(status, 200)
+        top = data["last_search"]["top_candidates"]
+        self.assertEqual(len(top), 20)
+        # All matched_tracks equal → highest avg_ratio first: u00..u19
+        self.assertEqual(top[0]["username"], "u00")
+        self.assertEqual(top[-1]["username"], "u19")
 
     def test_pipeline_detail_handles_null_candidates_gracefully(self):
         """Historical search_log row with NULL candidates → top_candidates=[]."""

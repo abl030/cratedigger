@@ -561,10 +561,12 @@ def _build_last_search_payload(
                 latest.get("request_id"), latest.get("id"), exc,
             )
             candidates = []
-    # Top-3 by (matched_tracks DESC, avg_ratio DESC) for compact list view;
-    # full forensic blob still reachable via the search history for
-    # operators who want it. Shared ranking lives in lib/quality.py.
-    top = top_candidates(candidates, limit=3)
+    # Top-20 by (matched_tracks DESC, avg_ratio DESC) — the full stored cap
+    # (search_log.candidates persists at most 20). The long-tail console's
+    # "peers seen" panel renders the wider slice; the compact detail view
+    # shows the same ranking, just more rows. Shared ranking lives in
+    # lib/quality.py.
+    top = top_candidates(candidates, limit=20)
     return {
         "variant": latest.get("variant"),
         "final_state": latest.get("final_state"),
