@@ -1227,6 +1227,12 @@ class _RequestsMixin(_PipelineDBBase):
             ar.min_bitrate,
             ar.search_filetype_override,
             ar.unfindable_category,
+            ar.current_spectral_grade,
+            ar.current_spectral_bitrate,
+            (
+                SELECT COUNT(*) FROM album_tracks t
+                WHERE t.request_id = ar.id
+            )::int AS track_count,
             EXISTS (
                 SELECT 1 FROM download_log dl
                 WHERE dl.request_id = ar.id

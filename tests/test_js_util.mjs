@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, manualReasonLabel, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
@@ -145,6 +145,18 @@ console.log('sourceLabel()');
 assertEqual(sourceLabel('89ad4ac3-39f7-470e-963a-56509c546377'), 'MusicBrainz', 'UUID → MusicBrainz');
 assertEqual(sourceLabel('2048516'), 'Discogs', 'numeric → Discogs');
 assertEqual(sourceLabel('not-a-real-id'), '', 'unknown id → empty source label');
+
+// --- youtubeBrowseUrl tests ---
+console.log('youtubeBrowseUrl()');
+assertEqual(
+  youtubeBrowseUrl('MPREb_abc123'),
+  'https://music.youtube.com/browse/MPREb_abc123',
+  'browse id → YT Music album URL');
+assertEqual(youtubeBrowseUrl('  MPREb_xy  '), 'https://music.youtube.com/browse/MPREb_xy',
+  'trims whitespace');
+assertEqual(youtubeBrowseUrl(''), '', 'empty → empty');
+assertEqual(youtubeBrowseUrl(null), '', 'null → empty');
+assertEqual(youtubeBrowseUrl(undefined), '', 'undefined → empty');
 
 // --- parseYear tests ---
 console.log('parseYear()');
@@ -1058,8 +1070,10 @@ console.log('long_tail.js __test__');
   // A mixed cohort spanning Missing + several on-disk bands, deliberately
   // out of canonical order so the ordering assertion is meaningful.
   const cohort = [
-    { id: 1, artist_name: 'Mount Eerie', album_title: 'Clear Moon', band: 'transparent' },
-    { id: 2, artist_name: 'The Mountain Goats', album_title: 'Tallahassee', band: 'missing' },
+    { id: 1, artist_name: 'Mount Eerie', album_title: 'Clear Moon', band: 'transparent',
+      mb_release_id: '89ad4ac3-39f7-470e-963a-56509c546377', track_count: 9 },
+    { id: 2, artist_name: 'The Mountain Goats', album_title: 'Tallahassee', band: 'missing',
+      mb_release_id: '2048516', discogs_release_id: '2048516', track_count: 14 },
     { id: 3, artist_name: 'Bill Callahan', album_title: 'Apocalypse', band: 'poor' },
     { id: 4, artist_name: 'Smog', album_title: 'Knock Knock', band: 'missing' },
     { id: 5, artist_name: 'Grouper', album_title: 'Dragging a Dead Deer', band: 'unknown' },
@@ -1175,11 +1189,34 @@ console.log('long_tail.js __test__');
     rowHtml.includes('badge-wanted') && rowHtml.includes('Missing'),
     'renderLongTailRow renders a Missing band chip for a missing row',
   );
-  // An on-disk-band row gets the rank colour class + capitalised label.
+  // Meta row = year · MB/Discogs · N tracks. cohort[1] carries a numeric
+  // (Discogs) release id + 14 tracks.
+  assert(
+    rowHtml.includes('Discogs') && rowHtml.includes('14 tracks'),
+    'renderLongTailRow meta shows the Discogs mirror label + track count',
+  );
+  // The low-signal pipeline `source` chip and unfindable_category chip are
+  // gone — meta is now the pressing-disambiguation triple.
+  assert(
+    !rowHtml.includes('lt-meta-chip" title="unfindable category"'),
+    'renderLongTailRow no longer renders the unfindable_category chip',
+  );
+  // An on-disk-band row gets the rank colour class + capitalised label, and
+  // a UUID (MusicBrainz) release id surfaces the MusicBrainz label.
   const transparentRow = renderLongTailRow(cohort[0]);
   assert(
     transparentRow.includes('badge-rank-transparent') && transparentRow.includes('Transparent'),
     'renderLongTailRow renders a rank-coloured chip for an on-disk band',
+  );
+  assert(
+    transparentRow.includes('MusicBrainz') && transparentRow.includes('9 tracks'),
+    'renderLongTailRow meta shows the MusicBrainz mirror label + track count',
+  );
+  // Singular track label for a single-track pressing.
+  assert(
+    renderLongTailRow({ id: 9, artist_name: 'A', album_title: 'B', band: 'missing',
+      mb_release_id: '123', track_count: 1 }).includes('1 track<'),
+    'renderLongTailRow renders singular "1 track"',
   );
 
   // --- renderLongTailBody: the three list states (DOM-free string paint) ---
@@ -1602,7 +1639,6 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     canAcceptSibling,
     acceptDisabledReason,
     intentToggleTarget,
-    regenerateOutcomeCopy,
     buildAcceptSiblingOptions,
     renderActionsBar,
   } = longTailTest;
@@ -1667,61 +1703,6 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     'lossless',
     'intentToggleTarget: non-lossless target_format → toggle to lossless');
 
-  // --- regenerateOutcomeCopy: every outcome → next-cycle copy (KTD3) ---
-  const regenSuccess = regenerateOutcomeCopy({ outcome: 'success' });
-  assertEqual(regenSuccess.tone, 'success', 'regenerateOutcomeCopy success → success tone');
-  assertEqual(regenSuccess.requeued, true, 'regenerateOutcomeCopy success → requeued (refetch)');
-  assertEqual(regenSuccess.metadataGap, false, 'regenerateOutcomeCopy success → not a metadata gap');
-  assert(
-    regenSuccess.detail.toLowerCase().includes('next cycle')
-      && !regenSuccess.detail.toLowerCase().includes('instant'),
-    'regenerateOutcomeCopy success copy is honest next-cycle, never "instant"');
-
-  const regenNoop = regenerateOutcomeCopy({ outcome: 'noop_active_plan_exists' });
-  assertEqual(regenNoop.tone, 'success', 'regenerateOutcomeCopy noop → success tone');
-  assertEqual(regenNoop.requeued, true, 'regenerateOutcomeCopy noop → requeued (already queued)');
-  assertEqual(regenNoop.metadataGap, false, 'regenerateOutcomeCopy noop → not a metadata gap');
-  assert(
-    regenNoop.detail.toLowerCase().includes('already'),
-    'regenerateOutcomeCopy noop says a fresh plan already exists');
-
-  // failed_deterministic is the METADATA-GAP variant — NOT a re-fire.
-  const regenDet = regenerateOutcomeCopy({
-    outcome: 'failed_deterministic',
-    error_message: 'no runnable query',
-    failure_class: 'incomplete_metadata',
-  });
-  assertEqual(regenDet.tone, 'error', 'regenerateOutcomeCopy failed_deterministic → error tone');
-  assertEqual(regenDet.metadataGap, true,
-    'regenerateOutcomeCopy failed_deterministic → metadataGap=true (surface inline, do NOT re-fire)');
-  assertEqual(regenDet.requeued, false,
-    'regenerateOutcomeCopy failed_deterministic → not requeued (no refetch)');
-  assert(regenDet.detail.includes('no runnable query'),
-    'regenerateOutcomeCopy failed_deterministic surfaces the API error');
-  assert(regenDet.detail.includes('incomplete_metadata'),
-    'regenerateOutcomeCopy failed_deterministic surfaces the failure class');
-  assert(regenDet.detail.toLowerCase().includes('field-quality'),
-    'regenerateOutcomeCopy failed_deterministic points at the field-quality detail');
-
-  const regenTrans = regenerateOutcomeCopy({ outcome: 'failed_transient', error: 'db hiccup' });
-  assertEqual(regenTrans.tone, 'error', 'regenerateOutcomeCopy failed_transient → error tone');
-  assertEqual(regenTrans.metadataGap, false,
-    'regenerateOutcomeCopy failed_transient → not a metadata gap (retryable)');
-  assertEqual(regenTrans.requeued, false, 'regenerateOutcomeCopy failed_transient → not requeued');
-  assert(regenTrans.detail.toLowerCase().includes('retry'),
-    'regenerateOutcomeCopy failed_transient tells the operator to retry');
-
-  const regenNotFound = regenerateOutcomeCopy({ outcome: 'request_not_found' });
-  assertEqual(regenNotFound.tone, 'error', 'regenerateOutcomeCopy request_not_found → error tone');
-  assert(regenNotFound.detail.toLowerCase().includes('refresh'),
-    'regenerateOutcomeCopy request_not_found tells the operator to refresh');
-
-  const regenUnknown = regenerateOutcomeCopy({ outcome: 'who_knows' });
-  assertEqual(regenUnknown.tone, 'error', 'regenerateOutcomeCopy unknown → error tone');
-  assert(regenUnknown.detail.length > 0, 'regenerateOutcomeCopy unknown → non-blank detail');
-  assertEqual(regenerateOutcomeCopy(null).tone, 'error',
-    'regenerateOutcomeCopy null → error tone (no throw)');
-
   // --- buildAcceptSiblingOptions: standard-mode picker options ---
   const opts = buildAcceptSiblingOptions({
     id: 77, artist_name: 'Smog', album_title: 'Knock Knock', mb_release_group_id: 'rg-9' });
@@ -1734,7 +1715,7 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     null,
     'buildAcceptSiblingOptions: no rg on row → null (picker lazily resolves)');
 
-  // --- renderActionsBar: enable/disable + intent badge + research btn ---
+  // --- renderActionsBar: enable/disable + intent badge + triage buttons ---
   const mbBar = renderActionsBar({
     id: 12, source: 'request', mb_release_group_id: 'rg-1', target_format: null });
   assert(mbBar.includes('window.longTailAcceptSibling(12)'),
@@ -1743,10 +1724,14 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     'renderActionsBar: MB row accept-sibling is enabled');
   assert(mbBar.includes('window.longTailSetIntent(12)'),
     'renderActionsBar wires the set-intent toggle');
-  assert(mbBar.includes('window.longTailReSearch(12)'),
-    'renderActionsBar wires the re-search button');
-  assert(mbBar.includes('next cycle'),
-    'renderActionsBar re-search copy is honest next-cycle');
+  // Triage buttons wired to the existing update / delete endpoints.
+  assert(mbBar.includes('window.longTailSetImported(12)') && mbBar.includes('Set imported'),
+    'renderActionsBar wires the Set imported button');
+  assert(mbBar.includes('window.longTailDeleteRequest(12)') && mbBar.includes('Delete request'),
+    'renderActionsBar wires the Delete request button');
+  // The re-search button is gone.
+  assert(!mbBar.includes('longTailReSearch') && !mbBar.includes('lt-act-research'),
+    'renderActionsBar no longer renders the re-search button');
   // default intent (no target_format) → toggle offers "switch to lossless".
   assert(mbBar.includes('switch to lossless') && mbBar.includes('lt-intent-default'),
     'renderActionsBar: default intent renders a default badge + "switch to lossless"');

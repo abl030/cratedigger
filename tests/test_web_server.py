@@ -10157,6 +10157,8 @@ class TestLongTailRouteContracts(_WebServerCase):
         "mb_release_id", "discogs_release_id", "target_format",
         "min_bitrate", "search_filetype_override", "unfindable_category",
         "band", "in_flight_rescue",
+        # Card meta (year · MB/Discogs · N tracks) + on-disk spectral strip.
+        "track_count", "current_spectral_grade", "current_spectral_bitrate",
     }
     ENVELOPE_REQUIRED_FIELDS = {"results", "band", "count"}
 
