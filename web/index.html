@@ -154,6 +154,8 @@
   .lt-yt-row { display: flex; gap: 8px; align-items: center; padding: 2px 0; border-bottom: 1px solid #222; }
   .lt-yt-row:last-child { border-bottom: none; }
   .lt-yt-id { color: #ccc; font-family: monospace; font-size: 0.92em; }
+  a.lt-yt-id { color: #6af; text-decoration: none; }
+  a.lt-yt-id:hover { text-decoration: underline; }
   .lt-yt-meta { color: #888; font-size: 0.92em; }
   .lt-yt-check { padding: 5px 12px; background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 0.85em; }
   .lt-yt-check:hover { background: #333; border-color: #56b; }
@@ -168,13 +170,19 @@
   .lt-link-btn { background: none; border: none; color: #6af; cursor: pointer; font-size: 0.82em; padding: 4px 0; }
   .lt-link-btn:hover { text-decoration: underline; }
   /* Long-tail secondary actions (U6) — the action bar sits at the top of
-     the console so accept-sibling / set-intent / re-search stay reachable
-     without scrolling past the evidence panels. */
+     the console so Set imported / accept-sibling / set-intent / Delete stay
+     reachable without scrolling past the evidence panels. */
   .lt-actions { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 8px 10px; background: #161616; border-radius: 6px; }
   .lt-act-group { display: flex; flex-direction: column; gap: 4px; }
   .lt-act-btn { padding: 5px 12px; background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 0.82em; }
   .lt-act-btn:hover:not(:disabled) { background: #333; border-color: #56b; }
   .lt-act-btn:disabled { opacity: 0.5; cursor: default; }
+  /* Set imported — positive/accept affordance. */
+  .lt-act-import { background: #2a3a2a; color: #9c9; border-color: #3a4a3a; }
+  .lt-act-import:hover:not(:disabled) { background: #344a34; color: #beb; border-color: #5a8; }
+  /* Delete request — danger affordance. */
+  .lt-act-delete { background: #3a2424; color: #d99; border-color: #5a3a3a; }
+  .lt-act-delete:hover:not(:disabled) { background: #4a2c2c; color: #fbb; border-color: #a55; }
   .lt-act-note { color: #888; font-size: 0.78em; max-width: 260px; }
   .lt-act-intent { display: flex; gap: 6px; align-items: center; }
   .lt-act-label { color: #888; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -182,7 +190,6 @@
   .lt-intent-lossless { background: #2a3a3a; color: #9cc; }
   .lt-intent-default { background: #2a2a2a; color: #aaa; }
   .lt-act-intent-toggle { font-size: 0.78em; padding: 3px 8px; }
-  .lt-act-research-note { color: #d88; font-size: 0.78em; max-width: 320px; margin-top: 2px; }
   /* Search-plan inspector — per-row magnifier button, in-place summary
      panel rendered as a sibling of the row (mirrors `.p-detail` shape but
      kept visually distinct so a row with both expanded is readable). */

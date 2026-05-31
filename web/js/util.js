@@ -172,6 +172,19 @@ export function sourceLabel(id) {
 }
 
 /**
+ * Build the YouTube Music album URL for a browse id (e.g. "MPREb_…") so the
+ * operator can open the resolved album in a new tab. Returns '' for an empty
+ * id so the caller can fall back to plain text.
+ * @param {string|null|undefined} browseId
+ * @returns {string}
+ */
+export function youtubeBrowseUrl(browseId) {
+  const value = browseId ? String(browseId).trim() : '';
+  if (!value) return '';
+  return `https://music.youtube.com/browse/${encodeURIComponent(value)}`;
+}
+
+/**
  * Map a `manual_reason` enum value to a short, human-friendly label for the
  * inline chip on the request-detail view. Returns the empty string for
  * NULL / unknown reasons so the caller can branch on truthiness.
