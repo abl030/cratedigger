@@ -119,6 +119,33 @@ class TestListLongTailBanding(unittest.TestCase):
         # Absent-from-membership → Missing (the other mechanism).
         self.assertEqual(by_id[2].band, BAND_MISSING)
 
+    def test_track_count_and_spectral_project_onto_row(self) -> None:
+        """The card meta (N tracks) + on-disk spectral strip read straight
+        off the cohort projection — ``track_count`` counts ``album_tracks``;
+        ``current_spectral_grade`` / ``current_spectral_bitrate`` mirror the
+        denormalised request columns. NULL spectral stays NULL ("if known").
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            current_spectral_grade="genuine", current_spectral_bitrate=952))
+        db.set_tracks(1, [
+            {"track_number": 1, "title": "A"},
+            {"track_number": 2, "title": "B"},
+            {"track_number": 3, "title": "C"},
+        ])
+        # A second wanted row with no tracks + unknown spectral.
+        db.seed_request(make_request_row(
+            id=2, status="wanted", mb_release_id="rel-2"))
+        rows = {r.id: r for r in list_long_tail(db, _fixed_band_fn({})).rows}
+        self.assertEqual(rows[1].track_count, 3)
+        self.assertEqual(rows[1].current_spectral_grade, "genuine")
+        self.assertEqual(rows[1].current_spectral_bitrate, 952)
+        # No tracks → 0; unknown spectral → None.
+        self.assertEqual(rows[2].track_count, 0)
+        self.assertIsNone(rows[2].current_spectral_grade)
+        self.assertIsNone(rows[2].current_spectral_bitrate)
+
     def test_discogs_sourced_row_bands_via_dual_key_lookup(self) -> None:
         """A Discogs-sourced wanted request bands correctly — the
         mb_release_id carries the Discogs numeric, banded the same way
@@ -254,6 +281,14 @@ class TestLongTailCohortRoundTrip(unittest.TestCase):
             artist_name="Vanishing Artist", album_title="Lost Pressing",
             source="request", mb_release_id=rel_uuid, year=1972,
             status="wanted")
+        # Tracks (counted into track_count) + denormalised on-disk spectral.
+        self.db.set_tracks(rid_plain, [
+            {"track_number": 1, "title": "I"},
+            {"track_number": 2, "title": "II"},
+        ])
+        self.db.update_request_fields(
+            rid_plain, current_spectral_grade="genuine",
+            current_spectral_bitrate=941)
         rid_rescue = self.db.add_request(
             artist_name="Rescue Artist", album_title="Found On YouTube",
             source="request", mb_release_id=str(uuid.uuid4()),
@@ -286,6 +321,13 @@ class TestLongTailCohortRoundTrip(unittest.TestCase):
         self.assertIn("min_bitrate", plain)
         self.assertIn("search_filetype_override", plain)
         self.assertIn("unfindable_category", plain)
+        # track_count counts album_tracks; spectral mirrors the request cols.
+        self.assertEqual(plain["track_count"], 2)
+        self.assertEqual(plain["current_spectral_grade"], "genuine")
+        self.assertEqual(plain["current_spectral_bitrate"], 941)
+        # The no-tracks rescue row counts 0, not NULL.
+        self.assertEqual(by_id[rid_rescue]["track_count"], 0)
+        self.assertIsNone(by_id[rid_rescue]["current_spectral_grade"])
         # in_flight_rescue stamped correctly by the EXISTS predicate.
         self.assertFalse(plain["in_flight_rescue"])
         self.assertTrue(by_id[rid_rescue]["in_flight_rescue"])

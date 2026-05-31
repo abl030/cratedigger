@@ -63,6 +63,14 @@ class LongTailRow(msgspec.Struct, frozen=True):
     columns are the operator-facing subset the console header renders
     (``min_bitrate``, ``target_format``, ``search_filetype_override``)
     plus the identity columns used by tab / search filtering client-side.
+
+    ``track_count`` is the ``album_tracks`` row count for the request
+    (the pressing's expected track count — the card meta renders it
+    alongside year + MB/Discogs as the pressing-disambiguation triple).
+    ``current_spectral_grade`` / ``current_spectral_bitrate`` are the
+    denormalised on-disk spectral measurement, NULL when unknown
+    (pre-2026-05-17 imports or lossy-source transcodes) — the expanded
+    view surfaces them only when present ("if known").
     """
 
     id: int
@@ -77,6 +85,9 @@ class LongTailRow(msgspec.Struct, frozen=True):
     min_bitrate: Optional[int]
     search_filetype_override: Optional[str]
     unfindable_category: Optional[str]
+    track_count: int
+    current_spectral_grade: Optional[str]
+    current_spectral_bitrate: Optional[int]
     band: str
     in_flight_rescue: bool
 
@@ -197,6 +208,10 @@ def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
         min_bitrate=_int_or_none(row.get("min_bitrate")),
         search_filetype_override=row.get("search_filetype_override"),
         unfindable_category=row.get("unfindable_category"),
+        track_count=_int_or_none(row.get("track_count")) or 0,
+        current_spectral_grade=row.get("current_spectral_grade"),
+        current_spectral_bitrate=_int_or_none(
+            row.get("current_spectral_bitrate")),
         band=band,
         in_flight_rescue=bool(row.get("in_flight_rescue")),
     )

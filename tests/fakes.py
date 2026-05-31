@@ -3538,8 +3538,11 @@ class FakePipelineDB:
             "id", "artist_name", "album_title", "year", "status", "source",
             "mb_release_id", "discogs_release_id", "target_format",
             "min_bitrate", "search_filetype_override", "unfindable_category",
+            "current_spectral_grade", "current_spectral_bitrate",
         )
         out: dict[str, Any] = {k: row.get(k) for k in keys}
+        # track_count mirrors the production COUNT(*) over album_tracks.
+        out["track_count"] = len(self._tracks.get(int(row["id"]), []))
         out["in_flight_rescue"] = self._has_youtube_running(int(row["id"]))
         return out
 
