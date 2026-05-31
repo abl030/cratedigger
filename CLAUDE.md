@@ -83,6 +83,23 @@ ssh doc2 'sudo cat /var/lib/cratedigger/config.ini'
 
 **IMPORTANT for Claude Code**: `systemctl start cratedigger` blocks until the oneshot finishes (minutes). **Always use `--no-block`** when starting via SSH from a Bash tool call. Never use `&` inside SSH quotes to background systemctl — SSH keeps the connection open waiting for all child processes regardless.
 
+#### Querying the pipeline DB (do this, in this order)
+
+1. **Run the query ON doc2.** doc1/Framework cannot reach the nspawn DB (`192.168.100.11:5432` times out). Only doc2 (where the nspawn container lives) connects reliably. `pipeline-cli` lives on doc2's PATH.
+2. **Pull the live schema first — never guess column names.** Query `information_schema.columns` for the table(s) you're about to touch, then write your real query against what's actually there. Column names are often not what you'd guess, and they drift across releases. The schema is deliberately NOT transcribed into this file — it would go stale. Pull it every time.
+3. **Then write whatever query you need.**
+
+Gotchas that cost a lot of time once:
+- The pgpass secret is **env-format** (`PGPASSWORD=...`), not colon-pgpass — extract with `grep '^PGPASSWORD=' | cut -d= -f2`, not `cut -d:`.
+- **Pass SQL via stdin heredoc, not as an argv string.** `$$`-dollar-quoting does NOT survive bash — it expands `$$` to the shell PID and corrupts the query. Heredoc lets you use normal `'…'` SQL literals.
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'album_requests' ORDER BY ordinal_position;
+SQL
+```
+
 ### Web dev server
 
 `scripts/web_dev_server.py` runs local route code against a real read-only PostgreSQL (`--data live-db`) or proxies `/api/*` to a remote backend while serving local frontend files (`--data prod-api`). Wrong Matches needs `live-db` on a host that can see the rejected folders on disk (`doc1`/`doc2` qualify; Framework/Windows don't). Canonical remote-dev flow (PG tunnel + double SSH forward + Range-header passthrough for audio scrubbing) in `docs/web-dev-server.md`.
