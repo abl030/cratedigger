@@ -605,6 +605,49 @@ def _is_m4a_alac(fpath: str) -> bool:
     return _ffprobe_audio_codec_name(fpath) == "alac"
 
 
+def _detect_native_codec_family(folder: str) -> str:
+    """Rank-model format label for a native (non-converted) lossy download.
+
+    Probes the actual audio files with ffprobe and maps the real codec to the
+    rank model's family label ("opus" / "aac" / "MP3") via
+    ``native_codec_format_label``. Falls back to "MP3" (the historical
+    assumption) when nothing is probeable, so the rank model never sees a None
+    native label.
+
+    This is the fix for the Opus-recorded-as-MP3 bug (request 4679): the
+    native lossy path hardcoded ``native_codec_family="MP3"`` for every codec,
+    so a genuine Opus 124 was scored on the MP3-VBR band table (acceptable
+    floor 130) and rejected as a downgrade against an MP3 128. Probing the
+    real codec lets Opus/AAC classify against their own bands.
+
+    Fallback caveat: a codec with no lossy rank band (e.g. Vorbis/OGG) maps to
+    None and the walk falls through to "MP3", which scores it on the MP3 bands
+    — the same mislabel class as the original bug, for an as-yet-unbanded
+    codec. To add a band later, update ``_NATIVE_CODEC_LABELS`` /
+    ``_NATIVE_EXT_LABELS`` in ``lib.quality`` AND ``QualityRankConfig``
+    together. When the fallback fires on a folder that DID contain audio (a
+    probe failure or an unmapped codec, as opposed to an empty folder), a
+    warning is logged so the mislabel is visible in the audit trail.
+    """
+    probed_any_audio = False
+    for root, _dirs, filenames in os.walk(folder):
+        for fname in sorted(filenames):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in AUDIO_EXTENSIONS:
+                continue
+            probed_any_audio = True
+            fpath = os.path.join(root, fname)
+            label = native_codec_format_label(
+                _ffprobe_audio_codec_name(fpath), ext)
+            if label is not None:
+                return label
+    if probed_any_audio:
+        _log(f"[WARN] native codec probe returned no rank-model label for "
+             f"audio in {folder}; falling back to MP3-band scoring (a probe "
+             f"failure or an unbanded codec such as Vorbis)")
+    return "MP3"
+
+
 def _is_lossless_file(fname: str, folder: str = "") -> bool:
     """Check if a file is lossless. For .m4a, probes the codec with ffprobe."""
     ext = os.path.splitext(fname)[1].lower()
@@ -1766,12 +1809,17 @@ def main():
     new_conv_target = conversion_target(
         args.target_format, will_be_verified_lossless,
         args.verified_lossless_target)
+    # Probe the real native codec once and reuse at both comparison_format_hint
+    # call sites. ``comparison_format_hint`` only consumes this on the native
+    # (converted==0) branch; on converted paths it's ignored, so one probe is
+    # enough for the whole function.
+    native_codec_family = _detect_native_codec_family(work_path)
     new_format_label = comparison_format_hint(
         target_format=args.target_format,
         verified_lossless_target=new_conv_target,
         converted_count=converted,
         is_transcode=quality_is_transcode,
-        native_codec_family="MP3",
+        native_codec_family=native_codec_family,
     )
 
     # --- Build measurements ---
@@ -1823,7 +1871,7 @@ def main():
                     verified_lossless_target=new_conv_target,
                     converted_count=converted,
                     is_transcode=is_transcode,
-                    native_codec_family="MP3",
+                    native_codec_family=native_codec_family,
                 )
                 new_m = AudioQualityMeasurement(
                     min_bitrate_kbps=new_min_br,

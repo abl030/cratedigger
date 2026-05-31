@@ -1572,6 +1572,55 @@ def comparison_format_hint(
     return native_codec_family
 
 
+# Probed-codec / extension → native-lossy rank-model format label. Only codecs
+# with a lossy rank band table are mapped; everything else returns None so the
+# caller applies its conservative legacy "MP3" fallback rather than this
+# function inventing a band.
+_NATIVE_CODEC_LABELS: dict[str, str] = {
+    "opus": "opus",
+    "aac": "aac",
+    "mp3": "MP3",
+    "mp3float": "MP3",
+}
+_NATIVE_EXT_LABELS: dict[str, str] = {
+    "opus": "opus",
+    "aac": "aac",
+    "m4a": "aac",
+    "mp3": "MP3",
+}
+
+
+def native_codec_format_label(
+    codec: Optional[str], ext: Optional[str] = None
+) -> Optional[str]:
+    """Map a probed codec name (or file-extension fallback) to the native-lossy
+    ``AudioQualityMeasurement.format`` label the rank model keys on.
+
+    Returns a label ``_codec_family_of`` recognises ("opus" / "aac" / "MP3"),
+    or None for codecs with no lossy rank band (vorbis, unknown) so the caller
+    can fall back conservatively. The probed codec name wins over the
+    extension — an Opus stream in an ``.ogg`` container is "opus", not vorbis.
+
+    This is the fix for the Opus-recorded-as-MP3 bug: native lossy downloads
+    used to be hardcoded to "MP3", so a genuine Opus 124 was scored on the
+    MP3-VBR band table and rejected as a downgrade against an MP3 128.
+    """
+    def _norm(value: Optional[str]) -> Optional[str]:
+        return (value or "").strip().lower().lstrip(".") or None
+
+    codec_norm = _norm(codec)
+    if codec_norm is not None:
+        # A probed codec name is authoritative — if it has no lossy band we
+        # return None rather than guessing from the (possibly generic)
+        # container extension.
+        return _NATIVE_CODEC_LABELS.get(codec_norm)
+
+    ext_norm = _norm(ext)
+    if ext_norm is not None:
+        return _NATIVE_EXT_LABELS.get(ext_norm)
+    return None
+
+
 def _shared_spectral_bitrates(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
