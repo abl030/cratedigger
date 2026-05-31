@@ -15,8 +15,3 @@
 - Backup before any destructive migration: `ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
 - After deploy, verify the migration ran: `ssh doc2 'pipeline-cli query "SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5"'`
 - If a migration fails, check `ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service'` for the error.
-
-## Post-Deploy Reflection
-- After deploying non-trivial changes, spawn an Opus agent to assess: did we make the code better? Did we finish what we intended? Are there loose ends or untested paths?
-- The agent should read the git log, the diff, and the relevant tests, then report findings to the user.
-- This is the final quality gate — it catches "built but not wired" and "tested but not deployed" problems.
