@@ -285,6 +285,57 @@ class TestLiveBugReproductions(unittest.TestCase):
         # When fixed, system should detect same-quality loop and accept
         self.assertTrue(r2["keep_searching"])
 
+    def test_darcie_haven_native_opus_beats_mp3_transcode(self):
+        """Darcie Haven - Angel of the Apocalypse / request 4679, 2026-05-31.
+
+        A genuine native Opus ~124 kbps download (min 124, avg 129) was
+        rejected as a downgrade against an existing MP3 CBR 128
+        (likely_transcode). Root cause: the harness stamped EVERY native
+        lossy download's measurement format as a hardcoded "MP3", so the
+        Opus was scored on the MP3-VBR band table (acceptable floor 130) and
+        129 landed POOR, losing to MP3-CBR-128 (ACCEPTABLE). With the real
+        "opus" label it classifies TRANSPARENT (opus transparent threshold
+        112) and wins. See the codec-label fix in tests/test_native_codec_label.py.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=124,
+            avg_bitrate=129,
+            is_cbr=False,
+            new_format="opus",
+            spectral_grade="genuine",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            existing_format="MP3",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+        )
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+
+    def test_darcie_haven_opus_mislabelled_mp3_loses(self):
+        """The bug itself: the SAME audio mislabelled "MP3" is (correctly,
+        given that wrong label) a downgrade. This pins that the codec LABEL
+        is the pivot — guards against a future regression that re-hardcodes
+        the native format to MP3."""
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=124,
+            avg_bitrate=129,
+            is_cbr=False,
+            new_format="MP3",
+            spectral_grade="genuine",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            existing_format="MP3",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=128,
+        )
+        self.assertNotEqual(r["stage2_import"], "import")
+        self.assertFalse(r["imported"])
+
 
 class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
     """Every TestLiveBugReproductions scenario must produce the same outcome
@@ -308,11 +359,14 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         is_flac: bool,
         min_bitrate: int,
         is_cbr: bool,
+        avg_bitrate: int | None = None,
         spectral_grade: str | None = None,
         spectral_bitrate: int | None = None,
         post_conversion_min_bitrate: int | None = None,
         candidate_v0_probe_avg: int | None = None,
         candidate_v0_probe_min: int | None = None,
+        native_codec: str = "mp3",
+        native_format: str = "MP3",
         mb_release_id: str = "mbid-parity-candidate",
         audio_corrupt: bool = False,
         folder_layout: str = "flat",
@@ -362,13 +416,17 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
                 spectral_bitrate_kbps=spectral_bitrate,
             )
         else:
-            container = codec = "mp3"
-            storage_format = "mp3 v0" if not is_cbr else "mp3 320"
+            container = codec = native_codec
+            if native_codec == "mp3":
+                storage_format = "mp3 v0" if not is_cbr else "mp3 320"
+            else:
+                storage_format = native_format.lower()
+            _avg = avg_bitrate if avg_bitrate is not None else min_bitrate
             measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
-                avg_bitrate_kbps=min_bitrate,
-                median_bitrate_kbps=min_bitrate,
-                format="MP3",
+                avg_bitrate_kbps=_avg,
+                median_bitrate_kbps=_avg,
+                format=native_format,
                 is_cbr=is_cbr,
                 spectral_grade=spectral_grade,
                 spectral_bitrate_kbps=spectral_bitrate,
@@ -675,6 +733,78 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         verdict, cleanup_eligible, _reason = classify_full_pipeline_decision(r)
         self.assertEqual(verdict, "confident_reject")
         self.assertTrue(cleanup_eligible)
+
+    def test_darcie_haven_native_opus_beats_mp3_via_evidence(self):
+        """Request 4679 shape through the production decider: a native Opus
+        124/129 (genuine) candidate must beat an existing MP3 CBR 128
+        (likely_transcode). Parity twin of
+        test_darcie_haven_native_opus_beats_mp3_transcode."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False,
+            min_bitrate=124,
+            avg_bitrate=129,
+            is_cbr=False,
+            spectral_grade="genuine",
+            native_codec="opus",
+            native_format="opus",
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128,
+            format="MP3", is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertEqual(r["stage2_import"], "import",
+                         "evidence pipeline must reach the same decision as "
+                         "the simulator — native Opus TRANSPARENT beats MP3 "
+                         "CBR 128 ACCEPTABLE")
+        self.assertTrue(r["imported"])
+
+    def test_darcie_haven_opus_mislabelled_mp3_loses_via_evidence(self):
+        """Parity twin of test_darcie_haven_opus_mislabelled_mp3_loses: the
+        SAME audio carried through the production decider with the buggy "MP3"
+        label is (correctly, given that wrong label) a downgrade. Pins that the
+        codec LABEL on the candidate measurement is the pivot at the evidence
+        boundary too — a regression that re-hardcodes the native format to MP3
+        in _new_format_hint_from_evidence would flip this back to a wrong
+        rejection and be caught here."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False,
+            min_bitrate=124,
+            avg_bitrate=129,
+            is_cbr=False,
+            spectral_grade="genuine",
+            native_codec="mp3",
+            native_format="MP3",
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128,
+            format="MP3", is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(import_mode="auto"),
+        )
+
+        self.assertNotEqual(r["stage2_import"], "import")
+        self.assertFalse(r["imported"])
 
 
 class TestPreimportFactRejects(unittest.TestCase):
