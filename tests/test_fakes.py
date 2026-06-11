@@ -3844,7 +3844,7 @@ def _public_methods(cls: type) -> set[str]:
 class TestPipelineDBFakeContract(unittest.TestCase):
     """Enforce FakePipelineDB stays in lockstep with PipelineDB.
 
-    Models ``TestRouteContractAudit`` (tests/test_web_server.py): the
+    Models ``TestRouteContractAudit`` (tests/web/test_route_audit.py): the
     convention in ``.claude/rules/code-quality.md`` — "every new
     PipelineDB method must have a matching stub on FakePipelineDB with
     a self-test in tests/test_fakes.py" — is enforced at test time, not

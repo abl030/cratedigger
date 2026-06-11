@@ -33,7 +33,7 @@ echo ""
 
 # Python tests
 echo "=== Python tests ==="
-python3 -m unittest discover tests -v 2>&1 | tee "$OUT"
+python3 -m unittest discover -s tests -t . -v 2>&1 | tee "$OUT"
 
 echo ""
 echo "=== SUMMARY ==="

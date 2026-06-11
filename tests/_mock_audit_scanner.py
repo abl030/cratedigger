@@ -277,14 +277,14 @@ _LEAF_SEAM_PATTERNS = [
     # real DB mutations + filesystem deletes via the wrong-match cleanup
     # service. Service behaviour is tested in
     # ``tests/test_wrong_matches_cleanup.py``; the contract tests in
-    # ``test_web_server.py`` pin the HTTP wire shape (status code,
+    # ``tests/web/test_routes_imports.py`` pin the HTTP wire shape (status code,
     # JSON fields, response summary). Patching the route-module binding
     # keeps those contract tests focused on the wire shape.
     re.compile(r"^web\.routes\.imports\.cleanup_all_wrong_matches$"),
 
     # Web-server module-level swap, same pattern as ``web.server.db``.
     # ``compute_library_rank`` is the in-library rank-badge producer
-    # (codec-aware tier label). Tests in ``test_web_server.py`` patch
+    # (codec-aware tier label). Tests in ``tests/web/`` patch
     # it via ``side_effect`` to stamp deterministic rank labels into
     # browse / label / artist responses without setting up a real
     # rank-config + beets album fixture for every contract test.
@@ -458,18 +458,35 @@ def scan_file(path: str) -> Dict[str, int]:
     return dict(counts)
 
 
+def iter_scan_paths():
+    """Yield ``(relpath, abspath)`` for every file the audit scans.
+
+    Recursive walk since #408 so subpackages (``tests/web/``) stay under
+    audit. Exclusions are keyed by relpath, not basename — a future
+    ``tests/web/test_mock_audit.py`` must NOT inherit the self-test's
+    exemption. ``web/_harness.py`` is scanned despite the underscore
+    prefix: the shared HTTP harness was audited for its whole life inside
+    ``test_web_server.py``, and the split must not relax that.
+    """
+    for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for fname in sorted(filenames):
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fname)
+            rel = os.path.relpath(path, TESTS_DIR)
+            if rel == "test_mock_audit.py":
+                continue  # mentions the patterns in its strings
+            if fname.startswith("_") and rel != os.path.join("web", "_harness.py"):
+                continue  # this scanner module itself, helpers, etc.
+            yield rel, path
+
+
 def scan_tree() -> Dict[str, Dict[str, int]]:
     """Return ``{relpath: {finding_key: count}}`` for every test file."""
     result: Dict[str, Dict[str, int]] = {}
-    for fname in sorted(os.listdir(TESTS_DIR)):
-        if not fname.endswith(".py"):
-            continue
-        if fname.startswith("_"):
-            continue  # this scanner module itself, helpers, etc.
-        if fname == "test_mock_audit.py":
-            continue  # mentions the patterns in its strings
-        path = os.path.join(TESTS_DIR, fname)
+    for rel, path in iter_scan_paths():
         counts = scan_file(path)
         if counts:
-            result[fname] = counts
+            result[rel] = counts
     return result

@@ -4,7 +4,7 @@ Both the CLI (``pipeline-cli search-plan show``) and the web API
 (``GET /api/pipeline/<id>/search-plan``) call into this module so the
 operator-facing surfaces stay in lock-step. The payload shape is the
 API contract: add a key here, update the contract test in
-``tests/test_web_server.py``.
+``tests/web/test_routes_pipeline_search_plan.py``.
 """
 
 from __future__ import annotations

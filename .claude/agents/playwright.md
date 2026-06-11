@@ -67,7 +67,7 @@ This is the current focus. The Discogs source came from a CC0 mirror at `discogs
 
 - MusicBrainz mirror: `http://192.168.1.35:5200/ws/2/release?query=...&fmt=json` (LAN-only).
 - Discogs mirror: `https://discogs.ablz.au/api/search?artist=X&title=Y`, `/api/releases/{id}`, `/api/masters/{id}`, `/api/artists/{id}`, `/api/artists/{id}/releases`.
-- Pipeline API surface (same host as web UI): see `web/routes/*.py` and `tests/test_web_server.py` for the authoritative list; every route has a contract test.
+- Pipeline API surface (same host as web UI): see `web/routes/*.py` and `tests/web/` for the authoritative list; every route has a contract test.
 
 Prefer `curl` / `WebFetch` when you only need JSON. Drive Playwright when the *UI* is what's being tested — tab switching, rendering, source-aware link generation, form submission, loading-state handling.
 
