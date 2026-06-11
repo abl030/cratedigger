@@ -181,7 +181,8 @@ def cleanup_wrong_match(
     """Evaluate and possibly delete one Wrong Matches source row.
 
     ``preview_fn`` is the DI seam for the stale-evidence refresh (issue
-    #271); production resolves it to ``preview_import_from_path``.
+    #271); production resolves it to
+    ``measure_and_persist_candidate_evidence``.
     """
     try:
         result = _cleanup_wrong_match(
@@ -605,23 +606,23 @@ def _refresh_stale_candidate_evidence(
     a file that was still 0 bytes at measurement time completes later, or
     the failed_imports move truncates a file after measurement. Either way
     the snapshot no longer describes the disk, so cleanup could neither
-    classify nor surface the row. Delegating to the worker-mode preview
-    path (the one existing measure-and-persist surface) rebuilds evidence
-    from current disk truth; the reload then goes through the same
-    freshness check as any other candidate. One attempt only — a source
-    that is still churning stays a stale skip until the next sweep.
+    classify nor surface the row. Delegating to
+    ``measure_and_persist_candidate_evidence`` (the one existing
+    measure-and-persist surface) rebuilds evidence from current disk
+    truth; the reload then goes through the same freshness check as any
+    other candidate. One attempt only — a source that is still churning
+    stays a stale skip until the next sweep.
     """
     if preview_fn is None:
-        from lib.import_preview import preview_import_from_path
+        from lib.import_preview import measure_and_persist_candidate_evidence
 
-        preview_fn = preview_import_from_path
+        preview_fn = measure_and_persist_candidate_evidence
     try:
         preview = preview_fn(
             db,
             request_id=request_id,
             path=source_path,
             download_log_id=download_log_id,
-            worker_mode=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception(

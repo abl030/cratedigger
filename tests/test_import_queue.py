@@ -1485,7 +1485,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 return preview_result
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(
@@ -1498,11 +1498,8 @@ class TestImportPreviewWorker(unittest.TestCase):
             request_id=42,
             path=source,
             force=True,
-            source_username="alice",
             download_log_id=7,
             import_job_id=claimed.id,
-            persist_candidate_evidence=True,
-            worker_mode=True,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -1538,7 +1535,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 return preview_result
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(
@@ -1551,11 +1548,8 @@ class TestImportPreviewWorker(unittest.TestCase):
             request_id=42,
             path=source,
             force=False,
-            source_username=None,
             download_log_id=None,
             import_job_id=claimed.id,
-            persist_candidate_evidence=True,
-            worker_mode=True,
         )
         assert updated is not None
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -1602,7 +1596,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 return preview_result
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(db, claimed)
@@ -1612,11 +1606,8 @@ class TestImportPreviewWorker(unittest.TestCase):
                 request_id=42,
                 path=staged,
                 force=False,
-                source_username="alice",
                 download_log_id=None,
                 import_job_id=claimed.id,
-                persist_candidate_evidence=True,
-                worker_mode=True,
             )
             assert updated is not None
             self.assertEqual(updated.preview_status, "evidence_ready")
@@ -1654,7 +1645,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             self._seed_job_candidate_evidence(db, claimed.id, staged)
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 return_value=self._preview(
                     "confident_reject",
                     reason="spectral_reject",
@@ -1731,7 +1722,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 patch("scripts.import_preview_worker.PipelineDB",
                       side_effect=lambda dsn: db),
                 patch(
-                    "scripts.import_preview_worker.preview_import_from_path",
+                    "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                     side_effect=preview,
                 ),
             ):
@@ -1825,7 +1816,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
+            "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             return_value=self._preview("confident_reject", reason="spectral_reject"),
         ):
             updated = import_preview_worker.process_claimed_preview_job(db, claimed)
@@ -1859,7 +1850,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
+            "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             return_value=self._preview("uncertain", reason="path_missing"),
         ):
             updated = import_preview_worker.process_claimed_preview_job(db, claimed)
@@ -2096,7 +2087,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
@@ -2141,7 +2132,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             self._seed_evidence_for_job(db, claimed.id, source)
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport:
@@ -2198,7 +2189,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             self._seed_evidence_for_job(db, claimed.id, staged)
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
@@ -2267,7 +2258,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 return preview_result
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(
@@ -2344,7 +2335,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 return preview_result
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ) as preview:
                 updated = import_preview_worker.process_claimed_preview_job(
@@ -3254,8 +3245,8 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
 
         self.assertEqual(result["path"], "/Incoming/auto-import/Artist - Album")
         self.assertEqual(result["request_id"], 42)
-        # YT has no slskd peer ⇒ no source_username.
-        self.assertIsNone(result["source_username"])
+        # The measurement core has no peer notion — no source_username key.
+        self.assertNotIn("source_username", result)
         self.assertFalse(result["force"])
 
     def test_preview_input_raises_on_malformed_youtube_payload(self):

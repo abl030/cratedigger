@@ -1672,7 +1672,6 @@ def cmd_import_preview(db, args):
                 request_id=args.request_id,
                 path=args.path,
                 force=not args.no_force,
-                source_username=args.source_username,
             )
         else:
             result = preview_import_from_values(
@@ -3426,8 +3425,6 @@ def _build_parser() -> tuple[
     p_preview.add_argument("--request-id", type=int,
                            help="Request ID for --path preview")
     p_preview.add_argument("--path", help="Preview a real folder for a request")
-    p_preview.add_argument("--source-username",
-                           help="Source username for preview audit context")
     p_preview.add_argument("--no-force", action="store_true",
                            help="Do not pass --force to import_one.py preview")
     p_preview.add_argument("--values", action="store_true",

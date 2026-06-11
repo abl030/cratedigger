@@ -128,9 +128,9 @@ def _store_evidence(
 class _RefreshStub:
     """Stub for the ``preview_fn`` DI seam (issue #271 stale-evidence refresh).
 
-    Mirrors the worker-mode ``preview_import_from_path`` contract: on success
-    it persists candidate evidence and re-points the download_log FK, and it
-    returns a real ``ImportPreviewResult`` either way.
+    Mirrors the ``measure_and_persist_candidate_evidence`` contract: on
+    success it persists candidate evidence and re-points the download_log
+    FK, and it returns a real ``ImportPreviewResult`` either way.
     """
 
     def __init__(
@@ -145,12 +145,11 @@ class _RefreshStub:
         self.reason = reason
         self.calls: list[dict[str, object]] = []
 
-    def __call__(self, db, *, request_id, path, download_log_id, worker_mode):
+    def __call__(self, db, *, request_id, path, download_log_id):
         self.calls.append({
             "request_id": request_id,
             "path": path,
             "download_log_id": download_log_id,
-            "worker_mode": worker_mode,
         })
         if self.persist_evidence is not None:
             db.set_download_log_candidate_evidence(
@@ -319,7 +318,6 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(call["request_id"], 1)
         self.assertEqual(call["path"], source)
         self.assertEqual(call["download_log_id"], log_id)
-        self.assertTrue(call["worker_mode"])
 
     def test_stale_refresh_failure_keeps_stale_skip(self) -> None:
         source, log_id = self._make_stale_row("refresh-fail-source")
