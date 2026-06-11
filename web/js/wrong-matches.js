@@ -1495,6 +1495,10 @@ export async function bulkTriageWrongMatches(btn) {
 
   btn.disabled = true;
   btn.textContent = 'Cleaning...';
+  const restore = () => {
+    btn.disabled = false;
+    btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
+  };
   try {
     const r = await fetch(`${API}/api/wrong-matches/triage`, {
       method: 'POST',
@@ -1502,18 +1506,57 @@ export async function bulkTriageWrongMatches(btn) {
       body: JSON.stringify({confirm_all_wrong_matches: true}),
     });
     const data = await r.json();
-    if (r.ok && data.status === 'ok') {
-      toast(cleanupSummaryToast(data));
+    // 202 = sweep started; 409 = one is already running. Either way a
+    // sweep is in flight server-side, so poll for its result.
+    if (r.status !== 202 && r.status !== 409) {
+      restore();
+      toast(data.error || data.message || 'Cleanup failed', true);
+      return;
+    }
+    const status = await pollTriageStatus();
+    if (status && status.state === 'completed') {
+      restore();
+      toast(cleanupSummaryToast(status.summary || {}));
       invalidateWrongMatches();
       await _refreshWrongMatches();
-    } else {
-      btn.disabled = false;
-      btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
-      toast(data.message || 'Cleanup failed', true);
+      return;
     }
+    if (status && status.state === 'idle') {
+      // The web service restarted mid-sweep and lost the in-memory status.
+      // Deletions already performed are durable — refresh to show them.
+      restore();
+      toast('Sweep status lost (web service restarted) — queue may be partially cleaned', true);
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+      return;
+    }
+    restore();
+    toast((status && status.error) || 'Cleanup sweep failed', true);
   } catch (_e) {
-    btn.disabled = false;
-    btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
+    restore();
     toast('Cleanup request failed', true);
   }
+}
+
+/**
+ * Poll the background sweep until it leaves the running state.
+ * @returns {Promise<{state: string, summary: Object|null, error: string|null}|null>}
+ */
+async function pollTriageStatus() {
+  // The sweep legitimately takes minutes when stale rows re-measure or
+  // the queue is large; poll gently and give up only after an hour.
+  const intervalMs = 3000;
+  const maxPolls = 1200;
+  for (let i = 0; i < maxPolls; i++) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    try {
+      const r = await fetch(`${API}/api/wrong-matches/triage/status`);
+      if (!r.ok) continue;
+      const status = await r.json();
+      if (status.state !== 'running') return status;
+    } catch (_e) {
+      // Transient fetch failure — keep polling.
+    }
+  }
+  return null;
 }

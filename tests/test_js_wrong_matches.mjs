@@ -428,33 +428,51 @@ console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshe
   assert(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup button');
   const calls = [];
   globalThis.confirm = () => true;
+  // The sweep runs server-side on a background thread; the client polls.
+  // Collapse the poll delay so the test doesn't sleep for real.
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/triage') {
       return {
         ok: true,
+        status: 202,
+        json: async () => ({ status: 'started', state: 'running' }),
+      };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      return {
+        ok: true,
+        status: 200,
         json: async () => ({
-          status: 'ok',
-          processed: 3,
-          deleted: 2,
-          kept_would_import: 1,
-          kept_uncertain: 0,
-          skipped_candidate_evidence_missing: 0,
-          skipped_candidate_evidence_stale: 0,
-          skipped_current_evidence_missing: 0,
-          skipped_current_evidence_stale: 0,
-          skipped_active_job: 0,
-          skipped_invalid_row: 0,
-          skipped_missing_path: 0,
-          skipped_operational: 0,
-          delete_failed: 0,
-          results: [],
+          state: 'completed',
+          started_at: '2026-06-11T00:00:00+00:00',
+          finished_at: '2026-06-11T00:01:00+00:00',
+          error: null,
+          summary: {
+            processed: 3,
+            deleted: 2,
+            kept_would_import: 1,
+            kept_uncertain: 0,
+            skipped_candidate_evidence_missing: 0,
+            skipped_candidate_evidence_stale: 0,
+            skipped_current_evidence_missing: 0,
+            skipped_current_evidence_stale: 0,
+            skipped_active_job: 0,
+            skipped_invalid_row: 0,
+            skipped_missing_path: 0,
+            skipped_operational: 0,
+            delete_failed: 0,
+            results: [],
+          },
         }),
       };
     }
     if (url === '/api/wrong-matches') {
       return {
         ok: true,
+        status: 200,
         json: async () => ({ groups: [] }),
       };
     }
@@ -468,9 +486,102 @@ console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshe
     { confirm_all_wrong_matches: true },
     'posts explicit full-queue confirmation',
   );
+  assert(calls.some(call => call.url === '/api/wrong-matches/triage/status'),
+    'polls the background sweep status');
   assert(calls.some(call => call.url === '/api/wrong-matches'), 'refetches the full pane after cleanup');
   assert(dom.toast.textContent.includes('Deleted 2 candidates'), 'toasts cleanup result');
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'renders refreshed empty state');
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('bulkTriageWrongMatches() handles a restart-lost sweep as partial, not failed');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  globalThis.confirm = () => true;
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  globalThis.fetch = async (url, _options = {}) => {
+    if (url === '/api/wrong-matches/triage') {
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({ status: 'started', state: 'running' }),
+      };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      // Web service restarted mid-sweep: fresh runner reports idle.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: 'idle',
+          started_at: null,
+          finished_at: null,
+          error: null,
+          summary: null,
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ groups: [] }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: true, textContent: 'Cleaning...', style: {} };
+  await __test__.bulkTriageWrongMatches(btn);
+  assertEqual(btn.disabled, false, 'restart-lost sweep restores button enabled');
+  assert(dom.toast.textContent.includes('status lost'), 'restart-lost sweep explains the lost status');
+  assert(!dom.toast.textContent.includes('failed'), 'restart-lost sweep is not reported as failed');
+  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'restart-lost sweep still refreshes the pane');
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('bulkTriageWrongMatches() surfaces a failed sweep and restores the button');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  globalThis.confirm = () => true;
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  globalThis.fetch = async (url, _options = {}) => {
+    if (url === '/api/wrong-matches/triage') {
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({ status: 'started', state: 'running' }),
+      };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: 'failed',
+          started_at: '2026-06-11T00:00:00+00:00',
+          finished_at: '2026-06-11T00:01:00+00:00',
+          error: 'RuntimeError: sweep blew up',
+          summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: true, textContent: 'Cleaning...', style: {} };
+  await __test__.bulkTriageWrongMatches(btn);
+  assertEqual(btn.disabled, false, 'failed sweep restores button enabled');
+  assertEqual(btn.textContent, 'Cleanup Wrong Matches (3)', 'failed sweep restores button text');
+  assert(dom.toast.textContent.includes('sweep blew up'), 'failed sweep toasts the error');
+  assertEqual(dom.toast.className, 'toast error', 'failed sweep shows error toast');
+  globalThis.setTimeout = realSetTimeout;
 }
 
 console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells');

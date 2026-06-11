@@ -43,6 +43,7 @@ from lib.import_preview import (
     preview_import_from_values,
 )
 from web.routes.pipeline import _serialize_import_job
+from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
     build_wrong_match_explorer,
     resolve_wrong_match_stream_file,
@@ -970,25 +971,43 @@ class WrongMatchTriageRequest(BaseModel):
         return self
 
 
+# Module singleton: at most one bulk sweep at a time, status shared
+# between the POST trigger and the GET status poller. In-memory only —
+# a web restart aborts the sweep, same as the old synchronous handler.
+_triage_runner = TriageRunner()
+
+
 def post_wrong_match_triage(h, body: dict) -> None:
+    """Start the bulk triage sweep on a background thread (202).
+
+    The sweep takes minutes when stale rows trigger re-measurement
+    (#271); running it inline wedged the single-threaded server for the
+    duration. The sweep thread opens its own DB connection via
+    ``_server()._new_db`` — psycopg2 handles are not thread-safe to
+    share with the request thread.
+    """
     req_body = parse_body(h, body, WrongMatchTriageRequest)
     if req_body is None:
         return
-    try:
-        summary = cleanup_all_wrong_matches(
-            _server()._db(),
-            confirm_all_wrong_matches=True,
-        )
-    except (ValueError, TypeError) as exc:
-        h._error(f"Invalid cleanup input: {exc}")
+    started = _triage_runner.start(
+        db_factory=_server()._new_db,
+        cleanup_fn=cleanup_all_wrong_matches,
+    )
+    if not started:
+        h._error("triage sweep already running", status=409)
         return
-    data = summary.to_dict()
-    data["status"] = "ok"
-    h._json(data)
+    h._json({"status": "started", "state": "running"}, status=202)
+
+
+def get_wrong_match_triage_status(h, params: dict) -> None:
+    h._json(_triage_runner.status())
+
+
 GET_ROUTES: dict[str, object] = {
     "/api/manual-import/scan": get_manual_import_scan,
     "/api/wrong-matches": get_wrong_matches,
     "/api/wrong-matches/audio": get_wrong_match_audio,
+    "/api/wrong-matches/triage/status": get_wrong_match_triage_status,
     "/api/wrong-matches/explorer": get_wrong_match_explorer,
 }
 POST_ROUTES: dict[str, object] = {
@@ -1013,6 +1032,10 @@ GET_DESCRIPTIONS: dict[str, str] = {
     ),
     "/api/wrong-matches/audio": (
         "Stream one wrong-match audio file with byte-range support."
+    ),
+    "/api/wrong-matches/triage/status": (
+        "Status of the background bulk-triage sweep — state plus the "
+        "cleanup summary once completed."
     ),
     "/api/wrong-matches/explorer": (
         "Filesystem-backed file/tag explorer payload for one wrong match."
@@ -1040,7 +1063,8 @@ POST_DESCRIPTIONS: dict[str, str] = {
         "rest for one request (one-click cleanup)."
     ),
     "/api/wrong-matches/triage": (
-        "Run the full Wrong Matches cleanup classifier across the queue "
-        "(DESTRUCTIVE); requires confirm_all_wrong_matches=true."
+        "Start the full Wrong Matches cleanup sweep on a background "
+        "thread (DESTRUCTIVE); requires confirm_all_wrong_matches=true. "
+        "Returns 202 immediately; poll /api/wrong-matches/triage/status."
     ),
 }

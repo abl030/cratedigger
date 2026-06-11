@@ -116,9 +116,12 @@ class _CoreMixin(_PipelineDBBase):
         same ``(namespace, key)`` pair across different DB sessions — e.g.
         two ``pipeline-cli force-import`` invocations racing on the same
         ``request_id`` (issue #92). Advisory locks are reentrant within a
-        single session, so this only protects against inter-session races;
-        the web server (single-threaded ``HTTPServer``) already serialises
-        within its own session.
+        single session, so this only protects against inter-session races.
+        The web server's request thread and its background bulk-triage
+        sweep thread (``web/triage_runner.py``) each hold their OWN
+        connection/session — cross-thread serialisation in that process
+        depends on never sharing a ``PipelineDB`` connection between
+        threads (``web/server.py::_new_db``).
 
         See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
         and call-site index.
