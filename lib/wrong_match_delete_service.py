@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, cast
+from contextlib import AbstractContextManager
+from typing import Any, Iterable, Protocol, cast, runtime_checkable
 
 import msgspec
 
+from lib.import_queue import ImportJob
 from lib.wrong_matches import (
     cleanup_wrong_match_source,
     unsafe_failed_import_path_reason,
@@ -20,6 +22,37 @@ from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
 )
+
+
+@runtime_checkable
+class WrongMatchDeleteDB(Protocol):
+    """The PipelineDB surface this service uses directly (#409).
+
+    Satisfied structurally by ``PipelineDB`` and ``FakePipelineDB``; parity
+    tests live in ``tests/test_wrong_matches_cleanup.py``. The handle is
+    also forwarded to ``cleanup_wrong_match_source`` (lib/wrong_matches.py),
+    which gets its own protocol in its own #409 increment.
+    """
+
+    def get_wrong_matches(self) -> list[dict[str, object]]: ...
+
+    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def list_active_import_jobs_for_wrong_match(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int | None,
+        failed_paths: Iterable[str],
+        source_dirs: Iterable[str],
+        ignore_import_job_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]: ...
+
 
 OUTCOME_DELETED = "deleted"
 OUTCOME_DELETE_FAILED = "delete_failed"
@@ -75,7 +108,7 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
 
 
 def delete_wrong_match(
-    db: Any,
+    db: WrongMatchDeleteDB,
     download_log_id: int,
     *,
     failed_path_hint: str | None = None,
@@ -103,7 +136,7 @@ def delete_wrong_match(
 
 
 def delete_wrong_match_group(
-    db: Any,
+    db: WrongMatchDeleteDB,
     request_id: int,
 ) -> WrongMatchDeleteSummary:
     results: list[WrongMatchDeleteResult] = []
@@ -162,7 +195,7 @@ def delete_wrong_match_group(
 
 
 def _delete_wrong_match(
-    db: Any,
+    db: WrongMatchDeleteDB,
     download_log_id: int,
     *,
     failed_path_hint: str | None,
@@ -391,14 +424,14 @@ def _group_outcome(
     return GROUP_OUTCOME_PARTIAL
 
 
-def _visible_wrong_match_row(db: Any, download_log_id: int) -> dict[str, Any] | None:
+def _visible_wrong_match_row(db: WrongMatchDeleteDB, download_log_id: int) -> dict[str, Any] | None:
     for row in db.get_wrong_matches():
         if row.get("download_log_id") == download_log_id:
             return row
     return None
 
 
-def _remaining_visible_count(db: Any, request_id: int) -> int:
+def _remaining_visible_count(db: WrongMatchDeleteDB, request_id: int) -> int:
     return sum(1 for row in db.get_wrong_matches() if row.get("request_id") == request_id)
 
 
@@ -434,28 +467,18 @@ def _resolve_first_existing(paths: Iterable[str]) -> str | None:
 
 
 def _active_jobs(
-    db: Any,
+    db: WrongMatchDeleteDB,
     *,
     download_log_id: int,
     request_id: int | None,
     failed_paths: Iterable[str],
     source_dirs: Iterable[str],
     ignore_import_job_id: int | None,
-) -> list[Any]:
-    finder: Any = getattr(db, "list_active_import_jobs_for_wrong_match", None)
-    if callable(finder):
-        result: Any = finder(
-            download_log_id=download_log_id,
-            request_id=request_id,
-            failed_paths=failed_paths,
-            source_dirs=source_dirs,
-            ignore_import_job_id=ignore_import_job_id,
-        )
-        return list(result)
-
-    jobs = getattr(db, "list_active_import_jobs", lambda **_: [])(
-        request_id=request_id
+) -> list[ImportJob]:
+    return db.list_active_import_jobs_for_wrong_match(
+        download_log_id=download_log_id,
+        request_id=request_id,
+        failed_paths=failed_paths,
+        source_dirs=source_dirs,
+        ignore_import_job_id=ignore_import_job_id,
     )
-    if ignore_import_job_id is None:
-        return list(jobs)
-    return [job for job in jobs if getattr(job, "id", None) != ignore_import_job_id]

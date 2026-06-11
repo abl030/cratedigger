@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from tests.fakes import FakePipelineDB
@@ -512,6 +513,33 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             self.assertEqual(len(db.get_wrong_matches()), 1)
         finally:
             shutil.rmtree(source, ignore_errors=True)
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.pipeline_db import PipelineDB
+    from lib.wrong_match_delete_service import WrongMatchDeleteDB as _DeleteDB
+
+    # Static parity proof — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_delete_protocol: _DeleteDB = cast("PipelineDB", None)
+    _fake_db_satisfies_delete_protocol: _DeleteDB = cast("FakePipelineDB", None)
+
+
+class TestDeleteDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy WrongMatchDeleteDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.wrong_match_delete_service import WrongMatchDeleteDB
+
+        self.assertTrue(issubclass(PipelineDB, WrongMatchDeleteDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.wrong_match_delete_service import WrongMatchDeleteDB
+
+        self.assertTrue(issubclass(FakePipelineDB, WrongMatchDeleteDB))
 
 
 if __name__ == "__main__":

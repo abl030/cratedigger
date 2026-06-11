@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -1035,6 +1036,39 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         _candidate_arg, current_arg = decider.call_args.args[:2]
         self.assertIsNone(current_arg)
         self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.pipeline_db import PipelineDB
+    from lib.wrong_match_cleanup_service import WrongMatchCleanupDB as _CleanupDB
+
+    # Static parity proof: production callers pass db as Any, so without
+    # these assignments pyright never structurally checks the impls against
+    # the protocol. A signature mismatch fails pyright here.
+    _pipeline_db_satisfies_cleanup_protocol: _CleanupDB = cast("PipelineDB", None)
+    _fake_db_satisfies_cleanup_protocol: _CleanupDB = cast("FakePipelineDB", None)
+
+
+class TestCleanupDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy WrongMatchCleanupDB.
+
+    issubclass on the runtime_checkable Protocol guards method *presence*;
+    signature parity is pyright's job (the protocol-typed params make every
+    call site a structural check, plus the TYPE_CHECKING assignment above).
+    """
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupDB
+
+        self.assertTrue(issubclass(PipelineDB, WrongMatchCleanupDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupDB
+
+        self.assertTrue(issubclass(FakePipelineDB, WrongMatchCleanupDB))
 
 
 class TestSummaryOutcomeContract(unittest.TestCase):
