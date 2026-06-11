@@ -45,6 +45,7 @@ from lib.import_preview import ImportPreviewValues, preview_import_from_values
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
 from lib.util import resolve_failed_path
+from lib.validation_envelope import decode_validation_envelope
 from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
                                 ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
                                 CLIFF_THRESHOLD_DB_PER_KHZ)
@@ -2184,8 +2185,8 @@ def post_pipeline_force_import(h, body: dict) -> None:
     if not vr_raw:
         h._error("No validation_result on this download log entry")
         return
-    vr = vr_raw if isinstance(vr_raw, dict) else json.loads(vr_raw)
-    failed_path = vr.get("failed_path")
+    vr = decode_validation_envelope(vr_raw)
+    failed_path = vr.failed_path
     if not failed_path:
         h._error("No failed_path in validation_result")
         return

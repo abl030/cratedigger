@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import mimetypes
 import os
 import re
@@ -12,6 +11,10 @@ from typing import Any, Mapping
 from lib.processing_paths import normalize_source_dirs, path_is_within_root
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.util import resolve_failed_path
+from lib.validation_envelope import (
+    ValidationResultEnvelope,
+    decode_validation_envelope,
+)
 
 _PLAYABLE_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
     ".aac",
@@ -73,14 +76,11 @@ _TXXX_TAG_ALIASES: dict[str, str] = {
 }
 
 
-def _target_candidate(validation_result: Mapping[str, Any]) -> dict[str, Any] | None:
-    raw_candidates = validation_result.get("candidates")
-    if not isinstance(raw_candidates, list):
-        return None
-    candidates = [
-        candidate for candidate in raw_candidates
-        if isinstance(candidate, dict)
-    ]
+def target_candidate(
+    validation_result: ValidationResultEnvelope,
+) -> dict[str, Any] | None:
+    """Return the target candidate (or first) from a decoded envelope."""
+    candidates = validation_result.candidates
     target = next(
         (candidate for candidate in candidates if candidate.get("is_target")),
         None,
@@ -88,25 +88,17 @@ def _target_candidate(validation_result: Mapping[str, Any]) -> dict[str, Any] | 
     return target if target is not None else (candidates[0] if candidates else None)
 
 
-def _validation_result_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if not raw:
-        return {}
-    return json.loads(str(raw))
+def source_dirs_from_validation_result(
+    validation_result: ValidationResultEnvelope,
+) -> list[str]:
+    return normalize_source_dirs(validation_result.source_dirs)
 
 
-def source_dirs_from_validation_result(validation_result: Mapping[str, Any]) -> list[str]:
-    raw = validation_result.get("source_dirs")
-    if not isinstance(raw, list):
-        return []
-    return normalize_source_dirs(raw)
-
-
-def _resolved_wrong_match_root(entry: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
-    validation_result = _validation_result_dict(entry.get("validation_result"))
-    failed_path_raw = validation_result.get("failed_path")
-    failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
+def _resolved_wrong_match_root(
+    entry: Mapping[str, Any],
+) -> tuple[ValidationResultEnvelope, str]:
+    validation_result = decode_validation_envelope(entry.get("validation_result"))
+    failed_path = validation_result.failed_path or ""
     resolved_path = resolve_failed_path(failed_path)
     if resolved_path is None:
         raise FileNotFoundError(f"Wrong-match files not found: {failed_path or '<missing>'}")
@@ -225,9 +217,9 @@ def _mapping_sort_key(mapping_row: Mapping[str, Any], fallback_index: int) -> tu
 
 def _reorder_files_by_match(
     files: list[dict[str, object]],
-    validation_result: Mapping[str, Any],
+    validation_result: ValidationResultEnvelope,
 ) -> tuple[list[dict[str, object]], str]:
-    target = _target_candidate(validation_result)
+    target = target_candidate(validation_result)
     if not target:
         return files, "folder"
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Iterable, cast
 
 import msgspec
@@ -10,7 +9,6 @@ import msgspec
 from lib.wrong_matches import (
     cleanup_wrong_match_source,
     unsafe_failed_import_path_reason,
-    validation_failed_path,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
@@ -18,6 +16,10 @@ from lib.pipeline_db import (
 )
 from lib.processing_paths import normalize_source_dirs
 from lib.util import resolve_failed_path
+from lib.validation_envelope import (
+    ValidationResultEnvelope,
+    decode_validation_envelope,
+)
 
 OUTCOME_DELETED = "deleted"
 OUTCOME_DELETE_FAILED = "delete_failed"
@@ -177,8 +179,8 @@ def _delete_wrong_match(
         )
     request_id_raw = entry.get("request_id")
     request_id = request_id_raw if type(request_id_raw) is int else None
-    validation_result = _validation_result_dict(entry.get("validation_result"))
-    raw_failed_path = validation_failed_path(validation_result)
+    validation_result = decode_validation_envelope(entry.get("validation_result"))
+    raw_failed_path = validation_result.failed_path or None
     if not raw_failed_path:
         return _result(
             download_log_id,
@@ -400,26 +402,11 @@ def _remaining_visible_count(db: Any, request_id: int) -> int:
     return sum(1 for row in db.get_wrong_matches() if row.get("request_id") == request_id)
 
 
-def _validation_result_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
 def _source_dirs(
-    validation_result: dict[str, Any],
+    validation_result: ValidationResultEnvelope,
     source_dirs_hint: Iterable[str],
 ) -> tuple[str, ...]:
-    raw = validation_result.get("source_dirs")
-    dirs: list[str] = []
-    if isinstance(raw, list):
-        dirs.extend(str(path) for path in raw if path)
+    dirs = [*validation_result.source_dirs]
     dirs.extend(str(path) for path in source_dirs_hint if path)
     return tuple(normalize_source_dirs(dirs))
 

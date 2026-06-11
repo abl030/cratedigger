@@ -8,7 +8,6 @@ import, but runs both against isolated temporary copies.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tempfile
@@ -44,6 +43,7 @@ from lib.quality import (
     quality_gate_decision,
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
+from lib.validation_envelope import decode_validation_envelope
 
 
 def _load_current_evidence_by_request(
@@ -318,18 +318,6 @@ def preview_import_from_values(
         simulation=simulation,
         cleanup_eligible=cleanup_eligible,
     )
-
-
-def _validation_result_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
 
 
 def _quality_gate_stage(measurement: AudioQualityMeasurement | None,
@@ -1155,9 +1143,9 @@ def preview_import_from_download_log(
             reason="Download log row has no request_id",
             download_log_id=download_log_id,
         )
-    vr = _validation_result_dict(entry.get("validation_result"))
-    raw_path = vr.get("failed_path")
-    if not isinstance(raw_path, str) or not raw_path:
+    vr = decode_validation_envelope(entry.get("validation_result"))
+    raw_path = vr.failed_path
+    if not raw_path:
         return _preview_result(
             mode="download_log",
             verdict=PREVIEW_VERDICT_UNCERTAIN,

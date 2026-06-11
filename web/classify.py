@@ -13,6 +13,7 @@ from typing import Any, Optional
 import msgspec
 
 from lib.quality import AudioQualityMeasurement, ImportResult
+from lib.validation_envelope import decode_validation_envelope
 
 # ---------------------------------------------------------------------------
 # Types
@@ -222,35 +223,6 @@ def _empty_wrong_match_triage() -> dict[str, Any]:
     }
 
 
-def _validation_result_dict(entry: LogEntry) -> dict[str, Any] | None:
-    raw = entry.validation_result
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            decoded = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        return decoded if isinstance(decoded, dict) else None
-    return None
-
-
-def _str_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bool, int, float)):
-        return str(value)
-    return None
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str)]
-
-
 def _humanize_token(value: str | None) -> str | None:
     if not value:
         return None
@@ -361,39 +333,39 @@ def _build_wrong_match_triage_detail(
 
 def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
     """Pull preview-driven wrong-match triage audit out of ValidationResult."""
-    validation_result = _validation_result_dict(entry)
-    if validation_result is None:
+    # Render path: one malformed historical audit row must not 500 the
+    # whole recents page (contract pinned by TestClassifyWrongMatchTriageAudit
+    # ``*_does_not_raise`` tests). The envelope decode stays strict; the
+    # fail-open lives here, at the display boundary only.
+    try:
+        triage = decode_validation_envelope(
+            entry.validation_result).wrong_match_triage
+    except (msgspec.ValidationError, json.JSONDecodeError):
         return _empty_wrong_match_triage()
-    triage = validation_result.get("wrong_match_triage")
-    if not isinstance(triage, dict):
+    if triage is None:
         return _empty_wrong_match_triage()
 
-    action = _str_or_none(triage.get("action"))
-    reason = _str_or_none(triage.get("reason"))
-    preview_verdict = _str_or_none(triage.get("preview_verdict"))
-    preview_decision = _str_or_none(triage.get("preview_decision"))
-    stage_chain = _string_list(triage.get("stage_chain"))
     summary = _build_wrong_match_triage_summary(
-        action,
-        reason,
-        preview_verdict,
-        preview_decision,
-        stage_chain,
+        triage.action,
+        triage.reason,
+        triage.preview_verdict,
+        triage.preview_decision,
+        triage.stage_chain,
     )
     detail = _build_wrong_match_triage_detail(
-        action,
-        reason,
-        preview_verdict,
-        preview_decision,
-        stage_chain,
+        triage.action,
+        triage.reason,
+        triage.preview_verdict,
+        triage.preview_decision,
+        triage.stage_chain,
     )
     return {
-        "action": action,
+        "action": triage.action,
         "summary": summary,
-        "reason": reason,
-        "preview_verdict": preview_verdict,
-        "preview_decision": preview_decision,
-        "stage_chain": stage_chain,
+        "reason": triage.reason,
+        "preview_verdict": triage.preview_verdict,
+        "preview_decision": triage.preview_decision,
+        "stage_chain": triage.stage_chain,
         "detail": detail,
     }
 

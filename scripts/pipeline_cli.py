@@ -1370,8 +1370,9 @@ def cmd_force_import(db, args):
         print(f"  No validation_result on download_log {log_id}.")
         return
 
-    vr = vr_raw if isinstance(vr_raw, dict) else json.loads(vr_raw)
-    failed_path = vr.get("failed_path")
+    from lib.validation_envelope import decode_validation_envelope
+
+    failed_path = decode_validation_envelope(vr_raw).failed_path
     if not failed_path:
         print(f"  No failed_path in validation_result for download_log {log_id}.")
         return

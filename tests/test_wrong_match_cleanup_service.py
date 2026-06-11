@@ -29,6 +29,7 @@ from lib.import_evidence import (
     ActionEvidenceProvenance,
     CurrentEvidenceActionResult,
 )
+from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_cleanup_service import (
     OUTCOME_DELETE_FAILED,
     OUTCOME_DELETED,
@@ -420,7 +421,12 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(
             triage["action"], OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
         )
-        self.assertFalse(triage["success"])
+        # success=False is a default and omit_defaults keeps it out of the
+        # JSONB; the typed decode restores it.
+        decoded = decode_validation_envelope(
+            by_id[log_id].validation_result).wrong_match_triage
+        assert decoded is not None
+        self.assertFalse(decoded.success)
         self.assertIn("evidence_refresh_failed", triage["reason"])
 
         missing_source = _make_source(self.tmp, "audit-missing-source")

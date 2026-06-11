@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from dataclasses import dataclass
 from typing import Any
 
 from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
+from lib.validation_envelope import decode_validation_envelope
 
 
 @dataclass(frozen=True)
@@ -73,22 +73,8 @@ class WrongMatchDismissResult:
         }
 
 
-def _validation_result_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
 def validation_failed_path(raw: Any) -> str | None:
-    data = _validation_result_dict(raw)
-    failed_path = data.get("failed_path")
-    return failed_path if isinstance(failed_path, str) and failed_path else None
+    return decode_validation_envelope(raw).failed_path or None
 
 
 def _path_candidates(*paths: str | None) -> list[str]:

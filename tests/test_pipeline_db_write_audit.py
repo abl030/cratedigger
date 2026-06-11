@@ -103,10 +103,6 @@ ALLOWLIST: dict[str, str] = {
         "the importer's RequestV0ProbeStateUpdate fields (which reach the row "
         "via finalize_request -> mark_imported_with_rescue/update_status) ARE "
         "column-checked by tests/test_pipeline_db_column_contract.py.",
-    "record_wrong_match_triage":
-        "writes an opaque dict into one JSONB column (validation_result) via "
-        "jsonb_set -- no per-column write list to drift. The sole caller, "
-        "wrong_match_cleanup_service.py, invokes it via getattr.",
     "update_track_artists":
         "positional list[str|None] driving a single-scalar-column UPDATE; no "
         "column-list payload to round-trip.",

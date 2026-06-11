@@ -7998,5 +7998,80 @@ class TestAtomicAndExecuteHardening(unittest.TestCase):
         self.assertEqual(row["reasoning"], "atomic-write")
 
 
+@requires_postgres
+class TestWrongMatchTriageRoundTrip(unittest.TestCase):
+    """Real-PG round-trip for the typed triage write path (#410).
+
+    Test-fidelity Rule A: the typed payload must survive the jsonb_set
+    write and decode back identical through the one envelope decode site.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="triage-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.log_id = self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="peer",
+            outcome="rejected",
+            validation_result=json.dumps({
+                "failed_path": "/mnt/x/failed_imports/B",
+                "scenario": "wrong_match",
+            }),
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_triage_audit_round_trips_every_field(self):
+        from lib.validation_envelope import (
+            WrongMatchTriageAudit,
+            decode_validation_envelope,
+        )
+
+        audit = WrongMatchTriageAudit(
+            action="deleted_reject",
+            outcome="deleted",
+            success=True,
+            reason="confident_reject",
+            preview_verdict="reject",
+            preview_decision="rejected_spectral",
+            cleanup_eligible=True,
+            source_path="/mnt/x/failed_imports/B",
+            stage_chain=["stage1_spectral", "stage2_import"],
+            cleared_rows=2,
+            deleted_path="/mnt/x/failed_imports/B",
+            path_missing=False,
+            error=None,
+        )
+        self.assertTrue(
+            self.db.record_wrong_match_triage(self.log_id, audit))
+
+        cur = self.db._execute(
+            "SELECT validation_result FROM download_log WHERE id = %s",
+            (self.log_id,))
+        row = cur.fetchone()
+        assert row is not None
+        env = decode_validation_envelope(row["validation_result"])
+        self.assertEqual(env.wrong_match_triage, audit)
+        # jsonb_set must merge, not replace — the pre-existing keys survive.
+        self.assertEqual(env.failed_path, "/mnt/x/failed_imports/B")
+        self.assertEqual(env.scenario, "wrong_match")
+
+    def test_clear_wrong_match_path_removes_only_the_failed_path_key(self):
+        from lib.validation_envelope import decode_validation_envelope
+
+        self.assertTrue(self.db.clear_wrong_match_path(self.log_id))
+        entry = self.db.get_download_log_entry(self.log_id)
+        assert entry is not None
+        env = decode_validation_envelope(entry["validation_result"])
+        self.assertIsNone(env.failed_path)
+        self.assertEqual(env.scenario, "wrong_match")
+
+
 if __name__ == "__main__":
     unittest.main()

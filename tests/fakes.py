@@ -64,6 +64,7 @@ from lib.quality import (
     AlbumQualityEvidence,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.validation_envelope import WrongMatchTriageAudit
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
     classify_failure_class as _classify_failure_class,
@@ -4082,14 +4083,16 @@ class FakePipelineDB:
     def record_wrong_match_triage(
         self,
         log_id: int,
-        triage_result: dict[str, object],
+        triage_result: WrongMatchTriageAudit,
     ) -> bool:
         for entry in self.download_logs:
             if entry.id != log_id:
                 continue
             vr = self._validation_result_dict(entry.validation_result) or {}
             new_vr = dict(vr)
-            new_vr["wrong_match_triage"] = dict(triage_result)
+            # Mirror the real writer: msgspec encode honours omit_defaults.
+            new_vr["wrong_match_triage"] = msgspec.json.decode(
+                msgspec.json.encode(triage_result))
             if isinstance(entry.validation_result, str):
                 entry.validation_result = json.dumps(new_vr)
             else:
