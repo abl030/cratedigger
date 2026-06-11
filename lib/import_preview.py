@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -21,6 +21,7 @@ from lib.measurement import (
     measure_preimport_state,
 )
 from lib.quality_evidence import (
+    QualityEvidenceDB,
     audio_snapshot_matches,
     legacy_current_lossless_v0_probe_from_request,
     load_or_backfill_current_evidence,
@@ -46,8 +47,20 @@ from lib.util import repair_mp3_headers, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
 
 
+@runtime_checkable
+class ImportPreviewDB(QualityEvidenceDB, Protocol):
+    """The PipelineDB surface the preview entry points use (#409).
+
+    Extends ``QualityEvidenceDB`` because the handle is forwarded into the
+    evidence persisters. Parity tests live in
+    ``tests/test_import_preview.py``.
+    """
+
+    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+
+
 def _load_current_evidence_by_request(
-    db: Any, request_id: int
+    db: ImportPreviewDB, request_id: int
 ) -> Any:
     """U3 FK reader: load current evidence via ``album_requests.current_evidence_id``.
 
@@ -356,7 +369,7 @@ def _request_label(req: dict[str, Any]) -> str:
 
 
 def measure_and_persist_candidate_evidence(
-    db: Any,
+    db: ImportPreviewDB,
     *,
     request_id: int,
     path: str,
@@ -788,7 +801,7 @@ def _measurement_decision_hint(measurement: Any) -> str:
 
 
 def preview_import_from_path(
-    db: Any,
+    db: ImportPreviewDB,
     *,
     request_id: int,
     path: str,
@@ -1116,7 +1129,7 @@ def preview_import_from_path(
 
 
 def preview_import_from_download_log(
-    db: Any,
+    db: ImportPreviewDB,
     download_log_id: int,
 ) -> ImportPreviewResult:
     """Preview the failed source referenced by one download_log row.
