@@ -5,10 +5,32 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
+
+
+@runtime_checkable
+class WrongMatchSourceDB(Protocol):
+    """The PipelineDB surface the wrong-match source helpers use (#409).
+
+    ``WrongMatchCleanupDB`` and ``WrongMatchDeleteDB`` extend this protocol
+    because their services forward the handle into these helpers. Parity
+    tests live in ``tests/test_wrong_matches_cleanup.py``.
+    """
+
+    def get_wrong_matches(self) -> list[dict[str, object]]: ...
+
+    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+
+    def clear_wrong_match_path(self, log_id: int) -> bool: ...
+
+    def clear_wrong_match_paths(
+        self,
+        request_id: int,
+        failed_paths: list[str] | tuple[str, ...] | set[str],
+    ) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -92,7 +114,7 @@ def _path_candidates(*paths: str | None) -> list[str]:
 
 
 def _wrong_match_entry_parts(
-    db: Any,
+    db: WrongMatchSourceDB,
     download_log_id: int,
 ) -> tuple[dict[str, Any] | None, int | None, str | None]:
     entry = db.get_download_log_entry(download_log_id)
@@ -149,7 +171,7 @@ def _has_failed_imports_ancestor(path: str) -> bool:
 
 
 def _equivalent_failed_path_aliases(
-    db: Any,
+    db: WrongMatchSourceDB,
     request_id: int | None,
     resolved_path: str | None,
 ) -> list[str]:
@@ -170,7 +192,7 @@ def _equivalent_failed_path_aliases(
 
 
 def dismiss_wrong_match_source(
-    db: Any,
+    db: WrongMatchSourceDB,
     download_log_id: int,
     *,
     failed_path_hint: str | None = None,
@@ -215,7 +237,7 @@ def dismiss_wrong_match_source(
 
 
 def cleanup_wrong_match_source(
-    db: Any,
+    db: WrongMatchSourceDB,
     download_log_id: int,
     *,
     failed_path_hint: str | None = None,
