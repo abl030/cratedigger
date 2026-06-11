@@ -18,9 +18,16 @@ branch = True
 # The oneshot timer doesn't need this — atexit already covers it.
 sigterm = True
 # Production systemd units run with WorkingDirectory=stateDir while the Python
-# source lives under /nix/store/<hash>-source. Use include globs instead of
-# source=. so coverage tracks the packaged source rather than the mutable state
-# directory. The local repo glob keeps test-suite coverage comparable.
+# source lives in the Nix store. Use include globs instead of source=. so
+# coverage tracks the packaged source rather than the mutable state directory.
+# The local repo glob keeps test-suite coverage comparable.
+#
+# The store-path NAME is owned by the downstream nixosconfig wrapper, which
+# renames the flake input (currently `cratedigger-src-group-permissions`).
+# Anchor on the bare substring `cratedigger` — anything tighter has already
+# broken collection twice (see tests/test_coverage_config.py, which pins the
+# real deployed shape). `/nix/store/*-source/*` covers the unrenamed
+# flake-input convention.
 #
 # Don't track the test suite itself — that conflates "test runs" with "real code
 # paths." The whole point of the prod-vs-test diff is to find code only tests
@@ -28,7 +35,7 @@ sigterm = True
 include =
     */cratedigger/*
     /nix/store/*-source/*
-    /nix/store/*-cratedigger-src/*
+    /nix/store/*cratedigger*/*
 omit =
     tests/*
     */tests/*
@@ -66,12 +73,16 @@ output = build/coverage.xml
 # files.
 #
 # coverage 7.x rejects patterns ending in a bare wildcard, so each entry
-# anchors on a concrete suffix. The flake builds cratedigger into a Nix
-# store path ending in `-source` (the convention for `src = ./.;` paths);
-# `*-cratedigger*` covers any future renames. The first line — `.` — is
-# the canonical prefix; everything else gets rewritten to it.
+# anchors on a concrete suffix — which means the deployed store-path name
+# (owned by the nixosconfig wrapper, which renames the flake input) must be
+# spelled out exactly here. If the wrapper renames the derivation, this entry
+# AND tests/test_coverage_config.py::DEPLOYED_SRC must follow; the harvest
+# guard in scripts/coverage_report.sh (combined file with 0 measured files
+# fails loudly) is the runtime backstop. `/nix/store/*-source` covers the
+# unrenamed `src = ./.;` convention. The first line — `.` — is the canonical
+# prefix; everything else gets rewritten to it.
 source =
     .
     /nix/store/*-source
-    /nix/store/*-cratedigger-src
+    /nix/store/*-cratedigger-src-group-permissions
     /home/*/cratedigger

@@ -57,7 +57,28 @@ else
   exit 1
 fi
 
-echo "=== coverage report ==="
+# Guard against silently-empty collection. Twice now (2026-05-28 source=.,
+# 2026-06-11 include globs missing the renamed store path) production wrote
+# thousands of shards that tracked zero files — combine "succeeds" and the
+# report is just empty. A harvest with no measured files is always a
+# collection bug, never a real signal; fail loudly so it gets fixed instead
+# of feeding an all-test-only diff into dead-code decisions.
+MEASURED=$(python3 - "$DEST_DIR/.coverage" <<'PY'
+import sys
+from coverage import CoverageData
+data = CoverageData(sys.argv[1])
+data.read()
+print(len(data.measured_files()))
+PY
+)
+if [[ "$MEASURED" -eq 0 ]]; then
+  echo "ERROR: combined coverage data measures 0 files — collection is broken." >&2
+  echo "Check that .coveragerc include globs match the deployed store path" >&2
+  echo "(see tests/test_coverage_config.py) and that COVERAGE_PROCESS_START" >&2
+  echo "points at the same rcfile." >&2
+  exit 1
+fi
+echo "=== coverage report ($MEASURED files measured) ==="
 coverage report --rcfile=.coveragerc --data-file="$DEST_DIR/.coverage" || true
 echo
 
