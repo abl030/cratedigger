@@ -520,11 +520,14 @@ if TYPE_CHECKING:
 
     from lib.pipeline_db import PipelineDB
     from lib.wrong_match_delete_service import WrongMatchDeleteDB as _DeleteDB
+    from lib.wrong_matches import WrongMatchSourceDB as _SourceDB
 
     # Static parity proof — see the matching block in
     # tests/test_wrong_match_cleanup_service.py for the rationale.
     _pipeline_db_satisfies_delete_protocol: _DeleteDB = cast("PipelineDB", None)
     _fake_db_satisfies_delete_protocol: _DeleteDB = cast("FakePipelineDB", None)
+    _pipeline_db_satisfies_source_protocol: _SourceDB = cast("PipelineDB", None)
+    _fake_db_satisfies_source_protocol: _SourceDB = cast("FakePipelineDB", None)
 
 
 class TestDeleteDBProtocolParity(unittest.TestCase):
@@ -540,6 +543,31 @@ class TestDeleteDBProtocolParity(unittest.TestCase):
         from lib.wrong_match_delete_service import WrongMatchDeleteDB
 
         self.assertTrue(issubclass(FakePipelineDB, WrongMatchDeleteDB))
+
+
+class TestSourceDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy WrongMatchSourceDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.wrong_matches import WrongMatchSourceDB
+
+        self.assertTrue(issubclass(PipelineDB, WrongMatchSourceDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.wrong_matches import WrongMatchSourceDB
+
+        self.assertTrue(issubclass(FakePipelineDB, WrongMatchSourceDB))
+
+    def test_service_protocols_extend_source_protocol(self) -> None:
+        """The services forward their handle into wrong_matches helpers, so
+        their protocols must declare the source surface too."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupDB
+        from lib.wrong_match_delete_service import WrongMatchDeleteDB
+        from lib.wrong_matches import WrongMatchSourceDB
+
+        self.assertTrue(issubclass(WrongMatchCleanupDB, WrongMatchSourceDB))
+        self.assertTrue(issubclass(WrongMatchDeleteDB, WrongMatchSourceDB))
 
 
 if __name__ == "__main__":

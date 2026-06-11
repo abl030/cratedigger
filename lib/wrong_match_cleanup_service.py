@@ -29,26 +29,28 @@ from lib.validation_envelope import (
     WrongMatchTriageAudit,
     decode_validation_envelope,
 )
-from lib.wrong_matches import cleanup_wrong_match_source, validation_failed_path
+from lib.wrong_matches import (
+    WrongMatchSourceDB,
+    cleanup_wrong_match_source,
+    validation_failed_path,
+)
 
 logger = logging.getLogger("cratedigger")
 
 
 @runtime_checkable
-class WrongMatchCleanupDB(Protocol):
-    """The PipelineDB surface this service uses directly (#409).
+class WrongMatchCleanupDB(WrongMatchSourceDB, Protocol):
+    """The PipelineDB surface this service uses (#409).
 
-    ``PipelineDB`` and ``FakePipelineDB`` satisfy it structurally — pyright
-    enforces signature parity at every call site, and the issubclass parity
-    tests in ``tests/test_wrong_match_cleanup_service.py`` guard method
-    presence at runtime. The handle is also forwarded to helpers in other
-    modules (``cleanup_wrong_match_source``, evidence loaders, ``preview_fn``)
-    whose own surfaces get protocols in their own #409 increments.
+    Extends ``WrongMatchSourceDB`` because the handle is forwarded into
+    ``cleanup_wrong_match_source``. ``PipelineDB`` and ``FakePipelineDB``
+    satisfy it structurally — pyright enforces signature parity at every
+    call site, and the issubclass parity tests in
+    ``tests/test_wrong_match_cleanup_service.py`` guard method presence at
+    runtime. The handle is also forwarded to the evidence loaders and
+    ``preview_fn``, whose surfaces get protocols in their own #409
+    increments.
     """
-
-    def get_wrong_matches(self) -> list[dict[str, object]]: ...
-
-    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
 
     def get_request(self, request_id: int) -> dict[str, Any] | None: ...
 

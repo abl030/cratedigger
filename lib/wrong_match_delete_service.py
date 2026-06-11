@@ -9,6 +9,7 @@ import msgspec
 
 from lib.import_queue import ImportJob
 from lib.wrong_matches import (
+    WrongMatchSourceDB,
     cleanup_wrong_match_source,
     unsafe_failed_import_path_reason,
 )
@@ -25,18 +26,14 @@ from lib.validation_envelope import (
 
 
 @runtime_checkable
-class WrongMatchDeleteDB(Protocol):
-    """The PipelineDB surface this service uses directly (#409).
+class WrongMatchDeleteDB(WrongMatchSourceDB, Protocol):
+    """The PipelineDB surface this service uses (#409).
 
-    Satisfied structurally by ``PipelineDB`` and ``FakePipelineDB``; parity
-    tests live in ``tests/test_wrong_matches_cleanup.py``. The handle is
-    also forwarded to ``cleanup_wrong_match_source`` (lib/wrong_matches.py),
-    which gets its own protocol in its own #409 increment.
+    Extends ``WrongMatchSourceDB`` because the handle is forwarded into
+    ``cleanup_wrong_match_source``. Satisfied structurally by ``PipelineDB``
+    and ``FakePipelineDB``; parity tests live in
+    ``tests/test_wrong_matches_cleanup.py``.
     """
-
-    def get_wrong_matches(self) -> list[dict[str, object]]: ...
-
-    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
 
     def advisory_lock(
         self, namespace: int, key: int,
