@@ -27,7 +27,7 @@ class _MiscMixin(_PipelineDBBase):
 
     # --- Track management ---
 
-    def set_tracks(self, request_id, tracks):
+    def set_tracks(self, request_id: int, tracks: list[dict[str, Any]]) -> None:
         self._execute("DELETE FROM album_tracks WHERE request_id = %s", (request_id,))
         for t in tracks:
             self._execute("""
@@ -44,7 +44,7 @@ class _MiscMixin(_PipelineDBBase):
         self.conn.commit()
 
 
-    def get_tracks(self, request_id):
+    def get_tracks(self, request_id: int) -> list[dict[str, Any]]:
         cur = self._execute("""
             SELECT disc_number, track_number, title, length_seconds, track_artist
             FROM album_tracks

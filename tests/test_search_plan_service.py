@@ -21,6 +21,7 @@ import os
 import sys
 import unittest
 from datetime import timedelta
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -1535,6 +1536,33 @@ class TestSearchPlanServiceU12NoServiceWrap(unittest.TestCase):
         # natural wrap inside ``record_consumed_search_attempt``
         # writes it.
         self.assertIsNone(self.db.request(42)["failure_class"])
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.pipeline_db import PipelineDB
+    from lib.search_plan_service import SearchPlanDB as _PlanDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_plan_protocol: _PlanDB = cast("PipelineDB", None)
+    _fake_db_satisfies_plan_protocol: _PlanDB = cast("FakePipelineDB", None)
+
+
+class TestSearchPlanDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy SearchPlanDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.search_plan_service import SearchPlanDB
+
+        self.assertTrue(issubclass(PipelineDB, SearchPlanDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.search_plan_service import SearchPlanDB
+
+        self.assertTrue(issubclass(FakePipelineDB, SearchPlanDB))
 
 
 if __name__ == "__main__":
