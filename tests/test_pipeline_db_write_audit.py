@@ -59,8 +59,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "mark_import_job_failed":
         "status transition only",
-    "mark_import_job_preview_blocked":
-        "status transition only",
     "mark_import_job_preview_failed":
         "status transition only",
     "mark_import_job_preview_importable":
@@ -81,8 +79,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "set_downloading_if_plan_current":
         "status transition only",
-    "set_manual":
-        "status transition only",
     "set_unfindable_category":
         "single-column write",
     "update_download_state":
@@ -91,12 +87,8 @@ ALLOWLIST: dict[str, str] = {
         "single-column path update",
     "update_download_state_if_downloading":
         "single-column status update",
-    "update_imported_path_by_release_id":
-        "single-column path update",
     "update_status":
         "single-column status update",
-    "update_v0_probe_state":
-        "single-column state update",
     "set_download_log_candidate_evidence":
         "single FK column update",
     "set_import_job_candidate_evidence":
@@ -107,8 +99,9 @@ ALLOWLIST: dict[str, str] = {
     # (permanent — NOT a TODO; #382 Layer 1 analysis):
     "update_request_fields":
         "dynamic field=value writer -- caller-determined column set, no fixed "
-        "payload to round-trip. Typed callers (update_spectral_state / "
-        "update_v0_probe_state) funnel through it and ARE column-checked by "
+        "payload to round-trip. Typed callers (update_spectral_state, and the "
+        "RequestV0ProbeStateUpdate fields the importer passes through "
+        "finalize) funnel through it and ARE column-checked by "
         "tests/test_pipeline_db_column_contract.py.",
     "record_wrong_match_triage":
         "writes an opaque dict into one JSONB column (validation_result) via "

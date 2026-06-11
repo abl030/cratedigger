@@ -155,16 +155,6 @@ class _MiscMixin(_PipelineDBBase):
         return [r["username"] for r in cur.fetchall()]
 
 
-    def get_user_cooldowns(self) -> list[dict[str, Any]]:
-        """Return all cooldown rows (including expired) for CLI/web display."""
-        cur = self._execute("""
-            SELECT username, cooldown_until, reason, created_at
-            FROM user_cooldowns
-            ORDER BY cooldown_until DESC
-        """)
-        return [dict(r) for r in cur.fetchall()]
-
-
     def check_and_apply_cooldown(
         self,
         username: str,

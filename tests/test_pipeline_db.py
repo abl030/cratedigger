@@ -575,40 +575,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
         finally:
             other.close()
 
-    def test_stale_running_jobs_are_listed_and_failed_conservatively(self):
-        from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
-
-        job = self.db.enqueue_import_job(
-            IMPORT_JOB_MANUAL,
-            request_id=self.req_id,
-            dedupe_key="manual:stale",
-            payload=manual_import_payload(failed_path="/tmp/manual"),
-        )
-        self.db.mark_import_job_preview_importable(
-            job.id,
-            preview_result={"verdict": "would_import"},
-            message="ready",
-        )
-        claimed = self.db.claim_next_import_job(worker_id="stale-worker")
-        assert claimed is not None
-        old = datetime.now(timezone.utc) - timedelta(hours=8)
-        self.db._execute(
-            "UPDATE import_jobs SET heartbeat_at = %s, updated_at = %s WHERE id = %s",
-            (old, old, claimed.id),
-        )
-
-        stale = self.db.list_stale_running_import_jobs(
-            older_than=timedelta(hours=4),
-        )
-        self.assertEqual([job.id for job in stale], [claimed.id])
-
-        failed = self.db.fail_stale_running_import_jobs(
-            older_than=timedelta(hours=4),
-            message="stale importer job",
-        )
-        self.assertEqual([job.id for job in failed], [claimed.id])
-        self.assertEqual(failed[0].status, "failed")
-
     def test_running_jobs_can_be_requeued_immediately_after_worker_restart(self):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
 
@@ -1331,21 +1297,6 @@ class TestSearchLog(unittest.TestCase):
         self.assertIsNone(history[0]["query"])
         self.assertIsNone(history[0]["result_count"])
         self.assertEqual(history[0]["outcome"], "empty_query")
-
-    def test_batch_fetch(self):
-        req2 = self.db.add_request(
-            mb_release_id="search-log-uuid-2",
-            artist_name="C",
-            album_title="D",
-            source="request",
-        )
-        self.db.log_search(self.req_id, query="q1", outcome="found")
-        self.db.log_search(req2, query="q2", outcome="timeout")
-        batch = self.db.get_search_history_batch([self.req_id, req2])
-        self.assertIn(self.req_id, batch)
-        self.assertIn(req2, batch)
-        self.assertEqual(len(batch[self.req_id]), 1)
-        self.assertEqual(batch[req2][0]["outcome"], "timeout")
 
     def test_all_outcomes_valid(self):
         for outcome in ("found", "no_match", "no_results", "timeout", "error", "empty_query"):
@@ -2530,49 +2481,6 @@ class TestResetToWanted(unittest.TestCase):
 
 
 @requires_postgres
-class TestSetManual(unittest.TestCase):
-    """U6: ``set_manual`` flip sites for system-driven manual transitions."""
-
-    def setUp(self):
-        self.db = make_db()
-        self.req_id = self.db.add_request(
-            mb_release_id="set-manual-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-
-    def tearDown(self):
-        self.db.close()
-
-    def test_writes_manual_reason_when_provided(self):
-        self.db.set_manual(self.req_id, manual_reason="search_exhausted")
-        req = self.db.get_request(self.req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "manual")
-        self.assertEqual(req["manual_reason"], "search_exhausted")
-
-    def test_does_not_overwrite_existing_manual_reason_when_none(self):
-        """Defensive: a None reason must NOT clobber a populated reason.
-
-        Generic flip paths that don't carry a system reason should leave
-        any existing populated reason in place.
-        """
-        # Pre-populate manual_reason directly (simulates an operator hold or
-        # a previous system flip).
-        self.db._execute(
-            "UPDATE album_requests SET manual_reason = %s WHERE id = %s",
-            ("operator_hold", self.req_id),
-        )
-        self.db.conn.commit()
-        self.db.set_manual(self.req_id)
-        req = self.db.get_request(self.req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "manual")
-        self.assertEqual(req["manual_reason"], "operator_hold")
-
-
-@requires_postgres
 class TestClearOnDiskQualityFields(unittest.TestCase):
     """``clear_on_disk_quality_fields`` is the write-side half of the
     "beets is the source of truth" invariant: once an album leaves beets
@@ -3232,21 +3140,23 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertEqual(req["current_spectral_grade"], "genuine")
         self.assertIsNone(req["current_spectral_bitrate"])
 
-    def test_update_v0_probe_state_updates_current_source_probe(self):
+    def test_v0_probe_state_update_fields_set_current_source_probe(self):
+        """``RequestV0ProbeStateUpdate.as_update_fields()`` is the live wire
+        between the importer (``lib/import_dispatch.py``) and the request
+        row — exercise it through ``update_request_fields`` exactly as
+        production does."""
         from lib import pipeline_db
         from lib.quality import V0ProbeEvidence
 
-        self.db.update_v0_probe_state(
-            self.req_id,
-            pipeline_db.RequestV0ProbeStateUpdate(
-                current_lossless_source=V0ProbeEvidence(
-                    kind="lossless_source_v0",
-                    min_bitrate_kbps=165,
-                    avg_bitrate_kbps=228,
-                    median_bitrate_kbps=225,
-                ),
+        update = pipeline_db.RequestV0ProbeStateUpdate(
+            current_lossless_source=V0ProbeEvidence(
+                kind="lossless_source_v0",
+                min_bitrate_kbps=165,
+                avg_bitrate_kbps=228,
+                median_bitrate_kbps=225,
             ),
         )
+        self.db.update_request_fields(self.req_id, **update.as_update_fields())
 
         req = self.db.get_request(self.req_id)
         assert req is not None
@@ -3254,27 +3164,25 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertEqual(req["current_lossless_source_v0_probe_avg_bitrate"], 228)
         self.assertEqual(req["current_lossless_source_v0_probe_median_bitrate"], 225)
 
-    def test_update_v0_probe_state_can_clear_current_source_probe(self):
+    def test_v0_probe_state_update_fields_can_clear_current_source_probe(self):
         from lib import pipeline_db
         from lib.quality import V0ProbeEvidence
 
-        self.db.update_v0_probe_state(
-            self.req_id,
-            pipeline_db.RequestV0ProbeStateUpdate(
-                current_lossless_source=V0ProbeEvidence(
-                    kind="lossless_source_v0",
-                    min_bitrate_kbps=165,
-                    avg_bitrate_kbps=228,
-                    median_bitrate_kbps=225,
-                ),
+        set_update = pipeline_db.RequestV0ProbeStateUpdate(
+            current_lossless_source=V0ProbeEvidence(
+                kind="lossless_source_v0",
+                min_bitrate_kbps=165,
+                avg_bitrate_kbps=228,
+                median_bitrate_kbps=225,
             ),
         )
-        self.db.update_v0_probe_state(
-            self.req_id,
-            pipeline_db.RequestV0ProbeStateUpdate(
-                clear_current_lossless_source=True,
-            ),
+        self.db.update_request_fields(
+            self.req_id, **set_update.as_update_fields())
+        clear_update = pipeline_db.RequestV0ProbeStateUpdate(
+            clear_current_lossless_source=True,
         )
+        self.db.update_request_fields(
+            self.req_id, **clear_update.as_update_fields())
 
         req = self.db.get_request(self.req_id)
         assert req is not None
@@ -3711,22 +3619,6 @@ class TestDownloadingStatus(unittest.TestCase):
         self.assertEqual(req["status"], "downloading")
         self.assertIsNone(req["active_download_state"])
 
-    def test_clear_download_state(self):
-        """clear_download_state() nulls the JSONB column."""
-        req_id = self.db.add_request(
-            mb_release_id="cds-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        state_json = json.dumps({"filetype": "flac", "enqueued_at": "now", "files": []})
-        self.db.set_downloading(req_id, state_json)
-        self.db.clear_download_state(req_id)
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertIsNone(req["active_download_state"])
-
-
 @requires_postgres
 class TestUserCooldowns(unittest.TestCase):
     """Tests for global user cooldown system (issue #39)."""
@@ -3771,11 +3663,14 @@ class TestUserCooldowns(unittest.TestCase):
         until2 = datetime.now(timezone.utc) + timedelta(days=5)
         self.db.add_cooldown("user1", until1, "first")
         self.db.add_cooldown("user1", until2, "extended")
-        cooldowns = self.db.get_user_cooldowns()
-        user1_rows = [c for c in cooldowns if c["username"] == "user1"]
-        self.assertEqual(len(user1_rows), 1)
+        cur = self.db._execute(
+            "SELECT cooldown_until FROM user_cooldowns WHERE username = %s",
+            ("user1",),
+        )
+        rows = cur.fetchall()
+        self.assertEqual(len(rows), 1)
         # Should have the later date
-        self.assertGreater(user1_rows[0]["cooldown_until"], until1)
+        self.assertGreater(rows[0]["cooldown_until"], until1)
 
     def test_check_and_apply_cooldown_triggers(self):
         """5 timeouts across different requests → cooldown applied."""

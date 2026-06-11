@@ -420,94 +420,6 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertIsNone(row["current_spectral_bitrate"])
 
-    def test_update_imported_path_by_release_id_matches_mb_albumid(self):
-        """Issue #132 P2 / #133: sibling ``imported_path`` propagation.
-        MB-sourced match on ``mb_release_id``."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=17, mb_release_id="mbid-sibling",
-            imported_path="/Beets/Old/Path"))
-
-        rows = db.update_imported_path_by_release_id(
-            mb_albumid="mbid-sibling",
-            discogs_albumid="",
-            new_path="/Beets/New/Path [2006]",
-        )
-
-        self.assertEqual(rows, 1)
-        self.assertEqual(
-            db.request(17)["imported_path"], "/Beets/New/Path [2006]")
-
-    def test_update_imported_path_by_release_id_matches_discogs(self):
-        """Discogs-sourced match on ``discogs_release_id``."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=18, mb_release_id=None,
-            discogs_release_id="12856590",
-            imported_path="/Beets/Old/Discogs"))
-
-        rows = db.update_imported_path_by_release_id(
-            mb_albumid="",
-            discogs_albumid="12856590",
-            new_path="/Beets/New/Discogs [2006]",
-        )
-
-        self.assertEqual(rows, 1)
-        self.assertEqual(
-            db.request(18)["imported_path"], "/Beets/New/Discogs [2006]")
-
-    def test_update_imported_path_by_release_id_untracked_returns_zero(self):
-        """No matching request → rowcount=0, no rows touched."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=19, mb_release_id="other-mbid",
-            imported_path="/Beets/Other"))
-
-        rows = db.update_imported_path_by_release_id(
-            mb_albumid="unknown-mbid",
-            discogs_albumid="",
-            new_path="/Beets/Ignored",
-        )
-
-        self.assertEqual(rows, 0)
-        self.assertEqual(db.request(19)["imported_path"], "/Beets/Other")
-
-    def test_update_imported_path_discogs_matches_legacy_mb_release_id(self):
-        """Codex R2 P2: beets-side ``discogs_albumid`` must match
-        pipeline rows that stored the Discogs numeric in
-        ``mb_release_id`` (legacy "pipeline compat" layout from
-        CLAUDE.md) OR in ``discogs_release_id``."""
-        db = FakePipelineDB()
-        # Legacy layout: numeric in mb_release_id, discogs_release_id None.
-        db.seed_request(make_request_row(
-            id=21, mb_release_id="12856590",
-            discogs_release_id=None, imported_path="/Beets/Legacy/Old"))
-
-        rows = db.update_imported_path_by_release_id(
-            mb_albumid="",
-            discogs_albumid="12856590",
-            new_path="/Beets/Legacy/New",
-        )
-
-        self.assertEqual(rows, 1)
-        self.assertEqual(
-            db.request(21)["imported_path"], "/Beets/Legacy/New")
-
-    def test_update_imported_path_by_release_id_both_empty_is_noop(self):
-        """Both release ids empty → rowcount=0, no UPDATE fires at all.
-        Mirrors the prod short-circuit that guards against accidentally
-        matching every row where a column is NULL/empty."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=20, mb_release_id="some-mbid",
-            imported_path="/Beets/Keep"))
-
-        rows = db.update_imported_path_by_release_id(
-            mb_albumid="", discogs_albumid="", new_path="/Beets/Bogus")
-
-        self.assertEqual(rows, 0)
-        self.assertEqual(db.request(20)["imported_path"], "/Beets/Keep")
-
     def test_clear_on_disk_quality_fields_matches_real_db(self):
         """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
         zero the on-disk spectral + verified_lossless + imported_path,
@@ -631,30 +543,6 @@ class TestFakePipelineDB(unittest.TestCase):
         with db.advisory_lock(0x1234, 42) as acquired:
             self.assertFalse(acquired)
         self.assertEqual(db.advisory_lock_calls, [(0x1234, 42)])
-
-    def test_set_manual_writes_reason(self):
-        """U6 fake parity: ``set_manual`` flips status and writes reason."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-
-        db.set_manual(42, manual_reason="search_exhausted")
-
-        row = db.request(42)
-        self.assertEqual(row["status"], "manual")
-        self.assertEqual(row["manual_reason"], "search_exhausted")
-        self.assertIn((42, "manual"), db.status_history)
-
-    def test_set_manual_does_not_overwrite_existing_reason_when_none(self):
-        """U6 fake parity: a None reason must NOT clobber a populated reason."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="manual", manual_reason="operator_hold"))
-
-        db.set_manual(42)
-
-        row = db.request(42)
-        self.assertEqual(row["status"], "manual")
-        self.assertEqual(row["manual_reason"], "operator_hold")
 
     def test_reset_to_wanted_clears_manual_reason(self):
         """U6 fake parity: re-queue clears ``manual_reason`` and counters."""
@@ -2665,7 +2553,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(claimed.status, "running")
         self.assertEqual(claimed.attempts, 1)
         self.assertEqual(claimed.worker_id, "fake-worker")
-        self.assertTrue(db.heartbeat_import_job(claimed.id))
 
         requeued = db.requeue_running_import_jobs(message="retry")
         self.assertEqual([job.id for job in requeued], [claimed.id])
@@ -3388,20 +3275,15 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertNotIn("failed_path", stored)
         self.assertEqual(stored["x"], 1)
 
-    def test_search_log_history_and_batch(self):
+    def test_search_log_history(self):
         db = FakePipelineDB()
         db.log_search(1, query="a b", outcome="found", result_count=10,
                       elapsed_s=0.5)
         db.log_search(1, query="c d", outcome="no_match")
-        db.log_search(2, query="e f", outcome="error")
 
         history_1 = db.get_search_history(1)
         self.assertEqual([r["outcome"] for r in history_1],
                          ["no_match", "found"])
-        batch = db.get_search_history_batch([1, 2])
-        self.assertEqual(
-            {k: [r["outcome"] for r in v] for k, v in batch.items()},
-            {1: ["no_match", "found"], 2: ["error"]})
 
     def test_log_search_records_u11_forensics_kwargs(self):
         """U11 R22-R27 mirror: every new kwarg must land on the
@@ -3509,11 +3391,9 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
         active = db.get_cooled_down_users()
         self.assertEqual(active, ["alice"])
-
-        rows = db.get_user_cooldowns()
-        # Newest cooldown_until first.
-        self.assertEqual([r["username"] for r in rows], ["alice", "bob"])
-        self.assertEqual(rows[0]["reason"], "y")
+        # Upsert replaced rather than duplicated alice's row.
+        self.assertEqual(len(db.user_cooldowns), 2)
+        self.assertEqual(db.user_cooldowns["alice"].reason, "y")
 
     # --- U3: peer_dir_daily_aggregates lazy-fill mirror ---
 

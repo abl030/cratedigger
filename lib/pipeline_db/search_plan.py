@@ -306,29 +306,6 @@ class _SearchPlanMixin(_PipelineDBBase):
         )
 
 
-    def get_search_history_batch(self, request_ids: list[int]) -> dict[int, list[dict[str, object]]]:
-        """Batch fetch search history for multiple request IDs.
-
-        Returns dict of request_id → list of history rows (most recent first).
-        """
-        if not request_ids:
-            return {}
-        ph = ",".join(["%s"] * len(request_ids))
-        cur = self._execute(
-            f"SELECT * FROM search_log WHERE request_id IN ({ph}) ORDER BY id DESC",
-            tuple(request_ids),
-        )
-        result: dict[int, list[dict[str, object]]] = {}
-        for row in cur.fetchall():
-            r = dict(row)
-            rid = r["request_id"]
-            assert isinstance(rid, int)
-            if rid not in result:
-                result[rid] = []
-            result[rid].append(r)
-        return result
-
-
     def get_search_plan_readiness(
         self,
         generator_id: str,
@@ -870,32 +847,6 @@ class _SearchPlanMixin(_PipelineDBBase):
                 )
             self.conn.commit()
             return (int(active_plan_id), previous_ordinal, target_ordinal)
-
-
-    def _fetch_plan_items(self, plan_id: int) -> list[SearchPlanItemRow]:
-        cur = self._execute(
-            """
-            SELECT id, plan_id, ordinal, strategy, query,
-                   canonical_query_key, repeat_group, provenance
-            FROM search_plan_items
-            WHERE plan_id = %s
-            ORDER BY ordinal ASC
-            """,
-            (plan_id,),
-        )
-        return [
-            SearchPlanItemRow(
-                id=int(r["id"]),
-                plan_id=int(r["plan_id"]),
-                ordinal=int(r["ordinal"]),
-                strategy=r["strategy"],
-                query=r["query"],
-                canonical_query_key=r["canonical_query_key"],
-                repeat_group=r["repeat_group"],
-                provenance=_item_provenance_from_jsonb(r["provenance"]),
-            )
-            for r in cur.fetchall()
-        ]
 
 
     def get_wanted_searchable(
