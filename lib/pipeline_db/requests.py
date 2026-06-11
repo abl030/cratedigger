@@ -560,7 +560,7 @@ class _RequestsMixin(_PipelineDBBase):
         )
 
 
-    def update_status(self, request_id, status, **extra):
+    def update_status(self, request_id: int, status: str, **extra: Any) -> None:
         now = datetime.now(timezone.utc)
         sets = ["status = %s", "active_download_state = NULL", "updated_at = %s"]
         params = [status, now]
@@ -1174,7 +1174,7 @@ class _RequestsMixin(_PipelineDBBase):
 
     # --- Retry logic ---
 
-    def record_attempt(self, request_id, attempt_type):
+    def record_attempt(self, request_id: int, attempt_type: str) -> None:
         col = f"{attempt_type}_attempts"
         now = datetime.now(timezone.utc)
 

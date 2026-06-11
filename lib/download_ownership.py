@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Callable, Protocol, TYPE_CHECKING, runtime_checkable
 
 from lib import transitions
 
@@ -11,6 +11,32 @@ if TYPE_CHECKING:
     from lib.search import PlanExecutionContext
 
 logger = logging.getLogger("cratedigger")
+
+
+@runtime_checkable
+class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
+    """The PipelineDB surface the ownership writer uses (#409).
+
+    Extends ``TransitionsDB`` because the writer forwards its handle into
+    ``transitions.finalize_request``. Parity tests live in
+    ``tests/test_download.py``.
+    """
+
+    def set_downloading_if_plan_current(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        plan_id: int,
+        plan_ordinal: int,
+        cycle_count_snapshot: int,
+    ) -> bool: ...
+
+    def update_download_state_if_downloading(
+        self, request_id: int, state_json: str,
+    ) -> bool: ...
+
+    def close(self) -> None: ...
 
 
 class DownloadOwnershipWriter:
@@ -26,7 +52,7 @@ class DownloadOwnershipWriter:
         self,
         dsn: str | None = None,
         *,
-        db_factory: Callable[[], Any] | None = None,
+        db_factory: Callable[[], DownloadOwnershipDB] | None = None,
         close_after_use: bool | None = None,
     ) -> None:
         self.dsn = dsn
@@ -35,19 +61,17 @@ class DownloadOwnershipWriter:
             db_factory is None if close_after_use is None else close_after_use
         )
 
-    def _open_db(self) -> Any:
+    def _open_db(self) -> DownloadOwnershipDB:
         if self._db_factory is not None:
             return self._db_factory()
         from lib.pipeline_db import PipelineDB
 
         return PipelineDB(self.dsn)
 
-    def _close_db(self, db: Any) -> None:
+    def _close_db(self, db: DownloadOwnershipDB) -> None:
         if not self._close_after_use:
             return
-        close = getattr(db, "close", None)
-        if close is not None:
-            close()
+        db.close()
 
     def claim_downloading(
         self,
@@ -129,18 +153,8 @@ class DownloadOwnershipWriter:
         """Guard active_download_state enrichment after slskd returns IDs."""
         db = self._open_db()
         try:
-            update = getattr(db, "update_download_state_if_downloading", None)
-            if update is None:
-                row = db.get_request(request_id)
-                if not row or row.get("status") != "downloading":
-                    logger.warning(
-                        "download ownership state update blocked for request %s: "
-                        "request is no longer downloading",
-                        request_id,
-                    )
-                    return False
-                db.update_download_state(request_id, state_json)
-                return True
-            return bool(update(request_id, state_json))
+            return bool(
+                db.update_download_state_if_downloading(request_id, state_json)
+            )
         finally:
             self._close_db(db)

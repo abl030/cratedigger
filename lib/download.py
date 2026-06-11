@@ -13,7 +13,8 @@ import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, TYPE_CHECKING
+from contextlib import AbstractContextManager
+from typing import Any, Callable, Literal, Protocol, TYPE_CHECKING, runtime_checkable
 
 
 from lib.download_recovery import (
@@ -31,6 +32,7 @@ from lib.processing_paths import (
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
+                         CooldownConfig,
                          DownloadDecision, ValidationResult,
                          decide_download_action,
                          compute_effective_override_bitrate,
@@ -53,6 +55,7 @@ from lib.import_manifest import (
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
+    ImportJob,
     automation_import_dedupe_key,
     automation_import_payload,
 )
@@ -66,6 +69,85 @@ if TYPE_CHECKING:
     from lib.context import CratediggerContext
 
 logger = logging.getLogger("cratedigger")
+
+
+@runtime_checkable
+class DownloadDB(transitions.TransitionsDB, Protocol):
+    """The PipelineDB surface the download poll/search loop uses (#409).
+
+    Extends ``TransitionsDB`` because the handle is forwarded into
+    ``transitions.finalize_request``. ``log_download`` is declared with
+    only the kwargs this module passes (the full signature lives on
+    ``PipelineDB.log_download``). Parity tests live in
+    ``tests/test_download.py``.
+    """
+
+    def get_downloading(self) -> list[dict[str, Any]]: ...
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def check_and_apply_cooldown(
+        self, username: str, config: CooldownConfig | None = None,
+    ) -> bool: ...
+
+    def update_download_state(
+        self, request_id: int, state_json: str,
+    ) -> None: ...
+
+    def update_download_state_current_path(
+        self, request_id: int, current_path: str | None,
+    ) -> None: ...
+
+    def log_download(
+        self,
+        request_id: int,
+        *,
+        soulseek_username: str | None = None,
+        filetype: str | None = None,
+        outcome: str | None = None,
+        error_message: str | None = None,
+    ) -> int: ...
+
+    def enqueue_import_job(
+        self,
+        job_type: str,
+        *,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob: ...
+
+    def get_active_import_job_for_request(
+        self, request_id: int,
+    ) -> dict[str, Any] | None: ...
+
+    def get_import_job_candidate_evidence_id(
+        self, import_job_id: int,
+    ) -> int | None: ...
+
+    def set_download_log_candidate_evidence(
+        self, download_log_id: int, evidence_id: int | None,
+    ) -> None: ...
+
+    def abandon_auto_import_request(
+        self,
+        *,
+        request_id: int,
+        current_path: str,
+        soulseek_username: str | None,
+        filetype: str | None,
+        beets_scenario: str,
+        beets_detail: str,
+        outcome: str,
+        staged_path: str,
+        error_message: str,
+        validation_result: str | None,
+    ) -> int | None: ...
+
+
 MAX_FILE_RETRIES = 5
 AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
     "audio_corrupt",
@@ -611,7 +693,7 @@ def _log_post_move_resume_blocked(
 
 
 def _request_import_subprocess_started(
-    db: Any,
+    db: DownloadDB | None,
     request_id: int | None,
 ) -> bool | None:
     """Return subprocess-start evidence, or None when ownership is unknown."""
@@ -646,7 +728,7 @@ def _request_import_subprocess_started(
 
 
 def _import_subprocess_already_started(
-    db: Any,
+    db: DownloadDB | None,
     request_id: int | None,
 ) -> bool:
     """Did a previous attempt actually launch ``import_one.py`` for this row?
@@ -708,7 +790,7 @@ def _restore_abandoned_auto_import(
 
 
 def _commit_abandoned_auto_import(
-    db: Any,
+    db: DownloadDB,
     *,
     request_id: int,
     current_path: str,
@@ -716,28 +798,19 @@ def _commit_abandoned_auto_import(
     detail: str,
     validation_result: str | None,
 ) -> bool:
-    commit = getattr(db, "abandon_auto_import_request", None)
-    if commit is not None:
-        log_id = commit(
-            request_id=request_id,
-            current_path=current_path,
-            soulseek_username=dl_info.username,
-            filetype=dl_info.filetype,
-            beets_scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
-            beets_detail=detail,
-            outcome="failed",
-            staged_path=current_path,
-            error_message=detail,
-            validation_result=validation_result,
-        )
-        return log_id is not None
-
-    logger.error(
-        "ABANDON AUTO-IMPORT BLOCKED: DB object has no "
-        "abandon_auto_import_request helper for request_id=%s",
-        request_id,
+    log_id = db.abandon_auto_import_request(
+        request_id=request_id,
+        current_path=current_path,
+        soulseek_username=dl_info.username,
+        filetype=dl_info.filetype,
+        beets_scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
+        beets_detail=detail,
+        outcome="failed",
+        staged_path=current_path,
+        error_message=detail,
+        validation_result=validation_result,
     )
-    return False
+    return log_id is not None
 
 
 def _abandon_interrupted_auto_import(
@@ -745,7 +818,7 @@ def _abandon_interrupted_auto_import(
     *,
     request_id: int,
     current_path: str,
-    db: Any,
+    db: DownloadDB,
     detail: str,
 ) -> bool:
     """Quarantine an interrupted auto-import attempt and redownload later."""
@@ -829,7 +902,7 @@ def _abandon_request_scoped_auto_import(
     request_id: int | None,
     current_path: str,
     current_path_kind: str,
-    db: Any,
+    db: DownloadDB | None,
     detail: str,
 ) -> bool:
     if (
@@ -2003,7 +2076,7 @@ def _timeout_album(
 
 
 def _persist_updated_download_state(
-    db: Any,
+    db: DownloadDB,
     request_id: int,
     entry: GrabListEntry,
     state: ActiveDownloadState,
@@ -2072,7 +2145,7 @@ def _run_completed_processing(
     entry: GrabListEntry,
     request_id: int,
     state: ActiveDownloadState,
-    db: Any,
+    db: DownloadDB,
     ctx: CratediggerContext,
     *,
     import_job_id: int,
@@ -2159,25 +2232,17 @@ def _run_completed_processing(
     return outcome
 
 
-def _active_automation_import_job(db: Any, request_id: int):
-    return db.get_import_job_by_dedupe_key(
-        automation_import_dedupe_key(request_id),
-        active_only=True,
-    )
-
-
-def _active_import_job_for_request(db: Any, request_id: int):
-    getter = getattr(db, "get_active_import_job_for_request", None)
-    if getter is not None:
-        return getter(request_id)
-    return _active_automation_import_job(db, request_id)
+def _active_import_job_for_request(
+    db: DownloadDB, request_id: int,
+) -> dict[str, Any] | None:
+    return db.get_active_import_job_for_request(request_id)
 
 
 def _enqueue_completed_processing(
     entry: GrabListEntry,
     request_id: int,
     state: ActiveDownloadState,
-    db: Any,
+    db: DownloadDB,
     ctx: CratediggerContext,
 ) -> Any:
     """Submit completed-download processing to the shared import queue."""
@@ -2239,7 +2304,7 @@ def _processing_path_ready_for_importer(
     entry: GrabListEntry,
     request_id: int,
     state: ActiveDownloadState,
-    db: Any,
+    db: DownloadDB,
     ctx: CratediggerContext,
 ) -> bool:
     """Fail closed before enqueueing a job that cannot resume local files."""
@@ -2383,7 +2448,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
 
 def _poll_one_active_download(
     row: dict[str, Any],
-    db: Any,
+    db: DownloadDB,
     ctx: CratediggerContext,
     cycle_snapshot: Any,
 ) -> None:

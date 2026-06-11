@@ -84,29 +84,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row else None
 
 
-    def get_import_job_by_dedupe_key(
-        self,
-        dedupe_key: str,
-        *,
-        active_only: bool = True,
-    ) -> ImportJob | None:
-        status_filter = (
-            "AND status IN ('queued', 'running')"
-            if active_only
-            else ""
-        )
-        cur = self._execute(f"""
-            SELECT *
-            FROM import_jobs
-            WHERE dedupe_key = %s
-            {status_filter}
-            ORDER BY updated_at DESC, id DESC
-            LIMIT 1
-        """, (dedupe_key,))
-        row = cur.fetchone()
-        return ImportJob.from_row(dict(row)) if row else None
-
-
     def list_import_jobs(
         self,
         *,

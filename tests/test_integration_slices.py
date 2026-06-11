@@ -5401,10 +5401,12 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         assert job_row is not None
         self.assertEqual(job_row.status, "failed")
 
-    def test_request_not_found_subcase_skips_finalize(self):
-        """request_id=None: helper writes the log + marks job failed but
-        does NOT call finalize_request (there is no parent to finalize).
-        Denylist is also skipped because it FK-references a request_id."""
+    def test_request_not_found_subcase_raises_without_finalize(self):
+        """request_id=None: the audit row CANNOT be written
+        (download_log.request_id is NOT NULL — the fake used to accept
+        None where production raised NotNullViolation; test-fidelity
+        Rule A). The helper raises an explicit ValueError instead, and
+        neither finalize_request, the log write, nor the denylist fire."""
         from lib.import_dispatch import _record_preview_measurement_failed
         from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
         from lib.quality import MeasurementFailure
@@ -5426,31 +5428,19 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
 
         # Spy on finalize_request to prove it is NOT called.
         with patch("lib.import_dispatch.finalize_request") as mock_finalize:
-            _record_preview_measurement_failed(
-                cast(Any, db),
-                request_id=None,
-                import_job_id=job.id,
-                payload=payload,
-                denylist_username="bob",
-            )
+            with self.assertRaises(ValueError):
+                _record_preview_measurement_failed(
+                    cast(Any, db),
+                    request_id=None,
+                    import_job_id=job.id,
+                    payload=payload,
+                    denylist_username="bob",
+                )
             mock_finalize.assert_not_called()
 
-        # download_log row still written (carrying NULL request_id).
-        self.assertEqual(len(db.download_logs), 1)
-        db.assert_log(
-            self, 0,
-            outcome="measurement_failed",
-            request_id=None,
-            beets_scenario="measurement_failed",
-        )
-
-        # No denylist (FK requires request_id).
+        # No audit row, no denylist — the raise happens before both.
+        self.assertEqual(len(db.download_logs), 0)
         self.assertEqual(len(db.denylist), 0)
-
-        # Job → failed.
-        job_row = db.get_import_job(job.id)
-        assert job_row is not None
-        self.assertEqual(job_row.status, "failed")
 
     def test_source_vanished_no_denylist_when_username_unknown(self):
         """source_vanished + no source_username → no denylist write.
@@ -5664,9 +5654,10 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         self.assertEqual(db.request(43)["status"], "wanted")
 
     def test_request_not_found_no_finalize_subcase(self):
-        """request_id=None subcase: helper writes log + marks job failed
-        but does NOT transition any request (there is nothing to
-        finalize). No exception bubbles up."""
+        """request_id=None subcase: the self-heal helper raises (the
+        audit row cannot carry a NULL request_id), the worker's
+        try/except absorbs it, and the job still lands failed from the
+        worker's own step 1. No exception bubbles up."""
         from lib.import_preview import ImportPreviewResult
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
         from lib.quality import MeasurementFailure
@@ -5710,9 +5701,10 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(updated.status, "failed")
-        # Helper still wrote the download_log row.
+        # The audit row cannot be written without a request_id; the
+        # worker absorbed the helper's raise (PREVIEW_SELF_HEAL_PARTIAL_FAILURE).
         outcomes = [log.outcome for log in db.download_logs]
-        self.assertIn("measurement_failed", outcomes)
+        self.assertNotIn("measurement_failed", outcomes)
 
 
 class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
