@@ -13,7 +13,7 @@ Outcome vocabulary is pinned via ``test_outcome_set_is_stable`` per
 from __future__ import annotations
 
 import unittest
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -2886,6 +2886,33 @@ class TestRedisCacheWiring(unittest.TestCase):
         }
         self.assertIn("MPREb-seed", browse_ids)
         self.assertNotIn("MPREb-STALE", browse_ids)
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.pipeline_db import PipelineDB
+    from lib.youtube_album_service import YoutubeResolverDB as _ResolverDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_resolver_protocol: _ResolverDB = cast("PipelineDB", None)
+    _fake_db_satisfies_resolver_protocol: _ResolverDB = cast("FakePipelineDB", None)
+
+
+class TestResolverDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy YoutubeResolverDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.youtube_album_service import YoutubeResolverDB
+
+        self.assertTrue(issubclass(PipelineDB, YoutubeResolverDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.youtube_album_service import YoutubeResolverDB
+
+        self.assertTrue(issubclass(FakePipelineDB, YoutubeResolverDB))
 
 
 if __name__ == "__main__":

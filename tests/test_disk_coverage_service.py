@@ -1,4 +1,5 @@
 import unittest
+from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -96,6 +97,42 @@ class TestDiskCoverageService(unittest.TestCase):
 
         self.assertEqual(payload["counts"]["off_disk_total"], 1)
         self.assertEqual(payload["off_disk"][0]["id"], 1)
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.beets_db import BeetsDB
+    from lib.disk_coverage_service import (
+        DiskCoverageBeetsDB as _CovBeetsDB,
+        DiskCoveragePipelineDB as _CovPipelineDB,
+    )
+    from lib.pipeline_db import PipelineDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_coverage_protocol: _CovPipelineDB = cast("PipelineDB", None)
+    _fake_db_satisfies_coverage_protocol: _CovPipelineDB = cast("FakePipelineDB", None)
+    _beets_db_satisfies_coverage_protocol: _CovBeetsDB = cast("BeetsDB", None)
+    _fake_beets_satisfies_coverage_protocol: _CovBeetsDB = cast("FakeBeetsDB", None)
+
+
+class TestDiskCoverageDBProtocolParity(unittest.TestCase):
+    """#409: both impl pairs must satisfy the disk-coverage protocols."""
+
+    def test_pipeline_impls_satisfy_protocol(self) -> None:
+        from lib.disk_coverage_service import DiskCoveragePipelineDB
+        from lib.pipeline_db import PipelineDB
+
+        self.assertTrue(issubclass(PipelineDB, DiskCoveragePipelineDB))
+        self.assertTrue(issubclass(FakePipelineDB, DiskCoveragePipelineDB))
+
+    def test_beets_impls_satisfy_protocol(self) -> None:
+        from lib.beets_db import BeetsDB
+        from lib.disk_coverage_service import DiskCoverageBeetsDB
+
+        self.assertTrue(issubclass(BeetsDB, DiskCoverageBeetsDB))
+        self.assertTrue(issubclass(FakeBeetsDB, DiskCoverageBeetsDB))
 
 
 if __name__ == "__main__":

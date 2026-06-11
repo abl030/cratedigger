@@ -470,7 +470,7 @@ def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
     return len(tracks)
 
 
-def default_youtube_ingest_service_factory(pdb: Any) -> "YoutubeIngestService":
+def default_youtube_ingest_service_factory(pdb: _PipelineDB) -> "YoutubeIngestService":
     """Construct a production ``YoutubeIngestService`` for CLI / API.
 
     Wires the live MB-mirror ``mb_track_count_fn`` (other ports retain

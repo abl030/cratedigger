@@ -36,7 +36,7 @@ import re
 import socket
 import time
 import urllib.error
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 import msgspec
 import requests
@@ -415,6 +415,27 @@ DistanceFn = Callable[..., BeetsDistanceResult]
 can supply canned results."""
 
 
+@runtime_checkable
+class YoutubeResolverDB(Protocol):
+    """The PipelineDB surface the resolver uses directly (#409).
+
+    The handle is also forwarded into ``distance_fn`` (a ``Callable[...]``
+    — ``compute_beets_distance`` types its own db param). Parity tests
+    live in ``tests/test_youtube_album_service.py``.
+    """
+
+    def get_youtube_album_mapping(
+        self, release_group_identifier: str, source: str,
+    ) -> Optional[list[dict[str, Any]]]: ...
+
+    def upsert_youtube_album_mapping(
+        self,
+        release_group_identifier: str,
+        source: str,
+        rows: list[dict[str, Any]],
+    ) -> None: ...
+
+
 # ---------------------------------------------------------------------------
 # Public service entrypoint.
 # ---------------------------------------------------------------------------
@@ -423,7 +444,7 @@ can supply canned results."""
 def resolve_youtube_album(
     identifier: str,
     *,
-    pdb: Any,
+    pdb: YoutubeResolverDB,
     mb_get_release: MBLookup,
     mb_get_release_group_releases: MBRGReleases,
     discogs_get_release: DiscogsLookup,
@@ -1300,7 +1321,7 @@ def _score_against_siblings(
     sibling_mbids: list[str],
     mb_release_group_id: Optional[str],
     distance_fn: DistanceFn,
-    pdb: Any,
+    pdb: YoutubeResolverDB,
     mb_fetcher: Callable[[str], Optional[dict]],
     deadline_breached: Optional[Callable[[], bool]] = None,
 ) -> list[ResolvedDistance]:
