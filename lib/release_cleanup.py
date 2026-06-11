@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from lib.beets_album_op import (BeetsOpFailure as SelectorFailure,
                                 BeetsOpFailureReason as SelectorFailureReason,
@@ -60,10 +60,16 @@ from lib.beets_album_op import BeetsAlbumHandle
 
 if TYPE_CHECKING:
     from lib.beets_db import BeetsDB
-    from lib.pipeline_db import PipelineDB
 
 
 log = logging.getLogger("cratedigger")
+
+
+@runtime_checkable
+class ReleaseCleanupDB(Protocol):
+    """The PipelineDB surface remove_and_reset_release uses (#409)."""
+
+    def clear_on_disk_quality_fields(self, request_id: int) -> None: ...
 
 # Re-export for historical call sites (web/routes/pipeline.py, tests,
 # harness/import_one.py) that import these names from this module.
@@ -182,7 +188,7 @@ def remove_album_by_selectors(
 
 def remove_and_reset_release(
     beets_db: "BeetsDB",
-    pipeline_db: "PipelineDB",
+    pipeline_db: ReleaseCleanupDB,
     release_id: str,
     request_id: int,
     *,
