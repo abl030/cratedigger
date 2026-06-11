@@ -6962,6 +6962,134 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
             _shutil.rmtree(source, ignore_errors=True)
 
 
+class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
+    """Issue #271 end-to-end: stale evidence re-measures via the REAL preview.
+
+    Drives ``cleanup_wrong_match`` with the production ``preview_fn`` default
+    (``preview_import_from_path(worker_mode=True)``) against a real temp
+    folder — no ``_RefreshStub``. Covers the live chain the unit tests fake:
+    stale snapshot → worker-mode re-measure (mp3val + ffmpeg decode gate) →
+    corrupt evidence persisted + FK re-pointed → unified decider rejects →
+    source deleted. Also pins the no-amplification property: the refresh must
+    not enqueue import jobs or write new download_log rows.
+    """
+
+    def _patch_cfg(self):
+        from lib.quality import QualityRankConfig
+        from types import SimpleNamespace as _SN
+        cfg = _SN(
+            quality_ranks=QualityRankConfig.defaults(),
+            verified_lossless_target="",
+            beets_directory="",
+            audio_check_mode="normal",
+        )
+        return patch("lib.config.read_runtime_config", return_value=cfg)
+
+    def test_stale_evidence_refreshes_through_real_preview_and_deletes(self) -> None:
+        from datetime import datetime, timezone
+        from lib.quality import (
+            AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
+            AudioQualityMeasurement,
+        )
+        from lib.quality_evidence import snapshot_fingerprint
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_DELETED,
+            cleanup_wrong_match,
+        )
+
+        root = tempfile.mkdtemp()
+        source = os.path.join(root, "failed_imports", "stale-album")
+        os.makedirs(source)
+        try:
+            # The track the original evidence describes: a real size that no
+            # longer matches disk (the #271 race — file truncated to 0 bytes
+            # after capture).
+            track = os.path.join(source, "01.mp3")
+            with open(track, "wb") as fp:
+                fp.write(b"")
+            stat = os.stat(track)
+            stale_files = [
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=13927478,
+                    mtime_ns=int(stat.st_mtime_ns),
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                ),
+            ]
+            evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-1",
+                snapshot_fingerprint=snapshot_fingerprint(stale_files),
+                source_path=source,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="mp3 v0",
+                    spectral_grade="genuine",
+                ),
+                measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                files=stale_files,
+                codec="mp3",
+                container="mp3",
+                storage_format="mp3 v0",
+                audio_file_count=1,
+                filetype_band="mp3",
+                folder_layout="flat",
+            )
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=1, status="manual", mb_release_id="mbid-1",
+            ))
+            db.log_download(
+                1,
+                outcome="rejected",
+                validation_result={
+                    "scenario": "wrong_match",
+                    "failed_path": source,
+                },
+            )
+            log_id = db.download_logs[-1].id
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id="mbid-1",
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_download_log_candidate_evidence(log_id, stored.id)
+            stale_evidence_id = stored.id
+
+            with self._patch_cfg():
+                result = cleanup_wrong_match(db, log_id)
+
+            # The real worker-mode preview re-measured the 0-byte file as
+            # audio_corrupt, persisted fresh evidence, and the unified
+            # decider confidently rejected → source deleted.
+            self.assertEqual(result.outcome, OUTCOME_DELETED)
+            self.assertFalse(os.path.exists(source))
+
+            # Fresh evidence row exists and the FK was re-pointed off the
+            # stale row.
+            new_evidence_id = db.get_download_log_candidate_evidence_id(log_id)
+            self.assertIsNotNone(new_evidence_id)
+            self.assertNotEqual(new_evidence_id, stale_evidence_id)
+            assert new_evidence_id is not None
+            refreshed = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert refreshed is not None
+            self.assertTrue(refreshed.audio_corrupt)
+
+            # No amplification: refresh must not enqueue import jobs or
+            # write new download_log rows.
+            self.assertEqual(db.list_import_jobs(), [])
+            self.assertEqual(len(db.download_logs), 1)
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(root, ignore_errors=True)
+
+
 class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
     """U3: AE1 end-to-end — propagate transcoded-FLAC evidence to the library
     row, then trigger ``cleanup_wrong_match`` against an identical-source FLAC
