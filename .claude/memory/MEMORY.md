@@ -1,4 +1,5 @@
 - [User profile](user_profile.md) — Senior dev running a curated music pipeline on NixOS; prefers TDD and incremental refactoring
+- [Full library backfill](project_full_library_backfill.md) — 2026-06-04: whole beets library ingested as wanted requests for upgrade; explains the ~4700 wanted cohort (21 lossless excluded)
 - [Use nix-shell](feedback_use_nix_shell.md) — All Python/test commands must run inside nix-shell, never bare python3
 - [TDD](feedback_tdd.md) — Strict TDD: tests first, then implementation, verify at each step
 - [Finish the job](feedback_finish_the_job.md) — Wire up new functionality end-to-end — don't leave infrastructure disconnected
@@ -14,7 +15,8 @@
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
 - [Pyright on the full repo](feedback_pyright_full_repo.md) — Always `nix-shell --run "pyright"` on the whole repo, never a subset; fix pre-existing errors in the same pass
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
-- [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from master, but ~/nixosconfig is usually on a dirty feature branch; do flake bumps + wrapper edits in a throwaway worktree off origin/master
+- [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from nixosconfig master; if ~/nixosconfig is dirty/on a feature branch, do flake bumps in a throwaway worktree off origin/master
+- [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — 2026-06-10: nixosconfig deploys via Forgejo + fleet-update, GitHub frozen; nixbot token header push; signed commits required
 - [CI only runs GitGuardian](project_ci_only_gitguardian.md) — cratedigger CI runs ONLY GitGuardian; tests/dead-code/pyright are NOT gated in CI; a green PR check ≠ green suite, so verify locally
 - [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
@@ -24,3 +26,4 @@
 - [Plex asciify_paths split](project_plex_asciify_split.md) — 2026-05-18: asciify_paths + beet move split 1,178 Plex albums; fix is Plex merge API, not Empty Trash
 - [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
 - [Converge is operator-authority](project_converge_operator_authority.md) — Wrong Matches converge button must NOT route deletions through the evidence classifier
+- [Full suite before merge](feedback_full_suite_before_merge.md) — Re-run full suite + pyright after review-fixer edits before commit/push/merge; partial run shipped a broken import to main (2026-05-31)
