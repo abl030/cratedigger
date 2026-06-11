@@ -16,6 +16,7 @@ import msgspec
 from lib.quality import AlbumQualityEvidence, QualityRankConfig
 from lib.quality_evidence import (
     EvidenceBuildResult,
+    QualityEvidenceDB,
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
     load_candidate_evidence_for_source,
@@ -84,7 +85,7 @@ class CurrentEvidenceActionResult(msgspec.Struct, frozen=True):
 
 
 def ensure_candidate_evidence_for_action(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     source_path: str,
     download_log_id: int | None = None,
@@ -120,7 +121,7 @@ def ensure_candidate_evidence_for_action(
 
 
 def ensure_current_evidence_for_action(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     mb_release_id: str,
@@ -237,7 +238,7 @@ def ensure_current_evidence_for_action(
 
 
 def load_current_evidence_for_action(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     mb_release_id: str,
