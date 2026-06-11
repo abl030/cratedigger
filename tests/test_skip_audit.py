@@ -39,25 +39,45 @@ FORBIDDEN_PATTERNS = [
 class TestNoSkippedTestsAllowed(unittest.TestCase):
     """The whole suite must run every time. No exceptions."""
 
+    @staticmethod
+    def _iter_py_files():
+        """Yield ``(relpath, abspath)`` for every .py under tests/, recursively.
+
+        Excludes only this exact file (by relpath, not basename — a future
+        ``tests/web/test_skip_audit.py`` must not inherit the exemption).
+        """
+        for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for fname in sorted(filenames):
+                if not fname.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, fname)
+                rel = os.path.relpath(path, TESTS_DIR)
+                if rel == os.path.basename(__file__):
+                    continue  # this file mentions the patterns in its docstring
+                yield rel, path
+
     def test_no_skip_markers_in_tests_dir(self) -> None:
         offenders: list[str] = []
-        for fname in sorted(os.listdir(TESTS_DIR)):
-            if not fname.endswith(".py"):
-                continue
-            if fname == os.path.basename(__file__):
-                continue  # this file mentions the patterns in its docstring
-            path = os.path.join(TESTS_DIR, fname)
+        for rel, path in self._iter_py_files():
             with open(path, encoding="utf-8") as f:
                 for lineno, line in enumerate(f, start=1):
                     for pat in FORBIDDEN_PATTERNS:
                         if pat.search(line):
-                            offenders.append(f"{fname}:{lineno}: {line.rstrip()}")
+                            offenders.append(f"{rel}:{lineno}: {line.rstrip()}")
         self.assertEqual(
             offenders, [],
             "Skipped/gated tests are forbidden — see CLAUDE.md "
             "§ 'Skipped tests are an anti-pattern'. Offenders:\n  "
             + "\n  ".join(offenders),
         )
+
+    def test_scan_reaches_tests_web_subpackage(self) -> None:
+        """Pin the recursive walk (#408) — a revert to os.listdir would
+        silently drop tests/web/ from the audit."""
+        rels = {rel for rel, _ in self._iter_py_files()}
+        self.assertIn(os.path.join("web", "_harness.py"), rels)
+        self.assertIn(os.path.join("web", "test_route_audit.py"), rels)
 
 
 if __name__ == "__main__":

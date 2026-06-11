@@ -48,7 +48,7 @@ import msgspec
 
 # Eager beets imports. Lazy-loading was tempting (the module is heavy
 # and quality_evidence/measurement do the same), but a sibling
-# ``tests/test_web_server.py`` adds ``tests/../lib`` to sys.path early
+# ``tests/web/_harness.py`` adds ``lib/`` to sys.path early
 # in the test session, which then shadows the upstream ``beets``
 # package whenever we lazily ``from beets import library`` later. By
 # importing eagerly here we lock in the right module at this file's

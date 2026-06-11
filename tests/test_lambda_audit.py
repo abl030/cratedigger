@@ -20,7 +20,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lambda_audit import ALLOWLIST, scan_file, scan_tree  # noqa: E402
+from _lambda_audit import ALLOWLIST, iter_test_files, scan_file, scan_tree  # noqa: E402
 
 
 class TestAdapterLambdaAudit(unittest.TestCase):
@@ -46,11 +46,8 @@ class TestAdapterLambdaAudit(unittest.TestCase):
         """Catch stale allowlist entries — a grandfathered site that was
         renamed, deleted, or migrated to the fake but left its row behind."""
         live: set[str] = set()
-        tests_dir = os.path.dirname(os.path.abspath(__file__))
-        for name in sorted(os.listdir(tests_dir)):
-            if not name.endswith(".py") or not name.startswith("test_"):
-                continue
-            for func, _lineno, _kwarg in scan_file(os.path.join(tests_dir, name)):
+        for name, path in iter_test_files():
+            for func, _lineno, _kwarg in scan_file(path):
                 live.add(f"{name}::{func}")
         stale = sorted(k for k in ALLOWLIST if k not in live)
         self.assertEqual(
@@ -65,6 +62,13 @@ class TestAdapterLambdaAudit(unittest.TestCase):
     def test_allowlist_rationales_are_non_empty(self) -> None:
         empty = sorted(k for k, v in ALLOWLIST.items() if not v.strip())
         self.assertEqual(empty, [], msg="ALLOWLIST entries need a rationale.")
+
+    def test_scan_reaches_tests_web_subpackage(self) -> None:
+        """Pin the recursive walk (#408) — a revert to os.listdir would
+        silently drop tests/web/ from the audit."""
+        rels = {rel for rel, _ in iter_test_files()}
+        self.assertIn(os.path.join("web", "test_routes_browse.py"), rels)
+        self.assertIn(os.path.join("web", "_harness.py"), rels)
 
 
 if __name__ == "__main__":

@@ -113,17 +113,36 @@ def scan_file(path: str) -> List[Tuple[str, int, str]]:
     return visitor.findings
 
 
-def scan_tree() -> Dict[str, List[Tuple[str, int, str]]]:
-    """Scan every ``tests/*.py`` and return non-allowlisted violations.
+def iter_test_files():
+    """Yield ``(relpath, abspath)`` for every module this audit scans.
 
-    Result shape: ``{filename: [(enclosing_function, lineno, kwarg), ...]}``.
-    Allowlisted ``filename::function`` keys are filtered out.
+    Recursive walk since #408 so subpackages (``tests/web/``) stay under
+    audit. ``web/_harness.py`` is included explicitly even though it isn't
+    a ``test_`` module: the shared HTTP harness was audited for its whole
+    life inside ``test_web_server.py``, and the split must not relax that.
+    """
+    for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for fname in sorted(filenames):
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fname)
+            rel = os.path.relpath(path, TESTS_DIR)
+            if fname.startswith("test_") or rel == os.path.join("web", "_harness.py"):
+                yield rel, path
+
+
+def scan_tree() -> Dict[str, List[Tuple[str, int, str]]]:
+    """Scan every test module under ``tests/`` (recursively) and return
+    non-allowlisted violations.
+
+    Result shape: ``{relpath: [(enclosing_function, lineno, kwarg), ...]}``.
+    Allowlisted ``relpath::function`` keys are filtered out; for files
+    directly in ``tests/`` the relpath is the bare filename, so existing
+    allowlist keys are unchanged.
     """
     out: Dict[str, List[Tuple[str, int, str]]] = {}
-    for name in sorted(os.listdir(TESTS_DIR)):
-        if not name.endswith(".py") or not name.startswith("test_"):
-            continue
-        path = os.path.join(TESTS_DIR, name)
+    for name, path in iter_test_files():
         kept = [
             (func, lineno, kwarg)
             for func, lineno, kwarg in scan_file(path)

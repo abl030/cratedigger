@@ -46,7 +46,7 @@ echo
 
 echo "=== Python tests under coverage ==="
 coverage run --parallel-mode --rcfile=.coveragerc \
-  -m unittest discover tests -v 2>&1 | tee "$OUT"
+  -m unittest discover -s tests -t . -v 2>&1 | tee "$OUT"
 
 echo
 echo "=== coverage combine ==="
