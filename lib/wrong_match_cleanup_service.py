@@ -68,6 +68,23 @@ FINAL_AUDIT_OUTCOMES: frozenset[str] = frozenset({
     OUTCOME_DELETE_FAILED,
 })
 
+# Issue #271: stuck-skip outcomes are persisted to the triage audit too, so
+# a row that cleanup cannot classify shows WHY in the UI instead of sitting
+# in the queue with no indication. Transient skips (active job, lock
+# contention, invalid row, operational crash) are deliberately excluded —
+# they resolve on their own and would overwrite a meaningful audit with
+# noise.
+STUCK_SKIP_AUDIT_OUTCOMES: frozenset[str] = frozenset({
+    OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
+    OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+    OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
+    OUTCOME_SKIPPED_CURRENT_EVIDENCE_STALE,
+    OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED,
+    OUTCOME_SKIPPED_MISSING_PATH,
+})
+
+AUDITED_OUTCOMES: frozenset[str] = FINAL_AUDIT_OUTCOMES | STUCK_SKIP_AUDIT_OUTCOMES
+
 
 class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
     download_log_id: int
@@ -123,6 +140,7 @@ def cleanup_all_wrong_matches(
     confirm_all_wrong_matches: bool = False,
     ignore_import_job_id: int | None = None,
     cfg: Any = None,
+    preview_fn: Any = None,
 ) -> WrongMatchCleanupSummary:
     """Run cleanup over the full current Wrong Matches queue."""
     if confirm_all_wrong_matches is not True:
@@ -146,6 +164,7 @@ def cleanup_all_wrong_matches(
             download_log_id,
             ignore_import_job_id=ignore_import_job_id,
             cfg=cfg,
+            preview_fn=preview_fn,
         ))
     return _summary(results)
 
@@ -157,8 +176,13 @@ def cleanup_wrong_match(
     failed_path_hint: str | None = None,
     ignore_import_job_id: int | None = None,
     cfg: Any = None,
+    preview_fn: Any = None,
 ) -> WrongMatchCleanupOutcome:
-    """Evaluate and possibly delete one Wrong Matches source row."""
+    """Evaluate and possibly delete one Wrong Matches source row.
+
+    ``preview_fn`` is the DI seam for the stale-evidence refresh (issue
+    #271); production resolves it to ``preview_import_from_path``.
+    """
     try:
         result = _cleanup_wrong_match(
             db,
@@ -166,6 +190,7 @@ def cleanup_wrong_match(
             failed_path_hint=failed_path_hint,
             ignore_import_job_id=ignore_import_job_id,
             cfg=cfg,
+            preview_fn=preview_fn,
         )
         _persist_cleanup_audit(db, result)
         return result
@@ -189,6 +214,7 @@ def _cleanup_wrong_match(
     failed_path_hint: str | None,
     ignore_import_job_id: int | None,
     cfg: Any,
+    preview_fn: Any = None,
 ) -> WrongMatchCleanupOutcome:
     entry = db.get_download_log_entry(download_log_id)
     if not entry:
@@ -256,6 +282,17 @@ def _cleanup_wrong_match(
         )
 
     candidate = _load_candidate_evidence(db, download_log_id, resolved_path)
+    if (
+        candidate.evidence is None
+        and candidate.outcome == OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE
+    ):
+        candidate = _refresh_stale_candidate_evidence(
+            db,
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=resolved_path,
+            preview_fn=preview_fn,
+        )
     if candidate.evidence is None:
         return _result(
             download_log_id,
@@ -554,6 +591,80 @@ def _load_candidate_evidence(
     )
 
 
+def _refresh_stale_candidate_evidence(
+    db: Any,
+    *,
+    request_id: int,
+    download_log_id: int,
+    source_path: str,
+    preview_fn: Any,
+) -> _LoadedEvidence:
+    """Re-measure a stale candidate and reload its evidence (issue #271).
+
+    Candidate evidence goes stale when slskd races the original capture —
+    a file that was still 0 bytes at measurement time completes later, or
+    the failed_imports move truncates a file after measurement. Either way
+    the snapshot no longer describes the disk, so cleanup could neither
+    classify nor surface the row. Delegating to the worker-mode preview
+    path (the one existing measure-and-persist surface) rebuilds evidence
+    from current disk truth; the reload then goes through the same
+    freshness check as any other candidate. One attempt only — a source
+    that is still churning stays a stale skip until the next sweep.
+    """
+    if preview_fn is None:
+        from lib.import_preview import preview_import_from_path
+
+        preview_fn = preview_import_from_path
+    try:
+        preview = preview_fn(
+            db,
+            request_id=request_id,
+            path=source_path,
+            download_log_id=download_log_id,
+            worker_mode=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "wrong_match_cleanup.evidence_refresh_crashed download_log_id=%s",
+            download_log_id,
+        )
+        return _LoadedEvidence(
+            None,
+            OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+            f"evidence_refresh_crashed: {type(exc).__name__}: {exc}",
+        )
+
+    from lib.import_preview import PREVIEW_VERDICT_EVIDENCE_READY
+
+    verdict = getattr(preview, "verdict", None)
+    if verdict != PREVIEW_VERDICT_EVIDENCE_READY:
+        detail = (
+            getattr(preview, "reason", None)
+            or getattr(preview, "detail", None)
+            or verdict
+            or "no_preview_result"
+        )
+        return _LoadedEvidence(
+            None,
+            OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+            f"evidence_refresh_failed: {detail}",
+        )
+
+    reloaded = _load_candidate_evidence(db, download_log_id, source_path)
+    if reloaded.evidence is None:
+        return _LoadedEvidence(
+            None,
+            reloaded.outcome or OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+            f"after_refresh: {reloaded.reason}",
+        )
+    logger.info(
+        "wrong_match_cleanup.evidence_refreshed download_log_id=%s path=%s",
+        download_log_id,
+        source_path,
+    )
+    return reloaded
+
+
 def _matching_active_jobs(
     db: Any,
     *,
@@ -765,7 +876,7 @@ def _persist_cleanup_audit(
     db: Any,
     result: WrongMatchCleanupOutcome,
 ) -> None:
-    if result.outcome not in FINAL_AUDIT_OUTCOMES:
+    if result.outcome not in AUDITED_OUTCOMES:
         return
     recorder = getattr(db, "record_wrong_match_triage", None)
     if not callable(recorder):

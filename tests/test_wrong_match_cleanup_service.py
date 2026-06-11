@@ -19,7 +19,12 @@ from lib.quality import (
     QualityRankConfig,
     VerifiedLosslessProof,
 )
-from lib.quality_evidence import snapshot_fingerprint
+from lib.import_preview import (
+    PREVIEW_VERDICT_EVIDENCE_READY,
+    PREVIEW_VERDICT_MEASUREMENT_FAILED,
+    ImportPreviewResult,
+)
+from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CurrentEvidenceActionResult,
@@ -80,8 +85,10 @@ def _evidence(
     *,
     mb_release_id: str = "mbid-1",
     audio_corrupt: bool = False,
+    files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> AlbumQualityEvidence:
-    files = _evidence_files(source)
+    if files is None:
+        files = _evidence_files(source)
     return AlbumQualityEvidence(
         mb_release_id=mb_release_id,
         snapshot_fingerprint=snapshot_fingerprint(files),
@@ -116,6 +123,47 @@ def _store_evidence(
     )
     assert stored is not None and stored.id is not None
     return stored.id
+
+
+class _RefreshStub:
+    """Stub for the ``preview_fn`` DI seam (issue #271 stale-evidence refresh).
+
+    Mirrors the worker-mode ``preview_import_from_path`` contract: on success
+    it persists candidate evidence and re-points the download_log FK, and it
+    returns a real ``ImportPreviewResult`` either way.
+    """
+
+    def __init__(
+        self,
+        *,
+        persist_evidence: AlbumQualityEvidence | None = None,
+        verdict: str = PREVIEW_VERDICT_EVIDENCE_READY,
+        reason: str | None = None,
+    ) -> None:
+        self.persist_evidence = persist_evidence
+        self.verdict = verdict
+        self.reason = reason
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, db, *, request_id, path, download_log_id, worker_mode):
+        self.calls.append({
+            "request_id": request_id,
+            "path": path,
+            "download_log_id": download_log_id,
+            "worker_mode": worker_mode,
+        })
+        if self.persist_evidence is not None:
+            db.set_download_log_candidate_evidence(
+                download_log_id,
+                _store_evidence(db, self.persist_evidence),
+            )
+        return ImportPreviewResult(
+            mode="path", verdict=self.verdict, reason=self.reason,
+        )
+
+
+def _refresh_stub(**kwargs) -> _RefreshStub:
+    return _RefreshStub(**kwargs)
 
 
 def _log_wrong_match(
@@ -223,6 +271,10 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             self.db,
             confirm_all_wrong_matches=True,
             cfg=_cfg(),
+            preview_fn=_refresh_stub(
+                verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+                reason="snapshot_stale",
+            ),
         )
 
         self.assertEqual(summary.deleted, 1)
@@ -233,6 +285,177 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(keep_source))
         self.assertTrue(os.path.isdir(stale_source))
         self.assertTrue(os.path.isdir(missing_source))
+
+    def _make_stale_row(self, name: str) -> tuple[str, int]:
+        """Wrong-match row whose evidence predates a late-arriving file."""
+        source = _make_source(self.tmp, name)
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source)),
+        )
+        with open(os.path.join(source, "02.mp3"), "wb") as handle:
+            handle.write(b"late arrival")
+        return source, log_id
+
+    def test_stale_evidence_refreshes_then_classifies(self) -> None:
+        """Issue #271: stale candidate evidence re-measures and re-decides."""
+        source, log_id = self._make_stale_row("refresh-source")
+        fresh = _evidence(
+            source,
+            audio_corrupt=True,
+            files=snapshot_audio_files(source),
+        )
+        preview_fn = _refresh_stub(persist_evidence=fresh)
+
+        result = cleanup_wrong_match(
+            self.db, log_id, cfg=_cfg(), preview_fn=preview_fn,
+        )
+
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertFalse(os.path.exists(source))
+        self.assertEqual(len(preview_fn.calls), 1)
+        call = preview_fn.calls[0]
+        self.assertEqual(call["request_id"], 1)
+        self.assertEqual(call["path"], source)
+        self.assertEqual(call["download_log_id"], log_id)
+        self.assertTrue(call["worker_mode"])
+
+    def test_stale_refresh_failure_keeps_stale_skip(self) -> None:
+        source, log_id = self._make_stale_row("refresh-fail-source")
+        preview_fn = _refresh_stub(
+            verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+            reason="materialization_error",
+        )
+
+        result = cleanup_wrong_match(
+            self.db, log_id, cfg=_cfg(), preview_fn=preview_fn,
+        )
+
+        self.assertEqual(
+            result.outcome, OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+        )
+        self.assertIn("evidence_refresh_failed", result.reason or "")
+        self.assertIn("materialization_error", result.reason or "")
+        self.assertTrue(os.path.isdir(source))
+
+    def test_stale_refresh_crash_keeps_stale_skip(self) -> None:
+        source, log_id = self._make_stale_row("refresh-crash-source")
+
+        def crashing_preview(db, **_kwargs):
+            raise RuntimeError("preview blew up")
+
+        result = cleanup_wrong_match(
+            self.db, log_id, cfg=_cfg(), preview_fn=crashing_preview,
+        )
+
+        self.assertEqual(
+            result.outcome, OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+        )
+        self.assertIn("evidence_refresh_crashed", result.reason or "")
+        self.assertTrue(os.path.isdir(source))
+
+    def test_stale_after_refresh_skips_without_looping(self) -> None:
+        """Refresh that leaves evidence stale must not retry forever."""
+        source, log_id = self._make_stale_row("still-stale-source")
+        # evidence_ready verdict but nothing persisted: reload stays stale.
+        preview_fn = _refresh_stub()
+
+        result = cleanup_wrong_match(
+            self.db, log_id, cfg=_cfg(), preview_fn=preview_fn,
+        )
+
+        self.assertEqual(
+            result.outcome, OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+        )
+        self.assertIn("after_refresh", result.reason or "")
+        self.assertEqual(len(preview_fn.calls), 1)
+        self.assertTrue(os.path.isdir(source))
+
+    def test_fresh_evidence_does_not_invoke_refresh(self) -> None:
+        source = _make_source(self.tmp, "fresh-no-refresh-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
+        )
+        preview_fn = _refresh_stub()
+
+        result = cleanup_wrong_match(
+            self.db, log_id, cfg=_cfg(), preview_fn=preview_fn,
+        )
+
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertEqual(preview_fn.calls, [])
+
+    def test_missing_candidate_evidence_is_not_refreshed(self) -> None:
+        """Refresh covers stale only — missing-FK rows stay manual (#271)."""
+        source = _make_source(self.tmp, "missing-no-refresh-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        preview_fn = _refresh_stub()
+
+        result = cleanup_wrong_match(
+            self.db, log_id, cfg=_cfg(), preview_fn=preview_fn,
+        )
+
+        self.assertEqual(
+            result.outcome, OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
+        )
+        self.assertEqual(preview_fn.calls, [])
+        self.assertTrue(os.path.isdir(source))
+
+    def test_stuck_skip_outcomes_persist_recents_triage_audit(self) -> None:
+        """Issue #271: stuck skips leave an audit row the UI can render."""
+        source, log_id = self._make_stale_row("audit-stale-source")
+        preview_fn = _refresh_stub(
+            verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+            reason="snapshot_stale",
+        )
+
+        cleanup_wrong_match(self.db, log_id, cfg=_cfg(), preview_fn=preview_fn)
+
+        by_id = {row.id: row for row in self.db.download_logs}
+        triage = by_id[log_id].validation_result["wrong_match_triage"]
+        self.assertEqual(
+            triage["outcome"], OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+        )
+        self.assertEqual(
+            triage["action"], OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
+        )
+        self.assertFalse(triage["success"])
+        self.assertIn("evidence_refresh_failed", triage["reason"])
+
+        missing_source = _make_source(self.tmp, "audit-missing-source")
+        missing_id = _log_wrong_match(self.db, 1, missing_source)
+        cleanup_wrong_match(
+            self.db, missing_id, cfg=_cfg(), preview_fn=preview_fn,
+        )
+        by_id = {row.id: row for row in self.db.download_logs}
+        triage = by_id[missing_id].validation_result["wrong_match_triage"]
+        self.assertEqual(
+            triage["outcome"], OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
+        )
+
+    def test_transient_skip_outcomes_do_not_persist_triage_audit(self) -> None:
+        source = _make_source(self.tmp, "audit-transient-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
+        )
+        self.db.enqueue_import_job(
+            "force_import",
+            request_id=1,
+            payload={"download_log_id": log_id, "failed_path": source},
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED_ACTIVE_JOB)
+        by_id = {row.id: row for row in self.db.download_logs}
+        self.assertNotIn(
+            "wrong_match_triage", by_id[log_id].validation_result,
+        )
 
     def test_final_outcomes_persist_recents_triage_audit(self) -> None:
         delete_source = _make_source(self.tmp, "audit-delete-source")
@@ -457,6 +680,9 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(summary.skipped_missing_path, 1)
         self.assertEqual(summary.results[0].outcome, OUTCOME_SKIPPED_MISSING_PATH)
         self.assertIn("failed_path", self.db.download_logs[-1].validation_result)
+        # Issue #271: missing-path skips are stuck states — audited.
+        triage = self.db.download_logs[-1].validation_result["wrong_match_triage"]
+        self.assertEqual(triage["outcome"], OUTCOME_SKIPPED_MISSING_PATH)
 
     def test_operational_failure_is_counted_at_service_layer(self) -> None:
         source = _make_source(self.tmp, "operational-source")
@@ -607,6 +833,12 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         assert result.reason is not None
         self.assertIn("RuntimeError", result.reason)
         self.assertIn("boom", result.reason)
+        # Issue #271: current-evidence skips are stuck states — audited.
+        by_id = {row.id: row for row in self.db.download_logs}
+        triage = by_id[log_id].validation_result["wrong_match_triage"]
+        self.assertEqual(
+            triage["outcome"], OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED,
+        )
 
     def test_verified_lossless_parent_short_circuits_to_deletion(self) -> None:
         """Verified-lossless current → cleanup deletes without calling the reducer."""
