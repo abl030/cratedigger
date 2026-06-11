@@ -116,7 +116,7 @@ class TestPipelineRouteContracts(_WebServerCase):
     }
     DASHBOARD_REQUIRED_FIELDS = {
         "generated_at", "redis", "searches", "cycles", "coverage",
-        "peer_dirs", "plan_readiness",
+        "peers", "plan_readiness",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS = {
         "label", "hours", "searches", "distinct_requests",
@@ -169,17 +169,16 @@ class TestPipelineRouteContracts(_WebServerCase):
     DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS = {
         "bucket_start", "matches", "matches_per_day",
     }
-    DASHBOARD_PEER_DIR_FIELDS = {
+    DASHBOARD_PEERS_FIELDS = {
         "totals", "days", "heavy_queries", "heavy_query_hours",
     }
-    DASHBOARD_PEER_DIR_TOTAL_FIELDS = {
-        "known_combos", "known_peers", "known_dirs", "new_24h",
-        "cold_seen_24h", "days_with_new", "tracked_since",
+    DASHBOARD_PEERS_TOTAL_FIELDS = {
+        "known_peers", "new_24h", "seen_24h", "tracked_since",
     }
-    DASHBOARD_PEER_DIR_DAY_FIELDS = {
-        "date", "new_combos", "new_peers", "new_dirs",
+    DASHBOARD_PEERS_DAY_FIELDS = {
+        "date", "new_peers", "total_peers",
     }
-    DASHBOARD_PEER_DIR_HEAVY_QUERY_FIELDS = {
+    DASHBOARD_PEER_BROWSE_HEAVY_QUERY_FIELDS = {
         "search_log_id", "request_id", "mb_release_id", "artist_name",
         "album_title", "status", "created_at", "query", "variant",
         "outcome", "result_count", "elapsed_s", "browse_time_s",
@@ -359,18 +358,18 @@ class TestPipelineRouteContracts(_WebServerCase):
         _assert_required_fields(self, data["coverage"],
                                 self.DASHBOARD_COVERAGE_FIELDS,
                                 "pipeline dashboard coverage")
-        _assert_required_fields(self, data["peer_dirs"],
-                                self.DASHBOARD_PEER_DIR_FIELDS,
-                                "pipeline dashboard peer dirs")
-        _assert_required_fields(self, data["peer_dirs"]["totals"],
-                                self.DASHBOARD_PEER_DIR_TOTAL_FIELDS,
-                                "pipeline dashboard peer dir totals")
-        _assert_required_fields(self, data["peer_dirs"]["days"][0],
-                                self.DASHBOARD_PEER_DIR_DAY_FIELDS,
-                                "pipeline dashboard peer dir day")
-        _assert_required_fields(self, data["peer_dirs"]["heavy_queries"][0],
-                                self.DASHBOARD_PEER_DIR_HEAVY_QUERY_FIELDS,
-                                "pipeline dashboard peer dir heavy query")
+        _assert_required_fields(self, data["peers"],
+                                self.DASHBOARD_PEERS_FIELDS,
+                                "pipeline dashboard peers")
+        _assert_required_fields(self, data["peers"]["totals"],
+                                self.DASHBOARD_PEERS_TOTAL_FIELDS,
+                                "pipeline dashboard peer totals")
+        _assert_required_fields(self, data["peers"]["days"][0],
+                                self.DASHBOARD_PEERS_DAY_FIELDS,
+                                "pipeline dashboard peer day")
+        _assert_required_fields(self, data["peers"]["heavy_queries"][0],
+                                self.DASHBOARD_PEER_BROWSE_HEAVY_QUERY_FIELDS,
+                                "pipeline dashboard peer browse heavy query")
         self.assertIsInstance(data["coverage"]["top_loop_suspects"], list)
         self.assertIsInstance(data["coverage"]["stale_wanted"], list)
         self.assertIsInstance(data["coverage"]["match_rate_series_24h"], list)

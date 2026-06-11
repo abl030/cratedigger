@@ -162,7 +162,7 @@ class BrowseCoordinator:
                         self._browse_and_cache, user, file_dir, slskd_client,
                     )
                     self._inflight[key] = browse_future
-                    self._ctx.peer_dir_observations.add(key)
+                    self._ctx.peer_observations.add(user)
                     browse_attempts += 1
                 else:
                     browse_future = existing_future

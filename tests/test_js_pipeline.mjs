@@ -185,9 +185,9 @@ console.log('withCoverageMatchRates() falls back to search window found counts')
   }
 }
 
-console.log('renderPeerDirHeavyQueries() shows release ids and exact query tokens');
+console.log('renderPeerBrowseHeavyQueries() shows release ids and exact query tokens');
 {
-  const html = __test__.renderPeerDirHeavyQueries({
+  const html = __test__.renderPeerBrowseHeavyQueries({
     heavy_query_hours: 24,
     heavy_queries: [
       {
@@ -212,6 +212,33 @@ console.log('renderPeerDirHeavyQueries() shows release ids and exact query token
   assertContains(html, '*he *iggles 1991', 'exact query rendered');
   assertContains(html, '32,355', 'peer/dir count rendered');
   assertContains(html, '64m 28s', 'browse duration rendered');
+}
+
+console.log('renderPeersCard() shows totals strip and cumulative day table');
+{
+  const html = __test__.renderPeersCard({
+    totals: {
+      known_peers: 40746,
+      new_24h: 312,
+      seen_24h: 1894,
+      tracked_since: '2026-05-08T13:50:47+00:00',
+    },
+    days: [
+      { date: '2026-06-12', new_peers: 312, total_peers: 40746 },
+      { date: '2026-06-11', new_peers: 0, total_peers: 40434 },
+    ],
+  });
+  assertContains(html, 'Known Peers', 'card title rendered');
+  assertContains(html, '40,746', 'known peer total rendered');
+  assertContains(html, 'Seen 24h', 'seen-24h metric rendered');
+  assertContains(html, '2026-06-11', 'zero-day row rendered');
+  assertContains(html, '40,434', 'carried-forward cumulative total rendered');
+}
+
+console.log('renderPeersCard() with no observations renders the empty row');
+{
+  const html = __test__.renderPeersCard({ totals: {}, days: [] });
+  assertContains(html, 'No peer observations yet', 'empty state rendered');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

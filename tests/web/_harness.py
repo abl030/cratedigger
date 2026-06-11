@@ -498,7 +498,7 @@ def _make_server():
                 },
             ],
         },
-        "peer_dirs": {
+        "peers": {
             "heavy_query_hours": 24,
             "heavy_queries": [
                 {
@@ -523,20 +523,16 @@ def _make_server():
                 },
             ],
             "totals": {
-                "known_combos": 1200,
                 "known_peers": 220,
-                "known_dirs": 980,
                 "new_24h": 80,
-                "cold_seen_24h": 95,
-                "days_with_new": 2,
+                "seen_24h": 95,
                 "tracked_since": "2026-05-04T00:00:00+00:00",
             },
             "days": [
                 {
                     "date": "2026-05-05",
-                    "new_combos": 80,
                     "new_peers": 22,
-                    "new_dirs": 75,
+                    "total_peers": 220,
                 },
             ],
         },
