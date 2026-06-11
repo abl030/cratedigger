@@ -943,10 +943,6 @@ def post_import_preview(h, body: dict) -> None:
                 request_id=int(body["request_id"]),
                 path=str(body["path"]),
                 force=bool(body.get("force", True)),
-                source_username=(
-                    str(body["source_username"])
-                    if body.get("source_username") is not None else None
-                ),
             )
     except (ValueError, TypeError, msgspec.ValidationError) as exc:
         h._error(f"Invalid preview input: {exc}")

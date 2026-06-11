@@ -5006,7 +5006,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
     ``load_candidate_evidence_for_source`` and a FakePipelineDB. Asserts
     that when stored candidate evidence already passes the snapshot guard,
     the worker marks the job importable WITHOUT invoking
-    ``preview_import_from_path`` / ``measure_preimport_state`` / spectral
+    ``measure_and_persist_candidate_evidence`` / ``measure_preimport_state`` / spectral
     analysis or, for automation jobs, the materialization helper.
 
     Covers AE4 for both force/manual and automation job types via the
@@ -5085,7 +5085,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             def _sentinel_preview(*args, **kwargs):
                 sentinels["preview_called"] = True
                 raise AssertionError(
-                    "preview_import_from_path must not be called when evidence is valid"
+                    "measure_and_persist_candidate_evidence must not be called when evidence is valid"
                 )
 
             def _sentinel_measure(*args, **kwargs):
@@ -5095,7 +5095,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
             ), patch(
                 "lib.import_preview.measure_preimport_state",
@@ -5162,7 +5162,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             def _sentinel_preview(*args, **kwargs):
                 sentinels["preview_called"] = True
                 raise AssertionError(
-                    "preview_import_from_path must not be called when evidence is valid"
+                    "measure_and_persist_candidate_evidence must not be called when evidence is valid"
                 )
 
             def _sentinel_measure(*args, **kwargs):
@@ -5178,7 +5178,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 )
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
             ), patch(
                 "lib.import_preview.measure_preimport_state",
@@ -5601,7 +5601,7 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
             failure=payload,
         )
         with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
+            "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
@@ -5652,7 +5652,7 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
             failure=payload,
         )
         with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
+            "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
@@ -5700,7 +5700,7 @@ class TestU5PreviewWorkerSelfHealSlice(unittest.TestCase):
             failure=payload,
         )
         with patch(
-            "scripts.import_preview_worker.preview_import_from_path",
+            "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
@@ -5783,7 +5783,7 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                 return preview_result
 
             with patch(
-                "scripts.import_preview_worker.preview_import_from_path",
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
@@ -6467,10 +6467,10 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
 
 
 class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
-    """Hotfix coverage: ``preview_import_from_path(worker_mode=True)`` must
+    """Hotfix coverage: ``measure_and_persist_candidate_evidence`` must
     never decide accept/reject. The worker collects facts via
     ``measure_preimport_state``, persists evidence, and lets the importer's
-    ``preimport_decide`` make the accept/reject call.
+    ``full_pipeline_decision_from_evidence`` make the accept/reject call.
 
     Reproduces the Boards-of-Canada production bug: a pre-U8 legacy shim
     bundled measurement with a ``spectral_reject`` decision, early-returned
@@ -6789,7 +6789,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             def _harness_sentinel(*args, **kwargs):
                 sentinels["harness_called"] = True
                 raise AssertionError(
-                    "harness must not run on corrupt audio in worker_mode"
+                    "harness must not run on corrupt audio in the measure-and-persist path"
                 )
 
             with patch(
@@ -6966,7 +6966,7 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
     """Issue #271 end-to-end: stale evidence re-measures via the REAL preview.
 
     Drives ``cleanup_wrong_match`` with the production ``preview_fn`` default
-    (``preview_import_from_path(worker_mode=True)``) against a real temp
+    (``measure_and_persist_candidate_evidence``) against a real temp
     folder — no ``_RefreshStub``. Covers the live chain the unit tests fake:
     stale snapshot → worker-mode re-measure (mp3val + ffmpeg decode gate) →
     corrupt evidence persisted + FK re-pointed → unified decider rejects →

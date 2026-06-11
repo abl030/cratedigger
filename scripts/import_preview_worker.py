@@ -25,7 +25,7 @@ from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
-    preview_import_from_path,
+    measure_and_persist_candidate_evidence,
 )
 from lib.import_evidence import (
     CANDIDATE_STATUS_REUSED,
@@ -102,13 +102,6 @@ def _state_from_raw(raw: Any) -> ActiveDownloadState:
     if isinstance(raw, str):
         return ActiveDownloadState.from_json(raw)
     raise ValueError("Automation import job has no active_download_state")
-
-
-def _first_state_username(state: ActiveDownloadState) -> str | None:
-    for file_state in state.files:
-        if file_state.username:
-            return file_state.username
-    return None
 
 
 def derive_canonical_import_folder(
@@ -297,15 +290,11 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
         failed_path = payload.get("failed_path")
         if not isinstance(failed_path, str) or not failed_path:
             raise ValueError("Force import preview job is missing failed_path")
-        source_username = payload.get("source_username")
         download_log_id = payload.get("download_log_id")
         return {
             "request_id": job.request_id,
             "path": failed_path,
             "force": True,
-            "source_username": (
-                str(source_username) if source_username is not None else None
-            ),
             "download_log_id": (
                 int(download_log_id)
                 if isinstance(download_log_id, int)
@@ -321,7 +310,6 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
             "request_id": job.request_id,
             "path": failed_path,
             "force": False,
-            "source_username": None,
             "download_log_id": None,
         }
 
@@ -341,15 +329,13 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
             "request_id": job.request_id,
             "path": state.current_path,
             "force": False,
-            "source_username": _first_state_username(state),
             "download_log_id": None,
         }
 
     if job.job_type == IMPORT_JOB_YOUTUBE:
         # KTD1: never read ``active_download_state``. The staged path
         # is the authoritative source — yt-dlp already wrote files
-        # there, and we measure them in place. ``source_username`` is
-        # None because YT has no slskd peer to attribute to.
+        # there, and we measure them in place.
         try:
             youtube_payload = msgspec.convert(payload, type=YoutubeImportPayload)
         except msgspec.ValidationError as exc:
@@ -360,7 +346,6 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
             "request_id": job.request_id,
             "path": youtube_payload.staged_path,
             "force": False,
-            "source_username": None,
             "download_log_id": None,
         }
 
@@ -369,11 +354,9 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
 def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
     preview_input = _preview_input(db, job)
-    return preview_import_from_path(
+    return measure_and_persist_candidate_evidence(
         db,
         import_job_id=job.id,
-        persist_candidate_evidence=True,
-        worker_mode=True,
         **preview_input,
     )
 
