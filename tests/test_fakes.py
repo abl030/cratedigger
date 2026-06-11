@@ -3232,6 +3232,33 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         stored = _json.loads(db.download_logs[0].validation_result)  # type: ignore[arg-type]
         self.assertNotIn("failed_path", stored)
 
+    def test_record_wrong_match_triage_merges_typed_audit(self):
+        """Mirrors the real jsonb_set writer: typed audit in, omit-defaults
+        dict merged onto the existing blob."""
+        from lib.validation_envelope import (
+            WrongMatchTriageAudit,
+            decode_validation_envelope,
+        )
+        db = FakePipelineDB()
+        db.log_download(1, outcome="rejected",
+                        validation_result={"failed_path": "/p1",
+                                           "scenario": "wrong_match"})
+        log_id = db.download_logs[0].id
+        audit = WrongMatchTriageAudit(action="deleted_reject", success=True)
+        self.assertTrue(db.record_wrong_match_triage(log_id, audit))
+
+        vr = db.download_logs[0].validation_result
+        assert isinstance(vr, dict)
+        # omit_defaults parity with the real writer — unset fields absent.
+        self.assertEqual(vr["wrong_match_triage"],
+                         {"action": "deleted_reject", "success": True})
+        # Merge, not replace.
+        self.assertEqual(vr["failed_path"], "/p1")
+        env = decode_validation_envelope(vr)
+        self.assertEqual(env.wrong_match_triage, audit)
+        # Unknown log id returns False.
+        self.assertFalse(db.record_wrong_match_triage(99999, audit))
+
     def test_clear_wrong_match_paths_clears_matching_request_and_paths(self):
         db = FakePipelineDB()
         db.log_download(1, outcome="rejected",

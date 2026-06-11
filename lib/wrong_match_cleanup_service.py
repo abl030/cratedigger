@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any, Iterable
@@ -24,6 +23,10 @@ from lib.quality import (
 )
 from lib.quality_evidence import load_candidate_evidence_for_source
 from lib.util import resolve_failed_path
+from lib.validation_envelope import (
+    WrongMatchTriageAudit,
+    decode_validation_envelope,
+)
 from lib.wrong_matches import cleanup_wrong_match_source, validation_failed_path
 
 logger = logging.getLogger("cratedigger")
@@ -263,7 +266,9 @@ def _cleanup_wrong_match(
             reason="failed_path_missing_on_disk",
         )
     candidates = _path_candidates(*candidates, resolved_path)
-    source_dirs = _validation_source_dirs(entry.get("validation_result"))
+    source_dirs = tuple(
+        decode_validation_envelope(entry.get("validation_result")).source_dirs
+    )
 
     active_jobs = _matching_active_jobs(
         db,
@@ -694,26 +699,6 @@ def _matching_active_jobs(
     return [job for job in jobs if getattr(job, "id", None) != ignore_import_job_id]
 
 
-def _validation_result_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _validation_source_dirs(raw: Any) -> tuple[str, ...]:
-    data = _validation_result_dict(raw)
-    value = data.get("source_dirs")
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(str(path) for path in value if path)
-
-
 def _path_candidates(*paths: str | None) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -822,34 +807,24 @@ def _stage_chain_from_decision(decision: dict[str, Any]) -> list[str]:
 
 def _cleanup_audit_payload(
     result: WrongMatchCleanupOutcome,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "action": _audit_action(result.outcome),
-        "success": result.success,
-        "outcome": result.outcome,
-    }
-    if result.reason is not None:
-        payload["reason"] = result.reason
-    if result.verdict is not None:
-        payload["preview_verdict"] = result.verdict
-    if result.preview_decision is not None:
-        payload["preview_decision"] = result.preview_decision
-    if result.cleanup_eligible:
-        payload["cleanup_eligible"] = True
-    if result.source_path is not None:
-        payload["source_path"] = result.source_path
-    stage_chain = _stage_chain_from_decision(result.decision)
-    if stage_chain:
-        payload["stage_chain"] = stage_chain
-    if result.cleared_rows:
-        payload["cleared_rows"] = result.cleared_rows
-    if result.deleted_path is not None:
-        payload["deleted_path"] = result.deleted_path
-    if result.path_missing:
-        payload["path_missing"] = True
-    if result.error is not None:
-        payload["error"] = result.error
-    return payload
+) -> WrongMatchTriageAudit:
+    # omit_defaults on the Struct keeps unset fields out of the JSONB,
+    # matching the old conditional dict building.
+    return WrongMatchTriageAudit(
+        action=_audit_action(result.outcome),
+        outcome=result.outcome,
+        success=result.success,
+        reason=result.reason,
+        preview_verdict=result.verdict,
+        preview_decision=result.preview_decision,
+        cleanup_eligible=result.cleanup_eligible,
+        source_path=result.source_path,
+        stage_chain=_stage_chain_from_decision(result.decision),
+        cleared_rows=result.cleared_rows,
+        deleted_path=result.deleted_path,
+        path_missing=result.path_missing,
+        error=result.error,
+    )
 
 
 def _persist_cleanup_audit(

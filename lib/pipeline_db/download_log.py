@@ -2,6 +2,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+import msgspec
 import psycopg2
 import psycopg2.extras
 
@@ -11,6 +12,12 @@ from lib.pipeline_db._shared import (
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
+from lib.validation_envelope import (
+    FAILED_PATH_KEY,
+    SCENARIO_KEY,
+    WRONG_MATCH_TRIAGE_KEY,
+    WrongMatchTriageAudit,
+)
 
 
 class _DownloadLogMixin(_PipelineDBBase):
@@ -338,8 +345,8 @@ class _DownloadLogMixin(_PipelineDBBase):
         # wrong-match reject — they only get populated for the request's
         # current-state row. COALESCE keeps the older audit history working
         # if any pre-evidence rows are still around.
-        cur = self._execute("""
-            SELECT DISTINCT ON (dl.request_id, dl.validation_result->>'failed_path')
+        cur = self._execute(f"""
+            SELECT DISTINCT ON (dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}')
                 dl.id AS download_log_id,
                 dl.request_id,
                 ar.artist_name,
@@ -366,10 +373,10 @@ class _DownloadLogMixin(_PipelineDBBase):
             LEFT JOIN album_quality_evidence e
                 ON e.id = dl.candidate_evidence_id
             WHERE dl.outcome = 'rejected'
-              AND dl.validation_result->>'failed_path' IS NOT NULL
-              AND (dl.validation_result->>'scenario' IS NULL
-                   OR dl.validation_result->>'scenario' NOT IN ('audio_corrupt', 'spectral_reject'))
-            ORDER BY dl.request_id, dl.validation_result->>'failed_path', dl.id DESC
+              AND dl.validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
+              AND (dl.validation_result->>'{SCENARIO_KEY}' IS NULL
+                   OR dl.validation_result->>'{SCENARIO_KEY}' NOT IN ('audio_corrupt', 'spectral_reject'))
+            ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC
         """)
         rows = [dict(r) for r in cur.fetchall()]
         # DISTINCT ON sorts by path within a request; re-sort so the route
@@ -384,10 +391,10 @@ class _DownloadLogMixin(_PipelineDBBase):
 
         Returns True if the entry was found and updated.
         """
-        cur = self._execute("""
+        cur = self._execute(f"""
             UPDATE download_log
-            SET validation_result = validation_result - 'failed_path'
-            WHERE id = %s AND validation_result->>'failed_path' IS NOT NULL
+            SET validation_result = validation_result - '{FAILED_PATH_KEY}'
+            WHERE id = %s AND validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
         """, (log_id,))
         return cur.rowcount > 0
 
@@ -404,10 +411,10 @@ class _DownloadLogMixin(_PipelineDBBase):
         placeholders = ", ".join(["%s"] * len(paths))
         cur = self._execute(f"""
             UPDATE download_log
-            SET validation_result = validation_result - 'failed_path'
+            SET validation_result = validation_result - '{FAILED_PATH_KEY}'
             WHERE request_id = %s
               AND outcome = 'rejected'
-              AND validation_result->>'failed_path' IN ({placeholders})
+              AND validation_result->>'{FAILED_PATH_KEY}' IN ({placeholders})
         """, tuple([request_id, *paths]))
         self.conn.commit()
         return cur.rowcount
@@ -416,23 +423,23 @@ class _DownloadLogMixin(_PipelineDBBase):
     def record_wrong_match_triage(
         self,
         log_id: int,
-        triage_result: dict[str, object],
+        triage_result: WrongMatchTriageAudit,
     ) -> bool:
         """Persist cleanup audit details on a download_log row."""
-        cur = self._execute("""
+        cur = self._execute(f"""
             UPDATE download_log
             SET validation_result = jsonb_set(
                 CASE
                     WHEN jsonb_typeof(validation_result) = 'object'
                     THEN validation_result
-                    ELSE '{}'::jsonb
+                    ELSE '{{}}'::jsonb
                 END,
-                '{wrong_match_triage}',
+                '{{{WRONG_MATCH_TRIAGE_KEY}}}',
                 %s::jsonb,
                 true
             )
             WHERE id = %s
-        """, (json.dumps(triage_result), log_id))
+        """, (msgspec.json.encode(triage_result).decode(), log_id))
         self.conn.commit()
         return cur.rowcount > 0
 

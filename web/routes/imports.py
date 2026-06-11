@@ -42,27 +42,23 @@ from lib.import_preview import (
     preview_import_from_path,
     preview_import_from_values,
 )
+from lib.validation_envelope import (
+    ValidationResultEnvelope,
+    decode_validation_envelope,
+)
 from web.routes.pipeline import _serialize_import_job
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
     build_wrong_match_explorer,
     resolve_wrong_match_stream_file,
     source_dirs_from_validation_result,
+    target_candidate,
 )
 
 
 def _server():
     from web import server
     return server
-
-
-def _parse_validation_result(vr_raw: object) -> dict[str, object]:
-    """Parse a validation_result JSONB value into a plain dict."""
-    if isinstance(vr_raw, dict):
-        return vr_raw
-    if not vr_raw:
-        return {}
-    return json.loads(str(vr_raw))
 
 
 def _row_presence(
@@ -88,25 +84,6 @@ def _row_presence(
     return "absent"
 
 
-def _target_candidate(vr: dict[str, object]) -> dict[str, object] | None:
-    """Return the target candidate from a validation_result payload."""
-    raw_candidates = vr.get("candidates", [])
-    if not isinstance(raw_candidates, list):
-        return None
-
-    candidates = [
-        candidate for candidate in raw_candidates
-        if isinstance(candidate, dict)
-    ]
-    target = next(
-        (candidate for candidate in candidates if candidate.get("is_target")),
-        None,
-    )
-    if target is not None:
-        return target
-    return candidates[0] if candidates else None
-
-
 def _threshold_milli(value: object) -> int:
     try:
         parsed = int(value) if isinstance(value, (str, int, float)) else 180
@@ -115,21 +92,11 @@ def _threshold_milli(value: object) -> int:
     return max(0, min(parsed, 999))
 
 
-def _distance_value(vr: dict[str, object]) -> float | None:
-    raw = vr.get("distance")
-    if isinstance(raw, bool) or raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    try:
-        return float(str(raw))
-    except (TypeError, ValueError):
-        return None
-
-
-def _is_green_distance(vr: dict[str, object], threshold_milli: int) -> bool:
-    distance = _distance_value(vr)
-    return distance is not None and distance <= threshold_milli / 1000
+def _is_green_distance(
+    vr: ValidationResultEnvelope,
+    threshold_milli: int,
+) -> bool:
+    return vr.distance is not None and vr.distance <= threshold_milli / 1000
 
 
 # Numeric rank for the per-entry sort. Higher = better quality. Mirrors
@@ -406,9 +373,8 @@ def _build_wrong_match_groups(
     for row in rows:
         if not include_replaced and row.get("request_status") == "replaced":
             continue
-        vr = _parse_validation_result(row.get("validation_result"))
-        failed_path_raw = vr.get("failed_path")
-        failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
+        vr = decode_validation_envelope(row.get("validation_result"))
+        failed_path = vr.failed_path or ""
         resolved_path = resolve_failed_path(failed_path)
         files_exist = resolved_path is not None
         if not files_exist:
@@ -444,7 +410,7 @@ def _build_wrong_match_groups(
             groups[request_id] = group
             order.append(request_id)
 
-        target = _target_candidate(vr)
+        target = target_candidate(vr)
         entries_list = group["entries"]
         assert isinstance(entries_list, list)
         log_id = row.get("download_log_id")
@@ -468,14 +434,14 @@ def _build_wrong_match_groups(
             "download_log_id": log_id,
             "failed_path": resolved_path or failed_path,
             "files_exist": files_exist,
-            "distance": vr.get("distance"),
-            "scenario": vr.get("scenario"),
-            "detail": vr.get("detail"),
+            "distance": vr.distance,
+            "scenario": vr.scenario,
+            "detail": vr.detail,
             "soulseek_username": row.get("soulseek_username")
-                or vr.get("soulseek_username"),
+                or vr.soulseek_username,
             "source_dirs": source_dirs_from_validation_result(vr),
             "candidate": target,
-            "local_items": vr.get("items", []),
+            "local_items": vr.items,
             "import_job": import_job,
             "spectral_grade": row.get("spectral_grade"),
             "spectral_bitrate": row.get("spectral_bitrate"),
@@ -800,10 +766,9 @@ def post_wrong_match_converge(h, body: dict) -> None:
             remaining += 1
             continue
 
-        vr = _parse_validation_result(row.get("validation_result"))
-        failed_path_raw = vr.get("failed_path")
-        failed_path = failed_path_raw if isinstance(failed_path_raw, str) else ""
-        distance = _distance_value(vr)
+        vr = decode_validation_envelope(row.get("validation_result"))
+        failed_path = vr.failed_path or ""
+        distance = vr.distance
         green = _is_green_distance(vr, threshold_milli)
 
         if green:
@@ -821,7 +786,7 @@ def post_wrong_match_converge(h, body: dict) -> None:
                 "failed_path": resolved_path,
                 "source_username": (
                     row.get("soulseek_username")
-                    or vr.get("soulseek_username")
+                    or vr.soulseek_username
                 ),
                 "source_dirs": source_dirs_from_validation_result(vr),
             })

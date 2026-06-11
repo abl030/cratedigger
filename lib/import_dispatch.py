@@ -6,7 +6,6 @@ that runs import_one.py and dispatches on the ImportResult decision.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
@@ -65,6 +64,7 @@ from lib.import_manifest import (
     tracked_audio_paths_from_validation_items,
 )
 from lib.processing_paths import normalize_source_dirs
+from lib.validation_envelope import decode_validation_envelope
 from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
                       trigger_meelo_clean)
 
@@ -110,18 +110,6 @@ DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 FORCE_MANUAL_SCENARIOS: frozenset[str] = frozenset({"force_import", "manual_import"})
 
 
-def _validation_result_dict(raw: Any) -> dict[str, Any] | None:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
-    return None
-
-
 def _origin_manifest_for_download_log(
     db: "PipelineDB",
     *,
@@ -136,13 +124,10 @@ def _origin_manifest_for_download_log(
     entry = get_entry(download_log_id)
     if not isinstance(entry, dict):
         return []
-    vr = _validation_result_dict(entry.get("validation_result"))
-    if not vr:
+    vr = decode_validation_envelope(entry.get("validation_result"))
+    if not vr.items:
         return []
-    items = vr.get("items")
-    if not isinstance(items, list):
-        return []
-    return tracked_audio_paths_from_validation_items(items, root=failed_path)
+    return tracked_audio_paths_from_validation_items(vr.items, root=failed_path)
 
 
 def _expected_request_track_count(db: "PipelineDB", request_id: int) -> int | None:

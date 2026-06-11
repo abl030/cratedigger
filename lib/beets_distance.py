@@ -58,6 +58,8 @@ from beets.autotag import distance as _beets_distance_mod  # noqa: E402
 from beets.autotag import hooks as _beets_hooks  # noqa: E402
 from beets.autotag import match as _beets_match_mod  # noqa: E402
 
+from lib.validation_envelope import decode_validation_envelope
+
 
 log = logging.getLogger(__name__)
 
@@ -573,8 +575,8 @@ def compute_beets_distance(
     else:
         # Resolve the on-disk path for the rejected download.
         assert log_row is not None  # narrowed above; Replace-mode invariant
-        vr = log_row.get("validation_result") or {}
-        failed_path = (vr.get("failed_path") if isinstance(vr, dict) else None) or ""
+        failed_path = decode_validation_envelope(
+            log_row.get("validation_result")).failed_path or ""
         resolver = resolve_failed_path
         if resolver is None:
             from lib.util import resolve_failed_path as default_resolver
