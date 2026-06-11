@@ -1031,5 +1031,55 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
 
 
+class TestSummaryOutcomeContract(unittest.TestCase):
+    """Guard: OUTCOME_KEYS and the Summary's count fields cannot drift (#411)."""
+
+    def test_outcome_keys_equal_struct_count_fields(self) -> None:
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_KEYS,
+            WrongMatchCleanupSummary,
+        )
+
+        count_fields = (
+            set(WrongMatchCleanupSummary.__struct_fields__)
+            - {"processed", "results"}
+        )
+        self.assertEqual(set(OUTCOME_KEYS), count_fields)
+
+    def test_summary_counts_each_outcome_into_its_field(self) -> None:
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_KEYS,
+            WrongMatchCleanupOutcome,
+            _summary,
+        )
+
+        for key in OUTCOME_KEYS:
+            with self.subTest(outcome=key):
+                summary = _summary([
+                    WrongMatchCleanupOutcome(download_log_id=1, outcome=key),
+                ])
+                self.assertEqual(getattr(summary, key), 1)
+                self.assertEqual(summary.processed, 1)
+                for other in OUTCOME_KEYS:
+                    if other != key:
+                        self.assertEqual(getattr(summary, other), 0)
+
+    def test_summary_preserves_results_and_ignores_unknown_outcomes(self) -> None:
+        from lib.wrong_match_cleanup_service import (
+            OUTCOME_DELETED,
+            WrongMatchCleanupOutcome,
+            _summary,
+        )
+
+        results = [
+            WrongMatchCleanupOutcome(download_log_id=1, outcome=OUTCOME_DELETED),
+            WrongMatchCleanupOutcome(download_log_id=2, outcome="not_a_real_outcome"),
+        ]
+        summary = _summary(results)
+        self.assertEqual(summary.processed, 2)
+        self.assertEqual(summary.deleted, 1)
+        self.assertEqual(summary.results, tuple(results))
+
+
 if __name__ == "__main__":
     unittest.main()

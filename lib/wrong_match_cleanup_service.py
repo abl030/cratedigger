@@ -745,39 +745,18 @@ def _runtime_config() -> Any:
 def _summary(
     results: list[WrongMatchCleanupOutcome],
 ) -> WrongMatchCleanupSummary:
+    # Outcome strings ARE the Summary's count-field names (guarded by
+    # TestSummaryOutcomeContract), so the counts dict splats straight in.
     counts = {key: 0 for key in OUTCOME_KEYS}
     for result in results:
         if result.outcome in counts:
             counts[result.outcome] += 1
-    return WrongMatchCleanupSummary(
-        processed=len(results),
-        deleted=counts[OUTCOME_DELETED],
-        deleted_verified_lossless_parent=counts[
-            OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT
-        ],
-        kept_would_import=counts[OUTCOME_KEPT_WOULD_IMPORT],
-        kept_uncertain=counts[OUTCOME_KEPT_UNCERTAIN],
-        skipped_candidate_evidence_missing=counts[
-            OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING
-        ],
-        skipped_candidate_evidence_stale=counts[
-            OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE
-        ],
-        skipped_current_evidence_missing=counts[
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING
-        ],
-        skipped_current_evidence_stale=counts[
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_STALE
-        ],
-        skipped_current_evidence_failed=counts[
-            OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED
-        ],
-        skipped_active_job=counts[OUTCOME_SKIPPED_ACTIVE_JOB],
-        skipped_invalid_row=counts[OUTCOME_SKIPPED_INVALID_ROW],
-        skipped_missing_path=counts[OUTCOME_SKIPPED_MISSING_PATH],
-        skipped_operational=counts[OUTCOME_SKIPPED_OPERATIONAL],
-        delete_failed=counts[OUTCOME_DELETE_FAILED],
-        results=tuple(results),
+    return msgspec.structs.replace(
+        WrongMatchCleanupSummary(
+            processed=len(results),
+            results=tuple(results),
+        ),
+        **counts,
     )
 
 
