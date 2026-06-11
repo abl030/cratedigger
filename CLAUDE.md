@@ -249,7 +249,7 @@ not `@dataclass` — see `.claude/rules/code-quality.md` § "Wire-boundary types
 
 ## Deploying changes
 
-All code deploys via Nix flake: push → `nix flake update cratedigger-src` on doc1 → `nixos-rebuild switch` doc2. Flake input updates MUST happen on doc1 (doc2 has no git push credentials). `cratedigger.service` has `restartIfChanged = false` — the 5-min timer picks up new code; `cratedigger-web` and `cratedigger-db-migrate` restart on switch. Before `nix/module.nix` changes, run the VM check (`nix build .#checks.x86_64-linux.moduleVm`). Full command sequence + verification in `.claude/rules/deploy.md` (always loaded); the `/deploy` command runs it end-to-end.
+All code deploys via Nix flake: push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → commit (SSH-signed) + push nixosconfig to **Forgejo** (`git.ablz.au`, token at `/run/secrets/forgejo/nixbot-token`) → `ssh doc2 'sudo fleet-update'`. **Never deploy from `github:abl030/nixosconfig` — since the 2026-06-10 Forgejo cutover, GitHub is a frozen, stale fallback** (the cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed). Flake input updates MUST happen on doc1 (has the Forgejo token + signing key). `cratedigger.service` has `restartIfChanged = false` — the 5-min timer picks up new code; `cratedigger-web` and `cratedigger-db-migrate` restart on switch. Before `nix/module.nix` changes, run the VM check (`nix build .#checks.x86_64-linux.moduleVm`). Full command sequence + verification in `.claude/rules/deploy.md` (always loaded); the `/deploy` command runs it end-to-end.
 
 ## GitHub PR merges
 
@@ -261,7 +261,7 @@ individual commits that landed in the PR.
 
 ## Database migrations
 
-Schema lives in `migrations/NNN_name.sql`; `cratedigger-db-migrate.service` runs them on every `nixos-rebuild switch` before the app services start (a failed migration blocks the app). Add a change by dropping a new numbered SQL file — no manual psql, **never** edit a shipped migration (frozen history), **never** add DDL inside `PipelineDB` methods. Full workflow (test with `tests.test_migrator`, back-up-before-destructive, post-deploy verify) in `.claude/rules/deploy.md` § "Database migrations" (always loaded).
+Schema lives in `migrations/NNN_name.sql`; `cratedigger-db-migrate.service` runs them on every switch (fleet-update or break-glass rebuild) before the app services start (a failed migration blocks the app). Add a change by dropping a new numbered SQL file — no manual psql, **never** edit a shipped migration (frozen history), **never** add DDL inside `PipelineDB` methods. Full workflow (test with `tests.test_migrator`, back-up-before-destructive, post-deploy verify) in `.claude/rules/deploy.md` § "Database migrations" (always loaded).
 
 ## Running tests
 

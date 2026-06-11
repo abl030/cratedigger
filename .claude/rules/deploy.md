@@ -1,8 +1,11 @@
 # Deployment Rules
 
-- All code deploys via Nix flake: push cratedigger → `nix flake update cratedigger-src` on doc1 → `nixos-rebuild switch` doc2
+- All code deploys via Nix flake: push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → commit (SSH-signed) + push nixosconfig to **Forgejo** → `ssh doc2 'sudo fleet-update'`.
+- **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo (`git.ablz.au`), NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
+- The Forgejo push needs a token header (gh's credential helper is github.com-only): `TOKEN=$(cat /run/secrets/forgejo/nixbot-token) && git -c "http.extraHeader=Authorization: token ${TOKEN}" push origin master`. Never echo the token.
+- `fleet-update` verifies every commit in range is SSH-signed by a key in hosts.nix, then builds from its own root-owned clone at `/var/lib/fleet-update/repo`. Break-glass only: `sudo fleet-update --dry-run` (fetch + verify + checkout) followed by `sudo nixos-rebuild switch --flake /var/lib/fleet-update/repo#doc2 --no-write-lock-file --option accept-flake-config true`.
 - The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports it via `inputs.cratedigger-src.nixosModules.default`.
-- Flake updates MUST happen on doc1 (has git push credentials). NEVER from doc2.
+- Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
 - `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The 5-min timer picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch.
 - Always verify deployed code: `ssh doc2 'grep "<unique string>" /nix/store/*/lib/quality.py 2>/dev/null'`. For module changes: `ssh doc2 'cat /etc/systemd/system/cratedigger.service'` or check the rendered `/var/lib/cratedigger/config.ini`.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.

@@ -1,24 +1,29 @@
 # Deploy to doc2
 
-Push code, update flake input on doc1, rebuild doc2 (which auto-runs migrations), verify.
+Push code, update flake input on doc1, push nixosconfig to Forgejo, run fleet-update on doc2 (which auto-runs migrations), verify.
+
+**Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from FORGEJO (`git.ablz.au`), never `github:abl030/nixosconfig` — GitHub is a frozen fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
 
 ## Steps
 
-1. Commit and push:
+1. Commit and push cratedigger (GitHub, unchanged):
 ```bash
 git add <files> && git commit -m "<message>" && git push
 ```
 
-2. Update flake input on doc1 and push:
+2. Update flake input on doc1, commit (must be SSH-signed — `commit.gpgsign` is already on in ~/nixosconfig), and push to Forgejo. The push needs the Forgejo token as an auth header (the gh credential helper only covers github.com):
 ```bash
-ssh doc1 'cd ~/nixosconfig && nix flake update cratedigger-src && git add flake.lock && git commit -m "cratedigger: <description>" && git push'
-# NOTE: If already on doc1 (hostname = proxmox-vm), run the inner command directly without ssh
+ssh doc1 'cd ~/nixosconfig && git pull && nix flake update cratedigger-src && git add flake.lock && git commit -m "cratedigger: <description>" && TOKEN=$(cat /run/secrets/forgejo/nixbot-token) && git -c "http.extraHeader=Authorization: token ${TOKEN}" push origin master'
+# NOTE: If already on doc1 (hostname = proxmox-vm), run the inner command directly without ssh.
+# NEVER echo the token. If ~/nixosconfig is dirty/on a feature branch, do the bump in a
+# throwaway worktree off origin/master instead.
 ```
 
-3. Rebuild doc2 (this also runs `cratedigger-db-migrate.service` automatically):
+3. Deploy doc2 via the verified path (fetches Forgejo, verifies every commit is signed by a key in hosts.nix, builds from its own root-owned clone; also runs `cratedigger-db-migrate.service` automatically):
 ```bash
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+ssh doc2 'sudo fleet-update'
 ```
+Do NOT use `nixos-rebuild switch --flake github:...` — GitHub is stale. Break-glass only: `ssh doc2 'sudo nixos-rebuild switch --flake /var/lib/fleet-update/repo#doc2 --no-write-lock-file --option accept-flake-config true'` after a `sudo fleet-update --dry-run` has fetched + verified the tip into the clone.
 
 4. Verify deployed code has the change:
 ```bash
@@ -33,7 +38,7 @@ ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migra
 
 ## Database migrations
 
-Schema is managed by versioned files in `migrations/NNN_name.sql`. The `cratedigger-db-migrate.service` oneshot unit runs the migrator (`scripts/migrate_db.py`) on every `nixos-rebuild switch` because `restartIfChanged = true`. `cratedigger.service` and `cratedigger-web.service` both `requires` it, so a failed migration blocks the app from starting.
+Schema is managed by versioned files in `migrations/NNN_name.sql`. The `cratedigger-db-migrate.service` oneshot unit runs the migrator (`scripts/migrate_db.py`) on every switch (fleet-update or break-glass rebuild) because `restartIfChanged = true`. `cratedigger.service` and `cratedigger-web.service` both `requires` it, so a failed migration blocks the app from starting.
 
 To add a schema change:
 1. Create the next-numbered file: `migrations/NNN_describe_change.sql`
@@ -56,4 +61,4 @@ ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service -n 30'
 - `restartIfChanged = false` on `cratedigger.service` — deploys don't restart cratedigger itself. The 5-min timer picks up new code on next cycle.
 - `restartIfChanged = true` on `cratedigger-db-migrate.service` — deploys DO re-run the migrator. Fast no-op if nothing changed.
 - To force a run: `ssh doc2 'sudo systemctl start cratedigger --no-block'` (don't block — it's a oneshot)
-- Flake updates MUST happen on doc1 (has git push credentials). NEVER from doc2 or Windows.
+- Flake updates MUST happen on doc1 (has the Forgejo token at `/run/secrets/forgejo/nixbot-token` and the signing key). NEVER from doc2 or Windows.
