@@ -37,7 +37,7 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
         return
     detail = load_library_album_detail(
         library_lookup=b,
-        pipeline_db=srv.db,
+        pipeline_db=srv._db(),
         album_id=album_id,
     )
     if not detail:
@@ -94,7 +94,7 @@ def post_beets_delete(h, body: dict) -> None:
     srv = _server()
     result = delete_release_from_library(
         beets_db_path=srv.beets_db_path,
-        pipeline_db=srv.db,
+        pipeline_db=srv._db(),
         request=request,
     )
 

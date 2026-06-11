@@ -591,6 +591,7 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
         h.send_response(416)
         h.send_header("Content-Range", f"bytes */{size}")
         h.send_header("Access-Control-Allow-Origin", "*")
+        h.send_header("Content-Length", "0")
         h.end_headers()
         return
 
@@ -621,6 +622,11 @@ def get_wrong_match_audio(h, params: dict[str, list[str]]) -> None:
                 break
             h.wfile.write(chunk)
             remaining -= len(chunk)
+    if remaining > 0:
+        # Short read (file truncated mid-stream): the body is shorter
+        # than the declared Content-Length, so the keep-alive stream is
+        # desynced — never reuse this socket.
+        h.close_connection = True
 
 
 def _delete_wrong_match_row(pdb, log_id: int):
