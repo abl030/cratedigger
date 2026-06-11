@@ -118,11 +118,8 @@ def _origin_manifest_for_download_log(
 ) -> list[str]:
     if download_log_id is None:
         return []
-    get_entry = getattr(db, "get_download_log_entry", None)
-    if get_entry is None:
-        return []
-    entry = get_entry(download_log_id)
-    if not isinstance(entry, dict):
+    entry = db.get_download_log_entry(download_log_id)
+    if entry is None:
         return []
     vr = decode_validation_envelope(entry.get("validation_result"))
     if not vr.items:
@@ -131,17 +128,12 @@ def _origin_manifest_for_download_log(
 
 
 def _expected_request_track_count(db: "PipelineDB", request_id: int) -> int | None:
-    get_tracks = getattr(db, "get_tracks", None)
-    if get_tracks is None:
-        return None
     try:
-        tracks = get_tracks(request_id)
+        tracks = db.get_tracks(request_id)
     except Exception:
         logger.debug("Failed to read expected tracks for manifest guard", exc_info=True)
         return None
-    if not isinstance(tracks, list) or not tracks:
-        return None
-    return len(tracks)
+    return len(tracks) if tracks else None
 
 
 def _guard_reject(

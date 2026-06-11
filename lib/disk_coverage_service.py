@@ -5,7 +5,7 @@ present in beets?" without treating ``album_requests.status`` as disk state.
 """
 
 from collections import Counter
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -94,9 +94,27 @@ def _beets_row(row: dict[str, Any]) -> BeetsUntrackedAlbum:
     )
 
 
+@runtime_checkable
+class DiskCoveragePipelineDB(Protocol):
+    """The PipelineDB surface disk_coverage uses (#409)."""
+
+    def list_non_replaced_requests(self) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class DiskCoverageBeetsDB(Protocol):
+    """The BeetsDB surface disk_coverage uses (#409) — the first
+    BeetsDB-side protocol; ``BeetsDB`` and ``FakeBeetsDB`` satisfy it
+    structurally."""
+
+    def check_mbids(self, mbids: list[str]) -> set[str]: ...
+
+    def list_release_identities(self) -> list[dict[str, object]]: ...
+
+
 def disk_coverage(
-    pipeline_db: Any,
-    beets_db: Any | None,
+    pipeline_db: DiskCoveragePipelineDB,
+    beets_db: DiskCoverageBeetsDB | None,
     *,
     include_rows: bool = True,
     include_inverse: bool = False,
