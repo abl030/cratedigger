@@ -17,7 +17,6 @@ from lib.pipeline_db._shared import (
     BACKOFF_MAX_MINUTES,
     MbidCollisionError,
     RequestSpectralStateUpdate,
-    RequestV0ProbeStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
 )
@@ -703,43 +702,6 @@ class _RequestsMixin(_PipelineDBBase):
             self.conn.commit()
 
 
-    def set_manual(
-        self,
-        request_id: int,
-        *,
-        manual_reason: str | None = None,
-    ) -> None:
-        """Flip a request to ``status='manual'``, optionally writing a reason.
-
-        - ``manual_reason`` is a system-driven cause string (e.g.
-          ``'search_exhausted'``). When non-None, it is written to the
-          new ``album_requests.manual_reason`` column.
-        - When ``manual_reason`` is None (the default), the column is left
-          untouched — never overwritten with NULL. This protects an
-          existing reason when a generic flip path runs against a row
-          that already has a populated reason.
-
-        Re-queue is the only path that clears ``manual_reason``; that
-        clearing happens in ``reset_to_wanted``.
-        """
-        now = datetime.now(timezone.utc)
-        sets = [
-            "status = 'manual'",
-            "active_download_state = NULL",
-            "updated_at = %s",
-        ]
-        params: list[object] = [now]
-        if manual_reason is not None:
-            sets.append("manual_reason = %s")
-            params.append(manual_reason)
-        params.append(request_id)
-        self._execute(
-            f"UPDATE album_requests SET {', '.join(sets)} WHERE id = %s",
-            params,
-        )
-        self.conn.commit()
-
-
     def update_spectral_state(
         self,
         request_id: int,
@@ -748,15 +710,6 @@ class _RequestsMixin(_PipelineDBBase):
         """Write spectral state pairs together, including explicit NULLs."""
         self.update_request_fields(request_id, **update.as_update_fields())
 
-
-
-    def update_v0_probe_state(
-        self,
-        request_id: int,
-        update: RequestV0ProbeStateUpdate,
-    ) -> None:
-        """Write current comparable source-probe state together."""
-        self.update_request_fields(request_id, **update.as_update_fields())
 
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
@@ -885,93 +838,6 @@ class _RequestsMixin(_PipelineDBBase):
         )
         self.conn.commit()
         return cur.rowcount > 0
-
-
-    def reset_search_attempts(self, request_id: int) -> None:
-        """Reset ``search_attempts`` to 0; leave status/backoff/other counters alone.
-
-        Used by the variant-ladder exhaustion path: when the V4 token pool
-        runs out, the request stays ``wanted`` and the ladder wraps back to
-        the default query. The standard ``next_retry_after`` cooldown still
-        governs when the next cycle picks it up.
-        """
-        now = datetime.now(timezone.utc)
-        self._execute(
-            "UPDATE album_requests SET search_attempts = 0, updated_at = %s WHERE id = %s",
-            (now, request_id),
-        )
-        self.conn.commit()
-
-
-    def update_imported_path_by_release_id(
-        self,
-        *,
-        mb_albumid: str,
-        discogs_albumid: str,
-        new_path: str,
-    ) -> int:
-        """Update ``imported_path`` for any request whose release id matches.
-
-        Issue #132 P2 / issue #133: when sibling canonicalization in
-        the harness moves a sibling's files on disk (e.g. from
-        ``/Beets/Shearwater/2006 - Palo Santo/`` to ``…/2006 - Palo
-        Santo [2006]/`` after ``%aunique`` re-evaluates because a new
-        same-name edition was just imported), the sibling might itself
-        be a tracked pipeline request — in which case its
-        ``album_requests.imported_path`` column is now stale. The UI
-        ("Imported to" label, ban-source button) would point at a
-        directory that no longer exists.
-
-        This method finds the tracked request across both layout combos
-        (MB-sourced: ``mb_release_id=<mbid>``; Discogs-sourced:
-        ``discogs_release_id=<numeric>`` and/or ``mb_release_id=<numeric>``
-        for legacy pre-plugin-patch imports) and updates its
-        ``imported_path``. Callers pass the two beets-side columns as
-        two arguments; either may be the empty string. No-op if neither
-        is populated.
-
-        Returns the number of rows updated (usually 0 or 1). A duplicate
-        request for the same release in the pipeline DB would return
-        more — that's the caller's signal that data is inconsistent
-        (the ``UNIQUE`` constraint on ``mb_release_id`` makes duplicate
-        MBIDs impossible in practice).
-        """
-        if not mb_albumid and not discogs_albumid:
-            return 0
-        now = datetime.now(timezone.utc)
-        clauses: list[str] = []
-        params: list[object] = [new_path, now]
-        if mb_albumid:
-            # Beets-side ``mb_albumid`` is either a MB UUID (stored
-            # in pipeline's ``mb_release_id``) or a legacy numeric
-            # (also stored in ``mb_release_id`` — the pre-plugin-patch
-            # layout). Either way the single-column match covers it.
-            clauses.append("mb_release_id = %s")
-            params.append(mb_albumid)
-        if discogs_albumid:
-            # Beets-side ``discogs_albumid`` is always numeric. The
-            # pipeline side could store the same numeric in EITHER
-            # ``discogs_release_id`` (rows added through the web UI
-            # after the discogs-plugin integration) OR
-            # ``mb_release_id`` (legacy "pipeline compat" convention
-            # documented in CLAUDE.md § "Discogs-sourced albums":
-            # *Numeric IDs stored in ``mb_release_id`` for pipeline
-            # compat*). Match both columns so a sibling whose beets
-            # row carries only ``discogs_albumid`` still finds its
-            # tracked request regardless of which pipeline layout
-            # that request was created under. Codex R2 P2.
-            clauses.append(
-                "(mb_release_id = %s OR discogs_release_id = %s)")
-            params.append(discogs_albumid)
-            params.append(discogs_albumid)
-        where = " OR ".join(clauses)
-        cur = self._execute(
-            f"UPDATE album_requests SET imported_path = %s, "
-            f"updated_at = %s WHERE {where}",
-            tuple(params),
-        )
-        self.conn.commit()
-        return cur.rowcount
 
 
     # --- Downloading state ---
@@ -1130,18 +996,6 @@ class _RequestsMixin(_PipelineDBBase):
             "ORDER BY updated_at ASC"
         )
         return [dict(r) for r in cur.fetchall()]
-
-
-    def clear_download_state(self, request_id: int) -> None:
-        """Clear active_download_state when download completes/fails."""
-        now = datetime.now(timezone.utc)
-        self._execute("""
-            UPDATE album_requests
-            SET active_download_state = NULL,
-                updated_at = %s
-            WHERE id = %s
-        """, (now, request_id))
-        self.conn.commit()
 
 
     # --- Query methods ---

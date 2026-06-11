@@ -52,7 +52,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              PLAN_STATUS_FAILED_TRANSIENT,
                              PLAN_STATUS_SUPERSEDED,
                              RequestSpectralStateUpdate,
-                             RequestV0ProbeStateUpdate, SEARCH_LOG_STAGE_ACCEPTED,
+                             SEARCH_LOG_STAGE_ACCEPTED,
                              SEARCH_LOG_STAGE_PRE_ATTEMPT,
                              SEARCH_LOG_STAGE_STALE_COMPLETION,
                              SearchPlanInspection, SearchPlanItemInput,
@@ -1046,7 +1046,6 @@ class FakePipelineDB:
         self.update_download_state_calls: list[tuple[int, str]] = []
         self.update_download_state_current_path_calls: list[tuple[int, str | None]] = []
         self.mark_import_subprocess_started_calls: list[tuple[int, str]] = []
-        self.clear_download_state_calls: list[int] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
         self.closed = False
         self._next_request_id = 0
@@ -1429,15 +1428,6 @@ class FakePipelineDB:
         row["updated_at"] = now
         return ImportJob.from_row(copy.deepcopy(row))
 
-    def heartbeat_import_job(self, job_id: int) -> bool:
-        for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") == "running":
-                now = _utcnow()
-                row["heartbeat_at"] = now
-                row["updated_at"] = now
-                return True
-        return False
-
     def mark_import_job_completed(
         self,
         job_id: int,
@@ -1476,49 +1466,6 @@ class FakePipelineDB:
                 row["updated_at"] = now
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
-
-    def list_stale_running_import_jobs(
-        self,
-        *,
-        older_than: timedelta,
-        limit: int = 50,
-    ) -> list[ImportJob]:
-        cutoff = _utcnow() - older_than
-        rows = []
-        for row in self._import_jobs:
-            if row.get("status") != "running":
-                continue
-            last = _as_datetime(
-                row.get("heartbeat_at")
-                or row.get("started_at")
-                or row.get("updated_at")
-            )
-            if last < cutoff:
-                rows.append(row)
-        rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
-        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
-
-    def fail_stale_running_import_jobs(
-        self,
-        *,
-        older_than: timedelta,
-        message: str,
-        limit: int = 50,
-    ) -> list[ImportJob]:
-        stale = self.list_stale_running_import_jobs(
-            older_than=older_than,
-            limit=limit,
-        )
-        failed = []
-        for job in stale:
-            updated = self.mark_import_job_failed(
-                job.id,
-                error=message,
-                message=message,
-            )
-            if updated is not None:
-                failed.append(updated)
-        return failed
 
     def requeue_running_import_jobs(
         self,
@@ -1669,45 +1616,15 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
-    def mark_import_job_preview_blocked(
-        self,
-        job_id: int,
-        *,
-        preview_status: str,
-        error: str,
-        preview_result: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None:
-        validate_preview_failure_status(preview_status)
-        result = copy.deepcopy(preview_result or {})
-        for row in self._import_jobs:
-            if (
-                row["id"] == job_id
-                and row.get("status") == "queued"
-                and row.get("preview_status") in ("waiting", "running")
-            ):
-                now = _utcnow()
-                row["preview_status"] = preview_status
-                row["preview_result"] = result
-                row["preview_message"] = message
-                row["preview_error"] = error
-                row["message"] = message
-                row["error"] = error
-                row["preview_completed_at"] = now
-                row["preview_worker_id"] = None
-                row["preview_heartbeat_at"] = None
-                row["updated_at"] = now
-                return ImportJob.from_row(copy.deepcopy(row))
-        return None
-
-    def list_stale_import_preview_jobs(
+    def requeue_stale_import_preview_jobs(
         self,
         *,
         older_than: timedelta,
+        message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
         cutoff = _utcnow() - older_than
-        rows = []
+        stale = []
         for row in self._import_jobs:
             if row.get("status") != "queued" or row.get("preview_status") != "running":
                 continue
@@ -1717,36 +1634,19 @@ class FakePipelineDB:
                 or row.get("updated_at")
             )
             if last < cutoff:
-                rows.append(row)
-        rows.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
-        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
-
-    def requeue_stale_import_preview_jobs(
-        self,
-        *,
-        older_than: timedelta,
-        message: str,
-        limit: int = 50,
-    ) -> list[ImportJob]:
-        stale = self.list_stale_import_preview_jobs(
-            older_than=older_than,
-            limit=limit,
-        )
+                stale.append(row)
+        stale.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
         updated_jobs = []
-        for job in stale:
-            for row in self._import_jobs:
-                if row["id"] != job.id:
-                    continue
-                now = _utcnow()
-                row["preview_status"] = "waiting"
-                row["preview_message"] = message
-                row["preview_error"] = None
-                row["preview_worker_id"] = None
-                row["preview_started_at"] = None
-                row["preview_heartbeat_at"] = None
-                row["updated_at"] = now
-                updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
-                break
+        for row in stale[:limit]:
+            now = _utcnow()
+            row["preview_status"] = "waiting"
+            row["preview_message"] = message
+            row["preview_error"] = None
+            row["preview_worker_id"] = None
+            row["preview_started_at"] = None
+            row["preview_heartbeat_at"] = None
+            row["updated_at"] = now
+            updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
 
     def requeue_running_import_preview_jobs(
@@ -1862,45 +1762,6 @@ class FakePipelineDB:
             row[key] = val
         self.status_history.append((request_id, "imported"))
 
-    def update_imported_path_by_release_id(
-        self,
-        *,
-        mb_albumid: str,
-        discogs_albumid: str,
-        new_path: str,
-    ) -> int:
-        """Stand-in for ``PipelineDB.update_imported_path_by_release_id``.
-
-        Mirrors the prod cross-layout matching (Codex R2 P2 fix):
-
-        - ``mb_albumid`` matches ONLY the pipeline's ``mb_release_id``
-          column (MB UUIDs and legacy numerics both live there).
-        - ``discogs_albumid`` matches EITHER the pipeline's
-          ``discogs_release_id`` OR ``mb_release_id`` column, because
-          the pipeline DB stores Discogs numerics in either column
-          depending on when/how the request was created (CLAUDE.md §
-          "Discogs-sourced albums": numeric IDs stored in
-          ``mb_release_id`` for pipeline compat).
-
-        Returns the number of rows updated. No-op when both inputs
-        are empty.
-        """
-        if not mb_albumid and not discogs_albumid:
-            return 0
-        updated = 0
-        for row in self._requests.values():
-            mb_hit = bool(
-                mb_albumid and row.get("mb_release_id") == mb_albumid)
-            discogs_hit = bool(
-                discogs_albumid
-                and (row.get("discogs_release_id") == discogs_albumid
-                     or row.get("mb_release_id") == discogs_albumid))
-            if mb_hit or discogs_hit:
-                row["imported_path"] = new_path
-                row["updated_at"] = _utcnow()
-                updated += 1
-        return updated
-
     def reset_to_wanted(
         self,
         request_id: int,
@@ -1954,35 +1815,6 @@ class FakePipelineDB:
         self.status_history.append((request_id, "wanted"))
         return True
 
-    def set_manual(
-        self,
-        request_id: int,
-        *,
-        manual_reason: str | None = None,
-    ) -> None:
-        """Mirror ``PipelineDB.set_manual``: flip to ``status='manual'``,
-        write ``manual_reason`` only when non-None (no NULL clobber).
-        """
-        row = self._requests.get(request_id)
-        if row is None:
-            return
-        row["status"] = "manual"
-        row["active_download_state"] = None
-        row["updated_at"] = _utcnow()
-        if manual_reason is not None:
-            row["manual_reason"] = manual_reason
-        self.status_history.append((request_id, "manual"))
-
-    def reset_search_attempts(self, request_id: int) -> None:
-        """Mirror ``PipelineDB.reset_search_attempts``: clear search counter,
-        leave status/backoff/other counters alone.
-        """
-        row = self._requests.get(request_id)
-        if row is None:
-            return
-        row["search_attempts"] = 0
-        row["updated_at"] = _utcnow()
-
     def set_downloading(self, request_id: int, state_json: str) -> bool:
         row = self._requests.get(request_id)
         if row is None or row["status"] != "wanted":
@@ -2025,13 +1857,6 @@ class FakePipelineDB:
         row["updated_at"] = now
         self.status_history.append((request_id, "downloading"))
         return True
-
-    def clear_download_state(self, request_id: int) -> None:
-        row = self._requests.get(request_id)
-        if row:
-            row["active_download_state"] = None
-            row["updated_at"] = _utcnow()
-        self.clear_download_state_calls.append(request_id)
 
     def update_download_state(self, request_id: int, state_json: str) -> None:
         row = self._requests.get(request_id)
@@ -2797,14 +2622,6 @@ class FakePipelineDB:
 
     def update_spectral_state(self, request_id: int,
                               update: RequestSpectralStateUpdate) -> None:
-        row = self._requests.get(request_id)
-        if row:
-            fields = update.as_update_fields()
-            row.update(fields)
-            row["updated_at"] = _utcnow()
-
-    def update_v0_probe_state(self, request_id: int,
-                              update: RequestV0ProbeStateUpdate) -> None:
         row = self._requests.get(request_id)
         if row:
             fields = update.as_update_fields()
@@ -4467,18 +4284,6 @@ class FakePipelineDB:
         ]
         return len(legacy), head
 
-    def get_search_history_batch(
-        self, request_ids: list[int],
-    ) -> dict[int, list[dict[str, object]]]:
-        wanted = set(request_ids)
-        result: dict[int, list[dict[str, object]]] = {}
-        for entry in reversed(self.search_logs):
-            if entry.request_id not in wanted:
-                continue
-            result.setdefault(entry.request_id, []).append(
-                self._search_log_to_dict(entry))
-        return result
-
     @staticmethod
     def _search_log_to_dict(entry: SearchLogRow) -> dict[str, object]:
         # Match production JSONB read behaviour: psycopg2 deserializes
@@ -4553,22 +4358,6 @@ class FakePipelineDB:
         return [
             c.username for c in self.user_cooldowns.values()
             if c.cooldown_until > now
-        ]
-
-    def get_user_cooldowns(self) -> list[dict[str, Any]]:
-        rows = sorted(
-            self.user_cooldowns.values(),
-            key=lambda c: c.cooldown_until,
-            reverse=True,
-        )
-        return [
-            {
-                "username": c.username,
-                "cooldown_until": c.cooldown_until,
-                "reason": c.reason,
-                "created_at": c.created_at,
-            }
-            for c in rows
         ]
 
     # --- Persisted search plans (U1) ---

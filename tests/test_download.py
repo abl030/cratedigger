@@ -2102,7 +2102,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         ctx, fake_db = self._make_poll_ctx(downloading_rows=[])
         poll_active_downloads(ctx)
-        self.assertEqual(fake_db.clear_download_state_calls, [])
+        self.assertEqual(fake_db._import_jobs, [])
+        self.assertEqual(fake_db.download_logs, [])
 
     def test_poll_active_all_complete(self):
         """1 downloading album, all files complete → enqueues importer job."""
@@ -2715,7 +2716,6 @@ class TestPollActiveDownloads(unittest.TestCase):
             7,
         )
         self.assertEqual(len(slskd.transfers.enqueue_calls), 7)
-        self.assertEqual(fake_db.clear_download_state_calls, [])
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
 

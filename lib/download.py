@@ -1700,8 +1700,9 @@ def build_active_download_state(
     persisting updated retry state across polling cycles. The
     ``import_subprocess_started_at`` flag is preserved through state
     rebuilds so cycle-based retry persistence cannot accidentally clear
-    the resume guard's witness — only ``clear_download_state`` (terminal
-    transitions) wipes it. See ``docs/advisory-locks.md``.
+    the resume guard's witness — only the terminal status transitions
+    (which NULL ``active_download_state`` inline) wipe it. See
+    ``docs/advisory-locks.md``.
     """
     enqueued_at_value = enqueued_at or datetime.now(timezone.utc).isoformat()
     files = [

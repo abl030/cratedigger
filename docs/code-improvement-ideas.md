@@ -83,7 +83,7 @@ This would also make integration testing the full `main()` flow possible — cur
 2. Calls `set_downloading()` with real state
 3. Verifies `get_wanted()` doesn't return it
 4. Verifies `get_downloading()` does return it
-5. Calls `clear_download_state()` + `update_status("imported")`
+5. Calls `update_status("imported")` (which NULLs `active_download_state` inline)
 6. Verifies final state
 
 This catches CHECK constraint issues, column migration bugs, and status visibility invariants that mocks hide.

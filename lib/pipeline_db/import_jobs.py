@@ -261,16 +261,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row else None
 
 
-    def heartbeat_import_job(self, job_id: int) -> bool:
-        cur = self._execute("""
-            UPDATE import_jobs
-            SET heartbeat_at = NOW(), updated_at = NOW()
-            WHERE id = %s AND status = 'running'
-            RETURNING id
-        """, (job_id,))
-        return cur.fetchone() is not None
-
-
     def mark_import_job_completed(
         self,
         job_id: int,
@@ -316,54 +306,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         """, (psycopg2.extras.Json(result or {}), message, error, job_id))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
-
-
-    def list_stale_running_import_jobs(
-        self,
-        *,
-        older_than: timedelta,
-        limit: int = 50,
-    ) -> list[ImportJob]:
-        cutoff = datetime.now(timezone.utc) - older_than
-        cur = self._execute("""
-            SELECT *
-            FROM import_jobs
-            WHERE status = 'running'
-              AND COALESCE(heartbeat_at, started_at, updated_at) < %s
-            ORDER BY updated_at ASC, id ASC
-            LIMIT %s
-        """, (cutoff, limit))
-        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
-
-
-    def fail_stale_running_import_jobs(
-        self,
-        *,
-        older_than: timedelta,
-        message: str,
-        limit: int = 50,
-    ) -> list[ImportJob]:
-        cutoff = datetime.now(timezone.utc) - older_than
-        cur = self._execute("""
-            WITH stale AS (
-                SELECT id
-                FROM import_jobs
-                WHERE status = 'running'
-                  AND COALESCE(heartbeat_at, started_at, updated_at) < %s
-                ORDER BY updated_at ASC, id ASC
-                LIMIT %s
-            )
-            UPDATE import_jobs
-            SET status = 'failed',
-                error = %s,
-                message = %s,
-                completed_at = NOW(),
-                updated_at = NOW()
-            FROM stale
-            WHERE import_jobs.id = stale.id
-            RETURNING import_jobs.*
-        """, (cutoff, limit, message, message))
-        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
 
     def requeue_running_import_jobs(
@@ -560,72 +502,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         ))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
-
-
-    def mark_import_job_preview_blocked(
-        self,
-        job_id: int,
-        *,
-        preview_status: str,
-        error: str,
-        preview_result: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None:
-        """Record a failed preview while keeping the job active as a blocker.
-
-        Automation preview failures must not become inactive terminal jobs while
-        the request remains ``downloading``. A queued, non-importable job keeps
-        the poller from re-enqueueing the same completed download in a loop.
-        """
-
-        validate_preview_failure_status(preview_status)
-        result = dict(preview_result or {})
-        cur = self._execute("""
-            UPDATE import_jobs
-            SET preview_status = %s,
-                preview_result = %s,
-                preview_message = %s,
-                preview_error = %s,
-                message = %s,
-                error = %s,
-                preview_completed_at = NOW(),
-                preview_worker_id = NULL,
-                preview_heartbeat_at = NULL,
-                updated_at = NOW()
-            WHERE id = %s
-              AND status = 'queued'
-              AND preview_status IN ('waiting', 'running')
-            RETURNING *
-        """, (
-            preview_status,
-            psycopg2.extras.Json(result),
-            message,
-            error,
-            message,
-            error,
-            job_id,
-        ))
-        row = cur.fetchone()
-        return ImportJob.from_row(dict(row)) if row else None
-
-
-    def list_stale_import_preview_jobs(
-        self,
-        *,
-        older_than: timedelta,
-        limit: int = 50,
-    ) -> list[ImportJob]:
-        cutoff = datetime.now(timezone.utc) - older_than
-        cur = self._execute("""
-            SELECT *
-            FROM import_jobs
-            WHERE status = 'queued'
-              AND preview_status = 'running'
-              AND COALESCE(preview_heartbeat_at, preview_started_at, updated_at) < %s
-            ORDER BY updated_at ASC, id ASC
-            LIMIT %s
-        """, (cutoff, limit))
-        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
 
     def requeue_stale_import_preview_jobs(
