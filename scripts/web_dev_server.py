@@ -369,7 +369,10 @@ def configure_live_db(config: DevConfig) -> None:
         web_server.db._execute("SET default_transaction_read_only = on")
         web_server.log.info("Connected dev live-db session in read-only mode")
 
-    web_server._db_dsn = config.dsn
+    # Deliberately do NOT set web_server._db_dsn: with a DSN present,
+    # `_db()` opens fresh per-thread connections (#427) that would skip
+    # the read-only session flag below. Leaving the DSN unset routes
+    # every request through this single injected read-only handle.
     connect_readonly()
     web_server._try_reconnect_db = connect_readonly  # type: ignore[assignment]
 

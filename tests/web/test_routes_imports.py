@@ -560,6 +560,51 @@ class TestWrongMatchesContract(unittest.TestCase):
             [1, 2, 3],
         )
 
+    def test_wrong_match_audio_short_read_closes_keepalive_connection(self):
+        """A file truncated mid-stream writes fewer bytes than the
+        declared Content-Length; the server must close the keep-alive
+        socket instead of letting the next response desync (#427)."""
+        import http.client
+        import tempfile
+        import os as _os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = _os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track_path, "wb") as handle:
+                handle.write(b"abcdef")
+
+            self.mock_db.get_download_log_entry.return_value = {
+                "id": 42,
+                "request_id": 100,
+                "validation_result": {
+                    "failed_path": tmpdir,
+                },
+            }
+
+            conn = http.client.HTTPConnection(
+                "127.0.0.1", self.port, timeout=10)
+            try:
+                # Pretend the file is 4 bytes longer than it is — the
+                # stream loop hits EOF early, leaving remaining > 0.
+                with patch("web.routes.imports.os.path.getsize",
+                           return_value=10):
+                    conn.request(
+                        "GET",
+                        "/api/wrong-matches/audio"
+                        "?download_log_id=42&path=01%20-%20Track.mp3",
+                    )
+                    resp = conn.getresponse()
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(
+                        resp.getheader("Content-Length"), "10")
+                    # Server closed after the short body: the client
+                    # sees an incomplete read promptly rather than
+                    # blocking for 4 bytes that will never come.
+                    with self.assertRaises(http.client.IncompleteRead):
+                        resp.read()
+            finally:
+                conn.close()
+
     def test_wrong_match_audio_supports_byte_ranges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = os.path.join(tmpdir, "01 - Track.mp3")

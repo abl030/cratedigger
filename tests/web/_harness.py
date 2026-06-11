@@ -13,7 +13,7 @@ import os
 import sys
 import threading
 import unittest
-from http.server import HTTPServer
+from http.server import HTTPServer, ThreadingHTTPServer
 from unittest.mock import MagicMock
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
@@ -596,7 +596,8 @@ def _make_server():
     srv.db = mock_db
     srv.beets_db_path = None  # No beets DB in tests
 
-    server = HTTPServer(("127.0.0.1", 0), srv.Handler)
+    # Mirror production: ThreadingHTTPServer + the same Handler.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

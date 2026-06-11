@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
+
+sys.path.insert(0, os.path.dirname(__file__))
+import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
 
 from scripts.web_dev_server import DevConfig, DevHandler, DevHTTPServer
 
@@ -154,6 +159,64 @@ class WebDevServerProxyTest(unittest.TestCase):
         self.assertEqual(resp.headers.get("Content-Range"), "bytes 1-3/6")
         self.assertEqual(resp.headers.get("Accept-Ranges"), "bytes")
         self.assertEqual(body, b"bcd")
+
+
+class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
+    """`--data live-db` sessions must stay read-only after #427.
+
+    `_db()` opens fresh per-thread connections whenever `_db_dsn` is
+    set, skipping the `SET default_transaction_read_only = on` that
+    configure_live_db applies to its injected handle. The guard here is
+    that configure_live_db leaves `_db_dsn` unset, so every request
+    routes through the single read-only handle — and a write through
+    `_db()` is rejected by PostgreSQL."""
+
+    def setUp(self) -> None:
+        import os
+        self.dsn = os.environ.get("TEST_DB_DSN")
+        import web.server as web_server
+        self.web_server = web_server
+        self._saved = (
+            web_server._db_dsn, web_server.db, web_server._try_reconnect_db,
+            web_server.beets_db_path, web_server._beets,
+        )
+
+    def tearDown(self) -> None:
+        ws = self.web_server
+        if ws.db is not None and ws.db is not self._saved[1]:
+            try:
+                ws.db.close()
+            except Exception:
+                pass
+        (ws._db_dsn, ws.db, ws._try_reconnect_db,
+         ws.beets_db_path, ws._beets) = self._saved
+
+    def test_live_db_session_rejects_writes_through_db_accessor(self):
+        import psycopg2
+        from scripts.web_dev_server import configure_live_db
+
+        config = DevConfig(
+            data="live-db",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=self.dsn,
+            beets_db=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        configure_live_db(config)
+        ws = self.web_server
+
+        # _db_dsn must stay unset so _db() returns the injected
+        # read-only handle instead of opening per-thread connections.
+        self.assertEqual(ws._db_dsn, self._saved[0])
+        self.assertIs(ws._db(), ws.db)
+
+        with self.assertRaises(psycopg2.Error):
+            ws._db()._execute(
+                "INSERT INTO album_requests (artist_name, album_title, source)"
+                " VALUES ('ro', 'ro', 'request')"
+            )
 
 
 if __name__ == "__main__":

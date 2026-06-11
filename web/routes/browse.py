@@ -66,7 +66,7 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
     albums = list_library_artist_rows(
         library_lookup=srv,
-        pipeline_db=srv.db,
+        pipeline_db=srv._db(),
         artist_name=name,
         mb_artist_id=mbid,
         rank_fn=srv.compute_library_rank,

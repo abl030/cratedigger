@@ -15,7 +15,8 @@ import re
 import shutil
 import sqlite3
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 logging.basicConfig(
@@ -48,43 +49,67 @@ from web.routes import youtube as _youtube_routes
 
 _db_dsn = None
 
-
-def _try_reconnect_db():
-    """Reconnect the pipeline DB if the connection is dead."""
-    global db
-    if not _db_dsn:
-        return
-    if db is not None:
-        try:
-            db.conn.close()
-        except Exception:
-            pass
-    try:
-        db = PipelineDB(_db_dsn)
-        log.info("Reconnected to pipeline DB")
-    except Exception:
-        log.exception("Failed to reconnect to pipeline DB")
-
-# Globals set in main()
+# Globals set in main() / injected by the test harness and dev server.
+# With `_db_dsn` set (production), request threads NEVER touch these —
+# each `ThreadingHTTPServer` worker gets its own handles via
+# `_thread_state` below, because neither psycopg2 connections nor
+# sqlite3 handles are safe to share across threads. With `_db_dsn`
+# unset (tests, web_dev_server live-db mode), `db` is the injected
+# shared handle and the caller owns its thread-safety.
 db: PipelineDB | None = None
 beets_db_path: str | None = None
 _beets: BeetsDB | None = None
 
+# Per-thread DB handles. Threads are mostly long-lived: the Handler
+# speaks HTTP/1.1 keep-alive, so a browser's persistent connections
+# each pin one worker thread (and its handles) across many requests.
+# One-shot clients (curl, the importer's notify hooks) cost one
+# connect/teardown each — fine at single-operator scale.
+_thread_state = threading.local()
+
+
+def _try_reconnect_db():
+    """Drop the current thread's pipeline-DB handle so the next
+    `_db()` call opens a fresh connection.
+
+    Only request-handler threads call this (from the do_GET/do_POST
+    catch-alls), so the thread-local is the right scope; other
+    threads' healthy connections are left alone. PipelineDB also
+    self-heals via `_ensure_conn`, so this is belt-and-braces for
+    errors that escape it."""
+    if not _db_dsn:
+        return
+    handle = getattr(_thread_state, "db", None)
+    if handle is not None:
+        try:
+            handle.conn.close()
+        except Exception:
+            pass
+        _thread_state.db = None
+        log.info("Dropped this thread's pipeline DB handle; next request reconnects")
+
 
 def _db() -> PipelineDB:
-    """Return the pipeline DB, raising if not connected."""
-    if db is None:
-        raise RuntimeError("Pipeline DB not connected")
-    return db
+    """Return this thread's pipeline DB, opening it on first use."""
+    if not _db_dsn:
+        # Injected shared handle (test harness / dev server).
+        if db is None:
+            raise RuntimeError("Pipeline DB not connected")
+        return db
+    handle = getattr(_thread_state, "db", None)
+    if handle is None:
+        handle = PipelineDB(_db_dsn)
+        _thread_state.db = handle
+    return handle
 
 
 def _new_db() -> PipelineDB:
     """Open a fresh pipeline-DB connection for a background thread.
 
-    psycopg2 connections must not be shared across threads, so background
-    work (the bulk-triage sweep) gets its own connection. Falls back to
-    the shared handle when no DSN is configured (test harness — the
-    handler mock stands in for both).
+    Background work that outlives a request (the bulk-triage sweep)
+    must not borrow a request thread's handle. Falls back to the shared
+    handle when no DSN is configured (test harness — the handler mock
+    stands in for both).
     """
     if _db_dsn:
         return PipelineDB(_db_dsn)
@@ -92,8 +117,20 @@ def _new_db() -> PipelineDB:
 
 
 def _beets_db() -> BeetsDB | None:
-    """Return the BeetsDB instance, or None if not configured."""
-    return _beets
+    """Return this thread's BeetsDB, or None if not configured.
+
+    sqlite3 connections are bound to their opening thread
+    (`check_same_thread`), so each worker opens its own read-only
+    handle on first use. An injected `_beets` (tests) wins."""
+    if _beets is not None:
+        return _beets
+    if not beets_db_path or not os.path.exists(beets_db_path):
+        return None
+    handle = getattr(_thread_state, "beets", None)
+    if handle is None:
+        handle = BeetsDB(beets_db_path)
+        _thread_state.beets = handle
+    return handle
 
 
 def _serialize_row(row: dict[str, object]) -> dict[str, object]:
@@ -130,9 +167,15 @@ def get_library_artist(
     return b.get_albums_by_artist(artist_name, mb_artist_id)
 
 
+def _db_available() -> bool:
+    """True when `_db()` can return a handle — a DSN for per-thread
+    connections, or an injected shared handle (tests / dev server)."""
+    return bool(_db_dsn) or db is not None
+
+
 def check_pipeline(mbids):
     """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → info."""
-    if not mbids or not db:
+    if not mbids or not _db_available():
         return {}
     pdb = _db()
     placeholders = ",".join(["%s"] * len(mbids))
@@ -155,7 +198,7 @@ def check_pipeline(mbids):
 
 def _enrich_with_pipeline(albums: list[dict[str, object]]) -> None:
     """Add pipeline_status/upgrade_queued to album dicts. Mutates in place."""
-    if not db:
+    if not _db_available():
         return
     mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
     if not mbids:
@@ -223,6 +266,16 @@ def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+
+    # HTTP/1.1 keep-alive: a browser's persistent connections each pin
+    # one worker thread, so its thread-local DB handles amortize across
+    # requests instead of reconnecting per request. Requires every
+    # response to carry Content-Length (all writers here do).
+    protocol_version = "HTTP/1.1"
+    # Reap idle keep-alive threads: a worker blocked waiting for the
+    # client's next request gives up after this many seconds, closing
+    # the connection and releasing its DB handles.
+    timeout = 75
 
     # Route tables: path → handler function.
     # Route modules export their own dicts; we merge them here.
@@ -391,9 +444,14 @@ class Handler(BaseHTTPRequestHandler):
             # classes here first — single warning line, no DB churn, no second
             # body-write attempt to a dead socket.
             log.warning("Client disconnect on GET %s: %s", path, type(e).__name__)
+            self.close_connection = True
         except Exception as e:
             log.exception("GET %s failed", path)
             _try_reconnect_db()
+            # The handler may have already sent headers or a partial body;
+            # under HTTP/1.1 keep-alive a follow-up response on the same
+            # socket would desync the stream, so always close after.
+            self.close_connection = True
             self._error(str(e), 500)
 
     def do_POST(self):
@@ -436,9 +494,12 @@ class Handler(BaseHTTPRequestHandler):
             # they share this outer try block, so any disconnect on either is
             # handled here.
             log.warning("Client disconnect on POST %s: %s", path, type(e).__name__)
+            self.close_connection = True
         except Exception as e:
             log.exception("POST %s failed", path)
             _try_reconnect_db()
+            # See do_GET: never reuse the socket after an error response.
+            self.close_connection = True
             self._error(str(e), 500)
 
     def do_OPTIONS(self):
@@ -446,6 +507,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # HTTP/1.1 keep-alive: a bodyless response must still declare
+        # its (zero) length or the client waits for a body forever.
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     # ── GET handlers ─────────────────────────────────────────────────
@@ -455,7 +519,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global db, beets_db_path, _beets
+    global beets_db_path
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument("--port", type=int, default=8085)
@@ -484,12 +548,14 @@ def main():
 
     global _db_dsn
     _db_dsn = args.dsn
-    db = PipelineDB(args.dsn)
+    # Fail fast at boot if the DB is unreachable; request threads open
+    # their own handles via `_db()`, so this one is connect-check only.
+    PipelineDB(args.dsn).close()
     beets_db_path = args.beets_db
-    if beets_db_path and os.path.exists(beets_db_path):
-        _beets = BeetsDB(beets_db_path)
+    if beets_db_path and not os.path.exists(beets_db_path):
+        log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
-    server = HTTPServer(("0.0.0.0", args.port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"Cratedigger Web UI listening on http://0.0.0.0:{args.port}")
     print(f"  Pipeline DB: {args.dsn}")
     print(f"  Beets DB: {beets_db_path}")
