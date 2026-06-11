@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from lib.config import CratediggerConfig
@@ -632,6 +633,40 @@ class TestImportPreviewPath(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.import_preview import ImportPreviewDB as _PreviewDB
+    from lib.pipeline_db import PipelineDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_preview_protocol: _PreviewDB = cast("PipelineDB", None)
+    _fake_db_satisfies_preview_protocol: _PreviewDB = cast("FakePipelineDB", None)
+
+
+class TestPreviewDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy ImportPreviewDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.import_preview import ImportPreviewDB
+        from lib.pipeline_db import PipelineDB
+
+        self.assertTrue(issubclass(PipelineDB, ImportPreviewDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.import_preview import ImportPreviewDB
+
+        self.assertTrue(issubclass(FakePipelineDB, ImportPreviewDB))
+
+    def test_preview_protocol_extends_evidence_protocol(self) -> None:
+        """Preview forwards its handle into the evidence persisters."""
+        from lib.import_preview import ImportPreviewDB
+        from lib.quality_evidence import QualityEvidenceDB
+
+        self.assertTrue(issubclass(ImportPreviewDB, QualityEvidenceDB))
 
 
 if __name__ == "__main__":
