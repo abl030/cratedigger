@@ -32,7 +32,7 @@ import shutil
 import socket
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 from urllib.error import URLError
 
 
@@ -55,16 +55,54 @@ from lib.pipeline_db import (
     SupersedeRaceError,
 )
 from lib.processing_paths import stage_to_ai_path
-from lib.release_cleanup import remove_and_reset_release
-from lib.search_plan_service import SearchPlanService
+from lib.release_cleanup import ReleaseCleanupDB, remove_and_reset_release
+from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
     trigger_meelo_scan,
     trigger_plex_scan,
 )
-from lib.wrong_match_delete_service import delete_wrong_match_group
+from lib.wrong_match_delete_service import (
+    WrongMatchDeleteDB,
+    delete_wrong_match_group,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class MbidReplaceDB(
+    WrongMatchDeleteDB, ReleaseCleanupDB, SearchPlanDB, Protocol,
+):
+    """The PipelineDB surface the Replace action uses (#409).
+
+    Extends the protocols of everything the handle is forwarded into:
+    ``delete_wrong_match_group``, ``remove_and_reset_release``, and the
+    constructor-built ``SearchPlanService``. Parity tests live in
+    ``tests/test_mbid_replace_service.py``.
+    """
+
+    def get_request_by_mb_release_id(
+        self, mb_release_id: str,
+    ) -> dict[str, Any] | None: ...
+
+    def get_request_by_replaces_request_id(
+        self, replaced_id: int,
+    ) -> dict[str, Any] | None: ...
+
+    def supersede_request_mbid(
+        self,
+        old_request_id: int,
+        *,
+        new_mb_release_id: str,
+        new_mb_release_group_id: str | None,
+        new_mb_artist_id: str | None,
+        new_artist_name: str,
+        new_album_title: str,
+        new_year: int | None,
+        new_country: str | None,
+        new_tracks: list[dict[str, Any]],
+    ) -> int: ...
 
 
 # Result outcome constants.
@@ -139,7 +177,7 @@ class MbidReplaceService:
 
     def __init__(
         self,
-        db: Any,
+        db: MbidReplaceDB,
         config: CratediggerConfig,
         slskd: Any = None,
         beets_db_factory: BeetsDBFactory | None = None,
@@ -260,6 +298,18 @@ class MbidReplaceService:
 
         source_rg = source.get("mb_release_group_id")
         if not source_rg:
+            # A source row without an MBID (Discogs-only) cannot be
+            # RG-resolved — same TARGET_INVALID outcome the lookup
+            # exception path produced before the typed narrowing.
+            if not isinstance(source_mbid, str) or not source_mbid:
+                return ReplaceResult(
+                    outcome=RESULT_TARGET_INVALID,
+                    request_id=request_id,
+                    error_message=(
+                        f"source MBID {source_mbid!r} could not be "
+                        "resolved: source request has no MB release id"
+                    ),
+                )
             # Lazy-backfill: resolve the source MBID's RG fresh.
             try:
                 src_data = self.mb_lookup(source_mbid, fresh=True)

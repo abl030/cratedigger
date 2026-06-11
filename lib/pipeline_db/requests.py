@@ -83,7 +83,7 @@ class _RequestsMixin(_PipelineDBBase):
         return dict(row) if row else None
 
 
-    def get_request_by_mb_release_id(self, mb_release_id) -> dict[str, Any] | None:
+    def get_request_by_mb_release_id(self, mb_release_id: str) -> dict[str, Any] | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)
         )

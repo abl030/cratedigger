@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
@@ -1081,6 +1082,45 @@ class TestReplaceCallOrder(_ServiceCase):
             )
         # slskd was never touched (R23).
         self._assert_slskd_untouched(svc.slskd)
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.mbid_replace_service import MbidReplaceDB as _ReplaceDB
+    from lib.pipeline_db import PipelineDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_replace_protocol: _ReplaceDB = cast("PipelineDB", None)
+    _fake_db_satisfies_replace_protocol: _ReplaceDB = cast("FakePipelineDB", None)
+
+
+class TestReplaceDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy MbidReplaceDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.mbid_replace_service import MbidReplaceDB
+        from lib.pipeline_db import PipelineDB
+
+        self.assertTrue(issubclass(PipelineDB, MbidReplaceDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.mbid_replace_service import MbidReplaceDB
+
+        self.assertTrue(issubclass(FakePipelineDB, MbidReplaceDB))
+
+    def test_replace_protocol_extends_forwarded_surfaces(self) -> None:
+        """Replace forwards its handle into wrong-match group delete,
+        release cleanup, and SearchPlanService."""
+        from lib.mbid_replace_service import MbidReplaceDB
+        from lib.release_cleanup import ReleaseCleanupDB
+        from lib.search_plan_service import SearchPlanDB
+        from lib.wrong_match_delete_service import WrongMatchDeleteDB
+
+        self.assertTrue(issubclass(MbidReplaceDB, WrongMatchDeleteDB))
+        self.assertTrue(issubclass(MbidReplaceDB, ReleaseCleanupDB))
+        self.assertTrue(issubclass(MbidReplaceDB, SearchPlanDB))
 
 
 if __name__ == "__main__":
