@@ -1,0 +1,282 @@
+{
+ "generated_at": "2026-05-05T11:05:00+00:00",
+ "redis": {
+  "enabled": true,
+  "status": "ok",
+  "error": null,
+  "used_memory_bytes": 229000000,
+  "maxmemory_bytes": 0,
+  "used_memory_dataset_bytes": 210000000,
+  "memory_utilization": null,
+  "key_count": 228000,
+  "expires_count": 228000,
+  "avg_ttl_ms": 23800000,
+  "fragmentation_ratio": 1.08
+ },
+ "searches": {
+  "windows": [
+   {
+    "label": "24h",
+    "hours": 24,
+    "searches": 2482,
+    "distinct_requests": 623,
+    "searches_per_hour": 103.4166666667,
+    "searches_per_24h": 2482,
+    "avg_elapsed_s": 65.19,
+    "median_elapsed_s": 65.15,
+    "p95_elapsed_s": 90.19,
+    "max_elapsed_s": 142.36,
+    "outcomes": {
+     "found": 128,
+     "no_match": 1640,
+     "no_results": 693,
+     "exhausted": 16,
+     "errors": 5
+    }
+   },
+   {
+    "label": "6h",
+    "hours": 6,
+    "searches": 866,
+    "distinct_requests": 586,
+    "searches_per_hour": 144.3333333333,
+    "searches_per_24h": 3464,
+    "avg_elapsed_s": 66.86,
+    "median_elapsed_s": 65.19,
+    "p95_elapsed_s": 91.21,
+    "max_elapsed_s": 142.36,
+    "outcomes": {
+     "found": 27,
+     "no_match": 586,
+     "no_results": 251,
+     "exhausted": 0,
+     "errors": 2
+    }
+   }
+  ]
+ },
+ "cycles": {
+  "windows": [
+   {
+    "label": "24h",
+    "hours": 24,
+    "cycles": 26,
+    "avg_cycle_s": 392.35,
+    "median_cycle_s": 338.43,
+    "p95_cycle_s": 761.42,
+    "max_cycle_s": 830.79,
+    "median_search_s": 296.1,
+    "watchdog_kills": 0,
+    "find_download_queued": 303,
+    "find_download_completed": 303,
+    "cache_errors": 0,
+    "cache_write_errors": 0,
+    "cache_fuse_tripped": 0,
+    "peers_browsed": 15568,
+    "peers_browsed_lazy": 103,
+    "fanout_waves": 1746
+   },
+   {
+    "label": "6h",
+    "hours": 6,
+    "cycles": 26,
+    "avg_cycle_s": 392.35,
+    "median_cycle_s": 338.43,
+    "p95_cycle_s": 761.42,
+    "max_cycle_s": 830.79,
+    "median_search_s": 296.1,
+    "watchdog_kills": 0,
+    "find_download_queued": 303,
+    "find_download_completed": 303,
+    "cache_errors": 0,
+    "cache_write_errors": 0,
+    "cache_fuse_tripped": 0,
+    "peers_browsed": 15568,
+    "peers_browsed_lazy": 103,
+    "fanout_waves": 1746
+   }
+  ],
+  "recent": [],
+  "outliers": []
+ },
+ "coverage": {
+  "wanted_total": 16,
+  "wanted_searched_24h": 16,
+  "wanted_searched_6h": 16,
+  "wanted_unsearched_24h": 0,
+  "wanted_unsearched_6h": 0,
+  "wanted_never_searched": 0,
+  "active_wanted_searches_24h": 143,
+  "active_wanted_searches_6h": 143,
+  "oldest_last_search_at": "2026-05-05T10:20:00+00:00",
+  "matches_24h": 128,
+  "matches_6h": 27,
+  "matches_per_hour_24h": 5.3333333333,
+  "matches_per_hour_6h": 4.5,
+  "match_rate_series_24h": [
+   {
+    "bucket_start": "2026-05-04T11:00:00+00:00",
+    "matches": 3,
+    "matches_per_hour": 3
+   },
+   {
+    "bucket_start": "2026-05-04T12:00:00+00:00",
+    "matches": 7,
+    "matches_per_hour": 7
+   },
+   {
+    "bucket_start": "2026-05-04T13:00:00+00:00",
+    "matches": 0,
+    "matches_per_hour": 0
+   },
+   {
+    "bucket_start": "2026-05-04T14:00:00+00:00",
+    "matches": 11,
+    "matches_per_hour": 11
+   },
+   {
+    "bucket_start": "2026-05-04T15:00:00+00:00",
+    "matches": 6,
+    "matches_per_hour": 6
+   },
+   {
+    "bucket_start": "2026-05-04T16:00:00+00:00",
+    "matches": 9,
+    "matches_per_hour": 9
+   }
+  ],
+  "match_rate_series_28d": [
+   {
+    "bucket_start": "2026-04-30T00:00:00+00:00",
+    "matches": 42,
+    "matches_per_day": 42
+   },
+   {
+    "bucket_start": "2026-05-01T00:00:00+00:00",
+    "matches": 51,
+    "matches_per_day": 51
+   },
+   {
+    "bucket_start": "2026-05-02T00:00:00+00:00",
+    "matches": 39,
+    "matches_per_day": 39
+   },
+   {
+    "bucket_start": "2026-05-03T00:00:00+00:00",
+    "matches": 64,
+    "matches_per_day": 64
+   },
+   {
+    "bucket_start": "2026-05-04T00:00:00+00:00",
+    "matches": 128,
+    "matches_per_day": 128
+   },
+   {
+    "bucket_start": "2026-05-05T00:00:00+00:00",
+    "matches": 27,
+    "matches_per_day": 27
+   }
+  ],
+  "wanted_trend": {
+   "current_wanted": 16,
+   "latest_sample_at": "2026-05-05T11:00:00+00:00",
+   "series_24h": [
+    {
+     "sampled_at": "2026-05-05T05:00:00+00:00",
+     "wanted_total": 42
+    },
+    {
+     "sampled_at": "2026-05-05T07:00:00+00:00",
+     "wanted_total": 34
+    },
+    {
+     "sampled_at": "2026-05-05T09:00:00+00:00",
+     "wanted_total": 25
+    },
+    {
+     "sampled_at": "2026-05-05T11:00:00+00:00",
+     "wanted_total": 17
+    },
+    {
+     "sampled_at": "2026-05-05T11:05:00+00:00",
+     "wanted_total": 16,
+     "synthetic": true
+    }
+   ],
+   "windows": [
+    {
+     "label": "6h",
+     "hours": 6,
+     "sample_count": 4,
+     "start_sample_at": "2026-05-05T05:00:00+00:00",
+     "end_sample_at": "2026-05-05T11:05:00+00:00",
+     "start_wanted": 42,
+     "end_wanted": 16,
+     "delta": -26,
+     "delta_per_hour": -4.27,
+     "drain_per_hour": 4.27,
+     "eta_hours": 3.75,
+     "trend": "down"
+    },
+    {
+     "label": "24h",
+     "hours": 24,
+     "sample_count": 4,
+     "start_sample_at": "2026-05-05T05:00:00+00:00",
+     "end_sample_at": "2026-05-05T11:05:00+00:00",
+     "start_wanted": 42,
+     "end_wanted": 16,
+     "delta": -26,
+     "delta_per_hour": -4.27,
+     "drain_per_hour": 4.27,
+     "eta_hours": 3.75,
+     "trend": "down"
+    },
+    {
+     "label": "7d",
+     "hours": 168,
+     "sample_count": 4,
+     "start_sample_at": "2026-05-05T05:00:00+00:00",
+     "end_sample_at": "2026-05-05T11:05:00+00:00",
+     "start_wanted": 42,
+     "end_wanted": 16,
+     "delta": -26,
+     "delta_per_hour": -4.27,
+     "drain_per_hour": 4.27,
+     "eta_hours": 3.75,
+     "trend": "down"
+    }
+   ]
+  },
+  "top_10_share_24h": 0.43,
+  "top_loop_suspects": [],
+  "stale_wanted": []
+ },
+ "peers": {
+  "days": [
+   {
+    "date": "2026-05-05",
+    "new_peers": 316,
+    "total_peers": 316
+   },
+   {
+    "date": "2026-05-04",
+    "new_peers": 0,
+    "total_peers": 0
+   },
+   {
+    "date": "2026-05-03",
+    "new_peers": 0,
+    "total_peers": 0
+   }
+  ],
+  "heavy_query_hours": 24,
+  "heavy_queries": [],
+  "totals": {
+   "known_peers": 316,
+   "new_24h": 316,
+   "seen_24h": 316,
+   "tracked_since": "2026-05-05T11:02:19.295439+00:00"
+  }
+ }
+}

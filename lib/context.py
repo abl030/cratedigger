@@ -73,7 +73,9 @@ class CratediggerContext:
     prefetched_album_tracks: dict[int, list[Any]] = field(default_factory=dict)
     peer_cache: Any = None
     peer_cache_negative_skips: set[tuple[str, str]] = field(default_factory=set)
-    peer_dir_observations: set[tuple[str, str]] = field(default_factory=set)
+    # Distinct peers cold-browsed this cycle; flushed to the
+    # peer_observations roster at end of cycle (#227).
+    peer_observations: set[str] = field(default_factory=set)
 
     # --- Per-cycle timing accumulators (issue #198 U1 instrumentation).
     # browse / match are wrapped at the call sites in lib/matching.py;

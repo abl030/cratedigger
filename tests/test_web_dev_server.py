@@ -17,7 +17,7 @@ class WebDevServerTest(unittest.TestCase):
     def setUp(self) -> None:
         config = DevConfig(
             data="fixture",
-            scenario="peer_dirs",
+            scenario="peers",
             prod_base_url="https://music.ablz.au",
             dsn=None,
             beets_db=None,
@@ -46,15 +46,15 @@ class WebDevServerTest(unittest.TestCase):
         with urlopen(f"{self.base}/") as resp:
             body = resp.read().decode()
 
-        self.assertIn("DEV fixture:peer_dirs", body)
+        self.assertIn("DEV fixture:peers", body)
         self.assertIn("new EventSource('/__dev/events')", body)
         self.assertIn('type="module" src="/js/main.js"', body)
 
     def test_serves_fixture_api_scenario(self):
         payload = self.get_json("/api/pipeline/dashboard")
 
-        self.assertEqual(payload["peer_dirs"]["totals"]["known_combos"], 1621)
-        self.assertEqual(payload["peer_dirs"]["days"][0]["new_peers"], 316)
+        self.assertEqual(payload["peers"]["totals"]["known_peers"], 316)
+        self.assertEqual(payload["peers"]["days"][0]["new_peers"], 316)
 
     def test_unknown_fixture_route_is_a_404_json(self):
         with self.assertRaises(HTTPError) as raised:
@@ -100,7 +100,7 @@ class WebDevServerProxyTest(unittest.TestCase):
         self.captured_request = None
         config = DevConfig(
             data="prod-api",
-            scenario="peer_dirs",
+            scenario="peers",
             prod_base_url="http://upstream.test",
             dsn=None,
             beets_db=None,

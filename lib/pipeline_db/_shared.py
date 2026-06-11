@@ -105,12 +105,11 @@ def _stable_hash(label: str, *parts: str) -> str:
     return digest.hexdigest()
 
 
-def _peer_dir_hashes(username: str, file_dir: str) -> tuple[str, str, str]:
-    return (
-        _stable_hash("peer-dir-combo", username, file_dir),
-        _stable_hash("peer-dir-user", username),
-        _stable_hash("peer-dir-dir", file_dir),
-    )
+def _peer_hash(username: str) -> str:
+    # Label stays "peer-dir-user" — migration 039 backfilled
+    # ``peer_observations`` from the combo table's ``username_hash``
+    # column, so changing the label would orphan every backfilled row.
+    return _stable_hash("peer-dir-user", username)
 
 # Advisory-lock namespaces. Every lock in this codebase is
 # session-scoped, non-blocking (``pg_try_advisory_lock``), and

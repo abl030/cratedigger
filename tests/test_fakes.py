@@ -2722,26 +2722,20 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         db = FakePipelineDB()
 
         cycle_id = db.record_cycle_metrics(cycle_total_s=12.5)
-        new_dirs = db.record_peer_dir_observations([
-            ("alice", "Artist\\Album"),
-            ("alice", "Artist\\Album"),
-            ("bob", "Other\\Album"),
-        ])
-        repeated = db.record_peer_dir_observations([
-            ("alice", "Artist\\Album"),
-        ])
+        new_peers = db.record_peer_observations(["alice", "alice", "bob"])
+        repeated = db.record_peer_observations(["alice"])
 
         self.assertEqual(cycle_id, 1)
         self.assertEqual(db.cycle_metrics[0]["wanted_total"], 0)
-        self.assertEqual(new_dirs, 2)
+        self.assertEqual(new_peers, 2)
         self.assertEqual(repeated, 0)
-        peer_metrics = db.get_peer_dir_daily_metrics()
-        self.assertEqual(peer_metrics["totals"]["known_combos"], 2)
+        peer_metrics = db.get_peer_metrics()
+        self.assertEqual(peer_metrics["totals"]["known_peers"], 2)
         dashboard = db.get_pipeline_dashboard_metrics()
         self.assertIn("cycles", dashboard)
         self.assertEqual(dashboard["cycles"]["recent"][0]["cycle_total_s"],
                          12.5)
-        self.assertEqual(dashboard["peer_dirs"]["totals"]["known_combos"], 2)
+        self.assertEqual(dashboard["peers"]["totals"]["known_peers"], 2)
         self.assertEqual(
             dashboard["coverage"]["wanted_trend"]["current_wanted"], 0)
 
@@ -3422,89 +3416,32 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(len(db.user_cooldowns), 2)
         self.assertEqual(db.user_cooldowns["alice"].reason, "y")
 
-    # --- U3: peer_dir_daily_aggregates lazy-fill mirror ---
+    # --- peer_observations roster mirror (#227) ---
 
-    def test_peer_dir_daily_metrics_uses_seeded_cache_rows_directly(self):
-        """Cache-hit path: rows seeded into the in-memory cache flow
-        through to the response without re-aggregating observations."""
+    def test_peer_metrics_cumulative_totals_carry_forward(self):
+        """``total_peers`` accumulates across days and carries forward
+        over days with no new peers."""
         db = FakePipelineDB()
-        perth = ZoneInfo("Australia/Perth")
-        today_perth = datetime.now(perth).date()
-        yday = today_perth - timedelta(days=1)
-        two_ago = today_perth - timedelta(days=2)
-        # Seed cache with values that cannot have been computed from the
-        # (empty) observations dict -- proves the response came from
-        # cache rather than from a recompute.
-        db.peer_dir_daily_aggregates[yday] = {
-            "new_combos": 7, "new_peers": 3, "new_dirs": 5,
-        }
-        db.peer_dir_daily_aggregates[two_ago] = {
-            "new_combos": 11, "new_peers": 2, "new_dirs": 4,
-        }
+        now = datetime.now(timezone.utc)
+        db.record_peer_observations(
+            ["old1", "old2"], observed_at=now - timedelta(days=5))
+        db.record_peer_observations(["new1"], observed_at=now)
 
-        resp = db.get_peer_dir_daily_metrics(days=14)
-
-        by_date = {row["date"]: row for row in resp["days"]}
-        self.assertEqual(by_date[yday.isoformat()]["new_combos"], 7)
-        self.assertEqual(by_date[yday.isoformat()]["new_peers"], 3)
-        self.assertEqual(by_date[yday.isoformat()]["new_dirs"], 5)
-        self.assertEqual(by_date[two_ago.isoformat()]["new_combos"], 11)
-        # Cache was not mutated.
+        resp = db.get_peer_metrics(days=14)
+        self.assertEqual(resp["totals"]["known_peers"], 3)
+        self.assertEqual(resp["totals"]["new_24h"], 1)
+        self.assertEqual(resp["totals"]["seen_24h"], 1)
+        self.assertEqual(resp["days"][0]["total_peers"], 3)
+        self.assertEqual(resp["days"][1]["total_peers"], 2)
         self.assertEqual(
-            db.peer_dir_daily_aggregates[yday],
-            {"new_combos": 7, "new_peers": 3, "new_dirs": 5},
-        )
+            sum(d["new_peers"] for d in resp["days"]), 3)
 
-    def test_peer_dir_daily_metrics_lazy_fills_then_serves_from_cache(self):
-        """Lazy-fill path: empty cache + seeded observations -> first
-        call computes & stores; second call reuses cache rows."""
-        db = FakePipelineDB()
-        perth = ZoneInfo("Australia/Perth")
-        # Seed an observation that is cleanly inside yesterday's Perth
-        # bucket: noon Perth yesterday.
-        yday_perth = (datetime.now(perth) - timedelta(days=1)).date()
-        observed_at = datetime.combine(
-            yday_perth, datetime.min.time().replace(hour=12),
-            tzinfo=perth,
-        ).astimezone(timezone.utc)
-        db.record_peer_dir_observations(
-            [("alice", "/music/a"), ("bob", "/music/b")],
-            observed_at=observed_at,
-        )
-
-        # Pre-condition: cache empty.
-        self.assertEqual(db.peer_dir_daily_aggregates, {})
-
-        resp1 = db.get_peer_dir_daily_metrics(days=14)
-
-        # Cache was populated for yesterday (and every other completed
-        # day in the window).
-        self.assertIn(yday_perth, db.peer_dir_daily_aggregates)
-        self.assertEqual(
-            db.peer_dir_daily_aggregates[yday_perth],
-            {"new_combos": 2, "new_peers": 2, "new_dirs": 2},
-        )
-
-        # Mutate the cached row to a sentinel; the next call must read
-        # from cache (sentinel surfaces) rather than recomputing.
-        db.peer_dir_daily_aggregates[yday_perth] = {
-            "new_combos": 999, "new_peers": 999, "new_dirs": 999,
-        }
-        resp2 = db.get_peer_dir_daily_metrics(days=14)
-
-        by_date1 = {r["date"]: r for r in resp1["days"]}
-        by_date2 = {r["date"]: r for r in resp2["days"]}
-        self.assertEqual(by_date1[yday_perth.isoformat()]["new_combos"], 2)
-        self.assertEqual(by_date2[yday_perth.isoformat()]["new_combos"], 999)
-
-    def test_peer_dir_daily_metrics_buckets_by_perth_local_date_not_utc(self):
+    def test_peer_metrics_buckets_by_perth_local_date_not_utc(self):
         """Perth-boundary regression: ``2026-05-07 23:55 UTC`` is
         ``2026-05-08 07:55 Perth``. The fake must bucket it into
         2026-05-08, matching the real method's
         ``(first_seen_at AT TIME ZONE 'Australia/Perth')::date``
-        expression. The pre-U3 fake bucketed by UTC date and would
-        have placed it in 2026-05-07 instead.
-        """
+        expression."""
         db = FakePipelineDB()
         perth = ZoneInfo("Australia/Perth")
         observed_at = datetime(
@@ -3514,36 +3451,19 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(observed_at.astimezone(perth).date(),
                          date(2026, 5, 8))
 
-        db.record_peer_dir_observations(
-            [("alice", "/music/a")], observed_at=observed_at,
-        )
+        db.record_peer_observations(["alice"], observed_at=observed_at)
 
-        # Drive the method "as if" today were 2026-05-09 Perth so
-        # 2026-05-08 falls into the completed-day window and gets
-        # cached. We use a generous window to cover both candidate
-        # buckets regardless of the real wall-clock date.
         with patch("tests.fakes._utcnow") as fake_now:
             fake_now.return_value = datetime(
                 2026, 5, 9, 5, 0, tzinfo=timezone.utc,
             )  # 2026-05-09 13:00 Perth
-            resp = db.get_peer_dir_daily_metrics(days=14)
+            resp = db.get_peer_metrics(days=14)
 
         by_date = {r["date"]: r for r in resp["days"]}
-        # The Perth-bucketed observation lands in 2026-05-08, not
-        # 2026-05-07. UTC-bucketing (the pre-U3 behavior) would have
-        # placed the count on 2026-05-07 instead.
-        self.assertEqual(by_date["2026-05-08"]["new_combos"], 1)
-        self.assertEqual(by_date["2026-05-07"]["new_combos"], 0)
-        # Cache rows reflect the same Perth-bucketing: 2026-05-08 has
-        # the observation, 2026-05-07 is a zero row.
-        self.assertEqual(
-            db.peer_dir_daily_aggregates[date(2026, 5, 8)],
-            {"new_combos": 1, "new_peers": 1, "new_dirs": 1},
-        )
-        self.assertEqual(
-            db.peer_dir_daily_aggregates[date(2026, 5, 7)],
-            {"new_combos": 0, "new_peers": 0, "new_dirs": 0},
-        )
+        self.assertEqual(by_date["2026-05-08"]["new_peers"], 1)
+        self.assertEqual(by_date["2026-05-07"]["new_peers"], 0)
+        self.assertEqual(by_date["2026-05-07"]["total_peers"], 0)
+        self.assertEqual(by_date["2026-05-08"]["total_peers"], 1)
 
 
 class TestFakeBadAudioHashes(unittest.TestCase):

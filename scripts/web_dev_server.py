@@ -413,7 +413,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--scenario",
-        default="peer_dirs",
+        default="peers",
         help="Fixture scenario under tests/fixtures/web/",
     )
     parser.add_argument("--prod-base-url", default=PROD_BASE_URL)

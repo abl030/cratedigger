@@ -1,105 +1,102 @@
 {
-  "generated_at": "2026-05-05T00:00:00+00:00",
-  "redis": {
-    "enabled": false,
-    "status": "disabled",
-    "error": null
-  },
-  "searches": {
-    "windows": []
-  },
-  "cycles": {
-    "windows": [],
-    "recent": [],
-    "outliers": []
-  },
-  "coverage": {
-    "wanted_total": 0,
-    "wanted_searched_24h": 0,
-    "wanted_searched_6h": 0,
-    "wanted_unsearched_24h": 0,
-    "wanted_unsearched_6h": 0,
-    "wanted_never_searched": 0,
-    "active_wanted_searches_24h": 0,
-    "active_wanted_searches_6h": 0,
-    "oldest_last_search_at": null,
-    "matches_24h": 0,
-    "matches_6h": 0,
-    "matches_per_hour_24h": 0,
-    "matches_per_hour_6h": 0,
-    "match_rate_series_24h": [],
-    "match_rate_series_28d": [],
-    "wanted_trend": {
-      "current_wanted": 0,
-      "latest_sample_at": null,
-      "series_24h": [
-        {
-          "sampled_at": "2026-05-05T00:00:00+00:00",
-          "wanted_total": 0,
-          "synthetic": true
-        }
-      ],
-      "windows": [
-        {
-          "label": "6h",
-          "hours": 6,
-          "sample_count": 0,
-          "start_sample_at": null,
-          "end_sample_at": "2026-05-05T00:00:00+00:00",
-          "start_wanted": null,
-          "end_wanted": 0,
-          "delta": null,
-          "delta_per_hour": null,
-          "drain_per_hour": null,
-          "eta_hours": null,
-          "trend": "unknown"
-        },
-        {
-          "label": "24h",
-          "hours": 24,
-          "sample_count": 0,
-          "start_sample_at": null,
-          "end_sample_at": "2026-05-05T00:00:00+00:00",
-          "start_wanted": null,
-          "end_wanted": 0,
-          "delta": null,
-          "delta_per_hour": null,
-          "drain_per_hour": null,
-          "eta_hours": null,
-          "trend": "unknown"
-        },
-        {
-          "label": "7d",
-          "hours": 168,
-          "sample_count": 0,
-          "start_sample_at": null,
-          "end_sample_at": "2026-05-05T00:00:00+00:00",
-          "start_wanted": null,
-          "end_wanted": 0,
-          "delta": null,
-          "delta_per_hour": null,
-          "drain_per_hour": null,
-          "eta_hours": null,
-          "trend": "unknown"
-        }
-      ]
-    },
-    "top_10_share_24h": 0,
-    "top_loop_suspects": [],
-    "stale_wanted": []
-  },
-  "peer_dirs": {
-    "days": [],
-    "heavy_query_hours": 24,
-    "heavy_queries": [],
-    "totals": {
-      "known_combos": 0,
-      "known_peers": 0,
-      "known_dirs": 0,
-      "new_24h": 0,
-      "cold_seen_24h": 0,
-      "days_with_new": 0,
-      "tracked_since": null
+ "generated_at": "2026-05-05T00:00:00+00:00",
+ "redis": {
+  "enabled": false,
+  "status": "disabled",
+  "error": null
+ },
+ "searches": {
+  "windows": []
+ },
+ "cycles": {
+  "windows": [],
+  "recent": [],
+  "outliers": []
+ },
+ "coverage": {
+  "wanted_total": 0,
+  "wanted_searched_24h": 0,
+  "wanted_searched_6h": 0,
+  "wanted_unsearched_24h": 0,
+  "wanted_unsearched_6h": 0,
+  "wanted_never_searched": 0,
+  "active_wanted_searches_24h": 0,
+  "active_wanted_searches_6h": 0,
+  "oldest_last_search_at": null,
+  "matches_24h": 0,
+  "matches_6h": 0,
+  "matches_per_hour_24h": 0,
+  "matches_per_hour_6h": 0,
+  "match_rate_series_24h": [],
+  "match_rate_series_28d": [],
+  "wanted_trend": {
+   "current_wanted": 0,
+   "latest_sample_at": null,
+   "series_24h": [
+    {
+     "sampled_at": "2026-05-05T00:00:00+00:00",
+     "wanted_total": 0,
+     "synthetic": true
     }
+   ],
+   "windows": [
+    {
+     "label": "6h",
+     "hours": 6,
+     "sample_count": 0,
+     "start_sample_at": null,
+     "end_sample_at": "2026-05-05T00:00:00+00:00",
+     "start_wanted": null,
+     "end_wanted": 0,
+     "delta": null,
+     "delta_per_hour": null,
+     "drain_per_hour": null,
+     "eta_hours": null,
+     "trend": "unknown"
+    },
+    {
+     "label": "24h",
+     "hours": 24,
+     "sample_count": 0,
+     "start_sample_at": null,
+     "end_sample_at": "2026-05-05T00:00:00+00:00",
+     "start_wanted": null,
+     "end_wanted": 0,
+     "delta": null,
+     "delta_per_hour": null,
+     "drain_per_hour": null,
+     "eta_hours": null,
+     "trend": "unknown"
+    },
+    {
+     "label": "7d",
+     "hours": 168,
+     "sample_count": 0,
+     "start_sample_at": null,
+     "end_sample_at": "2026-05-05T00:00:00+00:00",
+     "start_wanted": null,
+     "end_wanted": 0,
+     "delta": null,
+     "delta_per_hour": null,
+     "drain_per_hour": null,
+     "eta_hours": null,
+     "trend": "unknown"
+    }
+   ]
+  },
+  "top_10_share_24h": 0,
+  "top_loop_suspects": [],
+  "stale_wanted": []
+ },
+ "peers": {
+  "days": [],
+  "heavy_query_hours": 24,
+  "heavy_queries": [],
+  "totals": {
+   "known_peers": 0,
+   "new_24h": 0,
+   "seen_24h": 0,
+   "tracked_since": null
   }
+ }
 }

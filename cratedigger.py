@@ -1661,19 +1661,19 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to persist cycle metrics: {e}")
         try:
-            observations = getattr(_module_ctx, "peer_dir_observations", set())
+            observations = _module_ctx.peer_observations
             if observations:
                 db = pipeline_db_source._get_db()
-                new_observations = db.record_peer_dir_observations(
+                new_observations = db.record_peer_observations(
                     observations,
                     observed_at=cycle_completed_at,
                 )
                 logger.info(
-                    "Peer-dir observations persisted: "
+                    "Peer observations persisted: "
                     f"observed={len(observations)} new={new_observations}"
                 )
         except Exception as e:
-            logger.warning(f"Failed to persist peer-dir observations: {e}")
+            logger.warning(f"Failed to persist peer observations: {e}")
 
     finally:
         # Clean up pipeline DB connection

@@ -254,7 +254,7 @@ function renderPipelineDashboard() {
   const coverage = /** @type {any} */ (data.coverage || {});
   const coverageWithRates = withCoverageMatchRates(coverage, searches);
   const redis = /** @type {any} */ (data.redis || {});
-  const peerDirs = /** @type {any} */ (data.peer_dirs || {});
+  const peers = /** @type {any} */ (data.peers || {});
   const generated = data.generated_at ? awstDateTime(data.generated_at) : '';
   el.innerHTML = `
     ${renderPipelineNav()}
@@ -266,11 +266,11 @@ function renderPipelineDashboard() {
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverageWithRates)}
       ${renderWantedTrendCard(coverageWithRates.wanted_trend || {})}
-      ${renderPeerDirCard(peerDirs)}
+      ${renderPeersCard(peers)}
       ${renderSearchCard(searches)}
       ${renderCycleCard(cycles)}
       ${renderCycleOutliers(data.cycles?.outliers || [])}
-      ${renderPeerDirHeavyQueries(peerDirs)}
+      ${renderPeerBrowseHeavyQueries(peers)}
       ${renderLoopSuspects(coverage.top_loop_suspects || [])}
       ${renderStaleWanted(coverage.stale_wanted || [])}
     </div>
@@ -361,30 +361,29 @@ function formatWantedTrendWindow(w) {
   return `${direction} ${formatDecimal(Math.abs(w.delta_per_hour))}/hr (${formatSignedCount(delta)})`;
 }
 
-function renderPeerDirCard(peerDirs) {
-  const totals = peerDirs.totals || {};
-  const days = /** @type {any[]} */ (peerDirs.days || []);
+function renderPeersCard(peers) {
+  const totals = peers.totals || {};
+  const days = /** @type {any[]} */ (peers.days || []);
   return `
     <div class="dashboard-card dashboard-wide">
-      <div class="dashboard-card-title">Peer/Dir First Seen</div>
+      <div class="dashboard-card-title">Known Peers</div>
       <div class="dashboard-metric-strip">
-        <div class="dashboard-metric"><span>Known combos</span><strong>${formatCount(totals.known_combos)}</strong></div>
-        <div class="dashboard-metric"><span>New 24h</span><strong>${formatCount(totals.new_24h)}</strong></div>
         <div class="dashboard-metric"><span>Known peers</span><strong>${formatCount(totals.known_peers)}</strong></div>
+        <div class="dashboard-metric"><span>New 24h</span><strong>${formatCount(totals.new_24h)}</strong></div>
+        <div class="dashboard-metric"><span>Seen 24h</span><strong>${formatCount(totals.seen_24h)}</strong></div>
         <div class="dashboard-metric"><span>Tracked since</span><strong>${totals.tracked_since ? awstDate(totals.tracked_since) : 'n/a'}</strong></div>
       </div>
       <table class="dashboard-table">
-        <thead><tr><th>Day</th><th>Combos</th><th>Peers</th><th>Dirs</th></tr></thead>
+        <thead><tr><th>Day</th><th>New peers</th><th>Total known</th></tr></thead>
         <tbody>
           ${days.map(d => `
             <tr>
               <td>${esc(d.date || '')}</td>
-              <td class="${d.new_combos ? 'metric-good' : ''}">${formatCount(d.new_combos)}</td>
-              <td>${formatCount(d.new_peers)}</td>
-              <td>${formatCount(d.new_dirs)}</td>
+              <td class="${d.new_peers ? 'metric-good' : ''}">${formatCount(d.new_peers)}</td>
+              <td>${formatCount(d.total_peers)}</td>
             </tr>
           `).join('')}
-          ${days.length === 0 ? '<tr><td colspan="4">No peer/dir observations yet</td></tr>' : ''}
+          ${days.length === 0 ? '<tr><td colspan="3">No peer observations yet</td></tr>' : ''}
         </tbody>
       </table>
     </div>
@@ -632,9 +631,9 @@ function renderCycleOutliers(rows) {
   `;
 }
 
-function renderPeerDirHeavyQueries(peerDirs) {
-  const rows = /** @type {any[]} */ (peerDirs.heavy_queries || []);
-  const hours = Number(peerDirs.heavy_query_hours || 24);
+function renderPeerBrowseHeavyQueries(peers) {
+  const rows = /** @type {any[]} */ (peers.heavy_queries || []);
+  const hours = Number(peers.heavy_query_hours || 24);
   return `
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Peer/Dir Heavy Queries (${formatCount(hours)}h)</div>
@@ -1063,7 +1062,8 @@ export const __test__ = {
   renderCoverageCard,
   renderHourlyMatchRateChart,
   renderMatchRateChart,
-  renderPeerDirHeavyQueries,
+  renderPeerBrowseHeavyQueries,
+  renderPeersCard,
   renderPipelineNav,
   renderWantedTrendCard,
   renderWantedTrendChart,
