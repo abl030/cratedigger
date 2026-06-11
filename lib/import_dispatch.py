@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Sequence, TYPE_CHECKING, TypedDict
 
 import msgspec
 
@@ -749,7 +749,21 @@ def run_import_one(
     )
 
 
-def _v0_probe_log_fields(dl_info: DownloadInfo) -> dict[str, int | str | None]:
+class _V0ProbeLogFields(TypedDict):
+    """V0-probe kwargs splatted into ``log_download`` — TypedDict so the
+    unpack type-checks against the annotated signature per key."""
+
+    v0_probe_kind: str | None
+    v0_probe_min_bitrate: int | None
+    v0_probe_avg_bitrate: int | None
+    v0_probe_median_bitrate: int | None
+    existing_v0_probe_kind: str | None
+    existing_v0_probe_min_bitrate: int | None
+    existing_v0_probe_avg_bitrate: int | None
+    existing_v0_probe_median_bitrate: int | None
+
+
+def _v0_probe_log_fields(dl_info: DownloadInfo) -> _V0ProbeLogFields:
     probe = dl_info.v0_probe
     existing = dl_info.existing_v0_probe
     return {
@@ -1161,7 +1175,8 @@ def _finalize_request_and_log_rejection(
          fires and ``record_validation_attempt=True``, also bumps the
          validation attempt counter — matches pre-U4 importer behavior.
       2. ``download_log`` row write via ``db.log_download(**log_download_kwargs)``.
-         Always fires. Returns the new row id.
+         Fires whenever ``request_id`` is present (raises otherwise — see
+         below). Returns the new row id.
       3. ``source_denylist`` write when ``denylist_username`` is supplied
          AND ``request_id is not None`` (denylist FK-references a
          request). The importer-side entry point currently passes None
@@ -1174,8 +1189,11 @@ def _finalize_request_and_log_rejection(
          so the poll loop's active-import-job guard releases.
 
     Returns the new ``download_log`` row id. The ``request_not_found``
-    subcase (``request_id is None``) writes the log + marks the job
-    failed but skips finalize_request and denylist.
+    subcase (``request_id is None``) raises instead — the audit row
+    cannot be written because ``download_log.request_id`` is NOT NULL
+    (this was always true; the INSERT used to raise NotNullViolation).
+    The preview worker's self-heal try/except absorbs it and the job is
+    already ``failed`` from its step 1, so the queue still converges.
     """
     if requeue_to_wanted and request_id is not None:
         transition_kwargs: dict[str, object] = {}
@@ -1190,12 +1208,22 @@ def _finalize_request_and_log_rejection(
         if record_validation_attempt:
             db.record_attempt(request_id, "validation")
 
+    if request_id is None:
+        # Same control flow as the NotNullViolation this used to raise at
+        # the INSERT — download_log.request_id is NOT NULL — but with an
+        # honest message (#409 typing exposed the documented-but-impossible
+        # "request_not_found writes the log" subcase). The preview worker's
+        # self-heal try/except catches it; the job is already failed.
+        raise ValueError(
+            "cannot write download_log rejection audit: request_id is None "
+            "and download_log.request_id is NOT NULL"
+        )
     download_log_id = db.log_download(
         request_id=request_id,
         **log_download_kwargs,
     )
 
-    if denylist_username and request_id is not None:
+    if denylist_username:
         db.add_denylist(request_id, denylist_username, reason=denylist_reason)
 
     if import_job_id is not None:
@@ -1311,14 +1339,15 @@ def _record_preview_measurement_failed(
       * ``download_log`` row written with ``outcome='measurement_failed'``,
         ``beets_scenario='measurement_failed'``, and the
         ``MeasurementFailure`` JSON as ``validation_result``.
-      * Parent request → ``wanted`` via ``transitions.finalize_request``
-        (skipped when ``request_id is None`` — the
-        ``reason='request_not_found'`` subcase).
+      * Parent request → ``wanted`` via ``transitions.finalize_request``.
       * Optional denylist write when ``denylist_username`` is supplied.
       * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
         the poll loop's active-import-job guard releases on the next tick.
 
-    Returns the new ``download_log`` row id.
+    Returns the new ``download_log`` row id. The ``request_not_found``
+    subcase (``request_id is None``) raises instead — see
+    ``_finalize_request_and_log_rejection``; the worker's self-heal
+    try/except absorbs it.
     """
     requeue = request_id is not None
     validation_json = msgspec.json.encode(payload).decode("utf-8")

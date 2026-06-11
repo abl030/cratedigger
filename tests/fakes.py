@@ -1178,7 +1178,7 @@ class FakePipelineDB:
         validate_job_type(job_type)
         payload = validate_payload(job_type, payload or {})
         if dedupe_key is not None:
-            existing = self.get_import_job_by_dedupe_key(dedupe_key)
+            existing = self._get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
                 return ImportJob.from_row(existing.to_dict(), deduped=True)
         if job_type == IMPORT_JOB_YOUTUBE and request_id is not None:
@@ -1233,7 +1233,7 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
-    def get_import_job_by_dedupe_key(
+    def _get_import_job_by_dedupe_key(
         self,
         dedupe_key: str,
         *,
@@ -1978,6 +1978,16 @@ class FakePipelineDB:
         remaining named fields plus any test-only ``**extra`` merge into
         ``.extra`` so ``assert_log`` can still introspect them.
         """
+        if request_id is None:
+            # Mirror production: download_log.request_id is NOT NULL
+            # (test-fidelity Rule B — the fake must not be more
+            # permissive than the real INSERT).
+            import psycopg2.errors
+
+            raise psycopg2.errors.NotNullViolation(
+                'null value in column "request_id" of relation '
+                '"download_log" violates not-null constraint'
+            )
         self._next_download_log_id += 1
         auxiliary: dict[str, Any] = {
             "download_path": download_path,

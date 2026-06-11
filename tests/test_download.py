@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, cast
+from typing import Any, TYPE_CHECKING, cast
 
 from tests.helpers import (
     make_ctx_with_fake_db,
@@ -4043,6 +4043,47 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
                           "strict cfg must also reach rejection_backfill_override "
                           "— if cfg threading were broken, both branches would "
                           "use the same default and this assertion would silently pass")
+
+
+if TYPE_CHECKING:
+    from lib.download import DownloadDB as _DownloadDB
+    from lib.download_ownership import DownloadOwnershipDB as _OwnershipDB
+    from lib.pipeline_db import PipelineDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_download_protocol: _DownloadDB = cast("PipelineDB", None)
+    _fake_db_satisfies_download_protocol: _DownloadDB = cast("FakePipelineDB", None)
+    _pipeline_db_satisfies_ownership_protocol: _OwnershipDB = cast("PipelineDB", None)
+    _fake_db_satisfies_ownership_protocol: _OwnershipDB = cast("FakePipelineDB", None)
+
+
+class TestDownloadDBProtocolParity(unittest.TestCase):
+    """#409: both impls must satisfy DownloadDB and DownloadOwnershipDB."""
+
+    def test_pipeline_db_satisfies_protocols(self) -> None:
+        from lib.download import DownloadDB
+        from lib.download_ownership import DownloadOwnershipDB
+        from lib.pipeline_db import PipelineDB
+
+        self.assertTrue(issubclass(PipelineDB, DownloadDB))
+        self.assertTrue(issubclass(PipelineDB, DownloadOwnershipDB))
+
+    def test_fake_pipeline_db_satisfies_protocols(self) -> None:
+        from lib.download import DownloadDB
+        from lib.download_ownership import DownloadOwnershipDB
+
+        self.assertTrue(issubclass(FakePipelineDB, DownloadDB))
+        self.assertTrue(issubclass(FakePipelineDB, DownloadOwnershipDB))
+
+    def test_protocols_extend_transitions_protocol(self) -> None:
+        """Both forward their handle into transitions.finalize_request."""
+        from lib.download import DownloadDB
+        from lib.download_ownership import DownloadOwnershipDB
+        from lib.transitions import TransitionsDB
+
+        self.assertTrue(issubclass(DownloadDB, TransitionsDB))
+        self.assertTrue(issubclass(DownloadOwnershipDB, TransitionsDB))
 
 
 if __name__ == "__main__":

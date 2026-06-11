@@ -62,7 +62,7 @@ class _CoreMixin(_PipelineDBBase):
             self.conn = self._connect()
 
 
-    def close(self):
+    def close(self) -> None:
         self.conn.close()
 
 

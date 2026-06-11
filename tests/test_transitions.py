@@ -1,7 +1,7 @@
 """Tests for lib/transitions.py — state transition validation and side effects."""
 
 import unittest
-from typing import Any, cast
+from typing import Any, TYPE_CHECKING, cast
 
 from lib.transitions import (
     VALID_TRANSITIONS,
@@ -408,6 +408,31 @@ class TestFinalizeRequest(unittest.TestCase):
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertIsNone(db.request(42)["active_download_state"])
+
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import PipelineDB
+    from lib.transitions import TransitionsDB as _TransitionsDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_transitions_protocol: _TransitionsDB = cast("PipelineDB", None)
+    _fake_db_satisfies_transitions_protocol: _TransitionsDB = cast("FakePipelineDB", None)
+
+
+class TestTransitionsDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy TransitionsDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.transitions import TransitionsDB
+
+        self.assertTrue(issubclass(PipelineDB, TransitionsDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.transitions import TransitionsDB
+
+        self.assertTrue(issubclass(FakePipelineDB, TransitionsDB))
 
 
 if __name__ == "__main__":

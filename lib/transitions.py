@@ -12,12 +12,43 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, TYPE_CHECKING, cast
-
-if TYPE_CHECKING:
-    from lib.pipeline_db import PipelineDB
+from typing import Any, Literal, Mapping, Protocol, runtime_checkable
 
 logger = logging.getLogger("cratedigger")
+
+
+@runtime_checkable
+class TransitionsDB(Protocol):
+    """The PipelineDB surface the status-transition engine uses (#409).
+
+    Parity tests live in ``tests/test_transitions.py``.
+    """
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+
+    def set_downloading(self, request_id: int, state_json: str) -> bool: ...
+
+    def reset_to_wanted(
+        self,
+        request_id: int,
+        *,
+        clear_retry_counters: bool = True,
+        **fields: Any,
+    ) -> None: ...
+
+    def reset_downloading_to_wanted(
+        self, request_id: int, **fields: Any,
+    ) -> bool: ...
+
+    def record_attempt(self, request_id: int, attempt_type: str) -> None: ...
+
+    def mark_imported_with_rescue(
+        self, request_id: int, **extra: Any,
+    ) -> None: ...
+
+    def update_status(
+        self, request_id: int, status: str, **extra: Any,
+    ) -> None: ...
 
 
 class _OmittedField:
@@ -291,7 +322,7 @@ class RequestTransition:
 
 
 def finalize_request(
-    db: "PipelineDB",
+    db: TransitionsDB,
     request_id: int,
     transition: RequestTransition,
 ) -> bool:
@@ -360,7 +391,7 @@ def validate_transition(from_status: str, to_status: str) -> bool:
 
 
 def apply_transition(
-    db: "PipelineDB",
+    db: TransitionsDB,
     request_id: int,
     to_status: str,
     **extra: Any,
@@ -385,7 +416,7 @@ def apply_transition(
         from_status = str(from_status)
     # Presence-based: only fields explicitly passed get written.
     # Omitted fields are preserved by reset_to_wanted / update_status.
-    transition_fields: dict[str, object] = {}
+    transition_fields: dict[str, Any] = {}
     for _key in ("search_filetype_override", "min_bitrate", "prev_min_bitrate"):
         if _key in extra:
             transition_fields[_key] = extra.pop(_key)
@@ -422,7 +453,7 @@ def apply_transition(
 
     # → wanted with counter reset: use reset_to_wanted
     if to_status == "wanted" and fx.clear_retry_counters:
-        cast(Any, db.reset_to_wanted)(request_id, **transition_fields)
+        db.reset_to_wanted(request_id, **transition_fields)
         if fx.record_attempt and attempt_type:
             db.record_attempt(request_id, attempt_type)
         return True
@@ -430,16 +461,9 @@ def apply_transition(
     # downloading → wanted: clear active download state, preserve retry counters,
     # then record the failed automatic attempt so backoff can continue growing.
     if from_status == "downloading" and to_status == "wanted":
-        reset = getattr(db, "reset_downloading_to_wanted", None)
-        if reset is None:
-            cast(Any, db.reset_to_wanted)(
-                request_id,
-                clear_retry_counters=False,
-                **transition_fields,
-            )
-            reset_ok = True
-        else:
-            reset_ok = bool(reset(request_id, **transition_fields))
+        reset_ok = bool(
+            db.reset_downloading_to_wanted(request_id, **transition_fields)
+        )
         if not reset_ok:
             logger.warning(
                 f"apply_transition: status guard prevented 'downloading' -> "
@@ -459,7 +483,7 @@ def apply_transition(
     # like update_status (status + extras), just inside an explicit
     # transaction. No "import without rescue check" parallel path.
     if to_status == "imported":
-        cast(Any, db.mark_imported_with_rescue)(request_id, **all_extra)
+        db.mark_imported_with_rescue(request_id, **all_extra)
         return True
     db.update_status(request_id, to_status, **all_extra)
     return True
