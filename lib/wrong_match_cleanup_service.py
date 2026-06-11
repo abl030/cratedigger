@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Iterable
+from contextlib import AbstractContextManager
+from typing import Any, Iterable, Protocol, runtime_checkable
 
 import msgspec
 
 from lib.import_evidence import CURRENT_STATUS_LOADED, load_current_evidence_for_action
+from lib.import_queue import ImportJob
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
     wrong_match_cleanup_lock_key,
@@ -30,6 +32,47 @@ from lib.validation_envelope import (
 from lib.wrong_matches import cleanup_wrong_match_source, validation_failed_path
 
 logger = logging.getLogger("cratedigger")
+
+
+@runtime_checkable
+class WrongMatchCleanupDB(Protocol):
+    """The PipelineDB surface this service uses directly (#409).
+
+    ``PipelineDB`` and ``FakePipelineDB`` satisfy it structurally — pyright
+    enforces signature parity at every call site, and the issubclass parity
+    tests in ``tests/test_wrong_match_cleanup_service.py`` guard method
+    presence at runtime. The handle is also forwarded to helpers in other
+    modules (``cleanup_wrong_match_source``, evidence loaders, ``preview_fn``)
+    whose own surfaces get protocols in their own #409 increments.
+    """
+
+    def get_wrong_matches(self) -> list[dict[str, object]]: ...
+
+    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None: ...
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def update_request_fields(self, request_id: int, **extra: Any) -> None: ...
+
+    def list_active_import_jobs_for_wrong_match(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int | None,
+        failed_paths: Iterable[str],
+        source_dirs: Iterable[str],
+        ignore_import_job_id: int | None = None,
+        limit: int = 50,
+    ) -> list[ImportJob]: ...
+
+    def record_wrong_match_triage(
+        self, log_id: int, triage_result: WrongMatchTriageAudit,
+    ) -> bool: ...
+
 
 OUTCOME_DELETED = "deleted"
 OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT = "deleted_verified_lossless_parent"
@@ -138,7 +181,7 @@ class _LoadedEvidence(msgspec.Struct, frozen=True):
 
 
 def cleanup_all_wrong_matches(
-    db: Any,
+    db: WrongMatchCleanupDB,
     *,
     confirm_all_wrong_matches: bool = False,
     ignore_import_job_id: int | None = None,
@@ -173,7 +216,7 @@ def cleanup_all_wrong_matches(
 
 
 def cleanup_wrong_match(
-    db: Any,
+    db: WrongMatchCleanupDB,
     download_log_id: int,
     *,
     failed_path_hint: str | None = None,
@@ -212,7 +255,7 @@ def cleanup_wrong_match(
 
 
 def _cleanup_wrong_match(
-    db: Any,
+    db: WrongMatchCleanupDB,
     download_log_id: int,
     *,
     failed_path_hint: str | None,
@@ -431,7 +474,7 @@ def _cleanup_wrong_match(
 
 
 def _perform_cleanup_deletion(
-    db: Any,
+    db: WrongMatchCleanupDB,
     *,
     download_log_id: int,
     request_id: int,
@@ -573,7 +616,7 @@ def _perform_cleanup_deletion(
 
 
 def _load_candidate_evidence(
-    db: Any,
+    db: WrongMatchCleanupDB,
     download_log_id: int,
     source_path: str,
 ) -> _LoadedEvidence:
@@ -598,7 +641,7 @@ def _load_candidate_evidence(
 
 
 def _refresh_stale_candidate_evidence(
-    db: Any,
+    db: WrongMatchCleanupDB,
     *,
     request_id: int,
     download_log_id: int,
@@ -672,31 +715,21 @@ def _refresh_stale_candidate_evidence(
 
 
 def _matching_active_jobs(
-    db: Any,
+    db: WrongMatchCleanupDB,
     *,
     download_log_id: int,
     request_id: int | None,
     failed_paths: Iterable[str],
     source_dirs: Iterable[str],
     ignore_import_job_id: int | None,
-) -> list[Any]:
-    finder: Any = getattr(db, "list_active_import_jobs_for_wrong_match", None)
-    if callable(finder):
-        result: Any = finder(
-            download_log_id=download_log_id,
-            request_id=request_id,
-            failed_paths=failed_paths,
-            source_dirs=source_dirs,
-            ignore_import_job_id=ignore_import_job_id,
-        )
-        return list(result)
-
-    jobs = getattr(db, "list_active_import_jobs", lambda **_: [])(
-        request_id=request_id
+) -> list[ImportJob]:
+    return db.list_active_import_jobs_for_wrong_match(
+        download_log_id=download_log_id,
+        request_id=request_id,
+        failed_paths=failed_paths,
+        source_dirs=source_dirs,
+        ignore_import_job_id=ignore_import_job_id,
     )
-    if ignore_import_job_id is None:
-        return list(jobs)
-    return [job for job in jobs if getattr(job, "id", None) != ignore_import_job_id]
 
 
 def _path_candidates(*paths: str | None) -> list[str]:
@@ -828,16 +861,14 @@ def _cleanup_audit_payload(
 
 
 def _persist_cleanup_audit(
-    db: Any,
+    db: WrongMatchCleanupDB,
     result: WrongMatchCleanupOutcome,
 ) -> None:
     if result.outcome not in AUDITED_OUTCOMES:
         return
-    recorder = getattr(db, "record_wrong_match_triage", None)
-    if not callable(recorder):
-        return
     try:
-        recorder(result.download_log_id, _cleanup_audit_payload(result))
+        db.record_wrong_match_triage(
+            result.download_log_id, _cleanup_audit_payload(result))
     except Exception:  # noqa: BLE001
         logger.exception(
             "wrong_match_cleanup.audit_persist_failed download_log_id=%s",

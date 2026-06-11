@@ -277,7 +277,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         return row
 
 
-    def get_download_log_entry(self, log_id):
+    def get_download_log_entry(self, log_id: int) -> dict[str, Any] | None:
         """Get a single download_log entry by its ID."""
         cur = self._execute(
             self._DOWNLOAD_LOG_HISTORY_SELECT + " WHERE dl.id = %s",
