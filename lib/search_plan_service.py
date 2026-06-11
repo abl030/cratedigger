@@ -31,13 +31,17 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from contextlib import AbstractContextManager
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from lib.config import CratediggerConfig
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_PLAN,
     PLAN_STATUS_ACTIVE,
+    ActiveSearchPlan,
     SaturationSummary,
+    SearchLogHistoryPage,
+    SearchPlanInspection,
     SearchPlanItemInput,
 )
 from lib.release_snapshot import (
@@ -59,6 +63,87 @@ from lib.search import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class SearchPlanDB(Protocol):
+    """The PipelineDB surface SearchPlanService uses (#409).
+
+    Parity tests live in ``tests/test_search_plan_service.py``.
+    """
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+
+    def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
+
+    def set_tracks(
+        self, request_id: int, tracks: list[dict[str, Any]],
+    ) -> None: ...
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def get_active_search_plan(
+        self, request_id: int,
+    ) -> ActiveSearchPlan | None: ...
+
+    def create_successful_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+        set_active: bool = True,
+    ) -> int: ...
+
+    def create_failed_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        failure_class: str,
+        error_message: str | None = None,
+        transient: bool,
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int: ...
+
+    def supersede_search_plan_with_replacement(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+        metadata_snapshot: dict[str, object] | None = None,
+        provenance: dict[str, object] | None = None,
+    ) -> int: ...
+
+    def advance_search_plan_cursor(
+        self,
+        request_id: int,
+        *,
+        target_ordinal: int,
+        plan_item_count: int,
+    ) -> tuple[int, int, int]: ...
+
+    def get_saturation_summary(
+        self, request_id: int, *, window_days: int = 14,
+    ) -> SaturationSummary: ...
+
+    def get_search_history_page(
+        self,
+        request_id: int,
+        *,
+        limit: int,
+        before_id: int | None = None,
+    ) -> SearchLogHistoryPage: ...
+
+    def get_search_plan_inspection(
+        self, request_id: int,
+    ) -> SearchPlanInspection: ...
 
 
 # Failure-class strings (mirror migration 014's CHECK constraint and the
@@ -377,7 +462,7 @@ class SearchPlanService:
 
     def __init__(
         self,
-        db: Any,
+        db: SearchPlanDB,
         config: CratediggerConfig,
         resolver: Optional[TrackResolver] = None,
     ) -> None:
