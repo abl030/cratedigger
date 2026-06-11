@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from lib.quality import (
     LOSSLESS_CODECS,
@@ -28,6 +28,57 @@ from lib.quality import (
 
 if TYPE_CHECKING:
     from lib.measurement import PreimportMeasurement
+
+
+@runtime_checkable
+class QualityEvidenceDB(Protocol):
+    """The PipelineDB surface the evidence persist/load helpers use (#409).
+
+    Shared by ``lib/import_evidence.py`` (which forwards its handle into
+    these loaders) and extended by ``WrongMatchCleanupDB`` for the same
+    reason. Parity tests live in ``tests/test_quality_evidence.py``.
+    """
+
+    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
+
+    def upsert_album_quality_evidence(
+        self, evidence: AlbumQualityEvidence,
+    ) -> None: ...
+
+    def find_album_quality_evidence(
+        self,
+        *,
+        mb_release_id: str,
+        snapshot_fingerprint: str,
+    ) -> AlbumQualityEvidence | None: ...
+
+    def load_album_quality_evidence_by_id(
+        self, evidence_id: int | None,
+    ) -> AlbumQualityEvidence | None: ...
+
+    def set_import_job_candidate_evidence(
+        self, import_job_id: int, evidence_id: int | None,
+    ) -> None: ...
+
+    def set_download_log_candidate_evidence(
+        self, download_log_id: int, evidence_id: int | None,
+    ) -> None: ...
+
+    def set_request_current_evidence(
+        self, request_id: int, evidence_id: int | None,
+    ) -> None: ...
+
+    def get_import_job_candidate_evidence_id(
+        self, import_job_id: int,
+    ) -> int | None: ...
+
+    def get_download_log_candidate_evidence_id(
+        self, download_log_id: int,
+    ) -> int | None: ...
+
+    def get_request_current_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
 
 
 _AUDIO_EXTENSIONS = {
@@ -727,7 +778,7 @@ def evidence_from_album_info(
 
 
 def persist_candidate_evidence_from_import_result(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     mb_release_id: str,
     source_path: str,
@@ -777,7 +828,7 @@ def persist_candidate_evidence_from_import_result(
 
 
 def persist_candidate_evidence_from_measurement(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     mb_release_id: str,
     source_path: str,
@@ -827,7 +878,7 @@ def persist_candidate_evidence_from_measurement(
 
 
 def propagate_candidate_evidence_to_current(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     candidate_evidence: AlbumQualityEvidence,
@@ -957,7 +1008,7 @@ def propagate_candidate_evidence_to_current(
 
 
 def backfill_current_evidence_from_album_info(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     mb_release_id: str,
@@ -1003,7 +1054,7 @@ def backfill_current_evidence_from_album_info(
 
 
 def load_candidate_evidence_for_source(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     source_path: str,
     download_log_id: int | None = None,
@@ -1054,7 +1105,7 @@ def load_candidate_evidence_for_source(
 
 
 def load_or_backfill_current_evidence(
-    db: Any,
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     mb_release_id: str,

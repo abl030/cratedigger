@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
 
 from lib.beets_db import AlbumInfo
 from lib.quality import (
@@ -425,6 +426,43 @@ class TestAudioSnapshotMatches(unittest.TestCase):
         """Sanity: an unchanged tree always matches."""
         captured = snapshot_audio_files(self.root)
         self.assertTrue(audio_snapshot_matches(self.root, captured))
+
+
+if TYPE_CHECKING:
+    from typing import cast
+
+    from lib.pipeline_db import PipelineDB
+    from lib.quality_evidence import QualityEvidenceDB as _EvidenceDB
+    from tests.fakes import FakePipelineDB as _FakeDB
+
+    # Static parity proof (#409) — see the matching block in
+    # tests/test_wrong_match_cleanup_service.py for the rationale.
+    _pipeline_db_satisfies_evidence_protocol: _EvidenceDB = cast("PipelineDB", None)
+    _fake_db_satisfies_evidence_protocol: _EvidenceDB = cast("_FakeDB", None)
+
+
+class TestEvidenceDBProtocolParity(unittest.TestCase):
+    """#409: PipelineDB and FakePipelineDB must satisfy QualityEvidenceDB."""
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from lib.quality_evidence import QualityEvidenceDB
+
+        self.assertTrue(issubclass(PipelineDB, QualityEvidenceDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.quality_evidence import QualityEvidenceDB
+        from tests.fakes import FakePipelineDB
+
+        self.assertTrue(issubclass(FakePipelineDB, QualityEvidenceDB))
+
+    def test_cleanup_protocol_extends_evidence_protocol(self) -> None:
+        """The cleanup service forwards its handle into the evidence
+        loaders, so its protocol must declare this surface too."""
+        from lib.quality_evidence import QualityEvidenceDB
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupDB
+
+        self.assertTrue(issubclass(WrongMatchCleanupDB, QualityEvidenceDB))
 
 
 if __name__ == "__main__":

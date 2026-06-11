@@ -23,7 +23,10 @@ from lib.quality import (
     full_pipeline_decision_from_evidence,
     narrow_override_on_lossless_source_lock,
 )
-from lib.quality_evidence import load_candidate_evidence_for_source
+from lib.quality_evidence import (
+    QualityEvidenceDB,
+    load_candidate_evidence_for_source,
+)
 from lib.util import resolve_failed_path
 from lib.validation_envelope import (
     WrongMatchTriageAudit,
@@ -39,20 +42,17 @@ logger = logging.getLogger("cratedigger")
 
 
 @runtime_checkable
-class WrongMatchCleanupDB(WrongMatchSourceDB, Protocol):
+class WrongMatchCleanupDB(WrongMatchSourceDB, QualityEvidenceDB, Protocol):
     """The PipelineDB surface this service uses (#409).
 
-    Extends ``WrongMatchSourceDB`` because the handle is forwarded into
-    ``cleanup_wrong_match_source``. ``PipelineDB`` and ``FakePipelineDB``
-    satisfy it structurally — pyright enforces signature parity at every
-    call site, and the issubclass parity tests in
+    Extends ``WrongMatchSourceDB`` (the handle is forwarded into
+    ``cleanup_wrong_match_source``) and ``QualityEvidenceDB`` (forwarded
+    into the evidence loaders and ``preview_fn``). ``PipelineDB`` and
+    ``FakePipelineDB`` satisfy it structurally — pyright enforces signature
+    parity at every call site, and the issubclass parity tests in
     ``tests/test_wrong_match_cleanup_service.py`` guard method presence at
-    runtime. The handle is also forwarded to the evidence loaders and
-    ``preview_fn``, whose surfaces get protocols in their own #409
-    increments.
+    runtime.
     """
-
-    def get_request(self, request_id: int) -> dict[str, Any] | None: ...
 
     def advisory_lock(
         self, namespace: int, key: int,
