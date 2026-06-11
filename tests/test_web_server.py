@@ -154,6 +154,19 @@ class _WebServerCase(unittest.TestCase):
             return e.code, json.loads(e.read())
 
 
+def _fresh_triage_runner(case: unittest.TestCase):
+    """Swap in a fresh runner so triage tests don't share sweep state."""
+    from web import triage_runner as triage_runner_module
+    from web.routes import imports as imports_module
+    previous = imports_module._triage_runner
+    runner = triage_runner_module.TriageRunner()
+    imports_module._triage_runner = runner
+    case.addCleanup(
+        setattr, imports_module, "_triage_runner", previous,
+    )
+    return runner
+
+
 def _pipeline_db_test_harness(fake: "FakePipelineDB | None" = None) -> MagicMock:
     """Build the contract-test pipeline-DB harness.
 
@@ -1131,6 +1144,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/wrong-matches/delete-group",
         "/api/wrong-matches/converge",
         "/api/wrong-matches/triage",
+        "/api/wrong-matches/triage/status",
         "/api/wrong-matches/explorer",
         # U17: /api/triage HTTP endpoints. Per-request composition and
         # cohort listing both wrap ``lib.triage_service`` (U15) — same
@@ -1404,14 +1418,17 @@ class TestPipelineRouteContracts(_WebServerCase):
         "mode", "verdict", "would_import", "confident_reject", "uncertain",
         "cleanup_eligible", "decision", "reason", "stage_chain",
     }
-    WRONG_MATCH_TRIAGE_REQUIRED_FIELDS = {
-        "status", "processed", "deleted", "deleted_verified_lossless_parent",
+    WRONG_MATCH_TRIAGE_SUMMARY_REQUIRED_FIELDS = {
+        "processed", "deleted", "deleted_verified_lossless_parent",
         "kept_would_import", "kept_uncertain",
         "skipped_candidate_evidence_missing", "skipped_candidate_evidence_stale",
         "skipped_current_evidence_missing", "skipped_current_evidence_stale",
         "skipped_current_evidence_failed",
         "skipped_active_job", "skipped_invalid_row", "skipped_missing_path",
         "skipped_operational", "delete_failed", "results",
+    }
+    WRONG_MATCH_TRIAGE_STATUS_REQUIRED_FIELDS = {
+        "state", "started_at", "finished_at", "summary", "error",
     }
     IMPORT_JOB_REQUIRED_FIELDS = {
         "id", "job_type", "status", "request_id", "dedupe_key", "payload",
@@ -2071,8 +2088,9 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertIn("error", data)
 
     @patch("web.routes.imports.cleanup_all_wrong_matches")
-    def test_wrong_match_triage_contract(self, mock_cleanup):
+    def test_wrong_match_triage_starts_background_sweep(self, mock_cleanup):
         from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+        runner = _fresh_triage_runner(self)
         mock_cleanup.return_value = WrongMatchCleanupSummary(
             processed=2,
             deleted=1,
@@ -2082,19 +2100,83 @@ class TestPipelineRouteContracts(_WebServerCase):
             "confirm_all_wrong_matches": True,
         })
 
-        self.assertEqual(status, 200)
-        _assert_required_fields(self, data, self.WRONG_MATCH_TRIAGE_REQUIRED_FIELDS,
-                                "wrong match triage response")
+        # Issue: bulk triage must not hold the single server thread — the
+        # POST returns immediately and the sweep runs on a background thread.
+        self.assertEqual(status, 202)
+        self.assertEqual(data["status"], "started")
+        self.assertEqual(data["state"], "running")
+
+        runner.join(timeout=5)
         mock_cleanup.assert_called_once_with(
             self.mock_db,
             confirm_all_wrong_matches=True,
         )
-        self.assertEqual(data["status"], "ok")
-        self.assertEqual(data["processed"], 2)
-        self.assertEqual(data["deleted"], 1)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.WRONG_MATCH_TRIAGE_STATUS_REQUIRED_FIELDS,
+            "wrong match triage status response")
+        self.assertEqual(data["state"], "completed")
+        self.assertIsNone(data["error"])
+        _assert_required_fields(
+            self, data["summary"],
+            self.WRONG_MATCH_TRIAGE_SUMMARY_REQUIRED_FIELDS,
+            "wrong match triage summary")
+        self.assertEqual(data["summary"]["processed"], 2)
+        self.assertEqual(data["summary"]["deleted"], 1)
+
+    @patch("web.routes.imports.cleanup_all_wrong_matches")
+    def test_wrong_match_triage_rejects_concurrent_sweep(self, mock_cleanup):
+        import threading
+
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+        runner = _fresh_triage_runner(self)
+        release = threading.Event()
+        entered = threading.Event()
+
+        def slow_cleanup(db, *, confirm_all_wrong_matches):
+            entered.set()
+            release.wait(timeout=5)
+            return WrongMatchCleanupSummary(processed=0)
+
+        mock_cleanup.side_effect = slow_cleanup
+
+        status, data = self._post("/api/wrong-matches/triage", {
+            "confirm_all_wrong_matches": True,
+        })
+        self.assertEqual(status, 202)
+        self.assertTrue(entered.wait(timeout=5))
+
+        status, data = self._post("/api/wrong-matches/triage", {
+            "confirm_all_wrong_matches": True,
+        })
+        self.assertEqual(status, 409)
+        self.assertIn("already running", data["error"])
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "running")
+        self.assertIsNone(data["summary"])
+
+        release.set()
+        runner.join(timeout=5)
+
+    def test_wrong_match_triage_status_idle_contract(self):
+        _fresh_triage_runner(self)
+        status, data = self._get("/api/wrong-matches/triage/status")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.WRONG_MATCH_TRIAGE_STATUS_REQUIRED_FIELDS,
+            "wrong match triage status response")
+        self.assertEqual(data["state"], "idle")
+        self.assertIsNone(data["summary"])
+        self.assertIsNone(data["error"])
 
     @patch("web.routes.imports.cleanup_all_wrong_matches")
     def test_wrong_match_triage_requires_full_queue_confirmation(self, mock_cleanup):
+        _fresh_triage_runner(self)
         status, data = self._post("/api/wrong-matches/triage", {})
 
         self.assertEqual(status, 400)
@@ -8658,6 +8740,7 @@ class TestWrongMatchesContract(unittest.TestCase):
     def test_bulk_triage_runs_full_wrong_matches_queue(self, mock_cleanup):
         from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
 
+        runner = _fresh_triage_runner(self)
         mock_cleanup.return_value = WrongMatchCleanupSummary(
             processed=3,
             deleted=2,
@@ -8669,14 +8752,20 @@ class TestWrongMatchesContract(unittest.TestCase):
             {"confirm_all_wrong_matches": True},
         )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(data["status"], "ok")
-        self.assertEqual(data["processed"], 3)
-        self.assertEqual(data["deleted"], 2)
+        self.assertEqual(status, 202)
+        self.assertEqual(data["status"], "started")
+
+        runner.join(timeout=5)
         mock_cleanup.assert_called_once_with(
             self.mock_db,
             confirm_all_wrong_matches=True,
         )
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "completed")
+        self.assertEqual(data["summary"]["processed"], 3)
+        self.assertEqual(data["summary"]["deleted"], 2)
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""

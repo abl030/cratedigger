@@ -78,6 +78,19 @@ def _db() -> PipelineDB:
     return db
 
 
+def _new_db() -> PipelineDB:
+    """Open a fresh pipeline-DB connection for a background thread.
+
+    psycopg2 connections must not be shared across threads, so background
+    work (the bulk-triage sweep) gets its own connection. Falls back to
+    the shared handle when no DSN is configured (test harness — the
+    handler mock stands in for both).
+    """
+    if _db_dsn:
+        return PipelineDB(_db_dsn)
+    return _db()
+
+
 def _beets_db() -> BeetsDB | None:
     """Return the BeetsDB instance, or None if not configured."""
     return _beets
