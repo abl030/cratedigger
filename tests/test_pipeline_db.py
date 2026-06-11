@@ -3143,8 +3143,12 @@ class TestSpectralColumns(unittest.TestCase):
     def test_v0_probe_state_update_fields_set_current_source_probe(self):
         """``RequestV0ProbeStateUpdate.as_update_fields()`` is the live wire
         between the importer (``lib/import_dispatch.py``) and the request
-        row — exercise it through ``update_request_fields`` exactly as
-        production does."""
+        row. Production funnels the fields through ``finalize_request`` →
+        ``mark_imported_with_rescue`` / ``update_status``; this test drives
+        the same column names through ``update_request_fields`` (both
+        writers interpolate the dict keys into an ``UPDATE album_requests``
+        SET list, and the column contract is pinned by
+        ``test_pipeline_db_column_contract.py``)."""
         from lib import pipeline_db
         from lib.quality import V0ProbeEvidence
 
@@ -3618,6 +3622,7 @@ class TestDownloadingStatus(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["status"], "downloading")
         self.assertIsNone(req["active_download_state"])
+
 
 @requires_postgres
 class TestUserCooldowns(unittest.TestCase):

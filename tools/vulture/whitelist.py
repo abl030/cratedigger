@@ -1,3 +1,24 @@
+# Vulture whitelist — baseline of names vulture flagged as "unused" on the
+# pristine main branch. References here are treated as real uses, so vulture
+# only reports *new* dead code introduced after this baseline was generated.
+#
+# Regenerate the full list:
+#   nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ \
+#       cratedigger.py album_source.py > tools/vulture/whitelist.py"
+#
+# Most entries fall into one of these categories — left in the baseline because
+# vulture cannot see they're actually used:
+#   - msgspec.Struct / @dataclass fields read via serialization, not attribute access
+#   - beets ImportSession hook overrides (choose_match, resolve_duplicate, ...)
+#   - SQL DictRow column attribute lookups
+#   - Route handlers registered via _FUNC_GET_ROUTES / _FUNC_POST_ROUTES dispatch
+#   - Tuple unpacking targets where one position is intentionally discarded
+#
+# To audit the baseline for genuinely-dead candidates worth deleting:
+#   bash scripts/find_dead_code.sh --baseline    # runs without this whitelist
+#
+# Pyright / runtime ignores this file — it's Python only so vulture can parse
+# bare name expressions as references.
 medium_format  # unused variable (album_source.py:27)
 foreign_artist_id  # unused variable (album_source.py:54)
 db_release_group_year  # unused variable (album_source.py:66)
@@ -65,7 +86,6 @@ error_count  # unused variable (lib/spectral_check.py:356)
 error_count  # unused variable (lib/spectral_check.py:360)
 _.is_ready  # unused property (lib/startup_reconciliation.py:123)
 _DBProto  # unused class (lib/startup_reconciliation.py:129)
-clear_download_state  # unused variable (lib/transitions.py:323)
 deleted_verified_lossless_parent  # unused variable (lib/wrong_match_cleanup_service.py:95)
 kept_would_import  # unused variable (lib/wrong_match_cleanup_service.py:96)
 kept_uncertain  # unused variable (lib/wrong_match_cleanup_service.py:97)

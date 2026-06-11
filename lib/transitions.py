@@ -318,9 +318,11 @@ class TransitionSideEffects:
     """What side effects a state transition requires.
 
     These flags tell the imperative layer (apply_transition) what
-    db operations to perform alongside the status change.
+    db operations to perform alongside the status change. Clearing
+    ``active_download_state`` is NOT modelled here — the terminal
+    PipelineDB writers (``update_status``, ``mark_imported_with_rescue``,
+    the reset-to-wanted paths) NULL it inline, unconditionally.
     """
-    clear_download_state: bool = False
     clear_retry_counters: bool = False
     record_attempt: bool = False
 
@@ -330,10 +332,9 @@ class TransitionSideEffects:
 VALID_TRANSITIONS: dict[tuple[str, str], TransitionSideEffects] = {
     # Normal flow
     ("wanted", "downloading"): TransitionSideEffects(),
-    ("downloading", "imported"): TransitionSideEffects(clear_download_state=True),
-    ("downloading", "wanted"): TransitionSideEffects(
-        clear_download_state=True, record_attempt=True),
-    ("downloading", "manual"): TransitionSideEffects(clear_download_state=True),
+    ("downloading", "imported"): TransitionSideEffects(),
+    ("downloading", "wanted"): TransitionSideEffects(record_attempt=True),
+    ("downloading", "manual"): TransitionSideEffects(),
 
     # Manual status changes
     ("wanted", "manual"): TransitionSideEffects(),
@@ -345,11 +346,11 @@ VALID_TRANSITIONS: dict[tuple[str, str], TransitionSideEffects] = {
     ("manual", "wanted"): TransitionSideEffects(clear_retry_counters=True),
 
     # In-place update (quality gate accept, bitrate update)
-    ("imported", "imported"): TransitionSideEffects(clear_download_state=True),
+    ("imported", "imported"): TransitionSideEffects(),
 
     # Admin overrides (force-import, web accept)
-    ("manual", "imported"): TransitionSideEffects(clear_download_state=True),
-    ("wanted", "imported"): TransitionSideEffects(clear_download_state=True),
+    ("manual", "imported"): TransitionSideEffects(),
+    ("wanted", "imported"): TransitionSideEffects(),
 }
 
 

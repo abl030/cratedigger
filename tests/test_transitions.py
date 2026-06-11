@@ -66,26 +66,18 @@ class TestValidateTransition(unittest.TestCase):
 class TestTransitionSideEffects(unittest.TestCase):
     """Each transition returns the correct side-effect flags."""
 
-    def test_downloading_to_wanted_clears_and_records(self):
+    def test_downloading_to_wanted_records_attempt(self):
         fx = VALID_TRANSITIONS[("downloading", "wanted")]
-        self.assertTrue(fx.clear_download_state)
         self.assertTrue(fx.record_attempt)
         self.assertFalse(fx.clear_retry_counters)
 
-    def test_downloading_to_imported_clears_state(self):
+    def test_downloading_to_imported_no_effects(self):
         fx = VALID_TRANSITIONS[("downloading", "imported")]
-        self.assertTrue(fx.clear_download_state)
         self.assertFalse(fx.record_attempt)
         self.assertFalse(fx.clear_retry_counters)
 
-    def test_downloading_to_manual_clears_state(self):
-        fx = VALID_TRANSITIONS[("downloading", "manual")]
-        self.assertTrue(fx.clear_download_state)
-        self.assertFalse(fx.record_attempt)
-
-    def test_wanted_to_downloading_no_clearing(self):
+    def test_wanted_to_downloading_no_effects(self):
         fx = VALID_TRANSITIONS[("wanted", "downloading")]
-        self.assertFalse(fx.clear_download_state)
         self.assertFalse(fx.record_attempt)
         self.assertFalse(fx.clear_retry_counters)
 
@@ -93,33 +85,15 @@ class TestTransitionSideEffects(unittest.TestCase):
         fx = VALID_TRANSITIONS[("imported", "wanted")]
         self.assertTrue(fx.clear_retry_counters)
         self.assertFalse(fx.record_attempt)
-        self.assertFalse(fx.clear_download_state)
 
     def test_manual_to_wanted_clears_retry_counters(self):
         fx = VALID_TRANSITIONS[("manual", "wanted")]
         self.assertTrue(fx.clear_retry_counters)
 
-    def test_imported_to_imported_clears_state(self):
-        """In-place update on imported clears download state."""
-        fx = VALID_TRANSITIONS[("imported", "imported")]
-        self.assertTrue(fx.clear_download_state)
-        self.assertFalse(fx.record_attempt)
-
     def test_wanted_to_manual_no_effects(self):
         fx = VALID_TRANSITIONS[("wanted", "manual")]
-        self.assertFalse(fx.clear_download_state)
         self.assertFalse(fx.record_attempt)
         self.assertFalse(fx.clear_retry_counters)
-
-    def test_manual_to_imported_clears_state(self):
-        """Force-import from manual status."""
-        fx = VALID_TRANSITIONS[("manual", "imported")]
-        self.assertTrue(fx.clear_download_state)
-
-    def test_wanted_to_imported_clears_state(self):
-        """Admin accept from wanted status."""
-        fx = VALID_TRANSITIONS[("wanted", "imported")]
-        self.assertTrue(fx.clear_download_state)
 
     def test_invalid_transition_returns_none(self):
         """Invalid transitions are absent from the table."""

@@ -99,10 +99,10 @@ ALLOWLIST: dict[str, str] = {
     # (permanent — NOT a TODO; #382 Layer 1 analysis):
     "update_request_fields":
         "dynamic field=value writer -- caller-determined column set, no fixed "
-        "payload to round-trip. Typed callers (update_spectral_state, and the "
-        "RequestV0ProbeStateUpdate fields the importer passes through "
-        "finalize) funnel through it and ARE column-checked by "
-        "tests/test_pipeline_db_column_contract.py.",
+        "payload to round-trip. Its typed caller (update_spectral_state) and "
+        "the importer's RequestV0ProbeStateUpdate fields (which reach the row "
+        "via finalize_request -> mark_imported_with_rescue/update_status) ARE "
+        "column-checked by tests/test_pipeline_db_column_contract.py.",
     "record_wrong_match_triage":
         "writes an opaque dict into one JSONB column (validation_result) via "
         "jsonb_set -- no per-column write list to drift. The sole caller, "
