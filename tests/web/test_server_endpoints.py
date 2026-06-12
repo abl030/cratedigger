@@ -380,7 +380,10 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         if data["log"]:
             created = data["log"][0].get("created_at")
             self.assertIsInstance(created, str)
-            self.assertIn("2026", created)
+            # ISO-8601 round-trip — no fixed-year assertion (the seeded
+            # row carries the fake's "now", which outlives 2026).
+            from datetime import datetime as _dt
+            _dt.fromisoformat(created)
 
 
     def test_disambiguate_endpoint(self):
