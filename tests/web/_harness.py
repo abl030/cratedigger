@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Shared HTTP test harness for the web route contract tests (#408).
 
-Starts a real HTTP server on a random port with mocked DB; the
-``tests/web/test_*.py`` modules verify response codes, JSON structure,
-and error handling against it. One harness, no per-class copies.
+Starts a real HTTP server on a random port; the ``tests/web/test_*.py``
+modules verify response codes, JSON structure, and error handling
+against it. Two base classes during the #430 migration:
+
+- :class:`_FakeDbWebServerCase` — per-test bare ``FakePipelineDB``.
+  Subclass THIS for new and migrated modules.
+- :class:`_WebServerCase` — legacy class-level MagicMock-wrapped DB
+  with canned ``.return_value`` defaults. Dies when the ratchet
+  baseline in ``tests/_mock_audit_scanner.py`` is empty.
 """
 
 import copy
@@ -14,7 +20,7 @@ import sys
 import threading
 import unittest
 from http.server import HTTPServer, ThreadingHTTPServer
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -145,6 +151,38 @@ class _WebServerCase(unittest.TestCase):
             return e.code, json.loads(e.read())
 
 
+class _FakeDbWebServerCase(_WebServerCase):
+    """Contract-test base with a bare per-test :class:`FakePipelineDB`.
+
+    Migration target for #430. ``setUp`` installs a fresh fake as
+    ``web.server.db`` (the same module-global swap production uses for
+    DSN-less handles — ``_db()`` returns it directly), so every test
+    starts from empty typed state. Tests seed what they need
+    (``self.db.seed_request(...)``, ``self.db.log_download(...)``,
+    ``self.db.update_status(...)``) and assertions hit the fake's real
+    query semantics — there is no MagicMock layer to shape-match.
+
+    The inherited class-level ``mock_db`` (legacy MagicMock harness)
+    must not be touched in subclasses — the ratchet in
+    ``tests/_mock_audit_scanner.py`` is the guard that enforces this.
+    Note the textual guard is load-bearing: configuration of the
+    disconnected mock fails loudly at the route, but a negative
+    assertion (``assert_not_called``) against it would pass VACUOUSLY
+    (the mock genuinely receives no calls), so don't rely on runtime
+    behaviour to catch accidental use.
+    """
+
+    db: FakePipelineDB
+
+    def setUp(self) -> None:
+        super().setUp()
+        import web.server as srv
+        self.db = FakePipelineDB()
+        patcher = patch.object(srv, "db", self.db)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
 def _fresh_triage_runner(case: unittest.TestCase):
     """Swap in a fresh runner so triage tests don't share sweep state."""
     from web import triage_runner as triage_runner_module
@@ -176,8 +214,9 @@ def _pipeline_db_test_harness(fake: "FakePipelineDB | None" = None) -> MagicMock
     state-based assertions remain available via the underlying fake.
 
     Tests can reach the underlying fake through the ``_fake`` attribute on
-    the mock (or by accepting the helper's return value directly in
-    bespoke harnesses such as the ``failing_db`` site).
+    the mock. Transitional (#430): migrated route modules subclass
+    :class:`_FakeDbWebServerCase` instead; this helper dies with the last
+    ratchet entry in ``tests/_mock_audit_scanner.py``.
     """
     backing = fake if fake is not None else FakePipelineDB()
     harness = MagicMock(wraps=backing)

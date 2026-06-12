@@ -15,15 +15,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import (
     _assert_required_fields,
-    _WebServerCase,
-    _pipeline_db_test_harness,
+    _FakeDbWebServerCase,
 )
 
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeCursor, FakePipelineDB
 from tests.helpers import make_request_row
 
 
-class TestBeetsRouteContracts(_WebServerCase):
+class _FailingDeleteDB(FakePipelineDB):
+    """delete_request raises — pins purge-failure ordering (no beets
+    delete may run after the pipeline purge fails)."""
+
+    def delete_request(self, request_id: int) -> None:
+        raise RuntimeError("boom")
+
+
+class TestBeetsRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed beets library routes."""
 
     ALBUM_REQUIRED_FIELDS = {
@@ -72,6 +79,7 @@ class TestBeetsRouteContracts(_WebServerCase):
     RG_ID = "11111111-1111-1111-1111-111111111111"
 
     def setUp(self) -> None:
+        super().setUp()
         import web.server as srv
 
         self._srv = srv
@@ -79,13 +87,21 @@ class TestBeetsRouteContracts(_WebServerCase):
         self._orig_beets_db_path = srv.beets_db_path
         self.beets = MagicMock()
         srv._beets = self.beets
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=42,
             status="wanted",
             mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
+        ))
+        # One real success row so album-detail download_history flows
+        # through the fake's get_download_history query semantics.
+        self.db.log_download(
+            42, outcome="success", beets_scenario="strong_match",
+            beets_distance=0.012, soulseek_username="testuser",
+            filetype="mp3", bitrate=320000, was_converted=False,
+            actual_filetype="mp3", actual_min_bitrate=320,
+            slskd_filetype="mp3", slskd_bitrate=320000, valid=True,
         )
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
@@ -142,25 +158,48 @@ class TestBeetsRouteContracts(_WebServerCase):
             ["/music/Test Artist/Test Album/01 Track.mp3"],
         )
 
+    def _queue_pipeline_overlay_row(self, *, min_bitrate: int | None) -> None:
+        """Queue the row ``web.overlay.check_pipeline``'s raw SQL would
+        return for request 42 (the overlay goes through ``_execute``,
+        which the fake cannot interpret — the queued cursor IS the
+        query result). The legacy MagicMock harness silently fed this
+        path an empty magic cursor, so enrichment never ran in tests.
+
+        The cursor row is PROJECTED from the seeded request, mutated
+        first, so the two representations of request 42 cannot
+        contradict each other (in production they are the same row)."""
+        self.db.update_request_fields(42, min_bitrate=min_bitrate)
+        req = self.db.request(42)
+        self.db.queue_execute_results(FakeCursor([{
+            k: req.get(k)
+            for k in ("id", "mb_release_id", "status",
+                      "search_filetype_override", "target_format",
+                      "min_bitrate")
+        }]))
+
     def test_beets_search_contract(self):
         self.beets.search_albums.return_value = [self._album()]
-        with patch("web.server.check_pipeline", return_value={}):
-            status, data = self._get("/api/beets/search?q=test")
+        self._queue_pipeline_overlay_row(min_bitrate=900)
+        status, data = self._get("/api/beets/search?q=test")
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, {"albums"}, "beets search response")
         _assert_required_fields(self, data["albums"][0], self.ALBUM_REQUIRED_FIELDS,
                                 "beets search album")
+        # Pipeline enrichment ran for real: 900 kbps pipeline floor
+        # overrides the album's 320000 bps beets value.
+        self.assertEqual(data["albums"][0]["min_bitrate"], 900000)
 
     def test_beets_recent_contract(self):
         self.beets.get_recent.return_value = [self._album()]
-        with patch("web.server.check_pipeline", return_value={}):
-            status, data = self._get("/api/beets/recent")
+        self._queue_pipeline_overlay_row(min_bitrate=900)
+        status, data = self._get("/api/beets/recent")
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, {"albums"}, "beets recent response")
         _assert_required_fields(self, data["albums"][0], self.ALBUM_REQUIRED_FIELDS,
                                 "beets recent album")
+        self.assertEqual(data["albums"][0]["min_bitrate"], 900000)
 
     def test_beets_album_detail_contract(self):
         detail = self._album()
@@ -195,11 +234,16 @@ class TestBeetsRouteContracts(_WebServerCase):
         detail["path"] = "/music/Test Artist/Test Album"
         detail["tracks"] = [self._track()]
         self.beets.get_album_detail.return_value = detail
-        self.mock_db.get_request_by_discogs_release_id.return_value = make_request_row(
-            id=42,
+        self.db.seed_request(make_request_row(
+            id=43,
             status="wanted",
             mb_release_id="12856590",
             discogs_release_id="12856590",
+        ))
+        self.db.log_download(
+            43, outcome="success", beets_scenario="strong_match",
+            beets_distance=0.012, soulseek_username="testuser",
+            filetype="mp3", actual_filetype="mp3", actual_min_bitrate=320,
         )
 
         status, data = self._get("/api/beets/album/7")
@@ -288,28 +332,24 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
         self._configure_beets_delete_mock(mock_beets_cls)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-                "purge_pipeline": True,
-                "pipeline_id": 42,
-                "release_id": self.RELEASE_ID,
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "pipeline_id": 42,
+            "release_id": self.RELEASE_ID,
+        })
 
         self.assertEqual(status, 200)
         self.assertTrue(data["pipeline_deleted"])
         self.assertEqual(data["pipeline_id"], 42)
-        self.assertIsNone(fake_db.get_request(42))
+        self.assertIsNone(self.db.get_request(42))
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
@@ -322,27 +362,26 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        # Drop the setUp-seeded request 42 (same RELEASE_ID) so the
+        # release-id fallback can only resolve to this test's row.
+        self.db.delete_request(42)
+        self.db.seed_request(make_request_row(
             id=99, status="imported", mb_release_id=self.RELEASE_ID,
         ))
         self._configure_beets_delete_mock(mock_beets_cls)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-                "purge_pipeline": True,
-                "release_id": self.RELEASE_ID,
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "release_id": self.RELEASE_ID,
+        })
 
         self.assertEqual(status, 200)
         self.assertTrue(data["pipeline_deleted"])
         self.assertEqual(data["pipeline_id"], 99)
-        self.assertIsNone(fake_db.get_request(99))
+        self.assertIsNone(self.db.get_request(99))
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
@@ -355,27 +394,26 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        # Drop the setUp-seeded request 42 (same RELEASE_ID) so the
+        # release-id fallback can only resolve to this test's row.
+        self.db.delete_request(42)
+        self.db.seed_request(make_request_row(
             id=98, status="imported", mb_release_id=self.RELEASE_ID,
         ))
         self._configure_beets_delete_mock(mock_beets_cls)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-                "purge_pipeline": True,
-                "release_id": self.RELEASE_ID.upper(),
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "release_id": self.RELEASE_ID.upper(),
+        })
 
         self.assertEqual(status, 200)
         self.assertTrue(data["pipeline_deleted"])
         self.assertEqual(data["pipeline_id"], 98)
-        self.assertIsNone(fake_db.get_request(98))
+        self.assertIsNone(self.db.get_request(98))
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
@@ -388,25 +426,21 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
         self._configure_beets_delete_mock(mock_beets_cls)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+        })
 
         self.assertEqual(status, 200)
         self.assertFalse(data["pipeline_deleted"])
         self.assertIsNone(data["pipeline_id"])
-        self.assertIsNotNone(fake_db.get_request(42))
+        self.assertIsNotNone(self.db.get_request(42))
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
@@ -419,22 +453,21 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
         self._configure_beets_delete_mock(mock_beets_cls)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-                "purge_pipeline": True,
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+        })
 
         self.assertEqual(status, 200)
         self.assertFalse(data["pipeline_deleted"])
         self.assertIsNone(data["pipeline_id"])
+        # The setUp-seeded request is untouched — no pipeline context
+        # in the body means no purge, even with purge_pipeline=True.
+        self.assertIsNotNone(self.db.get_request(42))
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
@@ -447,11 +480,8 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=77,
             mb_release_id=None,
             discogs_release_id="12856590",
@@ -459,18 +489,17 @@ class TestBeetsRouteContracts(_WebServerCase):
         ))
         self._configure_beets_delete_mock(mock_beets_cls)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-                "purge_pipeline": True,
-                "release_id": "12856590",
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "release_id": "12856590",
+        })
 
         self.assertEqual(status, 200)
         self.assertTrue(data["pipeline_deleted"])
         self.assertEqual(data["pipeline_id"], 77)
-        self.assertIsNone(fake_db.get_request(77))
+        self.assertIsNone(self.db.get_request(77))
 
     @patch("lib.library_delete_service.os.path.isdir", return_value=False)
     @patch("lib.library_delete_service.os.path.isfile", return_value=False)
@@ -483,19 +512,14 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
         self._configure_beets_delete_mock(mock_beets_cls)
-        # Wrap a real FakePipelineDB so unmocked methods fall through to
-        # typed state — same rationale as ``_pipeline_db_test_harness``.
-        failing_db = _pipeline_db_test_harness()
-        failing_db.get_request.return_value = make_request_row(
+        failing_db = _FailingDeleteDB()
+        failing_db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
-        )
-        failing_db.delete_request.side_effect = RuntimeError("boom")
+        ))
 
-        with patch.object(srv, "db", failing_db):
+        with patch.object(self._srv, "db", failing_db):
             status, data = self._post("/api/beets/delete", {
                 "id": 7,
                 "confirm": "DELETE",
@@ -519,11 +543,8 @@ class TestBeetsRouteContracts(_WebServerCase):
         _mock_isfile,
         _mock_isdir,
     ):
-        import web.server as srv
-
         self._srv.beets_db_path = "/tmp/beets.db"
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
         self._configure_beets_delete_mock(
@@ -531,18 +552,17 @@ class TestBeetsRouteContracts(_WebServerCase):
             delete_side_effect=OSError("boom"),
         )
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post("/api/beets/delete", {
-                "id": 7,
-                "confirm": "DELETE",
-                "purge_pipeline": True,
-                "pipeline_id": 42,
-                "release_id": self.RELEASE_ID,
-            })
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "pipeline_id": 42,
+            "release_id": self.RELEASE_ID,
+        })
 
         self.assertEqual(status, 500)
         self.assertIn("Pipeline request was removed", data["error"])
-        self.assertIsNone(fake_db.get_request(42))
+        self.assertIsNone(self.db.get_request(42))
 
 if __name__ == "__main__":
     unittest.main()

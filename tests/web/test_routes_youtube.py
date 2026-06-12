@@ -17,11 +17,11 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _WebServerCase
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 
-class TestYoutubeRouteContracts(_WebServerCase):
+class TestYoutubeRouteContracts(_FakeDbWebServerCase):
     """U8 contract for ``GET /api/youtube-album?identifier=<id>``.
 
     Mirrors the CLI surface ``pipeline-cli youtube-album`` (U7); the
@@ -77,7 +77,7 @@ class TestYoutubeRouteContracts(_WebServerCase):
     UUID_B = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 
     def setUp(self) -> None:
-        self.mock_db.reset_mock()
+        super().setUp()
         from lib.youtube_album_service import (
             ResolvedDistance,
             ResolvedYoutubeRelease,
@@ -389,7 +389,7 @@ class TestYoutubeRouteContracts(_WebServerCase):
         )
 
 
-class TestPipelineYoutubeRescueContract(_WebServerCase):
+class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
     """U5 contract for ``POST /api/pipeline/<id>/youtube-rescue``.
 
     The endpoint wraps ``YoutubeIngestService.submit``. Both the CLI

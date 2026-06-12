@@ -17,14 +17,14 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _WebServerCase
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
 
 
-class TestBrowseRouteContracts(_WebServerCase):
+class TestBrowseRouteContracts(_FakeDbWebServerCase):
     """Contract tests for browse and MusicBrainz-backed routes."""
 
     ARTIST_SEARCH_REQUIRED_FIELDS = {"id", "name", "disambiguation"}
@@ -511,9 +511,9 @@ class TestBrowseRouteContracts(_WebServerCase):
         mock_beets.get_album_ids_by_mbids.return_value = {self.RELEASE_ID: 7}
         mock_beets.check_mbids_detail.return_value = {self.RELEASE_ID: {}}
         mock_beets.get_tracks_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id=self.RELEASE_ID,
-        )
+        ))
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
                 patch("web.server._beets_db", return_value=mock_beets):
@@ -533,9 +533,9 @@ class TestBrowseRouteContracts(_WebServerCase):
         mock_beets.get_album_ids_by_mbids.return_value = {"12856590": 8}
         mock_beets.check_mbids_detail.return_value = {"12856590": {}}
         mock_beets.get_tracks_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_discogs_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id="12856590", discogs_release_id="12856590",
-        )
+        ))
         mock_discogs_get.return_value = {
             "id": "12856590",
             "title": "Discogs Album",
@@ -606,7 +606,7 @@ class TestBrowseRouteContracts(_WebServerCase):
                                 "disambiguate track")
 
 
-class TestDiscogsBrowseRouteContracts(_WebServerCase):
+class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     """Contract tests for Discogs browse routes."""
 
     DISCOGS_SEARCH_REQUIRED_FIELDS = {
@@ -720,8 +720,6 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
         mock_beets.get_album_ids_by_mbids.return_value = {"83182": 10}
         mock_beets.check_mbids_detail.return_value = {"83182": {}}
         mock_beets.get_tracks_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
         with patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value={"83182"}), \
                 patch("web.server._beets_db", return_value=mock_beets):
@@ -749,7 +747,7 @@ class TestDiscogsBrowseRouteContracts(_WebServerCase):
         self.assertEqual(data["beets_album_id"], 10)
 
 
-class TestSearchByIdResolveContract(_WebServerCase):
+class TestSearchByIdResolveContract(_FakeDbWebServerCase):
     """Contract tests for /api/browse/resolve — the search-by-ID resolver."""
 
     REQUIRED_FIELDS = {

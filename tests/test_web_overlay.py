@@ -10,17 +10,7 @@ import unittest
 
 from web import overlay
 
-from tests.fakes import FakeBeetsDB, FakePipelineDB
-
-
-class _Cursor:
-    """Minimal cursor stand-in for FakePipelineDB.queue_execute_results."""
-
-    def __init__(self, rows):
-        self._rows = rows
-
-    def fetchall(self):
-        return self._rows
+from tests.fakes import FakeBeetsDB, FakeCursor, FakePipelineDB
 
 
 class TestSerializeRow(unittest.TestCase):
@@ -44,7 +34,7 @@ class TestCheckPipeline(unittest.TestCase):
 
     def test_returns_info_keyed_by_mbid(self):
         db = FakePipelineDB()
-        db.queue_execute_results(_Cursor([
+        db.queue_execute_results(FakeCursor([
             {
                 "id": 7, "mb_release_id": "mbid-1", "status": "wanted",
                 "search_filetype_override": "lossless",
@@ -67,7 +57,7 @@ class TestEnrichWithPipeline(unittest.TestCase):
 
     def test_wanted_with_override_marks_upgrade_queued(self):
         db = FakePipelineDB()
-        db.queue_execute_results(_Cursor([
+        db.queue_execute_results(FakeCursor([
             {
                 "id": 7, "mb_release_id": "mbid-1", "status": "wanted",
                 "search_filetype_override": "lossless",
