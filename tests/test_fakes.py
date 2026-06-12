@@ -5025,6 +5025,12 @@ class TestFakeDashboardMirror(unittest.TestCase):
         self.assertEqual(len(suspects), 1)
         self.assertEqual(suspects[0]["reset_24h"], 1)
         self.assertEqual(suspects[0]["problem_24h"], 1)
+        # Search-window errors bucket mirrors the SQL FILTER: the
+        # unknown outcome counts toward searches but NO bucket.
+        win24 = payload["searches"]["windows"][0]
+        self.assertEqual(win24["searches"], 3)
+        self.assertEqual(win24["outcomes"]["errors"], 1)
+        self.assertEqual(win24["outcomes"]["exhausted"], 1)
 
     def test_stale_wanted_includes_recently_searched_and_caps_at_12(self):
         """Production's stale panel is the 12 oldest-searched backlog

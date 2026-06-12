@@ -3828,13 +3828,19 @@ class FakePipelineDB:
         cutoff = now - timedelta(hours=hours)
         rows = [e for e in self.search_logs
                 if self._as_utc(e.created_at) >= cutoff]
-        outcomes = {"found": 0, "no_match": 0, "no_results": 0,
-                    "exhausted": 0, "errors": 0}
-        for e in rows:
-            if e.outcome in outcomes:
-                outcomes[e.outcome] += 1
-            else:
-                outcomes["errors"] += 1
+        # Errors bucket mirrors the SQL FILTER exactly: only timeout /
+        # error / empty_query count — an unknown outcome counts toward
+        # ``searches`` but no bucket.
+        outcomes = {
+            "found": sum(1 for e in rows if e.outcome == "found"),
+            "no_match": sum(1 for e in rows if e.outcome == "no_match"),
+            "no_results": sum(
+                1 for e in rows if e.outcome == "no_results"),
+            "exhausted": sum(1 for e in rows if e.outcome == "exhausted"),
+            "errors": sum(
+                1 for e in rows
+                if e.outcome in ("timeout", "error", "empty_query")),
+        }
         elapsed = sorted(
             e.elapsed_s for e in rows if e.elapsed_s is not None)
 
