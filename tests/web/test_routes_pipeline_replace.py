@@ -395,6 +395,9 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
             self.db.request(42)["mb_release_group_id"],
             "rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr",
         )
+        # No write at all — not even a redundant same-value UPDATE
+        # (the fake records every update_request_fields call).
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
     def test_resolve_rg_lazy_backfill_happy_path_returns_200(self):
         """Row has no RG → MB lookup → UPDATE row → 200."""
@@ -455,6 +458,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         )
         self.assertEqual(data["status"], "no_release_group")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
     def test_resolve_rg_discogs_release_id_returns_422(self):
         """Numeric Discogs release id → 422 short-circuit, no MB hit."""
@@ -467,6 +471,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self.assertEqual(data["status"], "non_mb_release_id")
         mock_mb.assert_not_called()
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
     def test_resolve_rg_transient_returns_503(self):
         """Network blip / timeout → 503 retryable."""
@@ -486,6 +491,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         )
         self.assertEqual(data["status"], "transient")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
 if __name__ == "__main__":
     unittest.main()

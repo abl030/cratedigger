@@ -6263,7 +6263,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 # ``python3 -m unittest tests.test_integration_slices`` directly would skip
 # (conftest is only auto-loaded by pytest discovery).
 import sys as _u7_sys
-_u7_sys.path.insert(0, os.path.dirname(__file__))
+_u7_sys.path.append(os.path.dirname(__file__))
 import conftest as _u7_conftest  # noqa: F401  # boots ephemeral PG + sets DSN
 
 

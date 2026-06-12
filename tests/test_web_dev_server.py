@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
 
 from scripts.web_dev_server import DevConfig, DevHandler, DevHTTPServer

@@ -21,8 +21,8 @@ import unittest
 # web.server`` resolve ``web`` to tests/web in module-order-dependent
 # ways (the package shadows the real one whenever no earlier import
 # already registered repo-root ``web`` in sys.modules).
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..")))
 from tests._mock_audit_scanner import (
     WEB_HARNESS_MOCK_BASELINE,
     count_harness_overrides,
@@ -55,6 +55,63 @@ class TestStatefulMockAudit(unittest.TestCase):
             "Replace each flagged usage with a typed fake, kwarg-DI seam, "
             "or real-input call.\n\n"
             + "\n".join(lines)
+        )
+
+
+class TestSysPathAudit(unittest.TestCase):
+    """Ban front-of-sys.path inserts of a test directory.
+
+    ``sys.path.insert(0, <tests dir>)`` makes ``tests/web`` shadow the
+    real ``web`` package for any later ``import web.server`` that runs
+    before something else has registered repo-root ``web`` in
+    sys.modules — module-order-dependent ModuleNotFoundErrors that the
+    full discovery run masks. ``sys.path.append`` resolves the same
+    bare imports (``conftest``, ``_lambda_audit``) without ever
+    out-ranking the repo root. Repo-root inserts (the
+    ``join(dirname, "..")`` shape) are fine and not matched.
+    """
+
+    # Matches a dirname-chain applied directly to __file__ (optionally
+    # through abspath); the chain depth decides which directory lands
+    # at the front of sys.path.
+    _FRONT_INSERT_RE = __import__("re").compile(
+        r"sys\.path\.insert\(\s*\d+\s*,\s*"
+        r"((?:os\.path\.dirname\(\s*)+)(?:os\.path\.abspath\(\s*)?__file__")
+
+    def test_no_front_inserts_of_test_dirs(self) -> None:
+        offenders: list[str] = []
+        from tests._mock_audit_scanner import TESTS_DIR
+        for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for fname in sorted(filenames):
+                if not fname.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, fname)
+                rel = os.path.relpath(path, TESTS_DIR)
+                if rel == "test_mock_audit.py":
+                    continue  # mentions the pattern in its own source
+                with open(path, encoding="utf-8") as f:
+                    for lineno, line in enumerate(f, 1):
+                        m = self._FRONT_INSERT_RE.search(line)
+                        if not m:
+                            continue
+                        # Resolve which directory the dirname-chain
+                        # yields for THIS file; only inserts that put
+                        # a directory inside tests/ at the front are
+                        # the shadowing hazard (repo-root inserts are
+                        # fine).
+                        depth = m.group(1).count("os.path.dirname(")
+                        target = os.path.abspath(path)
+                        for _ in range(depth):
+                            target = os.path.dirname(target)
+                        if target == TESTS_DIR or target.startswith(
+                                TESTS_DIR + os.sep):
+                            offenders.append(f"  - {rel}:{lineno}")
+        self.assertFalse(
+            offenders,
+            "Front-of-sys.path insert of a test directory — use "
+            "sys.path.append instead (tests/web must never shadow the "
+            "real web package):\n" + "\n".join(offenders),
         )
 
 

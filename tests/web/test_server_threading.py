@@ -20,7 +20,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import conftest  # noqa: F401 — sets TEST_DB_DSN for the per-thread test
 
 from tests.web._harness import _WebServerCase
