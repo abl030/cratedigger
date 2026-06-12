@@ -1515,13 +1515,15 @@ def _selected_bitrate(m: AudioQualityMeasurement,
     Keeps the metric dispatch in one place — compare_quality does not
     peek into m.avg / m.median / m.min directly.
     """
-    # Use `==` not `is`: RankBitrateMetric is a StrEnum, and the project
-    # has modules that get loaded under two names (``lib.quality`` and
-    # ``quality`` via the PYTHONPATH ``lib`` entry). When a cfg constructed
-    # in one module is compared with an enum member from the other, they
-    # are equal by string value but NOT the same object. Identity-compare
-    # here silently fell through to min_bitrate, breaking the AVG policy
-    # in the web simulator for VBR albums (issue #93 post-deploy probe).
+    # Use `==` not `is`: RankBitrateMetric is a StrEnum. Historically the
+    # project loaded modules under two names (``lib.quality`` and bare
+    # ``quality`` via a PYTHONPATH ``lib`` entry) — an enum member from
+    # one copy compared equal by string value but NOT identical to the
+    # other's, so identity-compare silently fell through to min_bitrate,
+    # breaking the AVG policy in the web simulator for VBR albums (issue
+    # #93 post-deploy probe). The dual-load is gone (#445 item 3; pinned
+    # by tests/test_no_dual_load.py), but `==` remains the correct
+    # comparison for a StrEnum either way.
     if cfg.bitrate_metric == RankBitrateMetric.AVG and m.avg_bitrate_kbps is not None:
         return m.avg_bitrate_kbps
     if (cfg.bitrate_metric == RankBitrateMetric.MEDIAN
