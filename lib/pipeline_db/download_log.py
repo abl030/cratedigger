@@ -250,17 +250,24 @@ class _DownloadLogMixin(_PipelineDBBase):
     # ``dl.*`` automatically projects ``source`` and ``youtube_metadata``
     # (migration 037) onto every consumer; no additional column list
     # change is needed here.
-    _DOWNLOAD_LOG_HISTORY_SELECT = """
-        SELECT
+    # History queries compose from these two named parts so variants
+    # (plain SELECT vs DISTINCT ON) build explicitly instead of
+    # string-replacing tokens inside a finished statement (#433).
+    _DOWNLOAD_LOG_HISTORY_COLUMNS = """
             dl.*,
             e.spectral_grade        AS _evidence_spectral_grade,
             e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
             e.v0_source_lineage     AS _evidence_v0_probe_kind,
             e.v0_avg_bitrate_kbps   AS _evidence_v0_probe_avg_bitrate
+    """
+    _DOWNLOAD_LOG_HISTORY_FROM = """
         FROM download_log dl
         LEFT JOIN album_quality_evidence e
             ON e.id = dl.candidate_evidence_id
     """
+    _DOWNLOAD_LOG_HISTORY_SELECT = (
+        "SELECT" + _DOWNLOAD_LOG_HISTORY_COLUMNS + _DOWNLOAD_LOG_HISTORY_FROM
+    )
 
     # Evidence stores lineage as ``lossless_source`` / ``native_lossy_research``;
     # download_log.v0_probe_kind stores the wire-shaped kind
@@ -357,11 +364,9 @@ class _DownloadLogMixin(_PipelineDBBase):
         ids = [int(r) for r in request_ids]
         latest_cur = self._execute(
             "SELECT * FROM ("
-            + self._DOWNLOAD_LOG_HISTORY_SELECT.replace(
-                "SELECT",
-                "SELECT DISTINCT ON (dl.request_id)",
-                1,
-            )
+            "SELECT DISTINCT ON (dl.request_id)"
+            + self._DOWNLOAD_LOG_HISTORY_COLUMNS
+            + self._DOWNLOAD_LOG_HISTORY_FROM
             + " WHERE dl.request_id = ANY(%s)"
             " ORDER BY dl.request_id, dl.id DESC"
             ") latest",
