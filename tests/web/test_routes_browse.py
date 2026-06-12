@@ -11,7 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
 
@@ -477,12 +477,12 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "track_count": 10,
             "status": "Official",
         }
-        mock_beets = MagicMock()
-        mock_beets.get_album_ids_by_mbids.return_value = {self.RELEASE_ID: 7}
-        mock_beets.check_mbids_detail.return_value = {self.RELEASE_ID: {}}
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
+        beets_db.set_mbid_detail(self.RELEASE_ID, {})
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
-                patch("web.server._beets_db", return_value=mock_beets), \
+                patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.check_pipeline",
                       return_value={self.RELEASE_ID: {"id": 42, "status": "wanted"}}):
             mock_mb.get_release_group_releases.return_value = {"releases": [release]}
@@ -507,16 +507,15 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 },
             ],
         }
-        mock_beets = MagicMock()
-        mock_beets.get_album_ids_by_mbids.return_value = {self.RELEASE_ID: 7}
-        mock_beets.check_mbids_detail.return_value = {self.RELEASE_ID: {}}
-        mock_beets.get_tracks_by_mb_release_id.return_value = None
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
+        beets_db.set_mbid_detail(self.RELEASE_ID, {})
         self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id=self.RELEASE_ID,
         ))
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
-                patch("web.server._beets_db", return_value=mock_beets):
+                patch("web.server._beets_db", return_value=beets_db):
             mock_mb.get_release.return_value = release
             status, data = self._get(f"/api/release/{self.RELEASE_ID}")
 
@@ -527,12 +526,39 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                                 "release detail track")
         self.assertEqual(data["beets_album_id"], 7)
 
+    def test_release_detail_includes_beets_tracks_when_in_library(self):
+        """In-library release with beets item rows → the payload carries
+        ``beets_tracks`` (the per-track format/bitrate table the
+        frontend renders under the release)."""
+        release = {
+            "id": self.RELEASE_ID,
+            "title": "Test Album",
+            "tracks": [{"disc_number": 1, "track_number": 1,
+                        "title": "Track", "length_seconds": 180}],
+        }
+        beets_track = {
+            "title": "Track", "track": 1, "disc": 1, "length": 180.0,
+            "format": "FLAC", "bitrate": 1100000,
+            "samplerate": 44100, "bitdepth": 16,
+        }
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
+        beets_db.set_mbid_detail(self.RELEASE_ID, {})
+        beets_db.set_tracks_for_release(self.RELEASE_ID, [beets_track])
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
+                patch("web.server._beets_db", return_value=beets_db):
+            mock_mb.get_release.return_value = release
+            status, data = self._get(f"/api/release/{self.RELEASE_ID}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["beets_tracks"], [beets_track])
+
     @patch("web.routes.browse.discogs_api.get_release")
     def test_release_detail_numeric_id_forwards_to_discogs(self, mock_discogs_get):
-        mock_beets = MagicMock()
-        mock_beets.get_album_ids_by_mbids.return_value = {"12856590": 8}
-        mock_beets.check_mbids_detail.return_value = {"12856590": {}}
-        mock_beets.get_tracks_by_mb_release_id.return_value = None
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release("12856590", [8])
+        beets_db.set_mbid_detail("12856590", {})
         self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id="12856590", discogs_release_id="12856590",
         ))
@@ -550,7 +576,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         }
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value={"12856590"}), \
-                patch("web.server._beets_db", return_value=mock_beets):
+                patch("web.server._beets_db", return_value=beets_db):
             status, data = self._get("/api/release/0012856590")
 
         self.assertEqual(status, 200)
@@ -680,12 +706,12 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
                                 "discogs artist response")
 
     def test_discogs_master_contract(self):
-        mock_beets = MagicMock()
-        mock_beets.get_album_ids_by_mbids.return_value = {"83182": 9}
-        mock_beets.check_mbids_detail.return_value = {"83182": {}}
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release("83182", [9])
+        beets_db.set_mbid_detail("83182", {})
         with patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value={"83182"}), \
-                patch("web.server._beets_db", return_value=mock_beets), \
+                patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.check_pipeline", return_value={}):
             mock_dg.get_master_releases.return_value = {
                 "title": "OK Computer",
@@ -716,13 +742,12 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["releases"][0]["beets_album_id"], 9)
 
     def test_discogs_release_contract(self):
-        mock_beets = MagicMock()
-        mock_beets.get_album_ids_by_mbids.return_value = {"83182": 10}
-        mock_beets.check_mbids_detail.return_value = {"83182": {}}
-        mock_beets.get_tracks_by_mb_release_id.return_value = None
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release("83182", [10])
+        beets_db.set_mbid_detail("83182", {})
         with patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value={"83182"}), \
-                patch("web.server._beets_db", return_value=mock_beets):
+                patch("web.server._beets_db", return_value=beets_db):
             mock_dg.get_release.return_value = {
                 "id": "83182",
                 "title": "OK Computer",
