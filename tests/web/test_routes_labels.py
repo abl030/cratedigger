@@ -8,12 +8,13 @@ tests/web/_harness.py.
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.error import HTTPError
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from tests.fakes import FakeBeetsDB
 from tests.web._harness import _assert_required_fields, _WebServerCase
 
 
@@ -164,11 +165,10 @@ class TestLabelRouteContracts(_WebServerCase):
         were called."""
         held_id = "1001"
         in_pipeline_id = "1002"
-        mock_beets = MagicMock()
-        mock_beets.get_album_ids_by_mbids.return_value = {held_id: 17}
-        mock_beets.check_mbids_detail.return_value = {
-            held_id: {"beets_format": "FLAC", "beets_bitrate": 1100},
-        }
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release(held_id, [17])
+        beets_db.set_mbid_detail(
+            held_id, {"beets_format": "FLAC", "beets_bitrate": 1100})
 
         def _compute_rank(fmt, br):
             return "lossless" if fmt == "FLAC" else "transparent"
@@ -178,7 +178,7 @@ class TestLabelRouteContracts(_WebServerCase):
                       return_value={held_id}), \
                 patch("web.server.check_pipeline",
                       return_value={in_pipeline_id: {"id": 99, "status": "wanted"}}), \
-                patch("web.server._beets_db", return_value=mock_beets), \
+                patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.compute_library_rank",
                       side_effect=_compute_rank):
             mock_dg.get_label.return_value = self._make_label_entity()

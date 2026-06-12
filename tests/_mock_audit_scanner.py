@@ -587,10 +587,7 @@ _WEB_BEETS_MOCK_RE = re.compile(
     r"\bmock_beets\w*|self\._beets\b|self\.beets\b")
 
 WEB_BEETS_MOCK_BASELINE: Dict[str, int] = {
-    os.path.join("web", "test_routes_browse.py"): 23,
-    os.path.join("web", "test_routes_labels.py"): 4,
     os.path.join("web", "test_routes_library.py"): 31,
-    os.path.join("web", "test_routes_pipeline.py"): 6,
     os.path.join("web", "test_routes_pipeline_mutations.py"): 19,
 }
 

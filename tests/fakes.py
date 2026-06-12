@@ -5722,6 +5722,9 @@ class FakeBeetsDB:
         self.get_item_paths_calls: list[str] = []
         self.check_mbids_calls: list[list[str]] = []
         self.check_mbids_detail_calls: list[list[str]] = []
+        self.get_album_ids_by_mbids_calls: list[list[str]] = []
+        self.get_tracks_by_mb_release_id_calls: list[str] = []
+        self._tracks_by_release: dict[str, list[dict[str, Any]]] = {}
         self.get_albums_by_artist_calls: list[tuple[str, str]] = []
         self._mbid_detail: dict[str, dict[str, Any]] = {}
         self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
@@ -5759,11 +5762,42 @@ class FakeBeetsDB:
     def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
         self._release_identities = [copy.deepcopy(r) for r in rows]
 
+    def set_tracks_for_release(
+        self, release_id: str, tracks: list[dict[str, Any]],
+    ) -> None:
+        self._tracks_by_release[release_id] = [
+            copy.deepcopy(t) for t in tracks]
+
     # --- Real-method surface ---
+
+    def _album_ids_lookup(self, release_id: str) -> list[int] | None:
+        """Normalized view of the ``set_album_ids_for_release`` store.
+
+        Production's ``_batch_lookup_album_ids`` runs every input
+        through ``normalize_release_id`` and matches against the stored
+        column value — '0012856590' finds the row stored '12856590'.
+        Returns ``None`` for "release never seeded" vs ``[]`` for
+        "seeded with zero albums".
+        """
+        key = normalize_release_id(release_id)
+        if not key:
+            return None
+        for seeded, ids in self._album_ids_for_release.items():
+            if normalize_release_id(seeded) == key:
+                return ids
+        return None
 
     def album_exists(self, release_id: str) -> bool:
         self.album_exists_calls.append(release_id)
-        return self._album_exists.get(release_id, self._album_exists_default)
+        if release_id in self._album_exists:
+            return self._album_exists[release_id]
+        # Production derives presence and album-id mapping from one
+        # seam (issue #121) — a release seeded with album ids IS in
+        # the library. An explicit set_album_exists seed still wins.
+        ids = self._album_ids_lookup(release_id)
+        if ids:
+            return True
+        return self._album_exists_default
 
     def check_mbids(self, mbids: list[str]) -> set[str]:
         self.check_mbids_calls.append(list(mbids))
@@ -5792,6 +5826,50 @@ class FakeBeetsDB:
         self.get_all_album_ids_for_release_calls.append(release_id)
         return self._album_ids_for_release.get(
             release_id, list(self._album_ids_default))
+
+    def get_album_ids_by_mbids(self, mbids: list[str]) -> dict[str, int]:
+        """Mirror of ``BeetsDB.get_album_ids_by_mbids`` — exact hits only.
+
+        Derives from the ``set_album_ids_for_release`` seed store —
+        shared with ``get_all_album_ids_for_release``, and seeded album
+        ids imply ``album_exists`` — mirroring production's single
+        ``_batch_lookup_album_ids`` seam (issue #121). Inputs and result
+        keys are normalized like production ('0012856590' hits the row
+        seeded '12856590' and the result is keyed '12856590'). First
+        seeded album id wins, matching the exact-hit ``locate`` contract.
+        """
+        self.get_album_ids_by_mbids_calls.append(list(mbids))
+        result: dict[str, int] = {}
+        for mbid in mbids:
+            key = normalize_release_id(mbid)
+            if not key:
+                continue
+            ids = self._album_ids_lookup(key)
+            if ids is None:
+                ids = list(self._album_ids_default)
+            if ids:
+                result[key] = ids[0]
+        return result
+
+    def get_tracks_by_mb_release_id(
+        self, mbid: str,
+    ) -> list[dict[str, Any]] | None:
+        """Mirror of ``BeetsDB.get_tracks_by_mb_release_id``.
+
+        ``None`` only when the release has no exact beets hit — the
+        browse route branches on that. A release seeded with album ids
+        but no tracks returns ``[]`` (production: exact hit always
+        yields a list), so 'album present but tracks None' is not an
+        expressible state.
+        """
+        self.get_tracks_by_mb_release_id_calls.append(mbid)
+        key = normalize_release_id(mbid)
+        for seeded, tracks in self._tracks_by_release.items():
+            if normalize_release_id(seeded) == key:
+                return [copy.deepcopy(t) for t in tracks]
+        if self._album_ids_lookup(key):
+            return []
+        return None
 
     def get_album_info(
         self, mb_release_id: str, _cfg: Any = None,

@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import msgspec
 
@@ -22,6 +22,7 @@ from tests.web._harness import (
     _fresh_triage_runner,
 )
 
+from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
 
 
@@ -235,7 +236,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
 
     def test_disk_coverage_contract(self):
-        from tests.fakes import FakeBeetsDB
         import web.server as srv
 
         self.db.seed_request(make_request_row(
@@ -259,7 +259,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "disk coverage off-disk row")
 
     def test_disk_coverage_inverse_contract(self):
-        from tests.fakes import FakeBeetsDB
         import web.server as srv
 
         beets = FakeBeetsDB()
@@ -1755,19 +1754,17 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         classifies Transparent bands ``transparent``. The beets leaf
         seam is patched to report the release in-library with a
         lossless detail row."""
-        import web.server as srv
         self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1"))
 
-        mock_beets = MagicMock()
+        beets_db = FakeBeetsDB()
         # MP3 @ 256 kbps classifies TRANSPARENT in the default rank model
         # (Opus 128 / MP3 V0 are transparent; see docs/quality-ranks.md).
-        mock_beets.check_mbids_detail.return_value = {
-            "rel-1": {"beets_format": "MP3", "beets_bitrate": 256},
-        }
+        beets_db.set_mbid_detail(
+            "rel-1", {"beets_format": "MP3", "beets_bitrate": 256})
         with patch("web.server.check_beets_library",
                    return_value={"rel-1"}), \
-                patch("web.server._beets_db", return_value=mock_beets):
+                patch("web.server._beets_db", return_value=beets_db):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 200)
@@ -1779,11 +1776,10 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1"))
 
-        mock_beets = MagicMock()
-        mock_beets.check_mbids_detail.return_value = {}  # no detail row
+        beets_db = FakeBeetsDB()  # no detail row seeded
         with patch("web.server.check_beets_library",
                    return_value={"rel-1"}), \
-                patch("web.server._beets_db", return_value=mock_beets):
+                patch("web.server._beets_db", return_value=beets_db):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 200)

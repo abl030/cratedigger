@@ -4324,6 +4324,68 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(beets.get_albums_by_artist_calls,
                          [("X", "mb-1"), ("Y", "")])
 
+    def test_get_tracks_by_mb_release_id_returns_seeded_or_none(self) -> None:
+        # Real method returns None when locate finds no exact hit —
+        # NOT an empty list (the browse route branches on that).
+        beets = FakeBeetsDB()
+        tracks = [{"title": "T1", "track": 1, "disc": 1, "length": 180,
+                   "format": "MP3", "bitrate": 320000,
+                   "samplerate": 44100, "bitdepth": 16}]
+        beets.set_tracks_for_release("mbid-1", tracks)
+        self.assertEqual(beets.get_tracks_by_mb_release_id("mbid-1"), tracks)
+        self.assertIsNone(beets.get_tracks_by_mb_release_id("mbid-2"))
+        self.assertEqual(beets.get_tracks_by_mb_release_id_calls,
+                         ["mbid-1", "mbid-2"])
+
+    def test_get_tracks_empty_list_when_album_present_without_seeds(self) -> None:
+        # Production: an exact album hit always yields a list (its
+        # items), never None. 'Album present but tracks None' is not a
+        # reachable state, so the fake must not express it either.
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release("mbid-1", [7])
+        self.assertEqual(beets.get_tracks_by_mb_release_id("mbid-1"), [])
+
+    def test_album_id_seeds_imply_presence(self) -> None:
+        # Production derives presence and album-id mapping from one
+        # seam (issue #121) — seeded ids mean the release IS in
+        # library. An explicit set_album_exists seed still wins.
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release("mbid-1", [7])
+        self.assertTrue(beets.album_exists("mbid-1"))
+        self.assertEqual(beets.check_mbids(["mbid-1", "mbid-2"]), {"mbid-1"})
+        beets.set_album_exists("mbid-1", False)
+        self.assertFalse(beets.album_exists("mbid-1"))
+
+    def test_get_album_ids_by_mbids_normalizes_like_production(self) -> None:
+        # _batch_lookup_album_ids normalizes every input and keys the
+        # result by the canonical form — '0012856590' hits the row
+        # stored '12856590'.
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release("12856590", [8])
+        out = beets.get_album_ids_by_mbids(["0012856590"])
+        self.assertEqual(out, {"12856590": 8})
+
+    def test_get_album_ids_by_mbids_honors_album_ids_default(self) -> None:
+        # The shared store's _default affordance applies to both
+        # readers — get_all_album_ids_for_release and this map.
+        beets = FakeBeetsDB()
+        beets._album_ids_default = [5]
+        self.assertEqual(beets.get_album_ids_by_mbids(["mbid-x"]),
+                         {"mbid-x": 5})
+
+    def test_get_album_ids_by_mbids_derives_from_release_id_seeds(self) -> None:
+        # Shares the set_album_ids_for_release seed store so presence
+        # and album-id mapping can't disagree (the paired-consistency
+        # concern from issue #121 the real _batch_lookup_album_ids
+        # exists to solve). Exact hit → first seeded album id.
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release("mbid-1", [17, 18])
+        beets.set_album_ids_for_release("mbid-empty", [])
+        out = beets.get_album_ids_by_mbids(["mbid-1", "mbid-empty", "mbid-2"])
+        self.assertEqual(out, {"mbid-1": 17})
+        self.assertEqual(beets.get_album_ids_by_mbids_calls,
+                         [["mbid-1", "mbid-empty", "mbid-2"]])
+
     def test_album_exists_returns_seeded_value(self) -> None:
         beets = FakeBeetsDB()
         beets.set_album_exists("mbid-1", True)
