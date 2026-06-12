@@ -133,6 +133,30 @@ def _beets_db() -> BeetsDB | None:
     return handle
 
 
+def _close_thread_handles() -> None:
+    """Close and drop this thread's DB handles.
+
+    Called from ``Handler.finish()`` — under ``ThreadingHTTPServer``
+    one thread serves one connection, so connection-close IS
+    thread-death and this releases the psycopg2/sqlite handles
+    deterministically instead of waiting on GC (#435). Injected shared
+    handles (``db``/``_beets`` — tests, dev server) are never touched."""
+    handle = getattr(_thread_state, "db", None)
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        _thread_state.db = None
+    beets_handle = getattr(_thread_state, "beets", None)
+    if beets_handle is not None:
+        try:
+            beets_handle.close()
+        except Exception:
+            pass
+        _thread_state.beets = None
+
+
 def _serialize_row(row: dict[str, object]) -> dict[str, object]:
     """Serialize a DB row dict — convert datetime objects to ISO strings."""
     result: dict[str, object] = {}
@@ -501,6 +525,16 @@ class Handler(BaseHTTPRequestHandler):
             # See do_GET: never reuse the socket after an error response.
             self.close_connection = True
             self._error(str(e), 500)
+
+    def finish(self):
+        """Connection teardown: release this thread's DB handles.
+
+        Runs once per connection (after the keep-alive loop ends), which
+        under ThreadingHTTPServer is the moment the worker thread dies."""
+        try:
+            super().finish()
+        finally:
+            _close_thread_handles()
 
     def do_OPTIONS(self):
         self.send_response(200)
