@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _WebServerCase
+from tests.web._harness import _FakeDbWebServerCase, _WebServerCase
 
 from tests.helpers import make_request_row
 
@@ -68,7 +68,7 @@ class TestOverlayNotBakedIntoRoutingCache(_WebServerCase):
             f"outside the web UI's POST paths. Offenders: {sorted(leaked)}")
 
 
-class _CachedServerCase(_WebServerCase):
+class _CachedServerCase(_FakeDbWebServerCase):
     """Shared harness: _WebServerCase but with a FakeRedis wired up so we
     can observe routing-cache behaviour in isolation. Pre-fix this would
     exhibit the stale-badge bug; post-fix it proves the overlay recomputes."""
@@ -104,6 +104,7 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
     RELEASE_ID = "c6cd62c4-da2a-4a89-a219-adba66d6c7d4"
 
     def setUp(self) -> None:
+        super().setUp()
         # Clear any state left behind by a previous test that shares the
         # FakeRedis instance, so each scenario starts cold. `_redis` is
         # typed `object | None` on the module; narrow to FakeRedis here.
@@ -126,18 +127,16 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
     def test_release_reflects_external_status_write(self) -> None:
         """Pipeline writes status='downloading' directly to Postgres
         between two GETs. The second GET must see 'downloading'."""
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id=self.RELEASE_ID,
-        )
+        ))
         first = self._call_release_detail()
         self.assertEqual(first["pipeline_status"], "wanted")
 
         # Simulate cratedigger pipeline flipping status outside the web UI.
         # No POST to /api/cache/invalidate, no web-UI cache-group flush —
         # this is the exact sequence that produced the stale-badge bug.
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
-            id=42, status="downloading", mb_release_id=self.RELEASE_ID,
-        )
+        self.db.update_status(42, "downloading")
         second = self._call_release_detail()
         self.assertEqual(
             second["pipeline_status"], "downloading",
@@ -149,9 +148,9 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
         """Same bug for the in_library flag. After an album is imported
         the 'in_library' flag flips true in beets; a second GET within
         the cache window must reflect that without an explicit flush."""
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
-        )
+        ))
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value=set()):
             mock_mb.get_release.return_value = {
@@ -217,6 +216,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
     ]
 
     def setUp(self) -> None:
+        super().setUp()
         from tests.test_web_cache import FakeRedis
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)

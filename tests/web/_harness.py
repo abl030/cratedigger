@@ -14,7 +14,7 @@ import sys
 import threading
 import unittest
 from http.server import HTTPServer, ThreadingHTTPServer
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -143,6 +143,35 @@ class _WebServerCase(unittest.TestCase):
             return resp.status, json.loads(resp.read())
         except HTTPError as e:
             return e.code, json.loads(e.read())
+
+
+class _FakeDbWebServerCase(_WebServerCase):
+    """Contract-test base with a bare per-test :class:`FakePipelineDB`.
+
+    Migration target for #430. ``setUp`` installs a fresh fake as
+    ``web.server.db`` (the same module-global swap production uses for
+    DSN-less handles — ``_db()`` returns it directly), so every test
+    starts from empty typed state. Tests seed what they need
+    (``self.db.seed_request(...)``, ``self.db.log_download(...)``,
+    ``self.db.update_status(...)``) and assertions hit the fake's real
+    query semantics — there is no MagicMock layer to shape-match.
+
+    The inherited class-level ``mock_db`` (legacy MagicMock harness)
+    must not be touched in subclasses; the ratchet in
+    ``tests/_mock_audit_scanner.py`` enforces this textually, and any
+    accidental use is inert anyway because ``web.server.db`` points at
+    ``self.db`` for the duration of the test.
+    """
+
+    db: FakePipelineDB
+
+    def setUp(self) -> None:
+        super().setUp()
+        import web.server as srv
+        self.db = FakePipelineDB()
+        patcher = patch.object(srv, "db", self.db)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 def _fresh_triage_runner(case: unittest.TestCase):
