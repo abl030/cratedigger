@@ -47,12 +47,13 @@ from typing import Callable, Optional, Protocol, Sequence
 import msgspec
 
 # Eager beets imports — deliberate. The module is heavy, but importing
-# at load time pins the upstream ``beets`` package once; lazy imports
-# inside call paths would re-resolve ``beets`` against whatever
-# sys.path looks like at call time. (Historically this guarded against
-# tests/web/_harness.py putting ``lib/`` on sys.path so ``lib/beets.py``
-# shadowed the real package — that insert is gone, and
-# tests/test_no_dual_load.py now bans the ambiguity outright.)
+# at load time pins the upstream ``beets`` package before anything can
+# pollute sys.path (the first import wins; later sys.path mutations
+# can't rebind a name already in sys.modules). Historically this
+# guarded against tests/web/_harness.py putting ``lib/`` on sys.path so
+# ``lib/beets.py`` shadowed the real package — that insert is gone, and
+# tests/test_no_dual_load.py + TestSysPathAudit ban the ambiguity
+# outright.
 from beets import library as _beets_library
 from beets.autotag import distance as _beets_distance_mod
 from beets.autotag import hooks as _beets_hooks

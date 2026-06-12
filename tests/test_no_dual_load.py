@@ -24,15 +24,24 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Modules that live under a package directory and whose bare name would
 # collide with the prefixed name if the package dir were on PYTHONPATH.
-# Each entry is (package, module_file_stem).
+# Each entry is (package, dotted_module_stem) — the walk descends into
+# subpackages so e.g. ("web", "routes.pipeline") guards the bare
+# ``routes.pipeline`` vs ``web.routes.pipeline`` pair too.
 PACKAGE_MODULES: list[tuple[str, str]] = []
 for pkg in ("lib", "web", "harness", "scripts"):
     pkg_dir = os.path.join(REPO_ROOT, pkg)
     if not os.path.isdir(pkg_dir):
         continue
-    for entry in os.listdir(pkg_dir):
-        if entry.endswith(".py") and entry != "__init__.py":
-            PACKAGE_MODULES.append((pkg, entry[:-3]))
+    for dirpath, dirnames, filenames in os.walk(pkg_dir):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        rel_dir = os.path.relpath(dirpath, pkg_dir)
+        prefix = "" if rel_dir == "." else rel_dir.replace(os.sep, ".") + "."
+        if prefix:
+            # The subpackage itself is a collidable bare name.
+            PACKAGE_MODULES.append((pkg, prefix.rstrip(".")))
+        for entry in sorted(filenames):
+            if entry.endswith(".py") and entry != "__init__.py":
+                PACKAGE_MODULES.append((pkg, prefix + entry[:-3]))
 
 
 def _run_entrypoint_and_dump_modules(bootstrap_code: str) -> set[str]:
@@ -112,22 +121,28 @@ class TestNoDualLoad(unittest.TestCase):
         name. server.py must strip its own directory from sys.path at
         import time so the bare names are never resolvable."""
         bootstrap = (
-            "import sys, os\n"
-            "web_dir = os.path.abspath('web')\n"
+            "import sys, os, tempfile\n"
+            "web_dir = os.path.realpath(os.path.abspath('web'))\n"
+            # A sentinel entry pins the negative-space contract: the
+            # strip must never remove anything OTHER than web/.
+            "sentinel = tempfile.mkdtemp(prefix='cd-syspath-sentinel-')\n"
+            "sys.path.insert(0, sentinel)\n"
             # Simulate script-mode boot: web/ at sys.path[0].
             "sys.path.insert(0, web_dir)\n"
             "import web.server\n"
             "live = [p for p in sys.path\n"
-            "        if os.path.abspath(p or os.getcwd()) == web_dir]\n"
+            "        if os.path.realpath(p or os.getcwd()) == web_dir]\n"
             "assert not live, f'web/ still on sys.path: {sys.path}'\n"
+            "assert sentinel in sys.path, 'strip removed a non-web entry'\n"
             # The structural consequence: bare web-module names must not
             # be importable at all.
-            "try:\n"
-            "    import routes  # noqa: F401\n"
-            "except ImportError:\n"
-            "    pass\n"
-            "else:\n"
-            "    raise AssertionError('bare `routes` is importable')\n"
+            "for bare in ('routes', 'mb', 'cache', 'overlay'):\n"
+            "    try:\n"
+            "        __import__(bare)\n"
+            "    except ImportError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError(f'bare {bare!r} is importable')\n"
         )
         modules = _run_entrypoint_and_dump_modules(bootstrap)
         offenders = _dual_loaded(modules)
