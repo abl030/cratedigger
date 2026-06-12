@@ -61,9 +61,9 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     # --- GET endpoints ---
 
     def test_index_returns_html(self):
-        resp = urlopen(f"{self.base}/")
-        self.assertEqual(resp.status, 200)
-        self.assertIn("text/html", resp.headers.get("Content-Type", ""))
+        with urlopen(f"{self.base}/") as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
     def test_pipeline_log_returns_entries(self):
         status, data = self._get("/api/pipeline/log")
@@ -598,10 +598,11 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         data = json.dumps(body).encode()
         req = Request(url, data=data, headers={"Content-Type": "application/json"})
         try:
-            resp = urlopen(req, timeout=2)
-            return resp.status, json.loads(resp.read())
+            with urlopen(req, timeout=2) as resp:
+                return resp.status, json.loads(resp.read())
         except HTTPError as e:
-            return e.code, json.loads(e.read())
+            with e:
+                return e.code, json.loads(e.read())
         except Exception:
             return None, None
 
