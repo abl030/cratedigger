@@ -205,8 +205,9 @@ def _pipeline_db_test_harness(fake: "FakePipelineDB | None" = None) -> MagicMock
     state-based assertions remain available via the underlying fake.
 
     Tests can reach the underlying fake through the ``_fake`` attribute on
-    the mock (or by accepting the helper's return value directly in
-    bespoke harnesses such as the ``failing_db`` site).
+    the mock. Transitional (#430): migrated route modules subclass
+    :class:`_FakeDbWebServerCase` instead; this helper dies with the last
+    ratchet entry in ``tests/_mock_audit_scanner.py``.
     """
     backing = fake if fake is not None else FakePipelineDB()
     harness = MagicMock(wraps=backing)
