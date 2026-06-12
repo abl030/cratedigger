@@ -525,7 +525,6 @@ _HARNESS_CTOR_RE = re.compile(r"\b_pipeline_db_test_harness\b")
 
 WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {
     os.path.join("web", "_harness.py"): 39,
-    os.path.join("web", "test_routes_imports.py"): 71,
 }
 
 

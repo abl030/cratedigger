@@ -6,7 +6,6 @@ tests/web/_harness.py.
 """
 
 import copy
-from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -20,21 +19,17 @@ from urllib.error import HTTPError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import (
-    _MOCK_PIPELINE_REQUEST,
     _DEFAULT_WRONG_MATCH_ROW,
-    _DEFAULT_WRONG_MATCH_ENTRY,
     _assert_required_fields,
-    _WebServerCase,
+    _FakeDbWebServerCase,
     _fresh_triage_runner,
-    _make_server,
 )
 
 from lib.manual_import import FolderInfo
-from lib.import_queue import ImportJob
 from tests.helpers import make_request_row
 
 
-class TestManualImportRouteContracts(_WebServerCase):
+class TestManualImportRouteContracts(_FakeDbWebServerCase):
     """Contract tests for manual import routes."""
 
     FOLDER_REQUIRED_FIELDS = {"name", "path", "artist", "album", "file_count", "match"}
@@ -42,8 +37,11 @@ class TestManualImportRouteContracts(_WebServerCase):
     IMPORT_REQUIRED_FIELDS = {"status", "message", "request_id", "artist", "album"}
 
     def setUp(self) -> None:
-        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
-        self.mock_db.get_by_status.side_effect = None
+        super().setUp()
+        self.db.seed_request(make_request_row(
+            id=100, status="wanted", mb_release_id="abc-123",
+            artist_name="Test Artist", album_title="Test Album",
+        ))
 
     @patch("web.routes.imports.scan_complete_folder")
     def test_manual_import_scan_contract(self, mock_scan):
@@ -60,15 +58,6 @@ class TestManualImportRouteContracts(_WebServerCase):
             file_count=10,
         )
         mock_scan.return_value = [folder]
-        self.mock_db.get_by_status.return_value = [
-            make_request_row(
-                id=100,
-                status="wanted",
-                mb_release_id="abc-123",
-                artist_name="Test Artist",
-                album_title="Test Album",
-            ),
-        ]
 
         status, data = self._get("/api/manual-import/scan")
 
@@ -97,7 +86,7 @@ class TestManualImportRouteContracts(_WebServerCase):
                                 "manual import response")
 
 
-class TestWrongMatchesContract(unittest.TestCase):
+class TestWrongMatchesContract(_FakeDbWebServerCase):
     """Contract tests: /api/wrong-matches returns grouped-by-release shape.
 
     Issue #113: every rejection with a failed_path must be reachable. The
@@ -106,50 +95,14 @@ class TestWrongMatchesContract(unittest.TestCase):
     collapse by release and expand to per-candidate actions.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.server, cls.port, cls.mock_db = _make_server()
-        cls.base = f"http://127.0.0.1:{cls.port}"
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-
-    def _get(self, path: str) -> tuple[int, dict]:
-        url = f"{self.base}{path}"
-        try:
-            resp = urlopen(url)
-            return resp.status, json.loads(resp.read())
-        except HTTPError as e:
-            return e.code, json.loads(e.read())
-
-    def _post(self, path: str, body: dict) -> tuple[int, dict]:
-        url = f"{self.base}{path}"
-        data = json.dumps(body).encode()
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            resp = urlopen(req)
-            return resp.status, json.loads(resp.read())
-        except HTTPError as e:
-            return e.code, json.loads(e.read())
-
     def setUp(self) -> None:
-        self.mock_db.get_request.return_value = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
-        self.mock_db.get_wrong_matches.side_effect = None
-        self.mock_db.get_wrong_matches.return_value = [copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)]
-        self.mock_db.get_download_log_entry.reset_mock()
-        self.mock_db.get_download_log_entry.side_effect = None
-        self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
-        self.mock_db.clear_wrong_match_path.reset_mock()
-        self.mock_db.clear_wrong_match_path.return_value = True
-        self.mock_db.clear_wrong_match_paths.reset_mock()
-        self.mock_db.clear_wrong_match_paths.return_value = 1
-        self.mock_db.enqueue_import_job.reset_mock()
-        self.mock_db.enqueue_import_job.side_effect = None
-        self.mock_db.enqueue_import_job.return_value = self._job(
-            77, 100, 42, "/mnt/virtio/music/slskd/failed_imports/Test")
-        self.mock_db.get_download_history_batch.return_value = {}
-        self.mock_db.list_active_import_jobs_for_wrong_match.return_value = []
+        super().setUp()
+        # Default group: request 100 + one rejected row pinned to log id
+        # 42 — the id many URLs / dedupe keys in this class reference.
+        self.default_log_id = self._seed_wrong_match(
+            download_log_id=42, request_id=100, username="testuser",
+            failed_path="/mnt/virtio/music/slskd/failed_imports/Test",
+        )
         # Default: treat every failed_path as existing so the group survives
         # filtering. Individual tests override this to exercise missing-file
         # and mixed-existence cases. Converge deletion is service-backed.
@@ -244,60 +197,95 @@ class TestWrongMatchesContract(unittest.TestCase):
         "source_dirs": list,
     }
 
-    def _row(self, download_log_id: int, request_id: int, username: str,
-             failed_path: str, artist: str = "Test Artist",
-             album: str = "Test Album",
-             mb_release_id: str | None = "abc-123",
-             scenario: str = "high_distance",
-             distance: float = 0.25) -> dict:
-        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
-        row["download_log_id"] = download_log_id
-        row["request_id"] = request_id
-        row["artist_name"] = artist
-        row["album_title"] = album
-        row["mb_release_id"] = mb_release_id
-        row["soulseek_username"] = username
-        row["validation_result"]["failed_path"] = failed_path
-        row["validation_result"]["scenario"] = scenario
-        row["validation_result"]["distance"] = distance
-        row["validation_result"]["candidates"][0]["distance"] = distance
-        return row
-
-    def _entry(self, download_log_id: int, request_id: int,
-               failed_path: str) -> dict:
-        return {
-            "id": download_log_id,
-            "request_id": request_id,
-            "validation_result": {
-                "failed_path": failed_path,
-                "scenario": "high_distance",
-            },
-        }
-
-    def _job(self, job_id: int, request_id: int, download_log_id: int,
-             failed_path: str, *, deduped: bool = False) -> ImportJob:
-        return ImportJob(
-            id=job_id,
-            job_type="force_import",
-            status="queued",
-            request_id=request_id,
-            dedupe_key=f"force_import:download_log:{download_log_id}",
-            payload={
-                "download_log_id": download_log_id,
-                "failed_path": failed_path,
-            },
-            result=None,
-            message="Import queued",
-            error=None,
-            attempts=0,
-            worker_id=None,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-            started_at=None,
-            heartbeat_at=None,
-            completed_at=None,
-            deduped=deduped,
+    def _seed_wrong_match(
+        self, *,
+        download_log_id: int | None = None,
+        request_id: int = 100,
+        username: str = "testuser",
+        failed_path: str = "/mnt/virtio/music/slskd/failed_imports/Test",
+        artist: str = "Test Artist",
+        album: str = "Test Album",
+        mb_release_id: str | None = "abc-123",
+        scenario: str = "high_distance",
+        distance: float = 0.25,
+        request_overrides: dict | None = None,
+        validation_overrides: dict | None = None,
+        log_overrides: dict | None = None,
+    ) -> int:
+        """Seed a request + one rejected download_log row that the fake's
+        REAL get_wrong_matches query surfaces (the legacy harness fed the
+        joined row shape straight into a mock). Returns the log id;
+        ``download_log_id`` pins it for tests whose URLs / dedupe keys
+        hardcode ids."""
+        if self.db.get_request(request_id) is None:
+            self.db.seed_request(make_request_row(
+                id=request_id, status="wanted", artist_name=artist,
+                album_title=album, mb_release_id=mb_release_id,
+                mb_release_group_id="rg-abc-123",
+                min_bitrate=None, verified_lossless=False,
+                current_spectral_grade=None,
+                current_spectral_bitrate=None, imported_path=None,
+                **(request_overrides or {}),
+            ))
+        elif request_overrides:
+            self.db.update_request_fields(request_id, **request_overrides)
+        vr = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW["validation_result"])
+        vr["failed_path"] = failed_path
+        vr["scenario"] = scenario
+        vr["distance"] = distance
+        vr["candidates"][0]["distance"] = distance
+        vr["soulseek_username"] = username
+        vr.update(validation_overrides or {})
+        if download_log_id is not None:
+            self.db._next_download_log_id = download_log_id - 1
+        return self.db.log_download(
+            request_id, outcome="rejected", soulseek_username=username,
+            validation_result=vr, **(log_overrides or {}),
         )
+
+    def _seed_entry_evidence(
+        self, log_id: int, *,
+        storage_format: str | None = None,
+        min_bitrate: int | None = None,
+        verified_lossless: bool = False,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+        v0_probe_kind: str | None = None,
+        v0_probe_avg_bitrate: int | None = None,
+    ) -> None:
+        """Attach a real album_quality_evidence row to a download_log row
+        — the route reads it through the fake's LEFT-JOIN mirror."""
+        from lib.quality import (
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+        from tests.helpers import make_album_quality_evidence
+        evidence = make_album_quality_evidence(
+            mb_release_id=f"ev-{log_id}",
+            storage_format=storage_format,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                format=storage_format,
+                verified_lossless=verified_lossless,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=spectral_bitrate,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                proof_origin="test", source="seeded",
+                classifier="contract-test",
+            ) if verified_lossless else None,
+            v0_metric=AlbumQualityV0Metric(
+                avg_bitrate_kbps=v0_probe_avg_bitrate,
+                source_lineage=v0_probe_kind,
+            ) if (v0_probe_kind or v0_probe_avg_bitrate) else None,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint)
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
 
     def _cleanup_result(self, log_id: int, *, outcome: str = "deleted"):
         from lib.wrong_match_cleanup_service import (
@@ -395,12 +383,14 @@ class TestWrongMatchesContract(unittest.TestCase):
         from get_wrong_matches() through to the entry dict so the operator
         can eyeball candidates by audio quality.
         """
-        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
-        row["spectral_grade"] = "suspect"
-        row["spectral_bitrate"] = 320
-        row["v0_probe_kind"] = "lossless_source_v0"
-        row["v0_probe_avg_bitrate"] = 265
-        self.mock_db.get_wrong_matches.return_value = [row]
+        # Legacy denorm columns (evidence rows reject legacy probe
+        # kinds like lossless_source_v0) — the COALESCE path the route
+        # falls back to for pre-evidence rows.
+        self.db.delete_request(100)
+        self._seed_wrong_match(download_log_id=43, log_overrides=dict(
+            spectral_grade="suspect", spectral_bitrate=320,
+            v0_probe_kind="lossless_source_v0", v0_probe_avg_bitrate=265,
+        ))
 
         _, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
@@ -410,12 +400,14 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(entry["v0_probe_avg_bitrate"], 265)
 
     def test_entry_surfaces_preserved_source_dirs(self):
-        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
-        row["validation_result"]["source_dirs"] = [
-            "baduser\\Artist\\Album",
-            "baduser\\Artist\\Album\\CD2",
-        ]
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self.db.delete_request(100)  # replace the setUp row wholesale
+        self._seed_wrong_match(
+            download_log_id=43,
+            validation_overrides={"source_dirs": [
+                "baduser\\Artist\\Album",
+                "baduser\\Artist\\Album\\CD2",
+            ]},
+        )
 
         _, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
@@ -430,16 +422,16 @@ class TestWrongMatchesContract(unittest.TestCase):
             with open(track_path, "wb") as handle:
                 handle.write(b"fake mp3 bytes")
 
-            self.mock_db.get_download_log_entry.return_value = {
-                "id": 42,
-                "request_id": 100,
-                "validation_result": {
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={
                     "failed_path": tmpdir,
                     "source_dirs": ["baduser\\Artist\\Album"],
                 },
-            }
+            )
 
-            status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
@@ -447,7 +439,9 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["audio_file_count"], 1)
         self.assertEqual(data["files"][0]["relative_path"], "01 - Track.mp3")
         self.assertTrue(data["files"][0]["playable"])
-        self.assertIn("/api/wrong-matches/audio?download_log_id=42", data["files"][0]["stream_url"])
+        self.assertIn(
+            f"/api/wrong-matches/audio?download_log_id={log_id}",
+            data["files"][0]["stream_url"])
 
     def test_wrong_match_explorer_normalizes_raw_id3_tags_and_skips_artwork_frames(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -455,13 +449,10 @@ class TestWrongMatchesContract(unittest.TestCase):
             with open(track_path, "wb") as handle:
                 handle.write(b"fake mp3 bytes")
 
-            self.mock_db.get_download_log_entry.return_value = {
-                "id": 42,
-                "request_id": 100,
-                "validation_result": {
-                    "failed_path": tmpdir,
-                },
-            }
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={"failed_path": tmpdir},
+            )
 
             class _FakeInfo:
                 length = 181.0
@@ -481,7 +472,8 @@ class TestWrongMatchesContract(unittest.TestCase):
                 info = _FakeInfo()
 
             with patch("mutagen.File", return_value=_FakeAudio()):
-                status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+                status, data = self._get(
+                    f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
         self.assertEqual(status, 200)
         tags = data["files"][0]["tags"]
@@ -503,10 +495,9 @@ class TestWrongMatchesContract(unittest.TestCase):
                 with open(os.path.join(tmpdir, filename), "wb") as handle:
                     handle.write(b"fake mp3 bytes")
 
-            self.mock_db.get_download_log_entry.return_value = {
-                "id": 42,
-                "request_id": 100,
-                "validation_result": {
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={
                     "failed_path": tmpdir,
                     "candidates": [{
                         "is_target": True,
@@ -526,7 +517,7 @@ class TestWrongMatchesContract(unittest.TestCase):
                         ],
                     }],
                 },
-            }
+            )
 
             class _FakeInfo:
                 length = 181.0
@@ -547,7 +538,8 @@ class TestWrongMatchesContract(unittest.TestCase):
                 return _FakeAudio()
 
             with patch("mutagen.File", side_effect=_fake_audio):
-                status, data = self._get("/api/wrong-matches/explorer?download_log_id=42")
+                status, data = self._get(
+                    f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["ordered_by"], "matched")
@@ -573,13 +565,10 @@ class TestWrongMatchesContract(unittest.TestCase):
             with open(track_path, "wb") as handle:
                 handle.write(b"abcdef")
 
-            self.mock_db.get_download_log_entry.return_value = {
-                "id": 42,
-                "request_id": 100,
-                "validation_result": {
-                    "failed_path": tmpdir,
-                },
-            }
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={"failed_path": tmpdir},
+            )
 
             conn = http.client.HTTPConnection(
                 "127.0.0.1", self.port, timeout=10)
@@ -591,7 +580,8 @@ class TestWrongMatchesContract(unittest.TestCase):
                     conn.request(
                         "GET",
                         "/api/wrong-matches/audio"
-                        "?download_log_id=42&path=01%20-%20Track.mp3",
+                        f"?download_log_id={log_id}"
+                        "&path=01%20-%20Track.mp3",
                     )
                     resp = conn.getresponse()
                     self.assertEqual(resp.status, 200)
@@ -611,16 +601,14 @@ class TestWrongMatchesContract(unittest.TestCase):
             with open(track_path, "wb") as handle:
                 handle.write(b"abcdef")
 
-            self.mock_db.get_download_log_entry.return_value = {
-                "id": 42,
-                "request_id": 100,
-                "validation_result": {
-                    "failed_path": tmpdir,
-                },
-            }
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={"failed_path": tmpdir},
+            )
 
             req = Request(
-                f"{self.base}/api/wrong-matches/audio?download_log_id=42&path=01%20-%20Track.mp3",
+                f"{self.base}/api/wrong-matches/audio"
+                f"?download_log_id={log_id}&path=01%20-%20Track.mp3",
                 headers={"Range": "bytes=1-3"},
             )
             with urlopen(req) as resp:
@@ -668,11 +656,10 @@ class TestWrongMatchesContract(unittest.TestCase):
         verified_lossless → entry.verified_lossless, and computes
         quality_rank from format + bitrate via compute_library_rank.
         """
-        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
-        row["evidence_storage_format"] = "FLAC"
-        row["evidence_min_bitrate"] = 0
-        row["evidence_verified_lossless"] = True
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self._seed_entry_evidence(
+            self.default_log_id,
+            storage_format="FLAC", min_bitrate=0, verified_lossless=True,
+        )
 
         _, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
@@ -688,22 +675,23 @@ class TestWrongMatchesContract(unittest.TestCase):
         an evidence-less row. The frontend operator wants the best
         candidate at the top so they can force-import without scrolling.
         """
-        def _row(log_id: int, fmt: str | None, kbps: int | None) -> dict:
-            r = self._row(log_id, 770, f"user{log_id}", f"/fi/p{log_id}",
-                          artist="A", album="B", mb_release_id="mb-x",
-                          distance=0.20)
-            r["evidence_storage_format"] = fmt
-            r["evidence_min_bitrate"] = kbps
-            r["evidence_verified_lossless"] = fmt == "FLAC"
-            return r
+        self.db.delete_request(100)  # drop the setUp group
+        def _seed(log_id: int, fmt: str | None, kbps: int | None) -> None:
+            self._seed_wrong_match(
+                download_log_id=log_id, request_id=770,
+                username=f"user{log_id}", failed_path=f"/fi/p{log_id}",
+                artist="A", album="B", mb_release_id="mb-x",
+                distance=0.20)
+            if fmt is not None:
+                self._seed_entry_evidence(
+                    log_id, storage_format=fmt, min_bitrate=kbps,
+                    verified_lossless=fmt == "FLAC")
 
-        self.mock_db.get_wrong_matches.return_value = [
-            _row(901, None,   None),   # unknown
-            _row(902, "opus", 128),    # transparent
-            _row(903, "MP3",  320),    # transparent
-            _row(904, "FLAC", 0),      # lossless
-            _row(905, "MP3",  192),    # good
-        ]
+        _seed(901, None,   None)   # unknown
+        _seed(902, "opus", 128)    # transparent
+        _seed(903, "MP3",  320)    # transparent
+        _seed(904, "FLAC", 0)      # lossless
+        _seed(905, "MP3",  192)    # good
         with patch("web.routes.imports.resolve_failed_path",
                    side_effect=lambda p: p):
             status, data = self._get("/api/wrong-matches")
@@ -722,11 +710,13 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     def test_multiple_rejections_for_same_request_collapse_to_single_group(self):
         """RED for issue #113: 3 rejections on one request → 1 group with 3 entries."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(3584, 515, "ascalaphid", "/fi/path_9"),
-            self._row(3565, 515, "gatybfb",    "/fi/path_8"),
-            self._row(3559, 515, "jazzush",    "/fi/path_7"),
-        ]
+        self.db.delete_request(100)  # drop the setUp group
+        self._seed_wrong_match(download_log_id=3559, request_id=515,
+                               username="jazzush", failed_path="/fi/path_7")
+        self._seed_wrong_match(download_log_id=3565, request_id=515,
+                               username="gatybfb", failed_path="/fi/path_8")
+        self._seed_wrong_match(download_log_id=3584, request_id=515,
+                               username="ascalaphid", failed_path="/fi/path_9")
         with patch("web.routes.imports.resolve_failed_path",
                    side_effect=lambda p: p):
             status, data = self._get("/api/wrong-matches")
@@ -743,14 +733,16 @@ class TestWrongMatchesContract(unittest.TestCase):
                          "Entries must be ordered newest download_log_id first.")
 
     def test_multiple_releases_return_separate_groups(self):
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(200, 1, "u1", "/fi/a", artist="A1", album="B1",
-                      mb_release_id="mb-1"),
-            self._row(201, 1, "u2", "/fi/b", artist="A1", album="B1",
-                      mb_release_id="mb-1"),
-            self._row(300, 2, "u3", "/fi/c", artist="A2", album="B2",
-                      mb_release_id="mb-2"),
-        ]
+        self.db.delete_request(100)  # drop the setUp group
+        self._seed_wrong_match(download_log_id=200, request_id=1,
+                               username="u1", failed_path="/fi/a",
+                               artist="A1", album="B1", mb_release_id="mb-1")
+        self._seed_wrong_match(download_log_id=201, request_id=1,
+                               username="u2", failed_path="/fi/b",
+                               artist="A1", album="B1", mb_release_id="mb-1")
+        self._seed_wrong_match(download_log_id=300, request_id=2,
+                               username="u3", failed_path="/fi/c",
+                               artist="A2", album="B2", mb_release_id="mb-2")
         with patch("web.routes.imports.resolve_failed_path",
                    side_effect=lambda p: p):
             status, data = self._get("/api/wrong-matches")
@@ -767,13 +759,10 @@ class TestWrongMatchesContract(unittest.TestCase):
                                      "beets_tracks": 12}})
     def test_group_shows_current_quality_when_imported(self, _mock_beets):
         """Imported album: quality_label, quality_rank, verified_lossless reflect on-disk state."""
-        row = self._row(42, 100, "testuser", "/fi/Test")
-        row["request_status"] = "imported"
-        row["request_min_bitrate"] = 207
-        row["request_verified_lossless"] = True
-        row["request_current_spectral_grade"] = "genuine"
-        row["request_imported_path"] = "/mnt/virtio/Music/Beets/Artist/Album"
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self.db.update_request_fields(
+            100, status="imported", min_bitrate=207,
+            verified_lossless=True, current_spectral_grade="genuine",
+            imported_path="/mnt/virtio/Music/Beets/Artist/Album")
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "imported")
@@ -790,11 +779,7 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     def test_group_shows_nothing_on_disk_when_wanted(self):
         """Wanted album: no files in library yet — fields are null, label signals 'not on disk'."""
-        row = self._row(42, 100, "testuser", "/fi/Test")
-        row["request_status"] = "wanted"
-        row["request_min_bitrate"] = None
-        row["request_verified_lossless"] = False
-        self.mock_db.get_wrong_matches.return_value = [row]
+        # setUp's request 100 is already wanted with no on-disk quality.
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "wanted")
@@ -814,13 +799,11 @@ class TestWrongMatchesContract(unittest.TestCase):
         "320k likely_transcode" for a release with nothing on disk and
         force-imports based on false quality data.
         """
-        row = self._row(42, 100, "testuser", "/fi/Test")
-        row["request_status"] = "wanted"
-        row["request_min_bitrate"] = 320                  # stale
-        row["request_verified_lossless"] = False
-        row["request_current_spectral_grade"] = "likely_transcode"  # stale
-        row["request_current_spectral_bitrate"] = 160                # stale
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self.db.update_request_fields(
+            100, status="wanted", min_bitrate=320,            # stale
+            verified_lossless=False,
+            current_spectral_grade="likely_transcode",        # stale
+            current_spectral_bitrate=160)                     # stale
         # No beets mock — _is_in_beets returns False, so every on-disk
         # field in the response should reflect "nothing on disk".
         status, data = self._get("/api/wrong-matches")
@@ -858,14 +841,12 @@ class TestWrongMatchesContract(unittest.TestCase):
         of the album, the honest UI answer is 'not in library' — re-tag
         it or add it to the pipeline.
         """
-        row = self._row(42, 100, "testuser", "/fi/Test",
-                         mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-        row["request_status"] = "imported"
-        row["request_min_bitrate"] = 245
-        row["request_verified_lossless"] = True
-        row["request_current_spectral_grade"] = "genuine"
-        row["request_current_spectral_bitrate"] = None
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self.db.update_request_fields(
+            100, status="imported",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            min_bitrate=245, verified_lossless=True,
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=None)
 
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
@@ -894,12 +875,10 @@ class TestWrongMatchesContract(unittest.TestCase):
         have returned a match (mocked here with ``create=True`` so the
         test is RED against the current code).
         """
-        row = self._row(42, 100, "testuser", "/fi/Test", mb_release_id=None)
-        row["request_status"] = "imported"
-        row["request_min_bitrate"] = 245
-        row["request_verified_lossless"] = True
-        row["request_current_spectral_grade"] = "genuine"
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self.db.update_request_fields(
+            100, status="imported", mb_release_id=None,
+            min_bitrate=245, verified_lossless=True,
+            current_spectral_grade="genuine")
 
         status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
@@ -915,33 +894,25 @@ class TestWrongMatchesContract(unittest.TestCase):
         A rejection that happened after a successful import doesn't change what
         beets has — the earlier success is still what's on disk.
         """
-        row = self._row(42, 100, "testuser", "/fi/Test")
-        self.mock_db.get_wrong_matches.return_value = [row]
-        self.mock_db.get_download_history_batch.return_value = {
-            100: [
-                # Newest = rejected (a later force-import attempt that failed).
-                {"id": 999, "outcome": "rejected",
-                 "created_at": "2026-04-19T09:00:00+00:00",
-                 "soulseek_username": "newestuser",
-                 "actual_filetype": "mp3", "actual_min_bitrate": 192,
-                 "beets_scenario": "high_distance"},
-                # Then an older force_import — this is what's actually on disk.
-                {"id": 900, "outcome": "force_import",
-                 "created_at": "2026-04-10T09:00:00+00:00",
-                 "soulseek_username": "forceuser",
-                 "actual_filetype": "mp3", "actual_min_bitrate": 207,
-                 "beets_scenario": "force_import"},
-                {"id": 800, "outcome": "success",
-                 "created_at": "2026-03-10T12:00:00+00:00",
-                 "soulseek_username": "olderuser",
-                 "actual_filetype": "flac", "actual_min_bitrate": 900},
-            ],
-        }
+        # Real history, oldest → newest: success, then a force_import,
+        # then a rejected attempt newest. The summary must pick the
+        # force_import (most recent import), not the newest rejection.
+        self.db.log_download(
+            100, outcome="success", soulseek_username="olderuser",
+            actual_filetype="flac", actual_min_bitrate=900)
+        forced_id = self.db.log_download(
+            100, outcome="force_import", soulseek_username="forceuser",
+            actual_filetype="mp3", actual_min_bitrate=207,
+            beets_scenario="force_import")
+        self.db.log_download(
+            100, outcome="rejected", soulseek_username="newestuser",
+            actual_filetype="mp3", actual_min_bitrate=192,
+            beets_scenario="high_distance")
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         latest = group["latest_import"]
         self.assertIsNotNone(latest)
-        self.assertEqual(latest["id"], 900,
+        self.assertEqual(latest["id"], forced_id,
                          "Must pick the most recent success/force/manual import, "
                          "not the newest rejection.")
         self.assertEqual(latest["outcome"], "force_import")
@@ -949,37 +920,28 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     def test_group_latest_import_none_when_never_imported(self):
         """Release that has only rejections → latest_import is None."""
-        row = self._row(42, 100, "testuser", "/fi/Test")
-        self.mock_db.get_wrong_matches.return_value = [row]
-        self.mock_db.get_download_history_batch.return_value = {
-            100: [
-                {"id": 999, "outcome": "rejected",
-                 "created_at": "2026-04-19T09:00:00+00:00",
-                 "soulseek_username": "u1"},
-                {"id": 998, "outcome": "timeout",
-                 "created_at": "2026-04-18T09:00:00+00:00",
-                 "soulseek_username": "u2"},
-            ],
-        }
+        self.db.log_download(100, outcome="timeout",
+                             soulseek_username="u2")
+        self.db.log_download(100, outcome="rejected",
+                             soulseek_username="u1")
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertIsNone(group["latest_import"])
 
     def test_group_latest_import_none_when_batch_empty(self):
         """Edge case: no history rows at all → latest_import is None."""
-        row = self._row(42, 100, "testuser", "/fi/Test")
-        self.mock_db.get_wrong_matches.return_value = [row]
-        self.mock_db.get_download_history_batch.return_value = {}
+        # Only the setUp rejection exists — no import history at all.
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertIsNone(group["latest_import"])
 
     def test_group_dropped_when_no_entries_have_existing_files(self):
         """If every entry's files are gone, the group is excluded from the UI."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(10, 5, "u1", "/gone/a"),
-            self._row(11, 5, "u2", "/gone/b"),
-        ]
+        self.db.delete_request(100)  # drop the setUp group
+        self._seed_wrong_match(download_log_id=10, request_id=5,
+                               username="u1", failed_path="/gone/a")
+        self._seed_wrong_match(download_log_id=11, request_id=5,
+                               username="u2", failed_path="/gone/b")
         with patch("web.routes.imports.resolve_failed_path", return_value=None):
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
@@ -987,10 +949,11 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     def test_group_pending_count_reflects_existing_entries_only(self):
         """pending_count counts entries with files still on disk."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(20, 7, "present", "/on-disk/a"),
-            self._row(21, 7, "missing", "/gone/b"),
-        ]
+        self.db.delete_request(100)  # drop the setUp group
+        self._seed_wrong_match(download_log_id=20, request_id=7,
+                               username="present", failed_path="/on-disk/a")
+        self._seed_wrong_match(download_log_id=21, request_id=7,
+                               username="missing", failed_path="/gone/b")
         with patch("web.routes.imports.resolve_failed_path",
                    side_effect=lambda p: p if p.startswith("/on-disk") else None):
             status, data = self._get("/api/wrong-matches")
@@ -1012,9 +975,9 @@ class TestWrongMatchesContract(unittest.TestCase):
     @patch("web.routes.imports.resolve_failed_path",
            return_value="/mnt/virtio/music/slskd/failed_imports/Test")
     def test_relative_failed_path_uses_resolved_path(self, _mock_resolve):
-        row = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW)
-        row["validation_result"]["failed_path"] = "failed_imports/Test"
-        self.mock_db.get_wrong_matches.return_value = [row]
+        self.db.delete_request(100)  # replace the setUp row wholesale
+        self._seed_wrong_match(download_log_id=43,
+                               failed_path="failed_imports/Test")
 
         status, data = self._get("/api/wrong-matches")
 
@@ -1042,7 +1005,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["deleted_path"],
                          "/mnt/virtio/music/slskd/failed_imports/Test")
         self.mock_manual_cleanup.assert_called_once_with(
-            self.mock_db,
+            self.db,
             42,
             require_visible=True,
         )
@@ -1069,7 +1032,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "active_import_job")
         self.mock_manual_cleanup.assert_called_once_with(
-            self.mock_db,
+            self.db,
             42,
             require_visible=True,
         )
@@ -1116,7 +1079,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["cleared"], 2)
         self.assertEqual(data["deleted_paths"], 2)
         self.assertTrue(data["group_empty"])
-        self.mock_manual_group_cleanup.assert_called_once_with(self.mock_db, 42)
+        self.mock_manual_group_cleanup.assert_called_once_with(self.db, 42)
 
     def test_manual_delete_group_reports_partial_when_rows_are_skipped(self):
         from lib.wrong_match_delete_service import (
@@ -1196,7 +1159,7 @@ class TestWrongMatchesContract(unittest.TestCase):
 
         runner.join(timeout=5)
         mock_cleanup.assert_called_once_with(
-            self.mock_db,
+            self.db,
             confirm_all_wrong_matches=True,
         )
 
@@ -1214,29 +1177,23 @@ class TestWrongMatchesContract(unittest.TestCase):
 
     def test_converge_queues_green_candidates_and_deletes_unmatched(self):
         """Converge queues green rows and deletes high-distance leftovers."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(100, 42, "u1", "/fi/a", distance=0.167),
-            self._row(101, 42, "u2", "/fi/b", distance=0.180),
-            self._row(102, 42, "u3", "/fi/c", distance=0.226),
-            self._row(200, 99, "other", "/fi/other", distance=0.100),
-        ]
-        self.mock_db.get_wrong_matches.return_value[0]["validation_result"]["source_dirs"] = [
-            "u1\\Artist\\Album",
-        ]
-        entries = {
-            100: self._entry(100, 42, "/fi/a"),
-            101: self._entry(101, 42, "/fi/b"),
-            102: self._entry(102, 42, "/fi/c"),
-        }
-        self.mock_db.get_download_log_entry.side_effect = (
-            lambda lid: copy.deepcopy(entries[lid])
-        )
-        self.mock_db.enqueue_import_job.side_effect = [
-            self._job(900, 42, 100, "/fi/a"),
-            self._job(901, 42, 101, "/fi/b"),
-        ]
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167,
+            validation_overrides={"source_dirs": ["u1\\Artist\\Album"]})
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="u2",
+            failed_path="/fi/b", distance=0.180)
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="u3",
+            failed_path="/fi/c", distance=0.226)
+        self._seed_wrong_match(
+            download_log_id=200, request_id=99, username="other",
+            failed_path="/fi/other", distance=0.100)
+
         def manual_delete_after_enqueue(_db, log_id, **_kwargs):
-            self.assertEqual(self.mock_db.enqueue_import_job.call_count, 2)
+            # Both green rows were queued BEFORE the unmatched delete ran.
+            self.assertEqual(len(self.db.list_import_jobs()), 2)
             return self._manual_cleanup_result(log_id)
 
         self.mock_manual_cleanup.side_effect = manual_delete_after_enqueue
@@ -1261,41 +1218,38 @@ class TestWrongMatchesContract(unittest.TestCase):
             {item["download_log_id"] for item in data["selected"]},
             {100, 101},
         )
+        jobs = {j.dedupe_key: j for j in self.db.list_import_jobs()}
         self.assertEqual(
-            [call.kwargs["dedupe_key"]
-             for call in self.mock_db.enqueue_import_job.call_args_list],
-            [
+            set(jobs),
+            {
                 "force_import:download_log:100",
                 "force_import:download_log:101",
-            ],
+            },
         )
-        self.mock_db.clear_wrong_match_paths.assert_not_called()
+        # Queued rows stay visible: their failed_path survives.
+        entry_100 = self.db.get_download_log_entry(100)
+        assert entry_100 is not None
         self.assertEqual(
-            self.mock_db.enqueue_import_job.call_args_list[0].kwargs["payload"]["source_dirs"],
+            entry_100["validation_result"]["failed_path"], "/fi/a")
+        self.assertEqual(
+            jobs["force_import:download_log:100"]
+            .payload["source_dirs"],
             ["u1\\Artist\\Album"],
         )
-        self.mock_manual_cleanup.assert_called_once_with(self.mock_db, 102, require_visible=True)
+        self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
         """Legacy true payloads still delete non-green rows while selected rows stay visible."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(100, 42, "u1", "/fi/a", distance=0.167),
-            self._row(101, 42, "u2", "/fi/b", distance=0.180),
-            self._row(102, 42, "u3", "/fi/c", distance=0.226),
-        ]
-        entries = {
-            100: self._entry(100, 42, "/fi/a"),
-            101: self._entry(101, 42, "/fi/b"),
-            102: self._entry(102, 42, "/fi/c"),
-        }
-        self.mock_db.get_download_log_entry.side_effect = (
-            lambda lid: copy.deepcopy(entries[lid])
-        )
-        self.mock_db.enqueue_import_job.side_effect = [
-            self._job(900, 42, 100, "/fi/a"),
-            self._job(901, 42, 101, "/fi/b"),
-        ]
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167)
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="u2",
+            failed_path="/fi/b", distance=0.180)
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="u3",
+            failed_path="/fi/c", distance=0.226)
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
@@ -1308,7 +1262,7 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["deleted"], 1)
         self.assertEqual(data["remaining"], 2)
         self.assertFalse(data["group_empty"])
-        self.mock_manual_cleanup.assert_called_once_with(self.mock_db, 102, require_visible=True)
+        self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 
     def test_converge_deletes_unmatched_unconditionally_without_classifier(self):
@@ -1319,18 +1273,12 @@ class TestWrongMatchesContract(unittest.TestCase):
         evidence-based classifier blocked deletion. Converge has already collected
         operator intent; the unmatched row dies.
         """
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(100, 42, "u1", "/fi/a", distance=0.167),
-            self._row(102, 42, "u3", "/fi/c", distance=0.226),
-        ]
-        entries = {
-            100: self._entry(100, 42, "/fi/a"),
-            102: self._entry(102, 42, "/fi/c"),
-        }
-        self.mock_db.get_download_log_entry.side_effect = (
-            lambda lid: copy.deepcopy(entries[lid])
-        )
-        self.mock_db.enqueue_import_job.return_value = self._job(900, 42, 100, "/fi/a")
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167)
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="u3",
+            failed_path="/fi/c", distance=0.226)
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
@@ -1341,14 +1289,14 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(data["deleted"], 1)
         self.assertEqual(data["remaining"], 1)
-        self.mock_manual_cleanup.assert_called_once_with(self.mock_db, 102, require_visible=True)
+        self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 
     def test_converge_skips_missing_green_files(self):
         """A green row with no surviving failed_path is not queued or dismissed."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(100, 42, "u1", "/gone/a", distance=0.167),
-        ]
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/gone/a", distance=0.167)
 
         with patch("web.routes.imports.resolve_failed_path", return_value=None):
             status, data = self._post("/api/wrong-matches/converge", {
@@ -1363,18 +1311,25 @@ class TestWrongMatchesContract(unittest.TestCase):
         self.assertEqual(data["skipped"], [
             {"download_log_id": 100, "reason": "files_missing"},
         ])
-        self.mock_db.enqueue_import_job.assert_not_called()
-        self.mock_db.clear_wrong_match_paths.assert_not_called()
+        self.assertEqual(self.db.list_import_jobs(), [])
+        # The row stays visible — failed_path survives.
+        entry_100 = self.db.get_download_log_entry(100)
+        assert entry_100 is not None
+        self.assertIn("failed_path", entry_100["validation_result"])
         self.mock_cleanup.assert_not_called()
 
     def test_converge_reports_deduped_jobs(self):
         """Existing active force-import jobs still count as selected but remain visible."""
-        self.mock_db.get_wrong_matches.return_value = [
-            self._row(100, 42, "u1", "/fi/a", distance=0.167),
-        ]
-        self.mock_db.get_download_log_entry.return_value = self._entry(100, 42, "/fi/a")
-        self.mock_db.enqueue_import_job.return_value = self._job(
-            900, 42, 100, "/fi/a", deduped=True)
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167)
+        # Pre-existing active job with the same dedupe key — converge's
+        # enqueue dedupes against it for real.
+        self.db.enqueue_import_job(
+            "force_import", request_id=42,
+            dedupe_key="force_import:download_log:100",
+            payload={"download_log_id": 100, "failed_path": "/fi/a"},
+        )
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
