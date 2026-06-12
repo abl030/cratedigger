@@ -19,7 +19,7 @@ from urllib.error import HTTPError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import (
-    _DEFAULT_WRONG_MATCH_ROW,
+    _DEFAULT_WRONG_MATCH_VALIDATION,
     _assert_required_fields,
     _FakeDbWebServerCase,
     _fresh_triage_runner,
@@ -229,7 +229,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             ))
         elif request_overrides:
             self.db.update_request_fields(request_id, **request_overrides)
-        vr = copy.deepcopy(_DEFAULT_WRONG_MATCH_ROW["validation_result"])
+        vr = copy.deepcopy(_DEFAULT_WRONG_MATCH_VALIDATION)
         vr["failed_path"] = failed_path
         vr["scenario"] = scenario
         vr["distance"] = distance
@@ -637,8 +637,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         preview hook (R3 — this feature does not introduce a preview
         workflow).
         """
-        # _DEFAULT_WRONG_MATCH_ROW already has all four evidence fields
-        # set to None; this test pins that the resulting entry mirrors that.
+        # The setUp row carries no evidence; this test pins that the
+        # resulting entry still emits all four keys as None.
         _, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
         self.assertEqual(entry["source_dirs"], [])
