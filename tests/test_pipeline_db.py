@@ -7771,5 +7771,164 @@ class TestWrongMatchTriageRoundTrip(unittest.TestCase):
         self.assertEqual(env.scenario, "wrong_match")
 
 
+@requires_postgres
+class TestLatestDownloadSummaries(unittest.TestCase):
+    """#426: ``get_latest_download_summaries`` returns only the newest
+    download_log row + a history count per request, instead of dragging
+    the full per-request history (with fat JSONB) over the wire."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.r1 = self.db.add_request(
+            artist_name="A", album_title="One", source="request",
+            mb_release_id="sum-1")
+        self.r2 = self.db.add_request(
+            artist_name="B", album_title="Two", source="request",
+            mb_release_id="sum-2")
+        self.r3 = self.db.add_request(
+            artist_name="C", album_title="NoHistory", source="request",
+            mb_release_id="sum-3")
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_latest_row_and_count_per_request(self):
+        self.db.log_download(self.r1, "user_old", "flac", "/tmp/1",
+                             outcome="rejected")
+        self.db.log_download(self.r1, "user_mid", "flac", "/tmp/2",
+                             outcome="rejected")
+        self.db.log_download(self.r1, "user_new", "flac", "/tmp/3",
+                             outcome="success",
+                             validation_result=json.dumps({"valid": True}))
+        self.db.log_download(self.r2, "solo", "mp3", "/tmp/4",
+                             outcome="rejected")
+
+        summaries = self.db.get_latest_download_summaries(
+            [self.r1, self.r2, self.r3])
+
+        self.assertEqual(set(summaries), {self.r1, self.r2})
+        s1 = summaries[self.r1]
+        self.assertEqual(s1["count"], 3)
+        self.assertEqual(s1["latest"]["soulseek_username"], "user_new")
+        self.assertEqual(s1["latest"]["outcome"], "success")
+        # The latest row must carry everything the history classifier
+        # consumes (JSONB included) — it feeds build_download_history_row.
+        self.assertIn("validation_result", s1["latest"])
+        self.assertIn("import_result", s1["latest"])
+        self.assertEqual(summaries[self.r2]["count"], 1)
+
+    def test_empty_input_returns_empty(self):
+        self.assertEqual(self.db.get_latest_download_summaries([]), {})
+
+    def test_latest_row_overlays_candidate_evidence(self):
+        """The evidence overlay that get_download_history_batch applied
+        must survive on the summary's latest row."""
+        from lib.quality import AudioQualityMeasurement
+        log_id = self.db.log_download(self.r1, "u", "flac", "/tmp/x",
+                                      outcome="rejected")
+        evidence = make_album_quality_evidence(
+            mb_release_id="sum-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                median_bitrate_kbps=940,
+                format="flac",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=998,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id="sum-1",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        summaries = self.db.get_latest_download_summaries([self.r1])
+        latest = summaries[self.r1]["latest"]
+        self.assertEqual(latest["spectral_grade"], "genuine")
+        self.assertEqual(latest["spectral_bitrate"], 998)
+
+
+@requires_postgres
+class TestSearchRequests(unittest.TestCase):
+    """#426: operator search over artist/album across all statuses."""
+
+    def setUp(self):
+        self.db = make_db()
+        self.db.add_request(
+            artist_name="The Mountain Goats", album_title="Tallahassee",
+            source="request", mb_release_id="sr-1", status="imported")
+        self.db.add_request(
+            artist_name="Goat", album_title="World Music",
+            source="request", mb_release_id="sr-2", status="wanted")
+        self.db.add_request(
+            artist_name="100% Wool", album_title="Felt",
+            source="request", mb_release_id="sr-3", status="manual")
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_matches_artist_case_insensitive(self):
+        rows = self.db.search_requests("mountain")
+        self.assertEqual([r["mb_release_id"] for r in rows], ["sr-1"])
+
+    def test_matches_album_title(self):
+        rows = self.db.search_requests("world mus")
+        self.assertEqual([r["mb_release_id"] for r in rows], ["sr-2"])
+
+    def test_matches_across_statuses(self):
+        rows = self.db.search_requests("goat")
+        self.assertEqual(
+            {r["mb_release_id"] for r in rows}, {"sr-1", "sr-2"})
+
+    def test_like_wildcards_are_escaped(self):
+        rows = self.db.search_requests("100%")
+        self.assertEqual([r["mb_release_id"] for r in rows], ["sr-3"])
+
+    def test_status_narrowing_happens_in_sql(self):
+        rows = self.db.search_requests("goat", status="wanted")
+        self.assertEqual([r["mb_release_id"] for r in rows], ["sr-2"])
+
+    def test_limit_and_blank_query(self):
+        self.assertEqual(self.db.search_requests("  "), [])
+        rows = self.db.search_requests("o", limit=2)
+        self.assertEqual(len(rows), 2)
+
+
+@requires_postgres
+class TestGetByStatusRecentWindow(unittest.TestCase):
+    """#426: the imported list is served newest-first with a cap."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_newest_first_with_limit(self):
+        ids = []
+        for i in range(3):
+            ids.append(self.db.add_request(
+                artist_name=f"A{i}", album_title=f"T{i}",
+                source="request", mb_release_id=f"recent-{i}",
+                status="imported"))
+        # Touch the oldest row so updated_at ordering (not insert order)
+        # decides recency.
+        self.db.update_request_fields(ids[0], reasoning="touched")
+
+        rows = self.db.get_by_status("imported", limit=2, newest_first=True)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["id"], ids[0])
+
+    def test_default_shape_unchanged(self):
+        self.db.add_request(
+            artist_name="A", album_title="T", source="request",
+            mb_release_id="legacy-order", status="wanted")
+        rows = self.db.get_by_status("wanted")
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

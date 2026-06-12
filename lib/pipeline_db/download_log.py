@@ -340,6 +340,50 @@ class _DownloadLogMixin(_PipelineDBBase):
         return result
 
 
+    def get_latest_download_summaries(
+        self, request_ids: list[int],
+    ) -> dict[int, dict]:
+        """Batch fetch only the NEWEST download_log row + history count
+        per request: ``{request_id: {"latest": row, "count": n}}``.
+
+        #426: the pipeline queue only renders the latest verdict and a
+        count, but ``get_download_history_batch`` dragged every
+        historical row (with fat JSONB) through Postgres and Python to
+        get them. ``DISTINCT ON`` returns one detoasted row per request;
+        the count aggregate never touches the JSONB columns.
+        """
+        if not request_ids:
+            return {}
+        ids = [int(r) for r in request_ids]
+        latest_cur = self._execute(
+            "SELECT * FROM ("
+            + self._DOWNLOAD_LOG_HISTORY_SELECT.replace(
+                "SELECT",
+                "SELECT DISTINCT ON (dl.request_id)",
+                1,
+            )
+            + " WHERE dl.request_id = ANY(%s)"
+            " ORDER BY dl.request_id, dl.id DESC"
+            ") latest",
+            (ids,),
+        )
+        result: dict[int, dict] = {}
+        for row in latest_cur.fetchall():
+            r = self._overlay_evidence_onto_download_log_row(dict(row))
+            result[int(r["request_id"])] = {"latest": r, "count": 0}
+
+        count_cur = self._execute(
+            "SELECT request_id, COUNT(*)::int AS n FROM download_log"
+            " WHERE request_id = ANY(%s) GROUP BY request_id",
+            (ids,),
+        )
+        for row in count_cur.fetchall():
+            rid = int(row["request_id"])
+            if rid in result:
+                result[rid]["count"] = int(row["n"])
+        return result
+
+
     # -- Wrong matches ---------------------------------------------------------
 
     def get_wrong_matches(self) -> list[dict[str, object]]:

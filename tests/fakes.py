@@ -3331,13 +3331,49 @@ class FakePipelineDB:
                 break
         return rows
 
-    def get_by_status(self, status: str) -> list[dict[str, Any]]:
-        return [
-            copy.deepcopy(r) for r in sorted(
+    def get_by_status(
+        self,
+        status: str,
+        *,
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        if newest_first:
+            rows = sorted(
+                (r for r in self._requests.values()
+                 if r.get("status") == status),
+                key=lambda r: _as_datetime(r.get("updated_at")),
+                reverse=True)
+        else:
+            rows = sorted(
                 (r for r in self._requests.values()
                  if r.get("status") == status),
                 key=lambda r: _as_datetime(r.get("created_at")))
+        if limit is not None:
+            rows = rows[:int(limit)]
+        return [copy.deepcopy(r) for r in rows]
+
+    def search_requests(
+        self, query: str, *, limit: int = 200, status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Mirror ``PipelineDB.search_requests``: case-insensitive
+        substring over artist/album, optionally narrowed to one status."""
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        rows = [
+            r for r in self._requests.values()
+            if (q in str(r.get("artist_name") or "").lower()
+                or q in str(r.get("album_title") or "").lower())
+            and (status is None or r.get("status") == status)
         ]
+        rows.sort(key=lambda r: (
+            str(r.get("artist_name") or ""),
+            r.get("year") is None,
+            int(str(r.get("year") or 0)),
+            int(str(r["id"])),
+        ))
+        return [copy.deepcopy(r) for r in rows[:int(limit)]]
 
     def _has_youtube_running(self, request_id: int) -> bool:
         """Mirror of the ``_LONG_TAIL_SELECT`` ``youtube_running`` EXISTS.
@@ -3540,6 +3576,17 @@ class FakePipelineDB:
             result.setdefault(entry.request_id, []).append(
                 self._download_log_to_dict(entry))
         return result
+
+    def get_latest_download_summaries(
+        self, request_ids: list[int],
+    ) -> dict[int, dict[str, Any]]:
+        """Mirror ``PipelineDB.get_latest_download_summaries``: newest
+        row + history count per request (#426)."""
+        return {
+            rid: {"latest": history[0], "count": len(history)}
+            for rid, history in
+            self.get_download_history_batch(request_ids).items()
+        }
 
     # --- Pipeline dashboard telemetry ---
 

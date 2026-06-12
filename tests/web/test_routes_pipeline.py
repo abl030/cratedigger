@@ -211,6 +211,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.mock_db.get_by_status.side_effect = None
         self.mock_db.get_by_status.return_value = []
         self.mock_db.get_download_history_batch.return_value = {}
+        self.mock_db.get_latest_download_summaries.return_value = {}
         self.mock_db.get_recent.return_value = []
         self.mock_db.get_track_counts.return_value = {}
 
@@ -328,15 +329,68 @@ class TestPipelineRouteContracts(_WebServerCase):
 
     def test_pipeline_all_contract(self):
         row = make_request_row(id=201, status="wanted", album_title="Wanted Album")
-        self.mock_db.get_by_status.side_effect = lambda s: [row] if s == "wanted" else []
+        self.mock_db.get_by_status.side_effect = (
+            lambda s, **kw: [row] if s == "wanted" else [])
 
         status, data = self._get("/api/pipeline/all")
 
         self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"counts", "wanted", "downloading", "imported", "manual"},
+        _assert_required_fields(self, data, {"counts", "wanted", "downloading", "imported", "manual",
+                                             "imported_total", "imported_truncated"},
                                 "pipeline all response")
         _assert_required_fields(self, data["wanted"][0], self.PIPELINE_ITEM_REQUIRED_FIELDS,
                                 "pipeline all item")
+
+    def test_pipeline_all_imported_is_a_recency_window(self):
+        """#426: the imported bucket is capped (newest first) and the
+        payload flags the truncation so the UI can say so."""
+        from web.routes.pipeline import IMPORTED_RECENT_LIMIT
+        row = make_request_row(id=301, status="imported",
+                               album_title="Imported Album")
+        calls = []
+
+        def _by_status(s, **kw):
+            calls.append((s, kw))
+            return [row] if s == "imported" else []
+
+        self.mock_db.get_by_status.side_effect = _by_status
+        self.mock_db.count_by_status.return_value = {
+            "wanted": 0, "imported": IMPORTED_RECENT_LIMIT + 50, "manual": 0,
+        }
+
+        status, data = self._get("/api/pipeline/all")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["imported_total"], IMPORTED_RECENT_LIMIT + 50)
+        self.assertTrue(data["imported_truncated"])
+        imported_call = next(c for c in calls if c[0] == "imported")
+        self.assertEqual(imported_call[1],
+                         {"limit": IMPORTED_RECENT_LIMIT, "newest_first": True})
+
+    SEARCH_REQUIRED_FIELDS = {"query", "items", "total"}
+
+    def test_pipeline_search_contract(self):
+        row = make_request_row(id=401, status="imported",
+                               artist_name="The Mountain Goats",
+                               album_title="Tallahassee")
+        self.mock_db.search_requests.return_value = [row]
+
+        status, data = self._get("/api/pipeline/search?q=mountain")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.SEARCH_REQUIRED_FIELDS,
+                                "pipeline search response")
+        self.assertEqual(data["query"], "mountain")
+        self.assertEqual(data["total"], 1)
+        _assert_required_fields(self, data["items"][0],
+                                self.PIPELINE_ITEM_REQUIRED_FIELDS,
+                                "pipeline search item")
+
+    def test_pipeline_search_blank_query_is_empty(self):
+        self.mock_db.search_requests.return_value = []
+        status, data = self._get("/api/pipeline/search")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["items"], [])
 
     def test_pipeline_dashboard_contract(self):
         status, data = self._get("/api/pipeline/dashboard")

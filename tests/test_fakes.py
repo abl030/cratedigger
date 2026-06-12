@@ -3416,6 +3416,61 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(len(db.user_cooldowns), 2)
         self.assertEqual(db.user_cooldowns["alice"].reason, "y")
 
+    # --- #426: recency window + search + latest-summaries mirrors ---
+
+    def test_get_by_status_recent_window(self):
+        db = FakePipelineDB()
+        ids = []
+        for i in range(3):
+            ids.append(db.add_request(
+                artist_name=f"A{i}", album_title=f"T{i}", source="request",
+                mb_release_id=f"win-{i}", status="imported"))
+        db.update_request_fields(ids[0], reasoning="touched")
+
+        rows = db.get_by_status("imported", limit=2, newest_first=True)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["id"], ids[0])
+        # Default shape unchanged.
+        self.assertEqual(len(db.get_by_status("imported")), 3)
+
+    def test_search_requests_matches_artist_and_album(self):
+        db = FakePipelineDB()
+        db.add_request(
+            artist_name="The Mountain Goats", album_title="Tallahassee",
+            source="request", mb_release_id="f-sr-1", status="imported")
+        db.add_request(
+            artist_name="Goat", album_title="World Music",
+            source="request", mb_release_id="f-sr-2", status="wanted")
+
+        self.assertEqual(
+            [r["mb_release_id"] for r in db.search_requests("mountain")],
+            ["f-sr-1"])
+        self.assertEqual(
+            [r["mb_release_id"] for r in db.search_requests("world mus")],
+            ["f-sr-2"])
+        self.assertEqual(
+            {r["mb_release_id"] for r in db.search_requests("goat")},
+            {"f-sr-1", "f-sr-2"})
+        self.assertEqual(db.search_requests("  "), [])
+        self.assertEqual(
+            [r["mb_release_id"]
+             for r in db.search_requests("goat", status="wanted")],
+            ["f-sr-2"])
+
+    def test_get_latest_download_summaries_mirror(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="T", source="request",
+            mb_release_id="f-sum-1", status="wanted")
+        db.log_download(rid, "old_user", "flac", "/tmp/1", outcome="rejected")
+        db.log_download(rid, "new_user", "flac", "/tmp/2", outcome="success")
+
+        summaries = db.get_latest_download_summaries([rid, 9999])
+        self.assertEqual(set(summaries), {rid})
+        self.assertEqual(summaries[rid]["count"], 2)
+        self.assertEqual(
+            summaries[rid]["latest"]["soulseek_username"], "new_user")
+
     # --- peer_observations roster mirror (#227) ---
 
     def test_peer_metrics_cumulative_totals_carry_forward(self):

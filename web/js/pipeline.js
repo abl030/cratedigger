@@ -37,6 +37,7 @@ export async function loadPipeline() {
   try {
     // U10: opt-in toggle persists in localStorage. Default: filtered.
     const includeReplaced = localStorage.getItem('pipeline.includeReplaced') === 'true';
+    clearPipelineSearch();
     const url = `${API}/api/pipeline/all${includeReplaced ? '?include_replaced=true' : ''}`;
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -130,7 +131,22 @@ export async function loadPipelineDashboard() {
  */
 export function setFilter(f) {
   state.pipelineFilter = f;
+  // Filter and search are mutually exclusive: clicking a count card
+  // abandons the active search so the clicked filter actually shows.
+  clearPipelineSearch();
   renderPipeline();
+}
+
+/**
+ * Reset the server-side search state (input text + results). Bumps the
+ * in-flight token so a fetch resolving late discards itself.
+ * @returns {void}
+ */
+export function clearPipelineSearch() {
+  state.pipelineSearchQuery = '';
+  state.pipelineSearchResults = null;
+  pipelineSearchToken += 1;
+  if (pipelineSearchTimer != null) clearTimeout(pipelineSearchTimer);
 }
 
 /**
@@ -168,30 +184,6 @@ export function renderPipeline() {
   const counts = data.counts || {};
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
 
-  let items = [];
-  if (state.pipelineFilter === 'all') {
-    items = [...(data.wanted || []), ...(data.downloading || []), ...(data.imported || []), ...(data.manual || [])];
-  } else if (state.pipelineFilter === 'wanted') {
-    // Downloading is a sub-state of wanted — same album, mid-acquisition.
-    // The status badge on each row still distinguishes them visually.
-    items = [...(data.wanted || []), ...(data.downloading || [])];
-  } else {
-    items = data[state.pipelineFilter] || [];
-  }
-
-  // Group by artist
-  const byArtist = {};
-  for (const item of items) {
-    const artist = item.artist_name || 'Unknown';
-    if (!byArtist[artist]) byArtist[artist] = [];
-    byArtist[artist].push(item);
-  }
-  // Sort artists alphabetically, albums by year within each
-  const artists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
-  for (const a of artists) {
-    byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
-  }
-
   // Wanted bucket includes downloading — mid-acquisition is a sub-state
   // of wanted. The status badge on each row keeps them visually distinct.
   const wantedTotal = (counts.wanted || 0) + (counts.downloading || 0);
@@ -213,6 +205,64 @@ export function renderPipeline() {
         </div>
       </div>
     </div>
+    <div class="lt-search">
+      <input type="text" id="pipeline-search-input" class="lt-search-input"
+        placeholder="Search every request by artist or album…"
+        value="${esc(state.pipelineSearchQuery || '')}"
+        oninput="window.onPipelineSearchInput(this.value)">
+    </div>
+    <div id="pipeline-list">${renderPipelineListBody()}</div>
+  `;
+}
+
+/**
+ * Build the artist-grouped list body for the current filter (or the
+ * active server-side search results). Kept separate from
+ * renderPipeline so a search keystroke can repaint only #pipeline-list
+ * and the input keeps focus/caret.
+ *
+ * @returns {string}
+ */
+function renderPipelineListBody() {
+  const data = state.pipelineData || {};
+  const searching = state.pipelineSearchResults != null;
+
+  let items = [];
+  if (searching) {
+    items = state.pipelineSearchResults || [];
+  } else if (state.pipelineFilter === 'all') {
+    items = [...(data.wanted || []), ...(data.downloading || []), ...(data.imported || []), ...(data.manual || [])];
+  } else if (state.pipelineFilter === 'wanted') {
+    // Downloading is a sub-state of wanted — same album, mid-acquisition.
+    // The status badge on each row still distinguishes them visually.
+    items = [...(data.wanted || []), ...(data.downloading || [])];
+  } else {
+    items = data[state.pipelineFilter] || [];
+  }
+
+  // The imported bucket is a recency window (#426); say so whenever the
+  // truncated bucket is part of the current view.
+  const showsImported = !searching
+    && (state.pipelineFilter === 'imported' || state.pipelineFilter === 'all');
+  const truncationNote = showsImported && data.imported_truncated
+    ? `<div class="loading">Showing the ${(data.imported || []).length} most recent of ${data.imported_total} imported — search above to find the rest.</div>`
+    : '';
+
+  // Group by artist
+  const byArtist = {};
+  for (const item of items) {
+    const artist = item.artist_name || 'Unknown';
+    if (!byArtist[artist]) byArtist[artist] = [];
+    byArtist[artist].push(item);
+  }
+  // Sort artists alphabetically, albums by year within each
+  const artists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
+  for (const a of artists) {
+    byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
+  }
+
+  return `
+    ${truncationNote}
     ${artists.map(artist => `
       <div class="p-group-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
         ${esc(artist)} <span style="color:#555;font-weight:400;">${byArtist[artist].length}</span>
@@ -221,8 +271,51 @@ export function renderPipeline() {
         ${byArtist[artist].map(item => renderPipelineItem(item)).join('')}
       </div>
     `).join('')}
-    ${artists.length === 0 ? '<div class="loading">No items</div>' : ''}
+    ${artists.length === 0 ? `<div class="loading">${searching ? 'No matches' : 'No items'}</div>` : ''}
   `;
+}
+
+// Module-scoped debounce + stale-response token for the server-side
+// pipeline search (#426). web.md: fetch-on-input UIs must stamp
+// requests and discard stale responses before rendering.
+let pipelineSearchTimer = null;
+let pipelineSearchToken = 0;
+const PIPELINE_SEARCH_DEBOUNCE_MS = 250;
+
+/**
+ * Handle a keystroke in the pipeline search box: debounce, fetch
+ * server-side results across every status, repaint only the list body.
+ * @param {string} value
+ * @returns {void}
+ */
+export function onPipelineSearchInput(value) {
+  const q = String(value == null ? '' : value);
+  state.pipelineSearchQuery = q;
+  if (pipelineSearchTimer != null) clearTimeout(pipelineSearchTimer);
+  const repaint = () => {
+    const listEl = document.getElementById('pipeline-list');
+    if (listEl) listEl.innerHTML = renderPipelineListBody();
+  };
+  if (q.trim().length < 2) {
+    state.pipelineSearchResults = null;
+    repaint();
+    return;
+  }
+  pipelineSearchTimer = /** @type {any} */ (setTimeout(async () => {
+    const token = ++pipelineSearchToken;
+    try {
+      const r = await fetch(`${API}/api/pipeline/search?q=${encodeURIComponent(q.trim())}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      if (token !== pipelineSearchToken) return;
+      state.pipelineSearchResults = data.items || [];
+      repaint();
+    } catch (e) {
+      if (token !== pipelineSearchToken) return;
+      state.pipelineSearchResults = [];
+      repaint();
+    }
+  }, PIPELINE_SEARCH_DEBOUNCE_MS));
 }
 
 function renderPipelineNav() {
@@ -1064,6 +1157,8 @@ export const __test__ = {
   renderMatchRateChart,
   renderPeerBrowseHeavyQueries,
   renderPeersCard,
+  renderPipelineListBody,
+  clearPipelineSearch,
   renderPipelineNav,
   renderWantedTrendCard,
   renderWantedTrendChart,
