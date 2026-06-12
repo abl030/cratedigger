@@ -107,7 +107,7 @@ class TestSlskdHttpPoolSizing(unittest.TestCase):
         # import conftest do so as `import conftest` (no package prefix), so
         # match that.
         import sys
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
         import conftest
 
         slskd_api = conftest._real_slskd_api

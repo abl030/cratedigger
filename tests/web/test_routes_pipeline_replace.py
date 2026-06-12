@@ -13,11 +13,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _WebServerCase
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from tests.helpers import make_request_row
 
 
 
-class TestReplacedFilterContract(_WebServerCase):
+class TestReplacedFilterContract(_FakeDbWebServerCase):
     """U10 backend tests for the ``?include_replaced`` query parameter
     on pipeline + wrong-matches list endpoints, plus the descendant_*
     fields surfaced from ``post_pipeline_add`` when the existing row is
@@ -25,47 +26,42 @@ class TestReplacedFilterContract(_WebServerCase):
     """
 
     def setUp(self) -> None:
-        # Default mock for the supersede-lookup so the add-flow tests
-        # below can override per-test.
-        self.mock_db.get_request_by_replaces_request_id.return_value = None
+        super().setUp()
+        # One active row + one frozen audit row — the filter contract
+        # is about which of these the list endpoints surface.
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted",
+            mb_release_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+        ))
+        self.db.seed_request(make_request_row(
+            id=42, status="replaced",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
 
     def test_pipeline_all_default_excludes_replaced(self):
-        captured: list[tuple[str, ...]] = []
-        def fake_get_by_status(status, **kw):
-            captured.append((status,))
-            return []
-        self.mock_db.get_by_status.side_effect = fake_get_by_status
-        self.mock_db.count_by_status.return_value = {}
-        self.mock_db.get_download_history_batch.return_value = {}
-        status, _ = self._get("/api/pipeline/all")
+        status, data = self._get("/api/pipeline/all")
         self.assertEqual(status, 200)
-        statuses = [c[0] for c in captured]
-        self.assertNotIn("replaced", statuses)
+        self.assertNotIn("replaced", data)
+        self.assertEqual(
+            [r["id"] for r in data["wanted"]], [1],
+        )
 
     def test_pipeline_all_include_replaced_true_fetches_replaced(self):
-        captured: list[tuple[str, ...]] = []
-        def fake_get_by_status(status, **kw):
-            captured.append((status,))
-            return []
-        self.mock_db.get_by_status.side_effect = fake_get_by_status
-        self.mock_db.count_by_status.return_value = {}
-        self.mock_db.get_download_history_batch.return_value = {}
-        status, _ = self._get("/api/pipeline/all?include_replaced=true")
+        status, data = self._get("/api/pipeline/all?include_replaced=true")
         self.assertEqual(status, 200)
-        statuses = [c[0] for c in captured]
-        self.assertIn("replaced", statuses)
+        self.assertIn("replaced", data)
+        self.assertEqual(
+            [r["id"] for r in data["replaced"]], [42],
+        )
 
     def test_post_pipeline_add_with_replaced_existing_surfaces_descendant(self):
-        # The harness routes get_request_by_release_id through
-        # get_request_by_mb_release_id (see _make_server), so mock that.
-        self.mock_db.get_request_by_mb_release_id.return_value = {
-            "id": 42, "status": "replaced",
-            "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        }
-        self.mock_db.get_request_by_replaces_request_id.return_value = {
-            "id": 99, "status": "wanted",
-            "mb_release_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-        }
+        # Request 42 (seeded replaced in setUp) was superseded by 99 —
+        # the descendant chain the add-flow surfaces.
+        self.db.seed_request(make_request_row(
+            id=99, status="wanted",
+            mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            replaces_request_id=42,
+        ))
         status, data = self._post(
             "/api/pipeline/add",
             {"mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
@@ -77,10 +73,10 @@ class TestReplacedFilterContract(_WebServerCase):
         self.assertEqual(data["descendant_status"], "wanted")
 
     def test_post_pipeline_add_with_non_replaced_existing_omits_descendant(self):
-        self.mock_db.get_request_by_mb_release_id.return_value = {
-            "id": 42, "status": "wanted",
-            "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        }
+        self.db.seed_request(make_request_row(
+            id=42, status="wanted",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
         status, data = self._post(
             "/api/pipeline/add",
             {"mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
@@ -90,7 +86,7 @@ class TestReplacedFilterContract(_WebServerCase):
         self.assertNotIn("descendant_request_id", data)
 
 
-class TestPipelineReplaceContract(_WebServerCase):
+class TestPipelineReplaceContract(_FakeDbWebServerCase):
     """Contract for ``POST /api/pipeline/<id>/replace`` plus the two
     auxiliary endpoints (``GET /api/pipeline/requests-by-rg/<rg>`` and
     ``GET /api/pipeline/active-rgs``).
@@ -120,6 +116,7 @@ class TestPipelineReplaceContract(_WebServerCase):
     }
 
     def setUp(self) -> None:
+        super().setUp()
         from lib.config import CratediggerConfig
         import configparser
         cp = configparser.RawConfigParser()
@@ -296,14 +293,12 @@ class TestPipelineReplaceContract(_WebServerCase):
         mock_svc.assert_not_called()
 
     def test_requests_by_rg_returns_200_with_required_fields(self):
-        self.mock_db.list_requests_in_release_group.return_value = [
-            {
-                "id": 42, "mb_release_id": "old-uuid",
-                "mb_release_group_id": "rg-1",
-                "status": "wanted",
-                "artist_name": "Pet Grief", "album_title": "X",
-            },
-        ]
+        self.db.seed_request(make_request_row(
+            id=42, mb_release_id="old-uuid",
+            mb_release_group_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            status="wanted",
+            artist_name="Pet Grief", album_title="X",
+        ))
         status, data = self._get(
             "/api/pipeline/requests-by-rg/"
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -318,7 +313,6 @@ class TestPipelineReplaceContract(_WebServerCase):
         )
 
     def test_requests_by_rg_empty_list(self):
-        self.mock_db.list_requests_in_release_group.return_value = []
         status, data = self._get(
             "/api/pipeline/requests-by-rg/"
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -327,21 +321,31 @@ class TestPipelineReplaceContract(_WebServerCase):
         self.assertEqual(data["requests"], [])
 
     def test_active_rgs_returns_sorted_list(self):
-        self.mock_db.list_active_release_group_ids.return_value = {
-            "rg-bbbb", "rg-aaaa",
-        }
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="m-1",
+            mb_release_group_id="rg-bbbb",
+        ))
+        self.db.seed_request(make_request_row(
+            id=2, status="imported", mb_release_id="m-2",
+            mb_release_group_id="rg-aaaa",
+        ))
+        # Replaced rows are frozen audit — their RG must NOT count as
+        # active.
+        self.db.seed_request(make_request_row(
+            id=3, status="replaced", mb_release_id="m-3",
+            mb_release_group_id="rg-cccc",
+        ))
         status, data = self._get("/api/pipeline/active-rgs")
         self.assertEqual(status, 200)
         self.assertEqual(data["release_group_ids"], ["rg-aaaa", "rg-bbbb"])
 
     def test_active_rgs_empty(self):
-        self.mock_db.list_active_release_group_ids.return_value = set()
         status, data = self._get("/api/pipeline/active-rgs")
         self.assertEqual(status, 200)
         self.assertEqual(data["release_group_ids"], [])
 
 
-class TestPipelineResolveRgContract(_WebServerCase):
+class TestPipelineResolveRgContract(_FakeDbWebServerCase):
     """Contract for ``POST /api/pipeline/<id>/resolve-rg``.
 
     Lazy-backfill ``mb_release_group_id`` for legacy rows. The Replace
@@ -359,20 +363,19 @@ class TestPipelineResolveRgContract(_WebServerCase):
         "request_id", "mb_release_group_id", "status",
     }
 
-    def setUp(self) -> None:
-        # _WebServerCase shares ``mock_db`` across tests in the class via
-        # setUpClass; reset call counts here so per-test assertions don't
-        # see stale calls from earlier tests in the same class.
-        self.mock_db.reset_mock()
+    def _seed(self, rg: str | None,
+              mb_release_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+              ) -> None:
+        self.db.seed_request(make_request_row(
+            id=42, status="wanted",
+            mb_release_id=mb_release_id,
+            mb_release_group_id=rg,
+        ))
 
     def test_resolve_rg_already_set_returns_200(self):
         """Idempotent: row already has a RG → return it untouched
         and do NOT hit the MB mirror or write to the DB."""
-        self.mock_db.get_request.return_value = {
-            "id": 42,
-            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "mb_release_group_id": "rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr",
-        }
+        self._seed("rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr")
         with patch("web.mb.get_release") as mock_mb:
             status, data = self._post(
                 "/api/pipeline/42/resolve-rg", {},
@@ -388,15 +391,17 @@ class TestPipelineResolveRgContract(_WebServerCase):
             "rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr",
         )
         mock_mb.assert_not_called()
-        self.mock_db.update_request_fields.assert_not_called()
+        self.assertEqual(
+            self.db.request(42)["mb_release_group_id"],
+            "rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr",
+        )
+        # No write at all — not even a redundant same-value UPDATE
+        # (the fake records every update_request_fields call).
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
     def test_resolve_rg_lazy_backfill_happy_path_returns_200(self):
         """Row has no RG → MB lookup → UPDATE row → 200."""
-        self.mock_db.get_request.return_value = {
-            "id": 42,
-            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "mb_release_group_id": None,
-        }
+        self._seed(None)
         with patch(
             "web.mb.get_release",
             return_value={"release_group_id": "rrrr-rrrr-rrrr"},
@@ -416,12 +421,12 @@ class TestPipelineResolveRgContract(_WebServerCase):
         mock_mb.assert_called_once_with(
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", fresh=False,
         )
-        self.mock_db.update_request_fields.assert_called_once_with(
-            42, mb_release_group_id="rrrr-rrrr-rrrr",
+        # The lazy backfill landed on the row itself.
+        self.assertEqual(
+            self.db.request(42)["mb_release_group_id"], "rrrr-rrrr-rrrr",
         )
 
     def test_resolve_rg_not_found_returns_404(self):
-        self.mock_db.get_request.return_value = None
         with patch("web.mb.get_release") as mock_mb:
             status, data = self._post(
                 "/api/pipeline/9999/resolve-rg", {},
@@ -438,11 +443,7 @@ class TestPipelineResolveRgContract(_WebServerCase):
     def test_resolve_rg_no_release_group_returns_422(self):
         """MB returns a payload but no release_group_id (e.g. mirror
         anomaly, or a release whose RG is missing upstream)."""
-        self.mock_db.get_request.return_value = {
-            "id": 42,
-            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "mb_release_group_id": None,
-        }
+        self._seed(None)
         with patch(
             "web.mb.get_release",
             return_value={"release_group_id": None},
@@ -456,15 +457,12 @@ class TestPipelineResolveRgContract(_WebServerCase):
             "resolve-rg 422 response",
         )
         self.assertEqual(data["status"], "no_release_group")
-        self.mock_db.update_request_fields.assert_not_called()
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
     def test_resolve_rg_discogs_release_id_returns_422(self):
         """Numeric Discogs release id → 422 short-circuit, no MB hit."""
-        self.mock_db.get_request.return_value = {
-            "id": 42,
-            "mb_release_id": "12345",
-            "mb_release_group_id": None,
-        }
+        self._seed(None, mb_release_id="12345")
         with patch("web.mb.get_release") as mock_mb:
             status, data = self._post(
                 "/api/pipeline/42/resolve-rg", {},
@@ -472,16 +470,13 @@ class TestPipelineResolveRgContract(_WebServerCase):
         self.assertEqual(status, 422)
         self.assertEqual(data["status"], "non_mb_release_id")
         mock_mb.assert_not_called()
-        self.mock_db.update_request_fields.assert_not_called()
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
     def test_resolve_rg_transient_returns_503(self):
         """Network blip / timeout → 503 retryable."""
         from urllib.error import URLError
-        self.mock_db.get_request.return_value = {
-            "id": 42,
-            "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "mb_release_group_id": None,
-        }
+        self._seed(None)
         with patch(
             "web.mb.get_release",
             side_effect=URLError("connection refused"),
@@ -495,7 +490,8 @@ class TestPipelineResolveRgContract(_WebServerCase):
             "resolve-rg 503 response",
         )
         self.assertEqual(data["status"], "transient")
-        self.mock_db.update_request_fields.assert_not_called()
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
 
 if __name__ == "__main__":
     unittest.main()
