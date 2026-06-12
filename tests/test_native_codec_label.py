@@ -25,7 +25,6 @@ import unittest
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 sys.path.insert(0, ROOT_DIR)
-sys.path.insert(0, HARNESS_DIR)
 
 
 def _make_audio(path: str, codec_args: list[str], duration: int = 1) -> None:

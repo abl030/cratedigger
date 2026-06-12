@@ -12,8 +12,6 @@ import sys
 import unittest
 from unittest.mock import patch, MagicMock
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "harness"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 
 def _make_harness_proc(messages: list[dict]) -> MagicMock:

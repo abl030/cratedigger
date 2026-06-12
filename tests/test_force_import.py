@@ -17,9 +17,6 @@ from unittest.mock import patch, MagicMock
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "lib"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "scripts"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "harness"))
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 

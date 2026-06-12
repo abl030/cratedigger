@@ -62,39 +62,61 @@ class TestStatefulMockAudit(unittest.TestCase):
 
 
 class TestSysPathAudit(unittest.TestCase):
-    """Ban front-of-sys.path inserts of a test directory.
+    """Ban every sys.path mutation that can shadow a real package.
 
-    ``sys.path.insert(0, <tests dir>)`` makes ``tests/web`` shadow the
-    real ``web`` package for any later ``import web.server`` that runs
-    before something else has registered repo-root ``web`` in
-    sys.modules — module-order-dependent ModuleNotFoundErrors that the
-    full discovery run masks. ``sys.path.append`` resolves the same
-    bare imports (``conftest``, ``_lambda_audit``) without ever
-    out-ranking the repo root. Repo-root inserts (the
-    ``join(dirname, "..")`` shape) are fine and not matched.
+    The audit resolves each ``<anything>.path.insert/append(...)`` call
+    in tests/ via the AST — folding ``os.path.join/dirname/abspath/
+    normpath`` chains and simple module-level variable assignments, so
+    naming the directory through a variable is not an evasion. The
+    policy (no exceptions — the tests/web/_harness.py inserts that
+    deliberately reproduced the dual-load ambiguity were removed with
+    #445 item 3; production strips its script-dir entry too, see
+    tests/test_no_dual_load.py):
+
+    - the repo root may be inserted or appended (how ``from lib.X``
+      resolves in standalone module runs);
+    - the tests/ dir (or a subdir) may only be APPENDED — a front
+      insert makes ``tests/web`` shadow the real ``web`` package in
+      module-order-dependent ways that full discovery masks;
+    - any other directory (lib/, web/, scripts/, harness/, anything
+      out-of-repo) is banned outright: it makes repo modules importable
+      under bare second names — the issue #95 / PR #94 dual-load class;
+    - a target the folder can't resolve is banned too: use a literal
+      ``os.path`` shape the audit can prove safe.
     """
 
-    # Matches a dirname-chain applied directly to __file__ (optionally
-    # through abspath); the chain depth decides which directory lands
-    # at the front of sys.path.
-    _FRONT_INSERT_RE = __import__("re").compile(
-        r"sys\.path\.insert\(\s*\d+\s*,\s*"
-        r"((?:os\.path\.dirname\(\s*)+)(?:os\.path\.abspath\(\s*)?__file__")
-    # Front-inserts of repo source dirs (lib/, web/, scripts/) shadow
-    # same-named top-level packages — lib/beets.py out-ranks the real
-    # ``beets`` package (the issue #95 dual-load footgun conftest.py
-    # documents). No exceptions: the tests/web/_harness.py inserts that
-    # deliberately reproduced the ambiguity were removed with #445
-    # item 3 (production now strips its script-dir entry too — see
-    # tests/test_no_dual_load.py).
-    _SOURCE_DIR_INSERT_RE = __import__("re").compile(
-        r'sys\.path\.insert\(\s*\d+\s*,\s*os\.path\.join\('
-        r'os\.path\.dirname\(__file__\),\s*"\.\."(?:,\s*"\.\.")?,'
-        r'\s*"(?:lib|web|scripts|harness)"\)')
+    @staticmethod
+    def _fold(node, file_path: str, env: dict[str, str]) -> str | None:
+        """Constant-fold a string expression: literals, ``__file__``,
+        previously-folded module-level names, and os.path calls."""
+        import ast
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id == "__file__":
+                return os.path.abspath(file_path)
+            return env.get(node.id)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            func = node.func
+            if (isinstance(func.value, ast.Attribute)
+                    and isinstance(func.value.value, ast.Name)
+                    and func.value.value.id == "os"
+                    and func.value.attr == "path"
+                    and func.attr in ("join", "dirname", "abspath",
+                                      "normpath")):
+                args = [TestSysPathAudit._fold(a, file_path, env)
+                        for a in node.args]
+                if any(a is None for a in args):
+                    return None
+                fn = getattr(os.path, func.attr)
+                return fn(*args)
+        return None
 
-    def test_no_front_inserts_of_test_dirs(self) -> None:
+    def test_no_shadowing_sys_path_mutations(self) -> None:
+        import ast
         offenders: list[str] = []
         from tests._mock_audit_scanner import TESTS_DIR
+        repo_root = os.path.dirname(TESTS_DIR)
         for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
             dirnames[:] = [d for d in dirnames if d != "__pycache__"]
             for fname in sorted(filenames):
@@ -102,34 +124,48 @@ class TestSysPathAudit(unittest.TestCase):
                     continue
                 path = os.path.join(dirpath, fname)
                 rel = os.path.relpath(path, TESTS_DIR)
-                if rel == "test_mock_audit.py":
-                    continue  # mentions the pattern in its own source
                 with open(path, encoding="utf-8") as f:
-                    for lineno, line in enumerate(f, 1):
-                        if self._SOURCE_DIR_INSERT_RE.search(line):
-                            offenders.append(
-                                f"  - {rel}:{lineno} (source-dir insert)")
-                            continue
-                        m = self._FRONT_INSERT_RE.search(line)
-                        if not m:
-                            continue
-                        # Resolve which directory the dirname-chain
-                        # yields for THIS file; only inserts that put
-                        # a directory inside tests/ at the front are
-                        # the shadowing hazard (repo-root inserts are
-                        # fine).
-                        depth = m.group(1).count("os.path.dirname(")
-                        target = os.path.abspath(path)
-                        for _ in range(depth):
-                            target = os.path.dirname(target)
-                        if target == TESTS_DIR or target.startswith(
-                                TESTS_DIR + os.sep):
-                            offenders.append(f"  - {rel}:{lineno}")
+                    tree = ast.parse(f.read(), filename=path)
+                # Module-level NAME = <foldable str expr> assignments.
+                env: dict[str, str] = {}
+                for stmt in tree.body:
+                    if (isinstance(stmt, ast.Assign)
+                            and len(stmt.targets) == 1
+                            and isinstance(stmt.targets[0], ast.Name)):
+                        folded = self._fold(stmt.value, path, env)
+                        if folded is not None:
+                            env[stmt.targets[0].id] = folded
+                for node in ast.walk(tree):
+                    if not (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr in ("insert", "append")
+                            and isinstance(node.func.value, ast.Attribute)
+                            and node.func.value.attr == "path"):
+                        continue
+                    is_insert = node.func.attr == "insert"
+                    dir_arg = node.args[1] if is_insert else node.args[0]
+                    target = self._fold(dir_arg, path, env)
+                    if target is None:
+                        offenders.append(
+                            f"  - {rel}:{node.lineno} (unresolvable "
+                            "sys.path target — use a literal os.path "
+                            "shape the audit can fold)")
+                        continue
+                    target = os.path.normpath(os.path.abspath(target))
+                    if target == repo_root:
+                        continue
+                    in_tests = (target == TESTS_DIR
+                                or target.startswith(TESTS_DIR + os.sep))
+                    if in_tests and not is_insert:
+                        continue
+                    kind = ("front-insert of a tests/ dir" if in_tests
+                            else f"non-root dir {target!r}")
+                    offenders.append(f"  - {rel}:{node.lineno} ({kind})")
         self.assertFalse(
             offenders,
-            "Front-of-sys.path insert of a test directory — use "
-            "sys.path.append instead (tests/web must never shadow the "
-            "real web package):\n" + "\n".join(offenders),
+            "sys.path mutation that can shadow a real package (issue "
+            "#95 dual-load class). Only the repo root may be inserted; "
+            "tests/ dirs may only be appended:\n" + "\n".join(offenders),
         )
 
 

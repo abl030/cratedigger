@@ -23,7 +23,6 @@ import unittest
 from typing import Any
 
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "web"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
