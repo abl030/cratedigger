@@ -17,7 +17,12 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _mock_audit_scanner import iter_scan_paths, scan_tree
+from _mock_audit_scanner import (
+    WEB_HARNESS_MOCK_BASELINE,
+    iter_scan_paths,
+    scan_tree,
+    scan_web_harness_overrides,
+)
 
 
 class TestStatefulMockAudit(unittest.TestCase):
@@ -44,6 +49,41 @@ class TestStatefulMockAudit(unittest.TestCase):
             "or real-input call.\n\n"
             + "\n".join(lines)
         )
+
+
+class TestWebHarnessMockRatchet(unittest.TestCase):
+    """Ratchet for the #430 MagicMock → FakePipelineDB harness migration.
+
+    Per-file counts of remaining MagicMock-harness usage in ``tests/web``
+    must match ``WEB_HARNESS_MOCK_BASELINE`` exactly: growth means a new
+    test leaned on mock shapes instead of FakePipelineDB state; shrink
+    means a migration landed and the baseline entry must drop with it.
+    """
+
+    def test_counts_match_baseline_exactly(self) -> None:
+        current = scan_web_harness_overrides()
+        problems: list[str] = []
+        for rel in sorted(set(current) | set(WEB_HARNESS_MOCK_BASELINE)):
+            cur = current.get(rel, 0)
+            base = WEB_HARNESS_MOCK_BASELINE.get(rel, 0)
+            if cur > base:
+                problems.append(
+                    f"  - {rel}: {base} → {cur} MagicMock-harness lines. "
+                    "New tests must seed FakePipelineDB state (see "
+                    "tests/fakes.py), not configure mock_db returns."
+                )
+            elif cur < base:
+                problems.append(
+                    f"  - {rel}: {base} → {cur} MagicMock-harness lines. "
+                    "Migration progress — shrink WEB_HARNESS_MOCK_BASELINE "
+                    "in tests/_mock_audit_scanner.py to match"
+                    + (" (delete the entry)." if cur == 0 else ".")
+                )
+        if problems:
+            self.fail(
+                "Web-harness MagicMock ratchet (#430) out of sync with "
+                "WEB_HARNESS_MOCK_BASELINE:\n" + "\n".join(problems)
+            )
 
 
 if __name__ == "__main__":
