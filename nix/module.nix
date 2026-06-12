@@ -93,13 +93,13 @@
   # idempotent DDL pass on every deploy).
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
 
   pipelineMigrate = pkgs.writeShellScriptBin "pipeline-migrate" ''
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python ${src}/scripts/migrate_db.py \
       --dsn "${cfg.pipelineDb.dsn}" \
       --migrations-dir "${src}/migrations" "$@"
@@ -107,7 +107,7 @@
 
   importerPkg = pkgs.writeShellScriptBin "cratedigger-importer" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/importer.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
@@ -115,7 +115,7 @@
 
   previewWorkerPkg = pkgs.writeShellScriptBin "cratedigger-import-preview-worker" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/import_preview_worker.py \
       --dsn "${cfg.pipelineDb.dsn}" \
@@ -124,7 +124,7 @@
 
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     ${coverageShellSetup}
     exec ${pyRunner} ${src}/web/server.py \
       --port ${toString cfg.web.port} \
@@ -143,7 +143,7 @@
   # subprocess and inherits this PATH from the wrapper.
   youtubeIngestWorkerPkg = pkgs.writeShellScriptBin "cratedigger-youtube-ingest" ''
     export PATH="${pkgs.yt-dlp}/bin:${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/youtube_ingest_worker.py \
       --dsn "${cfg.pipelineDb.dsn}" \
@@ -159,7 +159,7 @@
   # no way to reach the regular 5-min plan loop's cursor mutators.
   unfindableDetectionPkg = pkgs.writeShellScriptBin "cratedigger-unfindable" ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}:''${PYTHONPATH:-}"
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/run_unfindable_detection.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
