@@ -20,6 +20,8 @@ node tests/test_js_decisions.mjs || exit 1
 node tests/test_js_search_plan.mjs || exit 1
 node tests/test_js_recents.mjs || exit 1
 node tests/test_js_history.mjs || exit 1
+node tests/test_js_pipeline.mjs || exit 1
+node tests/test_js_pipeline_dashboard.mjs || exit 1
 node tests/test_js_wrong_matches.mjs || exit 1
 echo ""
 
