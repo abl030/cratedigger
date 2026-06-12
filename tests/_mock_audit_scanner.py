@@ -502,9 +502,14 @@ def scan_tree() -> Dict[str, Dict[str, int]]:
 # route-module by route-module.
 #
 # This ratchet pins the per-file count of remaining MagicMock-harness
-# usage lines (``mock_db.<attr>`` configuration/assertion sites and
-# ``_pipeline_db_test_harness(`` construction sites). The audit test
-# requires the live counts to match this baseline EXACTLY:
+# usage OCCURRENCES: every ``mock_db`` reference in a ``tests/web``
+# file (dotted, aliased, passed bare — aliasing the mock away is the
+# evasion the occurrence count exists to close) plus every
+# ``_pipeline_db_test_harness`` reference in ANY scanned test file
+# (the transitional wrapped-MagicMock constructor must not leak
+# outside tests/web where the per-file mock_db count can't see it).
+# The audit test requires the live counts to match this baseline
+# EXACTLY:
 #
 # - a count above baseline fails — new tests must seed FakePipelineDB
 #   state instead of configuring mock returns, even in unmigrated files
@@ -515,33 +520,41 @@ def scan_tree() -> Dict[str, Dict[str, int]]:
 #
 # The migration is done when this dict is empty.
 
-_WEB_HARNESS_OVERRIDE_RE = re.compile(
-    r"\bmock_db\.|\b_pipeline_db_test_harness\s*\("
-)
+_WEB_HARNESS_MOCK_DB_RE = re.compile(r"\bmock_db\b")
+_HARNESS_CTOR_RE = re.compile(r"\b_pipeline_db_test_harness\b")
 
 WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {
-    os.path.join("web", "_harness.py"): 31,
-    os.path.join("web", "test_routes_imports.py"): 63,
-    os.path.join("web", "test_routes_pipeline.py"): 59,
-    os.path.join("web", "test_routes_pipeline_mutations.py"): 98,
-    os.path.join("web", "test_routes_pipeline_replace.py"): 26,
+    os.path.join("web", "_harness.py"): 39,
+    os.path.join("web", "test_routes_imports.py"): 71,
+    os.path.join("web", "test_routes_pipeline.py"): 66,
+    os.path.join("web", "test_routes_pipeline_mutations.py"): 100,
+    os.path.join("web", "test_routes_pipeline_replace.py"): 27,
     os.path.join("web", "test_routes_pipeline_search_plan.py"): 42,
-    os.path.join("web", "test_server_endpoints.py"): 51,
+    os.path.join("web", "test_server_endpoints.py"): 53,
 }
 
 
+def count_harness_overrides(text: str, *, web_file: bool) -> int:
+    """Count MagicMock-harness usage occurrences in one file's text.
+
+    ``mock_db`` references only count inside ``tests/web`` files (the
+    name has no meaning elsewhere); ``_pipeline_db_test_harness``
+    references count everywhere the scanner walks.
+    """
+    n = len(_HARNESS_CTOR_RE.findall(text))
+    if web_file:
+        n += len(_WEB_HARNESS_MOCK_DB_RE.findall(text))
+    return n
+
+
 def scan_web_harness_overrides() -> Dict[str, int]:
-    """Count MagicMock-harness usage lines per ``tests/web`` file."""
+    """Count MagicMock-harness usage occurrences per test file."""
     counts: Dict[str, int] = {}
     web_prefix = "web" + os.sep
     for rel, path in iter_scan_paths():
-        if not rel.startswith(web_prefix):
-            continue
-        n = 0
         with open(path, encoding="utf-8") as f:
-            for line in f:
-                if _WEB_HARNESS_OVERRIDE_RE.search(line):
-                    n += 1
+            n = count_harness_overrides(
+                f.read(), web_file=rel.startswith(web_prefix))
         if n:
             counts[rel] = n
     return counts

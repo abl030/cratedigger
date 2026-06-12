@@ -1067,7 +1067,10 @@ class FakePipelineDB:
         # arguments for assertion.
         self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
         self._execute_queue: list[Any] = []
-        self._execute_default: Any = None
+        # Production ``_execute`` always returns a cursor — an unqueued
+        # call degrades to "query ran, zero rows" instead of a None
+        # that detonates as AttributeError at the caller's fetchall().
+        self._execute_default: Any = FakeCursor()
         # U15 triage N+1 guard: every triage-bound bulk getter increments
         # its counter exactly once per call. ``list_triage`` is bounded
         # to four entries (one page + three bulk getters) regardless of
@@ -1114,7 +1117,8 @@ class FakePipelineDB:
 
         Records the call and returns the next entry from
         ``queue_execute_results``. If the queue is empty, returns
-        ``self._execute_default`` (defaults to ``None``)."""
+        ``self._execute_default`` (an empty :class:`FakeCursor` —
+        mirrors production's "query ran, zero rows" contract)."""
         self.execute_calls.append((sql, params))
         if not self._execute_queue:
             return self._execute_default
@@ -5207,16 +5211,22 @@ class FakeCursor:
     code under test goes through ``PipelineDB._execute`` directly
     (e.g. ``web.overlay.check_pipeline``) — the fake cannot interpret
     SQL, so the test supplies the rows the query would return.
+
+    Mirrors real psycopg2 consumption semantics (test-fidelity Rule B):
+    ``fetchone`` advances and returns ``None`` when exhausted;
+    ``fetchall`` drains and returns only the remainder. A
+    ``while cur.fetchone():`` consumer must terminate.
     """
 
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         self._rows = list(rows) if rows else []
 
     def fetchall(self) -> list[dict[str, Any]]:
-        return self._rows
+        rows, self._rows = self._rows, []
+        return rows
 
     def fetchone(self) -> dict[str, Any] | None:
-        return self._rows[0] if self._rows else None
+        return self._rows.pop(0) if self._rows else None
 
 
 class FakeBeetsDB:

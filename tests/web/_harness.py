@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Shared HTTP test harness for the web route contract tests (#408).
 
-Starts a real HTTP server on a random port with mocked DB; the
-``tests/web/test_*.py`` modules verify response codes, JSON structure,
-and error handling against it. One harness, no per-class copies.
+Starts a real HTTP server on a random port; the ``tests/web/test_*.py``
+modules verify response codes, JSON structure, and error handling
+against it. Two base classes during the #430 migration:
+
+- :class:`_FakeDbWebServerCase` — per-test bare ``FakePipelineDB``.
+  Subclass THIS for new and migrated modules.
+- :class:`_WebServerCase` — legacy class-level MagicMock-wrapped DB
+  with canned ``.return_value`` defaults. Dies when the ratchet
+  baseline in ``tests/_mock_audit_scanner.py`` is empty.
 """
 
 import copy
@@ -157,10 +163,13 @@ class _FakeDbWebServerCase(_WebServerCase):
     query semantics — there is no MagicMock layer to shape-match.
 
     The inherited class-level ``mock_db`` (legacy MagicMock harness)
-    must not be touched in subclasses; the ratchet in
-    ``tests/_mock_audit_scanner.py`` enforces this textually, and any
-    accidental use is inert anyway because ``web.server.db`` points at
-    ``self.db`` for the duration of the test.
+    must not be touched in subclasses — the ratchet in
+    ``tests/_mock_audit_scanner.py`` is the guard that enforces this.
+    Note the textual guard is load-bearing: configuration of the
+    disconnected mock fails loudly at the route, but a negative
+    assertion (``assert_not_called``) against it would pass VACUOUSLY
+    (the mock genuinely receives no calls), so don't rely on runtime
+    behaviour to catch accidental use.
     """
 
     db: FakePipelineDB

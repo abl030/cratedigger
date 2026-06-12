@@ -19,6 +19,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _mock_audit_scanner import (
     WEB_HARNESS_MOCK_BASELINE,
+    count_harness_overrides,
     iter_scan_paths,
     scan_tree,
     scan_web_harness_overrides,
@@ -60,6 +61,32 @@ class TestWebHarnessMockRatchet(unittest.TestCase):
     means a migration landed and the baseline entry must drop with it.
     """
 
+    def test_counter_pins_evasion_shapes(self) -> None:
+        """Document exactly what the ratchet counts — occurrences, not
+        lines, including alias/bare-reference shapes that a dotted-only
+        regex would miss (the r1 adversarial-review evasion vectors)."""
+        cases = [
+            ("dotted config", "self.mock_db.get_log.return_value = []", 1),
+            ("alias assignment", "m = self.mock_db", 1),
+            ("getattr reflection", "getattr(self.mock_db, name)", 1),
+            ("bare positional arg", "helper(self.mock_db, x)", 1),
+            ("two occurrences one line",
+             "mock_db.a.return_value = 1; mock_db.b.side_effect = e", 2),
+            ("substring does not count", "my_mock_database = 1", 0),
+            ("harness ctor", "db = _pipeline_db_test_harness()", 1),
+        ]
+        for desc, line, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    count_harness_overrides(line, web_file=True), expected)
+        # mock_db is only meaningful inside tests/web; the transitional
+        # wrapped-MagicMock constructor is counted EVERYWHERE so it
+        # cannot leak outside tests/web unseen.
+        self.assertEqual(count_harness_overrides(
+            "self.mock_db.get_log()", web_file=False), 0)
+        self.assertEqual(count_harness_overrides(
+            "db = _pipeline_db_test_harness()", web_file=False), 1)
+
     def test_counts_match_baseline_exactly(self) -> None:
         current = scan_web_harness_overrides()
         problems: list[str] = []
@@ -68,13 +95,13 @@ class TestWebHarnessMockRatchet(unittest.TestCase):
             base = WEB_HARNESS_MOCK_BASELINE.get(rel, 0)
             if cur > base:
                 problems.append(
-                    f"  - {rel}: {base} → {cur} MagicMock-harness lines. "
+                    f"  - {rel}: {base} → {cur} MagicMock-harness occurrences. "
                     "New tests must seed FakePipelineDB state (see "
                     "tests/fakes.py), not configure mock_db returns."
                 )
             elif cur < base:
                 problems.append(
-                    f"  - {rel}: {base} → {cur} MagicMock-harness lines. "
+                    f"  - {rel}: {base} → {cur} MagicMock-harness occurrences. "
                     "Migration progress — shrink WEB_HARNESS_MOCK_BASELINE "
                     "in tests/_mock_audit_scanner.py to match"
                     + (" (delete the entry)." if cur == 0 else ".")
