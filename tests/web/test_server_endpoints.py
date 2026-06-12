@@ -541,7 +541,11 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
     """
 
     DB_FACTORY = _RaisingUpdateFieldsDB
-    db: "_RaisingUpdateFieldsDB"
+
+    @property
+    def raising_db(self) -> _RaisingUpdateFieldsDB:
+        assert isinstance(self.db, _RaisingUpdateFieldsDB)
+        return self.db
 
     def setUp(self):
         super().setUp()
@@ -552,7 +556,10 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
             search_filetype_override="lossless",
         ))
 
-    def _post(self, path, body):
+    def _post_may_disconnect(self, path, body):
+        """Like ``_post`` but tolerates connection-level failures —
+        exactly what the wedge produces server-side. Tests assert on
+        server-side observable state, not on the client response."""
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
         req = Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -562,10 +569,6 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         except HTTPError as e:
             return e.code, json.loads(e.read())
         except Exception:
-            # Connection-level failures (which is exactly what the wedge
-            # produces server-side) surface client-side as URLError or
-            # similar. Tests assert on server-side observable state, not
-            # on the client response.
             return None, None
 
     def _assert_no_reconnect_no_traceback(self, mock_reconnect, log_records, kind):
@@ -604,27 +607,27 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
     def test_brokenpipe_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Wedge regression: BrokenPipeError reaches the typed except
         clause first, never the catch-all that reconnects."""
-        self.db.update_error = BrokenPipeError(32, "Broken pipe")
+        self.raising_db.update_error = BrokenPipeError(32, "Broken pipe")
         with self.assertLogs("cratedigger-web", level="WARNING") as cm:
-            self._post("/api/pipeline/set-intent",
+            self._post_may_disconnect("/api/pipeline/set-intent",
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "BrokenPipeError")
 
     @patch("web.server._try_reconnect_db")
     def test_connection_reset_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Sibling disconnect class — same handling expected."""
-        self.db.update_error = ConnectionResetError(104, "Connection reset by peer")
+        self.raising_db.update_error = ConnectionResetError(104, "Connection reset by peer")
         with self.assertLogs("cratedigger-web", level="WARNING") as cm:
-            self._post("/api/pipeline/set-intent",
+            self._post_may_disconnect("/api/pipeline/set-intent",
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionResetError")
 
     @patch("web.server._try_reconnect_db")
     def test_connection_aborted_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Sibling disconnect class — same handling expected."""
-        self.db.update_error = ConnectionAbortedError(103, "Software caused connection abort")
+        self.raising_db.update_error = ConnectionAbortedError(103, "Software caused connection abort")
         with self.assertLogs("cratedigger-web", level="WARNING") as cm:
-            self._post("/api/pipeline/set-intent",
+            self._post_may_disconnect("/api/pipeline/set-intent",
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionAbortedError")
 
@@ -634,9 +637,9 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         the catch-all and trigger _try_reconnect_db. The narrowing must
         not change behaviour for real DB errors."""
         import psycopg2
-        self.db.update_error = psycopg2.OperationalError("simulated PG outage")
+        self.raising_db.update_error = psycopg2.OperationalError("simulated PG outage")
         with self.assertLogs("cratedigger-web", level="ERROR") as cm:
-            status, _ = self._post("/api/pipeline/set-intent",
+            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         # Real DB error → catch-all fires → reconnect attempted.
         self.assertEqual(
@@ -661,9 +664,9 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         (e.g. ValueError) still hits the catch-all. Narrowing this
         further (so non-DB exceptions skip the reconnect) is explicitly
         out of scope per the plan — see follow-up #234."""
-        self.db.update_error = ValueError("simulated handler bug")
+        self.raising_db.update_error = ValueError("simulated handler bug")
         with self.assertLogs("cratedigger-web", level="ERROR") as cm:
-            status, _ = self._post("/api/pipeline/set-intent",
+            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         self.assertEqual(
             mock_reconnect.call_count, 1,
@@ -689,7 +692,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
             # assertLogs requires at least one record; a trivial DEBUG log
             # ensures the context manager is satisfied even on a quiet path.
             logging.getLogger("cratedigger-web").debug("test marker: normal POST path")
-            status, _ = self._post("/api/pipeline/set-intent",
+            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         self.assertEqual(mock_reconnect.call_count, 0)
         disconnect_warnings = [
