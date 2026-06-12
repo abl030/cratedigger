@@ -4300,6 +4300,23 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
 class TestFakeBeetsDB(unittest.TestCase):
     """Self-tests for FakeBeetsDB — the minimal in-memory BeetsDB stand-in."""
 
+    def test_check_mbids_detail_returns_seeded_rows_only(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail("mbid-1", {"beets_tracks": 11})
+        out = beets.check_mbids_detail(["mbid-1", "mbid-2"])
+        self.assertEqual(out, {"mbid-1": {"beets_tracks": 11}})
+        self.assertEqual(beets.check_mbids_detail_calls,
+                         [["mbid-1", "mbid-2"]])
+
+    def test_get_albums_by_artist_returns_seeded_rows(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_albums_by_artist("X", [{"album": "A"}])
+        self.assertEqual(beets.get_albums_by_artist("X", "mb-1"),
+                         [{"album": "A"}])
+        self.assertEqual(beets.get_albums_by_artist("Y"), [])
+        self.assertEqual(beets.get_albums_by_artist_calls,
+                         [("X", "mb-1"), ("Y", "")])
+
     def test_album_exists_returns_seeded_value(self) -> None:
         beets = FakeBeetsDB()
         beets.set_album_exists("mbid-1", True)

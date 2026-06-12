@@ -5242,9 +5242,21 @@ class FakeBeetsDB:
         self.get_album_path_by_id_calls: list[int] = []
         self.get_item_paths_calls: list[str] = []
         self.check_mbids_calls: list[list[str]] = []
+        self.check_mbids_detail_calls: list[list[str]] = []
+        self.get_albums_by_artist_calls: list[tuple[str, str]] = []
+        self._mbid_detail: dict[str, dict[str, Any]] = {}
+        self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
         self.list_release_identities_calls: int = 0
 
     # --- Seeding helpers ---
+
+    def set_mbid_detail(self, mbid: str, detail: dict[str, Any]) -> None:
+        self._mbid_detail[mbid] = detail
+
+    def set_albums_by_artist(
+        self, name: str, albums: list[dict[str, Any]],
+    ) -> None:
+        self._albums_by_artist[name] = albums
 
     def set_album_exists(self, release_id: str, value: bool) -> None:
         self._album_exists[release_id] = value
@@ -5277,6 +5289,21 @@ class FakeBeetsDB:
     def check_mbids(self, mbids: list[str]) -> set[str]:
         self.check_mbids_calls.append(list(mbids))
         return {mbid for mbid in mbids if self.album_exists(mbid)}
+
+    def check_mbids_detail(
+        self, mbids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        self.check_mbids_detail_calls.append(list(mbids))
+        return {
+            mbid: copy.deepcopy(self._mbid_detail[mbid])
+            for mbid in mbids if mbid in self._mbid_detail
+        }
+
+    def get_albums_by_artist(
+        self, name: str, mbid: str = "",
+    ) -> list[dict[str, Any]]:
+        self.get_albums_by_artist_calls.append((name, mbid))
+        return copy.deepcopy(self._albums_by_artist.get(name, []))
 
     def list_release_identities(self) -> list[dict[str, Any]]:
         self.list_release_identities_calls += 1
