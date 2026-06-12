@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import _FakeDbWebServerCase
 
-from tests.fakes import FakeCursor, FakePipelineDB
+from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 
@@ -43,15 +43,20 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             actual_min_bitrate=320, valid=True,
         )
 
-    def _queue_log_counts(self, *, total: int = 1, imported: int = 1,
-                          matches_24h: int = 3, matches_6h: int = 1) -> None:
-        """The /api/pipeline/log counts come from one raw-SQL aggregate
-        the fake cannot interpret — the queued cursor IS that query's
-        result row. Unqueued calls degrade to all-zero counts."""
-        self.db.queue_execute_results(FakeCursor([{
-            "total": total, "imported": imported,
-            "matches_24h": matches_24h, "matches_6h": matches_6h,
-        }]))
+    def _seed_log_counts_state(self) -> None:
+        """Real rows behind /api/pipeline/log counts: setUp's one
+        success row + these make total=7, imported=2; three recent
+        found-searches, one aged past the 6h window (#445 item 2 —
+        the counts flow through PipelineDB.get_download_log_counts
+        and the fake's state-derived mirror, no queued cursor)."""
+        from datetime import timedelta
+
+        self.db.log_download(100, outcome="force_import")
+        for _ in range(5):
+            self.db.log_download(100, outcome="rejected")
+        for _ in range(3):
+            self.db.log_search(100, outcome="found")
+        self.db.search_logs[0].created_at -= timedelta(hours=12)
 
     # --- GET endpoints ---
 
@@ -121,8 +126,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             {e["outcome"] for e in data["log"]}, {"success", "rejected"})
 
     def test_pipeline_log_counts_structure(self):
-        self._queue_log_counts(total=7, imported=2,
-                               matches_24h=3, matches_6h=1)
+        self._seed_log_counts_state()
         status, data = self._get("/api/pipeline/log")
         self.assertEqual(status, 200)
         counts = data["counts"]
@@ -132,13 +136,17 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         for key in ("matches_per_hour_24h", "matches_per_hour_6h"):
             self.assertIn(key, counts)
             self.assertIsInstance(counts[key], (int, float))
-        # The queued aggregate row actually flowed into the payload.
+        # The seeded rows actually flowed into the payload.
         self.assertEqual(counts["all"], 7)
         self.assertEqual(counts["imported"], 2)
         # rejected (5) is coprime with matches_24h (3) so a wiring swap
-        # cannot pass by numeric coincidence.
+        # cannot pass by numeric coincidence; 24h (3) ≠ 6h (2) so a
+        # window transposition cannot either.
         self.assertEqual(counts["rejected"], 5)
+        self.assertEqual(counts["matches_24h"], 3)
+        self.assertEqual(counts["matches_6h"], 2)
         self.assertAlmostEqual(counts["matches_per_hour_24h"], 3 / 24)
+        self.assertAlmostEqual(counts["matches_per_hour_6h"], 2 / 6)
 
     def test_pipeline_status(self):
         status, data = self._get("/api/pipeline/status")

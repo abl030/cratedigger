@@ -18,7 +18,7 @@ from tests.web._harness import (
     _FakeDbWebServerCase,
 )
 
-from tests.fakes import FakeBeetsDB, FakeCursor, FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 
 
@@ -163,28 +163,16 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
             ["/music/Test Artist/Test Album/01 Track.mp3"],
         )
 
-    def _queue_pipeline_overlay_row(self, *, min_bitrate: int | None) -> None:
-        """Queue the row ``web.overlay.check_pipeline``'s raw SQL would
-        return for request 42 (the overlay goes through ``_execute``,
-        which the fake cannot interpret — the queued cursor IS the
-        query result). The legacy MagicMock harness silently fed this
-        path an empty magic cursor, so enrichment never ran in tests.
-
-        The cursor row is PROJECTED from the seeded request, mutated
-        first, so the two representations of request 42 cannot
-        contradict each other (in production they are the same row)."""
+    def _set_overlay_min_bitrate(self, *, min_bitrate: int | None) -> None:
+        """Raise request 42's pipeline floor — the overlay now flows
+        through ``PipelineDB.get_pipeline_overlay`` and the fake's
+        state-derived mirror reads the seeded row directly (#445
+        item 2; the queued-cursor projection helper is gone)."""
         self.db.update_request_fields(42, min_bitrate=min_bitrate)
-        req = self.db.request(42)
-        self.db.queue_execute_results(FakeCursor([{
-            k: req.get(k)
-            for k in ("id", "mb_release_id", "status",
-                      "search_filetype_override", "target_format",
-                      "min_bitrate")
-        }]))
 
     def test_beets_search_contract(self):
         self.beets_db.set_library_albums([self._album()])
-        self._queue_pipeline_overlay_row(min_bitrate=900)
+        self._set_overlay_min_bitrate(min_bitrate=900)
         status, data = self._get("/api/beets/search?q=test")
 
         self.assertEqual(status, 200)
@@ -197,7 +185,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
 
     def test_beets_recent_contract(self):
         self.beets_db.set_library_albums([self._album()])
-        self._queue_pipeline_overlay_row(min_bitrate=900)
+        self._set_overlay_min_bitrate(min_bitrate=900)
         status, data = self._get("/api/beets/recent")
 
         self.assertEqual(status, 200)

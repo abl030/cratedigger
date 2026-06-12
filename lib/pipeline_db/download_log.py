@@ -1,5 +1,6 @@
 """download_log audit rows and wrong-match bookkeeping."""
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 import msgspec
@@ -20,8 +21,61 @@ from lib.validation_envelope import (
 )
 
 
+@dataclass(frozen=True)
+class DownloadLogCounts:
+    """Aggregate counts behind the Recents tab's filter chips +
+    found-search enqueue rates (#445 item 2)."""
+
+    total: int
+    imported: int
+    matches_24h: int
+    matches_6h: int
+
+
 class _DownloadLogMixin(_PipelineDBBase):
     """download_log audit rows and wrong-match bookkeeping."""
+
+    def get_download_log_counts(self) -> DownloadLogCounts:
+        """One-query aggregate: download_log totals plus found-search
+        counts in the 24h/6h windows. The CROSS JOIN of two single-row
+        aggregates always returns exactly one row."""
+        cur = self._execute("""
+            WITH download_counts AS (
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (
+                        WHERE outcome IN ('success', 'force_import')
+                    ) AS imported
+                FROM download_log
+            ),
+            match_counts AS (
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE outcome = 'found'
+                          AND created_at >= NOW() - INTERVAL '24 hours'
+                    )::int AS matches_24h,
+                    COUNT(*) FILTER (
+                        WHERE outcome = 'found'
+                          AND created_at >= NOW() - INTERVAL '6 hours'
+                    )::int AS matches_6h
+                FROM search_log
+            )
+            SELECT
+                download_counts.total,
+                download_counts.imported,
+                match_counts.matches_24h,
+                match_counts.matches_6h
+            FROM download_counts
+            CROSS JOIN match_counts
+        """)
+        row = cur.fetchone()
+        assert row is not None, "CROSS JOIN of aggregates always yields a row"
+        return DownloadLogCounts(
+            total=row["total"],
+            imported=row["imported"],
+            matches_24h=row["matches_24h"],
+            matches_6h=row["matches_6h"],
+        )
 
 
     def get_log(self, limit: int = 50,

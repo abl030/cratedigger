@@ -8009,5 +8009,135 @@ class TestDashboardFakeParity(unittest.TestCase):
         )
 
 
+@requires_postgres
+class TestGetDownloadLogCounts(unittest.TestCase):
+    """#445 item 2 — the /api/pipeline/log counts aggregate, promoted
+    from inline route SQL to a named PipelineDB method."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_empty_tables_yield_zero_counts(self):
+        counts = self.db.get_download_log_counts()
+        self.assertEqual(
+            (counts.total, counts.imported,
+             counts.matches_24h, counts.matches_6h),
+            (0, 0, 0, 0))
+
+    def test_counts_aggregate_downloads_and_found_searches(self):
+        rid = self.db.add_request(
+            mb_release_id="counts-mbid-1", artist_name="A",
+            album_title="B", source="request")
+        self.db.log_download(rid, outcome="success")
+        self.db.log_download(rid, outcome="force_import")
+        self.db.log_download(rid, outcome="rejected")
+        self.db.log_search(rid, outcome="found")
+        self.db.log_search(rid, outcome="found")
+        self.db.log_search(rid, outcome="error")
+        # Age one found-row out of the 6h window but not the 24h one.
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - INTERVAL '12 hours' "
+            "WHERE id = (SELECT MIN(id) FROM search_log "
+            "            WHERE outcome = 'found')")
+        # And one found-row out of BOTH windows.
+        self.db.log_search(rid, outcome="found")
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - INTERVAL '2 days' "
+            "WHERE id = (SELECT MAX(id) FROM search_log)")
+
+        counts = self.db.get_download_log_counts()
+        self.assertEqual(counts.total, 3)
+        self.assertEqual(counts.imported, 2)
+        self.assertEqual(counts.matches_24h, 2)
+        self.assertEqual(counts.matches_6h, 1)
+
+    def test_fake_parity_on_identical_state(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        for db in (self.db, fake):
+            rid = db.add_request(
+                mb_release_id="parity-mbid-1", artist_name="A",
+                album_title="B", source="request")
+            db.log_download(rid, outcome="success")
+            db.log_download(rid, outcome="timeout")
+            db.log_search(rid, outcome="found")
+            db.log_search(rid, outcome="no_results")
+        real = self.db.get_download_log_counts()
+        mirrored = fake.get_download_log_counts()
+        self.assertEqual(
+            (real.total, real.imported, real.matches_24h, real.matches_6h),
+            (mirrored.total, mirrored.imported,
+             mirrored.matches_24h, mirrored.matches_6h),
+            "FakePipelineDB's counts mirror drifted from the real SQL — "
+            "fix the fake (tests/fakes.py), never the production SQL, "
+            "unless the SQL change is the point of your PR.")
+
+
+@requires_postgres
+class TestGetPipelineOverlay(unittest.TestCase):
+    """#445 item 2 — web/overlay.py::check_pipeline's inline SQL,
+    promoted to a named PipelineDB method."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_empty_mbids_short_circuits(self):
+        self.assertEqual(self.db.get_pipeline_overlay([]), {})
+
+    def test_maps_known_mbids_with_overlay_fields(self):
+        rid = self.db.add_request(
+            mb_release_id="overlay-mbid-1", artist_name="A",
+            album_title="B", source="request")
+        self.db.update_request_fields(
+            rid, min_bitrate=900, search_filetype_override="lossless")
+
+        info = self.db.get_pipeline_overlay(
+            ["overlay-mbid-1", "overlay-mbid-unknown"])
+
+        self.assertEqual(set(info), {"overlay-mbid-1"})
+        row = info["overlay-mbid-1"]
+        self.assertEqual(row["id"], rid)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertIsNone(row["target_format"])
+        self.assertEqual(row["min_bitrate"], 900)
+
+    def test_fake_parity_on_identical_state(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        rids: dict[int, int] = {}
+        for db in (self.db, fake):
+            rid = db.add_request(
+                mb_release_id="overlay-parity-1", artist_name="A",
+                album_title="B", source="request")
+            db.update_request_fields(rid, min_bitrate=320)
+            db.add_request(
+                mb_release_id="overlay-parity-2", artist_name="C",
+                album_title="D", source="request", status="manual")
+            rids[id(db)] = rid
+        mbids = ["overlay-parity-1", "overlay-parity-2", "nope"]
+        real = self.db.get_pipeline_overlay(mbids)
+        mirrored = fake.get_pipeline_overlay(mbids)
+        # The PG sequence isn't reset between tests, so ids differ by
+        # backend — pin each backend's id mapping, compare the rest.
+        self.assertEqual(real["overlay-parity-1"]["id"], rids[id(self.db)])
+        self.assertEqual(mirrored["overlay-parity-1"]["id"], rids[id(fake)])
+        strip = lambda o: {m: {k: v for k, v in row.items() if k != "id"}
+                           for m, row in o.items()}
+        self.assertEqual(
+            strip(real), strip(mirrored),
+            "FakePipelineDB's overlay mirror drifted from the real SQL — "
+            "fix the fake (tests/fakes.py), never the production SQL, "
+            "unless the SQL change is the point of your PR.")
+
+
 if __name__ == "__main__":
     unittest.main()

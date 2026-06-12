@@ -46,7 +46,8 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              BadAudioHashRow, ConsumedAttemptInput,
                              ConsumedAttemptResult, CURSOR_UPDATE_ADVANCED,
                              CURSOR_UPDATE_STALE, CURSOR_UPDATE_UNCHANGED,
-                             CURSOR_UPDATE_WRAPPED, DryRunPlanClassification,
+                             CURSOR_UPDATE_WRAPPED, DownloadLogCounts,
+                             DryRunPlanClassification,
                              NonConsumingAttemptInput,
                              PLAN_STATUS_ACTIVE, PLAN_STATUS_FAILED_DETERMINISTIC,
                              PLAN_STATUS_FAILED_TRANSIENT,
@@ -3365,6 +3366,55 @@ class FakePipelineDB:
         if limit is not None:
             eligible = eligible[:int(limit)]
         return [copy.deepcopy(r) for r in eligible]
+
+    def get_download_log_counts(self) -> DownloadLogCounts:
+        """Mirror of ``PipelineDB.get_download_log_counts`` — computed
+        from the fake's real ``download_logs``/``search_logs`` state,
+        never queued (#445 item 2). Parity with the production SQL is
+        pinned by ``tests/test_pipeline_db.py::TestGetDownloadLogCounts``.
+        """
+        now = _utcnow()
+        total = len(self.download_logs)
+        imported = sum(
+            1 for e in self.download_logs
+            if e.outcome in ("success", "force_import"))
+        found_24h = sum(
+            1 for e in self.search_logs
+            if e.outcome == "found"
+            and self._as_utc(e.created_at) >= now - timedelta(hours=24))
+        found_6h = sum(
+            1 for e in self.search_logs
+            if e.outcome == "found"
+            and self._as_utc(e.created_at) >= now - timedelta(hours=6))
+        return DownloadLogCounts(
+            total=total, imported=imported,
+            matches_24h=found_24h, matches_6h=found_6h)
+
+    def get_pipeline_overlay(
+        self, mbids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Mirror of ``PipelineDB.get_pipeline_overlay`` — projects the
+        overlay fields straight from seeded request rows (#445 item 2).
+        Parity pinned by ``TestGetPipelineOverlay``."""
+        wanted = {str(m) for m in mbids}
+        out: dict[str, dict[str, Any]] = {}
+        for r in self._requests.values():
+            raw = r.get("mb_release_id")
+            # Production's column is TEXT — compare and key by the str
+            # form (a None mbid must never stringify into a match).
+            if raw is None:
+                continue
+            mbid = str(raw)
+            if mbid in wanted:
+                out[mbid] = {
+                    "id": r["id"],
+                    "status": r.get("status"),
+                    "search_filetype_override":
+                        r.get("search_filetype_override"),
+                    "target_format": r.get("target_format"),
+                    "min_bitrate": r.get("min_bitrate"),
+                }
+        return out
 
     def get_log(self, limit: int = 50,
                 outcome_filter: str | None = None,
