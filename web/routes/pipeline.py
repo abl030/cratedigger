@@ -352,19 +352,30 @@ def get_pipeline_recent(h, params: dict[str, list[str]]) -> None:
     h._json({"recent": serialized})
 
 
-def _attach_latest_download_history(
+def _attach_latest_download_summaries(
     items: list[dict],
-    history_batch: dict[int, list[dict]],
+    summaries: dict[int, dict],
 ) -> list[dict]:
+    """Stamp each request row with its newest download's verdict fields.
+
+    ``summaries`` comes from ``get_latest_download_summaries`` — one
+    latest row + a count per request, never the full history (#426).
+    """
     for item in items:
-        history = history_batch.get(item["id"], [])
-        if history:
-            last = build_download_history_row(history[0])
+        summary = summaries.get(int(str(item["id"])))
+        if summary:
+            last = build_download_history_row(summary["latest"])
             item["last_verdict"] = last.verdict
             item["last_outcome"] = last.outcome
             item["last_username"] = last.soulseek_username
-            item["download_count"] = len(history)
+            item["download_count"] = summary["count"]
     return items
+
+
+# The imported cohort is the whole library backfill (~7K rows and
+# growing) — the queue serves a recency window plus server-side search
+# instead of the full list (#426).
+IMPORTED_RECENT_LIMIT = 100
 
 
 def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
@@ -383,16 +394,39 @@ def get_pipeline_all(h, params: dict[str, list[str]]) -> None:
     if include_replaced:
         statuses = statuses + ("replaced",)
     for status in statuses:
-        rows = [s._serialize_row(r) for r in s._db().get_by_status(status)]
+        if status == "imported":
+            db_rows = s._db().get_by_status(
+                "imported", limit=IMPORTED_RECENT_LIMIT, newest_first=True)
+        else:
+            db_rows = s._db().get_by_status(status)
+        rows = [s._serialize_row(r) for r in db_rows]
         status_items[status] = rows
         all_ids.extend([int(str(r["id"])) for r in rows])
-    history_batch = s._db().get_download_history_batch(all_ids)
+    summaries = s._db().get_latest_download_summaries(all_ids)
     for status in statuses:
-        all_data[status] = _attach_latest_download_history(
+        all_data[status] = _attach_latest_download_summaries(
             status_items[status],
-            history_batch,
+            summaries,
         )
+    all_data["imported_total"] = int(counts.get("imported", 0))
+    all_data["imported_truncated"] = (
+        int(counts.get("imported", 0)) > IMPORTED_RECENT_LIMIT
+    )
     h._json(all_data)
+
+
+def get_pipeline_search(h, params: dict[str, list[str]]) -> None:
+    """Operator search over artist/album across every status (#426)."""
+    s = _server()
+    query = params.get("q", [""])[0]
+    rows = [s._serialize_row(r) for r in s._db().search_requests(query)]
+    ids = [int(str(r["id"])) for r in rows]
+    summaries = s._db().get_latest_download_summaries(ids)
+    h._json({
+        "query": query,
+        "items": _attach_latest_download_summaries(rows, summaries),
+        "total": len(rows),
+    })
 
 
 def get_pipeline_downloading(h, params: dict[str, list[str]]) -> None:
@@ -400,14 +434,14 @@ def get_pipeline_downloading(h, params: dict[str, list[str]]) -> None:
     counts = s._db().count_by_status()
     rows = [s._serialize_row(r) for r in s._db().get_by_status("downloading")]
     ids = [int(str(r["id"])) for r in rows]
-    history_batch = s._db().get_download_history_batch(ids)
+    summaries = s._db().get_latest_download_summaries(ids)
     youtube_ingest = [
         s._serialize_row(r)
         for r in s._db().list_active_youtube_rescues(limit=50)
     ]
     h._json({
         "counts": counts,
-        "downloading": _attach_latest_download_history(rows, history_batch),
+        "downloading": _attach_latest_download_summaries(rows, summaries),
         "youtube_ingest": youtube_ingest,
     })
 
@@ -2765,6 +2799,7 @@ GET_ROUTES: dict[str, object] = {
     "/api/pipeline/status": get_pipeline_status,
     "/api/pipeline/recent": get_pipeline_recent,
     "/api/pipeline/all": get_pipeline_all,
+    "/api/pipeline/search": get_pipeline_search,
     "/api/pipeline/downloading": get_pipeline_downloading,
     "/api/pipeline/dashboard": get_pipeline_dashboard,
     "/api/pipeline/constants": get_pipeline_constants,
@@ -2838,9 +2873,16 @@ GET_DESCRIPTIONS: dict[str, str] = {
         "download-history enrichment."
     ),
     "/api/pipeline/all": (
-        "All pipeline requests bucketed by status; latest download "
-        "history attached per row. include_replaced=true opts in to "
-        "frozen audit rows."
+        "Pipeline requests bucketed by status; latest download summary "
+        "attached per row. The imported bucket is a recency window "
+        "(newest 100; imported_total/imported_truncated flag the cap) — "
+        "use /api/pipeline/search for the rest. include_replaced=true "
+        "opts in to frozen audit rows."
+    ),
+    "/api/pipeline/search": (
+        "Operator search over artist/album across every status "
+        "(?q=substring, case-insensitive); latest download summary "
+        "attached per row."
     ),
     "/api/pipeline/downloading": (
         "Pipeline requests currently in the downloading status, plus "

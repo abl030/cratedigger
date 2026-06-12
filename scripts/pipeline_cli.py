@@ -198,7 +198,11 @@ def tracks_from_mb_release(release_data):
 
 
 def cmd_list(db, args):
-    if args.filter_status:
+    if args.search:
+        # Status narrowing happens in SQL — a Python post-filter after
+        # the LIMIT would silently drop matches on common tokens.
+        albums = db.search_requests(args.search, status=args.filter_status)
+    elif args.filter_status:
         albums = db.get_by_status(args.filter_status)
     else:
         rows = db._execute("SELECT * FROM album_requests ORDER BY created_at ASC").fetchall()
@@ -3205,6 +3209,11 @@ def _build_parser() -> tuple[
     # list
     p_list = sub.add_parser("list", help="List album requests")
     p_list.add_argument("filter_status", nargs="?", help="Filter by status")
+    p_list.add_argument(
+        "--search",
+        help="Case-insensitive substring match on artist or album "
+             "(mirrors GET /api/pipeline/search)",
+    )
 
     # add
     p_add = sub.add_parser("add", help="Add a new request by MBID or Discogs ID")

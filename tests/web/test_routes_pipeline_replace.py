@@ -31,7 +31,7 @@ class TestReplacedFilterContract(_WebServerCase):
 
     def test_pipeline_all_default_excludes_replaced(self):
         captured: list[tuple[str, ...]] = []
-        def fake_get_by_status(status):
+        def fake_get_by_status(status, **kw):
             captured.append((status,))
             return []
         self.mock_db.get_by_status.side_effect = fake_get_by_status
@@ -44,7 +44,7 @@ class TestReplacedFilterContract(_WebServerCase):
 
     def test_pipeline_all_include_replaced_true_fetches_replaced(self):
         captured: list[tuple[str, ...]] = []
-        def fake_get_by_status(status):
+        def fake_get_by_status(status, **kw):
             captured.append((status,))
             return []
         self.mock_db.get_by_status.side_effect = fake_get_by_status

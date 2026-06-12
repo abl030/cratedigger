@@ -1026,10 +1026,54 @@ class _RequestsMixin(_PipelineDBBase):
         return [dict(r) for r in cur.fetchall()]
 
 
-    def get_by_status(self, status):
+    def get_by_status(self, status, *, limit=None, newest_first=False):
+        """Rows in one status. ``newest_first`` orders by ``updated_at``
+        DESC (recency window for the imported list, #426); ``limit``
+        caps the result. Defaults preserve the original full-list shape.
+        """
+        order = "updated_at DESC" if newest_first else "created_at ASC"
+        sql = f"SELECT * FROM album_requests WHERE status = %s ORDER BY {order}"
+        params: list[object] = [status]
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(int(limit))
+        cur = self._execute(sql, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+
+    def search_requests(
+        self,
+        query: str,
+        *,
+        limit: int = 200,
+        status: str | None = None,
+    ) -> list[dict]:
+        """Operator search over artist/album (#426).
+
+        Case-insensitive substring match with LIKE wildcards escaped, so
+        ``100%`` finds the artist named ``100% Wool`` rather than
+        everything. Ordered like the queue view: artist, then year.
+        ``status`` narrows in SQL — filtering after the LIMIT would
+        silently under-report on queries matching more rows than the cap.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        pattern = f"%{_escape_like_pattern(q)}%"
+        status_clause = ""
+        params: list[object] = [pattern, pattern]
+        if status is not None:
+            status_clause = " AND status = %s"
+            params.append(status)
+        params.append(max(1, min(int(limit), 500)))
         cur = self._execute(
-            "SELECT * FROM album_requests WHERE status = %s ORDER BY created_at ASC",
-            (status,),
+            "SELECT * FROM album_requests"
+            " WHERE (artist_name ILIKE %s ESCAPE '\\'"
+            "    OR album_title ILIKE %s ESCAPE '\\')"
+            f"{status_clause}"
+            " ORDER BY artist_name, year NULLS LAST, id"
+            " LIMIT %s",
+            tuple(params),
         )
         return [dict(r) for r in cur.fetchall()]
 

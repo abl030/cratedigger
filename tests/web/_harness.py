@@ -232,6 +232,8 @@ def _make_server():
     }))
     mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
     mock_db.get_by_status.return_value = []
+    mock_db.get_latest_download_summaries.return_value = {}
+    mock_db.search_requests.return_value = []
     mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
     mock_db.get_tracks.return_value = []
     mock_db.get_download_history.return_value = [

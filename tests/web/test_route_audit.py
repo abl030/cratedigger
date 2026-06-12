@@ -41,6 +41,7 @@ class TestRouteContractAudit(unittest.TestCase):
         "/api/pipeline/status",
         "/api/pipeline/recent",
         "/api/pipeline/all",
+        "/api/pipeline/search",
         "/api/pipeline/downloading",
         "/api/pipeline/dashboard",
         "/api/pipeline/constants",

@@ -325,13 +325,53 @@ class TestCmdList(unittest.TestCase):
         id2 = self.db.add_request(mb_release_id="b", artist_name="C", album_title="D", source="request")
         self.db.update_status(id2, "imported")
 
-        args = MagicMock(filter_status="wanted")
+        args = MagicMock(filter_status="wanted", search=None)
         pipeline_cli.cmd_list(self.db, args)
 
     def test_list_all(self):
         self.db.add_request(mb_release_id="a", artist_name="A", album_title="B", source="request")
-        args = MagicMock(filter_status=None)
+        args = MagicMock(filter_status=None, search=None)
         pipeline_cli.cmd_list(self.db, args)
+
+    def test_list_search_mirrors_api_search(self):
+        """CLI ⇄ API symmetry (#426): ``list --search`` wraps the same
+        ``search_requests`` the web search endpoint uses."""
+        import contextlib
+        import io
+
+        self.db.add_request(
+            mb_release_id="s-1", artist_name="The Mountain Goats",
+            album_title="Tallahassee", source="request")
+        self.db.add_request(
+            mb_release_id="s-2", artist_name="Other",
+            album_title="Album", source="request")
+
+        out = io.StringIO()
+        args = MagicMock(filter_status=None, search="mountain")
+        with contextlib.redirect_stdout(out):
+            pipeline_cli.cmd_list(self.db, args)
+        text = out.getvalue()
+        self.assertIn("The Mountain Goats", text)
+        self.assertNotIn("Other", text)
+
+    def test_list_search_with_status_filter(self):
+        rid = self.db.add_request(
+            mb_release_id="s-3", artist_name="Goat", album_title="One",
+            source="request")
+        self.db.add_request(
+            mb_release_id="s-4", artist_name="Goat", album_title="Two",
+            source="request")
+        self.db.update_status(rid, "imported")
+
+        import contextlib
+        import io
+        out = io.StringIO()
+        args = MagicMock(filter_status="imported", search="goat")
+        with contextlib.redirect_stdout(out):
+            pipeline_cli.cmd_list(self.db, args)
+        text = out.getvalue()
+        self.assertIn("One", text)
+        self.assertNotIn("Two", text)
 
 
 class TestCmdRetry(unittest.TestCase):

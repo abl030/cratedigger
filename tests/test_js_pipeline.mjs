@@ -241,5 +241,60 @@ console.log('renderPeersCard() with no observations renders the empty row');
   assertContains(html, 'No peer observations yet', 'empty state rendered');
 }
 
+console.log('renderPipelineListBody() flags the imported recency window');
+{
+  state.pipelineFilter = 'imported';
+  state.pipelineSearchResults = null;
+  state.pipelineData = {
+    counts: { imported: 6828 },
+    imported: [],
+    imported_total: 6828,
+    imported_truncated: true,
+  };
+  const html = __test__.renderPipelineListBody();
+  assertContains(html, 'most recent of 6828 imported',
+    'truncation note names the full imported count');
+  assertContains(html, 'search above', 'note points at the search box');
+}
+
+console.log('renderPipelineListBody() renders server search results across statuses');
+{
+  state.pipelineFilter = 'wanted';
+  state.pipelineData = { counts: {}, wanted: [], imported: [] };
+  state.pipelineSearchResults = [
+    {
+      id: 7, artist_name: 'The Mountain Goats', album_title: 'Tallahassee',
+      status: 'imported', source: 'request', year: 2002,
+      created_at: '2026-06-01T00:00:00+00:00',
+      updated_at: '2026-06-02T00:00:00+00:00',
+      mb_release_id: 'mbid-7', mb_release_group_id: 'rg-7',
+    },
+  ];
+  const html = __test__.renderPipelineListBody();
+  assertContains(html, 'The Mountain Goats', 'search result row rendered');
+  assertExcludes(html, 'most recent of', 'no truncation note while searching');
+
+  state.pipelineSearchResults = [];
+  const emptyHtml = __test__.renderPipelineListBody();
+  assertContains(emptyHtml, 'No matches', 'empty search shows No matches');
+  state.pipelineSearchResults = null;
+}
+
+console.log('clearPipelineSearch() makes filters and search mutually exclusive');
+{
+  state.pipelineFilter = 'imported';
+  state.pipelineSearchQuery = 'mountain';
+  state.pipelineSearchResults = [{ id: 1 }];
+  __test__.clearPipelineSearch();
+  if (state.pipelineSearchQuery === '' && state.pipelineSearchResults === null) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: clearPipelineSearch did not reset search state');
+  }
+  const html = __test__.renderPipelineListBody();
+  assertExcludes(html, 'No matches', 'list body is back in filter mode after clear');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

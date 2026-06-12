@@ -142,7 +142,7 @@ class TestServerEndpoints(unittest.TestCase):
             mb_release_id="dl-uuid", status="downloading",
             active_download_state={"filetype": "flac", "enqueued_at": "now", "files": []},
         )
-        self.mock_db.get_by_status.side_effect = lambda s: [downloading_row] if s == "downloading" else []
+        self.mock_db.get_by_status.side_effect = lambda s, **kw: [downloading_row] if s == "downloading" else []
         self.mock_db.count_by_status.return_value = {"downloading": 1}
         self.mock_db.get_download_history_batch.return_value = {}
         status, data = self._get("/api/pipeline/all")
@@ -166,11 +166,11 @@ class TestServerEndpoints(unittest.TestCase):
             },
         )
         self.mock_db.get_by_status.side_effect = (
-            lambda s: [downloading_row] if s == "downloading" else []
+            lambda s, **kw: [downloading_row] if s == "downloading" else []
         )
         self.mock_db.count_by_status.return_value = {"downloading": 1}
-        self.mock_db.get_download_history_batch.reset_mock()
-        self.mock_db.get_download_history_batch.return_value = {}
+        self.mock_db.get_latest_download_summaries.reset_mock()
+        self.mock_db.get_latest_download_summaries.return_value = {}
 
         status, data = self._get("/api/pipeline/downloading")
 
@@ -179,11 +179,11 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(len(data["downloading"]), 1)
         self.assertEqual(data["downloading"][0]["album_title"], "Active Download")
         self.mock_db.get_by_status.assert_called_with("downloading")
-        self.mock_db.get_download_history_batch.assert_any_call([201])
+        self.mock_db.get_latest_download_summaries.assert_any_call([201])
 
         self.mock_db.get_by_status.side_effect = None
         self.mock_db.get_by_status.return_value = []
-        self.mock_db.get_download_history_batch.reset_mock()
+        self.mock_db.get_latest_download_summaries.reset_mock()
         self.mock_db.count_by_status.return_value = {
             "wanted": 0, "imported": 1, "manual": 0}
 
