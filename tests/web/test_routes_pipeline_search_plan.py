@@ -781,12 +781,13 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
             "lib.search_plan_service.SearchPlanService.generate_for_request",
         ) as mock_gen:
             try:
-                resp = urlopen(req, timeout=5)
-                status = resp.status
-                data = json.loads(resp.read())
+                with urlopen(req, timeout=5) as resp:
+                    status = resp.status
+                    data = json.loads(resp.read())
             except HTTPError as e:
-                status = e.code
-                data = json.loads(e.read())
+                with e:
+                    status = e.code
+                    data = json.loads(e.read())
         self.assertEqual(status, 400)
         self.assertIn("error", data)
         mock_gen.assert_not_called()

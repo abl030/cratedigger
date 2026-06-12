@@ -84,24 +84,30 @@ class _WebServerCase(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        # shutdown() stops serve_forever but leaves the listening
+        # socket open — close it or every test class leaks one
+        # ResourceWarning into the suite output (#445 item 5).
+        cls.server.server_close()
 
     def _get(self, path: str) -> tuple[int, dict]:
         url = f"{self.base}{path}"
         try:
-            resp = urlopen(url)
-            return resp.status, json.loads(resp.read())
+            with urlopen(url) as resp:
+                return resp.status, json.loads(resp.read())
         except HTTPError as e:
-            return e.code, json.loads(e.read())
+            with e:
+                return e.code, json.loads(e.read())
 
     def _post(self, path: str, body: dict) -> tuple[int, dict]:
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
         req = Request(url, data=data, headers={"Content-Type": "application/json"})
         try:
-            resp = urlopen(req)
-            return resp.status, json.loads(resp.read())
+            with urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
         except HTTPError as e:
-            return e.code, json.loads(e.read())
+            with e:
+                return e.code, json.loads(e.read())
 
 
 class _FakeDbWebServerCase(_WebServerCase):

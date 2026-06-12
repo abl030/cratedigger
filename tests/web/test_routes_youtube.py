@@ -542,12 +542,13 @@ class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
             "lib.youtube_ingest_service.YoutubeIngestService.submit",
         ) as mock_submit:
             try:
-                resp = urlopen(req, timeout=5)
-                status = resp.status
-                data = json.loads(resp.read())
+                with urlopen(req, timeout=5) as resp:
+                    status = resp.status
+                    data = json.loads(resp.read())
             except HTTPError as e:
-                status = e.code
-                data = json.loads(e.read())
+                with e:
+                    status = e.code
+                    data = json.loads(e.read())
         self.assertEqual(status, 400)
         self.assertIn("error", data)
         mock_submit.assert_not_called()

@@ -3515,7 +3515,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
         db.record_peer_observations(["alice"], observed_at=observed_at)
 
-        with patch("tests.fakes._utcnow") as fake_now:
+        with patch("tests.fakes.pipeline_db._utcnow") as fake_now:
             fake_now.return_value = datetime(
                 2026, 5, 9, 5, 0, tzinfo=timezone.utc,
             )  # 2026-05-09 13:00 Perth
