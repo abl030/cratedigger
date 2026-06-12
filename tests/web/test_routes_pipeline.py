@@ -915,9 +915,14 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         mock_cleanup.assert_not_called()
 
     def _enqueue_force_job(self) -> int:
+        from lib.import_queue import force_import_dedupe_key
+        log_id = self.db.log_download(
+            100, outcome="rejected", soulseek_username="baduser",
+            validation_result={"failed_path": "/tmp/Test Album"},
+        )
         job = self.db.enqueue_import_job(
             "force_import", request_id=100,
-            dedupe_key="force_import:download_log:42",
+            dedupe_key=force_import_dedupe_key(log_id),
             payload={"failed_path": "/tmp/Test Album"},
             message="Import queued",
         )
@@ -955,6 +960,18 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # The identity join resolved through the seeded request row.
         self.assertEqual(data["jobs"][0]["artist_name"],
                          self.db.request(100)["artist_name"])
+
+    def test_import_jobs_timeline_caps_at_50(self):
+        """The route hardcodes limit=50 — seed 51 jobs, count the page."""
+        for i in range(51):
+            self.db.enqueue_import_job(
+                "force_import", request_id=100,
+                dedupe_key=f"force_import:download_log:{i}",
+                payload={"failed_path": f"/tmp/a{i}"},
+            )
+        status, data = self._get("/api/import-jobs/timeline")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["jobs"]), 50)
 
     def test_import_jobs_rejects_invalid_filters(self):
         status, data = self._get("/api/import-jobs?status=bad")

@@ -106,6 +106,10 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/log?limit=5000")
         self.assertEqual(status, 200)
         self.assertEqual(len(data["log"]), 500)
+        # And the no-param default is 50 — same seeded rows.
+        status, data = self._get("/api/pipeline/log")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["log"]), 50)
 
     def test_pipeline_log_filter_invalid_ignored(self):
         self.db.log_download(100, outcome="rejected",
@@ -117,7 +121,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             {e["outcome"] for e in data["log"]}, {"success", "rejected"})
 
     def test_pipeline_log_counts_structure(self):
-        self._queue_log_counts(total=5, imported=2,
+        self._queue_log_counts(total=7, imported=2,
                                matches_24h=3, matches_6h=1)
         status, data = self._get("/api/pipeline/log")
         self.assertEqual(status, 200)
@@ -129,9 +133,11 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             self.assertIn(key, counts)
             self.assertIsInstance(counts[key], (int, float))
         # The queued aggregate row actually flowed into the payload.
-        self.assertEqual(counts["all"], 5)
+        self.assertEqual(counts["all"], 7)
         self.assertEqual(counts["imported"], 2)
-        self.assertEqual(counts["rejected"], 3)
+        # rejected (5) is coprime with matches_24h (3) so a wiring swap
+        # cannot pass by numeric coincidence.
+        self.assertEqual(counts["rejected"], 5)
         self.assertAlmostEqual(counts["matches_per_hour_24h"], 3 / 24)
 
     def test_pipeline_status(self):
@@ -222,6 +228,23 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(rescue["album_title"], "YT Album")
         self.assertEqual(rescue["youtube_metadata"]["browse_id"], "yt-browse")
         self.assertEqual(rescue["request_status"], "wanted")
+
+    def test_pipeline_downloading_caps_youtube_ingest_at_50(self):
+        """The route hardcodes limit=50 on list_active_youtube_rescues —
+        one running rescue per request (partial unique index), so 51
+        requests with running ingests page down to 50."""
+        for i in range(51):
+            rid = 300 + i
+            self.db.seed_request(make_request_row(
+                id=rid, status="wanted", mb_release_id=f"yt-{rid}"))
+            self.db.insert_youtube_running(
+                request_id=rid, browse_id=f"b{rid}",
+                audio_playlist_id=None, yt_url=f"https://yt/{rid}",
+                expected_track_count=2,
+            )
+        status, data = self._get("/api/pipeline/downloading")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["youtube_ingest"]), 50)
 
     def test_pipeline_detail(self):
         status, data = self._get("/api/pipeline/100")
