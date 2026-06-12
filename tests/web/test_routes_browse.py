@@ -360,8 +360,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "artist_credit": "Radiohead",
             "primary_artist_id": "3840",
         }
-        # server.py loads routes via `from routes import browse` (sys.path hack),
-        # so the canonical module is `routes.browse`, not `web.routes.browse`.
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]

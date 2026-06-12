@@ -372,10 +372,11 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
     def setUpClass(cls) -> None:
         # Read the fixture's real length once so MB tracks line up
         # with whatever the on-disk file actually decodes to. Import
-        # via ``lib.beets_distance`` which holds an eager reference to
-        # the upstream ``beets.library`` module — guards against the
-        # sys.path leak where other tests inject ``tests/../lib`` and
-        # shadow the real ``beets`` package.
+        # via ``lib.beets_distance``, which pins the upstream
+        # ``beets.library`` module eagerly at load time. (Historically
+        # this also guarded against tests injecting ``tests/../lib``
+        # onto sys.path and shadowing the real ``beets`` package —
+        # those inserts are gone and TestSysPathAudit bans the class.)
         from lib.beets_distance import _beets_library
         item = _beets_library.Item.from_path(FIXTURE_FLAC)
         cls.fixture_length = float(item.get("length") or 1.0)

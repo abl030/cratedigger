@@ -735,9 +735,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
     # -- fresh=True seam (Codex review on issue #101) ----------------
 
-    @patch("routes.pipeline.mb_api.get_release_group_year",
+    @patch("web.routes.pipeline.mb_api.get_release_group_year",
            return_value=2024)
-    @patch("routes.pipeline.mb_api.get_release")
+    @patch("web.routes.pipeline.mb_api.get_release")
     def test_pipeline_add_mb_fetches_release_fresh(
         self, mock_get_release, _mock_rgy,
     ):
@@ -772,7 +772,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             self.assertEqual(call.args, ("fresh-add-mbid",))
             self.assertEqual(call.kwargs, {"fresh": True})
 
-    @patch("routes.pipeline.discogs_api.get_release")
+    @patch("web.routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_fetches_release_fresh(self, mock_get_release):
         """POST /api/pipeline/add (Discogs) MUST bypass the 24h meta cache."""
         mock_get_release.return_value = {
@@ -798,7 +798,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             self.assertEqual(call.kwargs, {"fresh": True})
 
     @patch("web.routes.pipeline.finalize_request")
-    @patch("routes.pipeline.mb_api.get_release")
+    @patch("web.routes.pipeline.mb_api.get_release")
     def test_pipeline_upgrade_new_mb_fetches_release_fresh(
             self, mock_get_release, _mock_transition):
         """POST /api/pipeline/upgrade creating a brand-new MB request
@@ -818,7 +818,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", fresh=True)
 
     @patch("web.routes.pipeline.finalize_request")
-    @patch("routes.pipeline.discogs_api.get_release")
+    @patch("web.routes.pipeline.discogs_api.get_release")
     def test_pipeline_upgrade_new_discogs_fetches_release_fresh(
             self, mock_get_release, _mock_transition):
         """POST /api/pipeline/upgrade creating a brand-new Discogs request

@@ -21,18 +21,6 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-# Eager import: lib.beets_distance pins the real ``beets`` package
-# (see lib/beets_distance.py:49-55) — we must trigger it *before* the
-# next two ``sys.path.insert`` calls add ``lib/`` ahead of site-
-# packages, otherwise downstream imports of lib.youtube_album_service
-# (which imports lib.beets_distance lazily inside the route handler)
-# fail with "cannot import name 'library' from 'beets'" because
-# ``beets`` would resolve to ``lib/beets.py``.
-import lib.beets_distance  # noqa: F401,E402
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "web"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "lib"))
-
 from tests.fakes import FakePipelineDB
 
 # Production-shaped ``validation_result`` template for wrong-match

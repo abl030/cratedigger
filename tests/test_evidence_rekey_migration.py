@@ -33,7 +33,6 @@ from typing import Sequence
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import psycopg2  # noqa: E402
 

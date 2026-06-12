@@ -1087,9 +1087,10 @@ class TestPipelineRouteDirectEquivalence(_FakeDbWebServerCase):
     the response had the right keys with plausible values. Equivalence
     tests catch the divergence that contract tests can't see.
 
-    ``tests/web/_harness.py`` puts ``lib/`` on sys.path, reproducing the
-    same PYTHONPATH ambiguity production has. A future regression of the
-    original dual-load bug would fail this test.
+    The dual-load ambiguity itself is gone (#445 item 3: one canonical
+    import name per module, enforced by tests/test_no_dual_load.py and
+    TestSysPathAudit), but the equivalence contract this test pins is
+    independent of how a divergence arises — keep it.
     """
 
     # Scenario table — each is a direct-call kwargs dict. The helper

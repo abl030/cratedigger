@@ -163,14 +163,16 @@ look like this by default. If it doesn't, that's the smell.
 ## Caveats
 
 - The eager `from beets import library` at module load time is
-  non-obvious. It exists because `tests/test_web_server.py` adds
-  `tests/../lib` to sys.path early in the test session, which then
-  shadows the upstream `beets` package whenever something lazy-imports
-  it later. Eager-at-load wins because the module is loaded before any
-  test fixture can pollute sys.path. The fix that actually mattered
-  was adding `ps.beets` to the production pythonEnv in
-  `nix/package.nix` so the eager import works in prod too — see PR
-  #287.
+  non-obvious. Historically it guarded against the web test harness
+  adding `lib/` to sys.path early in the test session, which shadowed
+  the upstream `beets` package with `lib/beets.py` whenever something
+  lazy-imported it later. Those inserts were removed with #445 item 3
+  (every module now loads under exactly one canonical name —
+  `tests/test_no_dual_load.py` and `TestSysPathAudit` enforce it), but
+  the eager import stays: it pins the upstream package once at load
+  time. The fix that actually mattered was adding `ps.beets` to the
+  production pythonEnv in `nix/package.nix` so the eager import works
+  in prod too — see PR #287.
 
 - The cross-RG guardrail passes through when the request's release
   group is null (legacy rows). Documented as `_StubPDB`-driven test

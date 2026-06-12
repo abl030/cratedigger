@@ -7,14 +7,32 @@ Usage:
     python3 web/server.py --port 8085 --dsn postgresql://cratedigger@192.168.100.11/cratedigger
 """
 
+import os
+import sys
+
+# Script-mode Python puts this file's directory (web/) at sys.path[0]
+# (production boots `coverage run .../web/server.py`), which makes every
+# web module importable under a bare second name (`import mb`, `from
+# routes import ...`) — the issue #95 / PR #94 dual-load bug class, where
+# two copies of the same class break `is` and isinstance across the
+# boundary. Strip it (realpath: a symlink-aliased spelling of web/ must
+# not survive the filter) before ANY other import so each module has
+# exactly one canonical name.
+_WEB_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+sys.path[:] = [
+    p for p in sys.path if os.path.realpath(p or os.getcwd()) != _WEB_DIR
+]
+
+# Ensure repo root is importable when run as __main__ so `from lib.X` /
+# `from web.X` resolve without relying on PYTHONPATH.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 import json
 import logging
-import os
 import re
 import shutil
 import sqlite3
-import sys
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -25,10 +43,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger("cratedigger-web")
-
-# Ensure repo root is importable when run as __main__ so `from lib.X` /
-# `from web.X` resolve without relying on PYTHONPATH.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
