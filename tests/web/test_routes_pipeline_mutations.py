@@ -19,7 +19,7 @@ from tests.web._harness import (
     _FakeDbWebServerCase,
 )
 
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 
 
@@ -856,60 +856,43 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         import web.server as srv
         self._srv = srv
         self._orig_beets = srv._beets
-        # Beets stub: update() only hits this via album_exists / get_min_bitrate.
+        # Beets fake: update() only hits this via album_exists / get_min_bitrate.
         # A live beets DB is the usual preceding state for a requeue.
-        self._beets = MagicMock()
-        self._beets.album_exists.return_value = True
-        self._beets.get_min_bitrate.return_value = 320
+        self.beets_db = FakeBeetsDB()
+        self.beets_db._album_exists_default = True
+        self.beets_db._min_bitrate_default = 320
         # Ban-source now also calls ``get_item_paths`` for the bad-rip
-        # hash-capture step (plan 2026-04-29-005, U4). Default to "no
-        # tracks" so legacy ban-source tests don't trip over the new
-        # gate; tests that exercise hash capture override this.
-        self._beets.get_item_paths.return_value = []
-        # Ban-source now routes through ``BeetsDB.locate`` (issue #121).
-        # Default the mock to 'album present before and removed after'
+        # hash-capture step (plan 2026-04-29-005, U4). The fake defaults
+        # to "no tracks" so legacy ban-source tests don't trip over the
+        # new gate; tests that exercise hash capture seed item paths.
+        # Ban-source routes through ``BeetsDB.locate`` (issue #121).
+        # Default the queue to 'album present before and removed after'
         # so the legacy `album_exists.side_effect = [True, False]`
         # tests read as "exact → absent" in the new vocabulary.
         # Individual tests override this via ``_set_locate_sequence``.
         self._set_locate_sequence([
-            ("exact", 1, ()),  # selectors filled per-test via helper
+            ("exact", 1, ()),  # selectors auto-filled by the fake
             ("absent", None, ()),
         ])
-        srv._beets = self._beets
+        srv._beets = self.beets_db
 
     def _set_locate_sequence(
             self, results: list[tuple[str, object, tuple]]) -> None:
-        """Program ``self._beets.locate`` to return a sequence of results.
-
-        Each tuple is ``(kind, album_id, selectors)``. Yields one
-        ReleaseLocation-shaped SimpleNamespace per call; extra calls
-        reuse the final entry. Kept local to this test class because
-        ban-source is the main caller that reasons about the before /
-        after pair.
-        """
-        from types import SimpleNamespace
-        results_copy = list(results)
-
-        def _side_effect(release_id, *_args, **_kwargs):
-            if not results_copy:
-                return SimpleNamespace(kind="absent", album_id=None, selectors=())
-            kind, album_id, selectors = (
-                results_copy[0] if len(results_copy) == 1
-                else results_copy.pop(0))
-            # Auto-fill selectors for 'exact' when the test left them blank
-            # — the locate seam's contract is that selectors are driven by
-            # the ID shape, so it's OK for tests to defer to it.
-            if kind == "exact" and not selectors:
-                from lib.release_identity import detect_release_source
-                if detect_release_source(str(release_id)) == "discogs":
-                    selectors = (f"discogs_albumid:{release_id}",
-                                 f"mb_albumid:{release_id}")
-                else:
-                    selectors = (f"mb_albumid:{release_id}",)
-            return SimpleNamespace(
-                kind=kind, album_id=album_id, selectors=selectors)
-
-        self._beets.locate.side_effect = _side_effect
+        """Queue ``(kind, album_id, selectors)`` locate outcomes on the
+        fake. Extra calls reuse the final entry; blank selectors on an
+        'exact' entry are auto-filled from the queried id's shape by
+        the fake (the locate contract derives them from the ID)."""
+        from lib.beets_db import ReleaseLocation
+        entries: list[ReleaseLocation] = []
+        for kind, album_id, selectors in results:
+            assert kind in ("exact", "absent"), kind
+            # No coercion — queue_locate_results rejects
+            # production-impossible (kind, album_id, selectors) combos.
+            entries.append(ReleaseLocation(
+                kind="exact" if kind == "exact" else "absent",
+                album_id=album_id,  # type: ignore[arg-type]
+                selectors=tuple(selectors)))
+        self.beets_db.queue_locate_results(entries)
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
@@ -978,7 +961,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
     def test_upgrade_omits_min_bitrate_when_beets_lookup_misses(
             self, mock_transition):
         """Missing Beets quality data must not clear the existing DB baseline."""
-        self._beets.get_min_bitrate.return_value = None
+        self.beets_db._min_bitrate_default = None
         self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=320,
             mb_release_id=self.RELEASE_ID,
@@ -1266,16 +1249,12 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         import web.server as srv
         self._srv = srv
         self._orig_beets = srv._beets
-        self._beets = MagicMock()
-        # Default: no tracks — individual tests override.
-        self._beets.get_item_paths.return_value = []
-        # locate seam returns "absent" so ``remove_and_reset_release``
-        # is a no-op unless overridden per-test.
-        from types import SimpleNamespace
-        self._beets.locate.return_value = SimpleNamespace(
-            kind="absent", album_id=None, selectors=()
-        )
-        srv._beets = self._beets
+        self.beets_db = FakeBeetsDB()
+        # Defaults: no tracks (tests seed item paths), and locate is
+        # state-derived — nothing seeded means "absent", so
+        # ``remove_and_reset_release`` is a no-op unless a test seeds
+        # album ids or queues locate results.
+        srv._beets = self.beets_db
 
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
@@ -1299,10 +1278,10 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         # the uploader from the real download_log.
         self.db.log_download(
             1704, outcome="success", soulseek_username="Hxrco")
-        self._beets.get_item_paths.return_value = [
+        self.beets_db.set_item_paths(self.RELEASE_ID, [
             (1, "/mnt/Music/Beets/A/track-01.flac"),
             (2, "/mnt/Music/Beets/A/track-02.flac"),
-        ]
+        ])
         # Distinct digests per call so the route inserts both rows.
         mock_hash.side_effect = [self.HASH_A, self.HASH_B]
 
@@ -1356,11 +1335,11 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         """
         self.db.log_download(
             1704, outcome="success", soulseek_username="Hxrco")
-        self._beets.get_item_paths.return_value = [
+        self.beets_db.set_item_paths(self.RELEASE_ID, [
             (1, "/mnt/Music/Beets/A/track-01.flac"),
             (2, "/mnt/Music/Beets/A/track-02.flac"),
             (3, "/mnt/Music/Beets/A/track-03.flac"),
-        ]
+        ])
         # Track 2 raises; tracks 1 and 3 succeed.
         from lib.audio_hash import AudioHashError
         mock_hash.side_effect = [
@@ -1397,9 +1376,9 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         ``reported_username=None`` (the bytes are still protected).
         """
         # No successful download on record — nothing seeded.
-        self._beets.get_item_paths.return_value = [
+        self.beets_db.set_item_paths(self.RELEASE_ID, [
             (1, "/mnt/Music/Beets/A/track-01.mp3"),
-        ]
+        ])
         mock_hash.return_value = self.HASH_A
 
         status, data = self._post(
@@ -1435,7 +1414,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         """
         self.db.log_download(
             1704, outcome="success", soulseek_username="Hxrco")
-        self._beets.get_item_paths.return_value = []
+        # No item paths seeded — the fake returns [] for the release.
 
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1482,8 +1461,8 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         # No mutation of any kind.
         self.assertEqual(self.db.denylist, [])
         self.assertEqual(self.db.bad_audio_hashes, [])
-        self._beets.get_item_paths.assert_not_called()
-        self._beets.locate.assert_not_called()
+        self.assertEqual(self.beets_db.get_item_paths_calls, [])
+        self.assertEqual(self.beets_db.locate_calls, [])
 
         # The active set is queued OR running — flip the job to the
         # state the importer worker would hold and re-assert the 409.
@@ -1515,9 +1494,9 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         """
         self.db.log_download(
             1704, outcome="success", soulseek_username="Hxrco")
-        self._beets.get_item_paths.return_value = [
+        self.beets_db.set_item_paths(self.RELEASE_ID, [
             (1, "/mnt/Music/Beets/A/track-01.flac"),
-        ]
+        ])
         mock_hash.return_value = self.HASH_A
 
         # First click inserts the hash for real...

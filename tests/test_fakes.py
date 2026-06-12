@@ -4373,6 +4373,142 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(beets.get_album_ids_by_mbids(["mbid-x"]),
                          {"mbid-x": 5})
 
+    def test_search_albums_substring_matches_artist_or_album(self) -> None:
+        # Real query: LIKE %q% COLLATE NOCASE on albumartist OR album,
+        # ORDER BY albumartist, year, album, LIMIT.
+        beets = FakeBeetsDB()
+        beets.set_library_albums([
+            {"id": 2, "album": "Zeta", "artist": "B Artist", "year": 2020,
+             "added": 10.0},
+            {"id": 1, "album": "Alpha", "artist": "A Artist", "year": 2020,
+             "added": 20.0},
+            {"id": 3, "album": "Unrelated", "artist": "Nobody", "year": 2020,
+             "added": 30.0},
+        ])
+        out = beets.search_albums("aRtIsT")
+        self.assertEqual([a["id"] for a in out], [1, 2])
+        self.assertEqual(beets.search_albums("artist", limit=1)[0]["id"], 1)
+        self.assertEqual(beets.search_albums_calls,
+                         [("aRtIsT", 100), ("artist", 1)])
+
+    def test_get_recent_sorts_by_added_desc(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_library_albums([
+            {"id": 1, "album": "Old", "artist": "X", "added": 10.0},
+            {"id": 2, "album": "New", "artist": "X", "added": 30.0},
+            {"id": 3, "album": "Never stamped", "artist": "X", "added": None},
+        ])
+        out = beets.get_recent(limit=2)
+        self.assertEqual([a["id"] for a in out], [2, 1])
+        # NULL added sorts last under DESC (SQLite ordering).
+        self.assertEqual(
+            [a["id"] for a in beets.get_recent(limit=3)], [2, 1, 3])
+        self.assertEqual(beets.get_recent_calls, [2, 3])
+
+    def test_locate_state_derived_from_album_id_seeds(self) -> None:
+        from lib.beets_db import ReleaseLocation
+
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(
+            "11111111-1111-1111-1111-111111111111", [4])
+        beets.set_album_ids_for_release("12856590", [9])
+        loc = beets.locate("11111111-1111-1111-1111-111111111111")
+        self.assertEqual(loc, ReleaseLocation(
+            kind="exact", album_id=4,
+            selectors=("mb_albumid:11111111-1111-1111-1111-111111111111",)))
+        # Discogs numeric shape → both selector columns, normalized id.
+        loc = beets.locate("0012856590")
+        self.assertEqual(loc, ReleaseLocation(
+            kind="exact", album_id=9,
+            selectors=("discogs_albumid:12856590",
+                       "mb_albumid:12856590")))
+        self.assertEqual(
+            beets.locate("unseeded-mbid"),
+            ReleaseLocation(kind="absent", album_id=None, selectors=()))
+        self.assertEqual(
+            beets.locate_calls,
+            ["11111111-1111-1111-1111-111111111111", "0012856590",
+             "unseeded-mbid"])
+
+    def test_locate_queue_consumes_in_order_and_repeats_last(self) -> None:
+        from lib.beets_db import ReleaseLocation
+
+        beets = FakeBeetsDB()
+        beets.queue_locate_results([
+            ReleaseLocation(kind="exact", album_id=1, selectors=()),
+            ReleaseLocation(kind="absent", album_id=None, selectors=()),
+        ])
+        first = beets.locate("mbid-x")
+        # Empty selectors on an exact entry auto-fill from the queried
+        # id's shape at call time.
+        self.assertEqual(first.kind, "exact")
+        self.assertEqual(first.selectors, ("mb_albumid:mbid-x",))
+        self.assertEqual(beets.locate("mbid-x").kind, "absent")
+        self.assertEqual(beets.locate("mbid-x").kind, "absent")
+
+    def test_get_min_bitrate_seeded_and_default(self) -> None:
+        beets = FakeBeetsDB()
+        beets._album_exists_default = True  # presence gate (see below)
+        beets.set_min_bitrate("mbid-1", 245)
+        self.assertEqual(beets.get_min_bitrate("mbid-1"), 245)
+        beets._min_bitrate_default = 320
+        self.assertEqual(beets.get_min_bitrate("mbid-2"), 320)
+        self.assertEqual(beets.get_min_bitrate_calls,
+                         ["mbid-1", "mbid-2"])
+
+    def test_get_min_bitrate_gates_on_presence_like_production(self) -> None:
+        # Production resolves presence via locate first — an absent
+        # release returns None no matter what; bitrate keys normalize.
+        from lib.beets_db import ReleaseLocation
+
+        beets = FakeBeetsDB()
+        beets._min_bitrate_default = 320
+        self.assertIsNone(beets.get_min_bitrate("mbid-absent"))
+        beets.set_album_ids_for_release("12856590", [7])
+        beets.set_min_bitrate("12856590", 245)
+        self.assertEqual(beets.get_min_bitrate("0012856590"), 245)
+        # Queued locate head models "current" state — after a queued
+        # removal lands at absent, min_bitrate goes None with it.
+        beets.queue_locate_results([
+            ReleaseLocation(kind="absent", album_id=None, selectors=())])
+        self.assertIsNone(beets.get_min_bitrate("0012856590"))
+        self.assertFalse(beets.album_exists("0012856590"))
+
+    def test_locate_queue_rejects_impossible_locations(self) -> None:
+        from lib.beets_db import ReleaseLocation
+
+        beets = FakeBeetsDB()
+        with self.assertRaises(AssertionError):
+            beets.queue_locate_results([ReleaseLocation(
+                kind="exact", album_id=None, selectors=())])
+        with self.assertRaises(AssertionError):
+            beets.queue_locate_results([ReleaseLocation(
+                kind="absent", album_id=None,
+                selectors=("mb_albumid:x",))])
+
+    def test_locate_queue_passes_explicit_selectors_verbatim(self) -> None:
+        from lib.beets_db import ReleaseLocation
+
+        beets = FakeBeetsDB()
+        entry = ReleaseLocation(
+            kind="exact", album_id=3,
+            selectors=("discogs_albumid:9", "mb_albumid:9"))
+        beets.queue_locate_results([entry])
+        self.assertEqual(beets.locate("9"), entry)
+
+    def test_get_album_detail_keyed_by_album_id(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, {"id": 7, "album": "A", "tracks": []})
+        detail = beets.get_album_detail(7)
+        assert detail is not None
+        self.assertEqual(detail["album"], "A")
+        detail["album"] = "mutated"
+        got = beets.get_album_detail(7)
+        assert got is not None
+        self.assertEqual(got["album"], "A")
+        self.assertIsNone(beets.get_album_detail(8))
+        self.assertEqual(beets.get_album_detail_calls, [7, 7, 8])
+
     def test_get_album_ids_by_mbids_derives_from_release_id_seeds(self) -> None:
         # Shares the set_album_ids_for_release seed store so presence
         # and album-id mapping can't disagree (the paired-consistency

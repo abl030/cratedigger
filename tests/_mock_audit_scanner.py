@@ -549,8 +549,8 @@ def scan_web_harness_overrides() -> Dict[str, int]:
 # === Web beets-MagicMock ratchet (#445 item 1) ===
 #
 # The #430 migration covered the pipeline DB; the browse / library /
-# pipeline contract tests still configure MagicMock shapes for the
-# OTHER stateful collaborator — ``BeetsDB``. Those mocks evaded the
+# pipeline contract tests historically configured MagicMock shapes for
+# the OTHER stateful collaborator — ``BeetsDB``. Those mocks evaded the
 # stateful-assign heuristic purely by variable naming: ``mock_beets``,
 # ``self._beets`` and ``self.beets`` don't match ``STATEFUL_VAR_NAMES``
 # (same evasion class the r1 ratchet review caught for ``mock_db``).
@@ -586,10 +586,10 @@ def scan_web_harness_overrides() -> Dict[str, int]:
 _WEB_BEETS_MOCK_RE = re.compile(
     r"\bmock_beets\w*|self\._beets\b|self\.beets\b")
 
-WEB_BEETS_MOCK_BASELINE: Dict[str, int] = {
-    os.path.join("web", "test_routes_library.py"): 31,
-    os.path.join("web", "test_routes_pipeline_mutations.py"): 19,
-}
+# EMPTY — the #445 item 1 migration is complete (ratchet + four
+# migration batches). The ratchet stays armed at zero: any reintroduced
+# beets-mock variable name in tests/web fails the audit immediately.
+WEB_BEETS_MOCK_BASELINE: Dict[str, int] = {}
 
 
 def count_beets_mock_overrides(text: str) -> int:

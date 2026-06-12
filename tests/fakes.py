@@ -63,7 +63,12 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
 from lib.quality import (
     AlbumQualityEvidence,
 )
-from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.beets_db import ReleaseLocation
+from lib.release_identity import (
+    ReleaseIdentity,
+    detect_release_source,
+    normalize_release_id,
+)
 from lib.validation_envelope import WrongMatchTriageAudit
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
@@ -5729,6 +5734,16 @@ class FakeBeetsDB:
         self._mbid_detail: dict[str, dict[str, Any]] = {}
         self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
         self.list_release_identities_calls: int = 0
+        self._library_albums: list[dict[str, Any]] = []
+        self._album_detail: dict[int, dict[str, Any]] = {}
+        self.search_albums_calls: list[tuple[str, int]] = []
+        self.get_recent_calls: list[int] = []
+        self.get_album_detail_calls: list[int] = []
+        self._locate_queue: list[ReleaseLocation] = []
+        self.locate_calls: list[str] = []
+        self._min_bitrate: dict[str, int | None] = {}
+        self._min_bitrate_default: int | None = None
+        self.get_min_bitrate_calls: list[str] = []
 
     # --- Seeding helpers ---
 
@@ -5768,6 +5783,48 @@ class FakeBeetsDB:
         self._tracks_by_release[release_id] = [
             copy.deepcopy(t) for t in tracks]
 
+    def set_library_albums(self, rows: list[dict[str, Any]]) -> None:
+        """Seed the album table backing ``search_albums``/``get_recent``."""
+        self._library_albums = [copy.deepcopy(r) for r in rows]
+
+    def set_album_detail(self, album_id: int, detail: dict[str, Any]) -> None:
+        self._album_detail[album_id] = copy.deepcopy(detail)
+
+    def set_min_bitrate(self, release_id: str, kbps: int | None) -> None:
+        """Seed a per-release min bitrate. Keys are normalized like
+        production's locate-backed lookup. The release must also be
+        present (album ids seeded, explicit album_exists, or the
+        default) — ``get_min_bitrate`` gates on presence first."""
+        self._min_bitrate[normalize_release_id(release_id)] = kbps
+
+    def queue_locate_results(self, entries: list[ReleaseLocation]) -> None:
+        """Queue ``locate()`` outcomes for before/after-mutation flows.
+
+        Ban-source observes presence around a ``beet remove`` that runs
+        behind a patched subprocess, so the fake's seed stores can't
+        change mid-flow — the queue models the external mutation.
+        Entries are consumed in order; the last entry repeats. An
+        ``exact`` entry with empty selectors gets them auto-filled from
+        the queried id's shape at call time (the locate contract derives
+        selectors from the ID). With an empty queue, ``locate`` is
+        state-derived from the ``set_album_ids_for_release`` store.
+
+        Production-impossible locations are rejected up front: an
+        ``exact`` hit always carries a real int album_id, and ``absent``
+        is always ``(None, ())`` (lib/beets_db.py::locate).
+        """
+        for entry in entries:
+            if entry.kind == "exact":
+                assert (isinstance(entry.album_id, int)
+                        and not isinstance(entry.album_id, bool)), (
+                    f"exact ReleaseLocation needs an int album_id, got "
+                    f"{entry.album_id!r} — production cannot construct this")
+            else:
+                assert entry.album_id is None and entry.selectors == (), (
+                    f"absent ReleaseLocation is always (None, ()), got "
+                    f"({entry.album_id!r}, {entry.selectors!r})")
+        self._locate_queue = list(entries)
+
     # --- Real-method surface ---
 
     def _album_ids_lookup(self, release_id: str) -> list[int] | None:
@@ -5787,17 +5844,27 @@ class FakeBeetsDB:
                 return ids
         return None
 
-    def album_exists(self, release_id: str) -> bool:
-        self.album_exists_calls.append(release_id)
+    def _presence(self, release_id: str) -> bool:
+        """Current presence per the locate seam (issue #121).
+
+        Production answers ``album_exists`` / ``get_min_bitrate`` via
+        ``locate``; the fake's equivalent precedence is: queued locate
+        head (the most explicit model of "current state around an
+        external mutation") → explicit ``set_album_exists`` seed →
+        seeded album ids → the ``_album_exists_default``.
+        """
+        if self._locate_queue:
+            return self._locate_queue[0].kind == "exact"
         if release_id in self._album_exists:
             return self._album_exists[release_id]
-        # Production derives presence and album-id mapping from one
-        # seam (issue #121) — a release seeded with album ids IS in
-        # the library. An explicit set_album_exists seed still wins.
         ids = self._album_ids_lookup(release_id)
         if ids:
             return True
         return self._album_exists_default
+
+    def album_exists(self, release_id: str) -> bool:
+        self.album_exists_calls.append(release_id)
+        return self._presence(release_id)
 
     def check_mbids(self, mbids: list[str]) -> set[str]:
         self.check_mbids_calls.append(list(mbids))
@@ -5870,6 +5937,88 @@ class FakeBeetsDB:
         if self._album_ids_lookup(key):
             return []
         return None
+
+    def search_albums(
+        self, query: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Mirror of ``BeetsDB.search_albums`` over the seeded album
+        table: case-insensitive substring on artist/album, ordered by
+        (artist, year, album), LIMIT applied after ordering."""
+        self.search_albums_calls.append((query, limit))
+        q = query.lower()
+        hits = [
+            a for a in self._library_albums
+            if q in str(a.get("artist", "")).lower()
+            or q in str(a.get("album", "")).lower()
+        ]
+        hits.sort(key=lambda a: (
+            str(a.get("artist", "")), a.get("year") or 0,
+            str(a.get("album", ""))))
+        return [copy.deepcopy(a) for a in hits[:limit]]
+
+    def get_recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Mirror of ``BeetsDB.get_recent`` — ``added`` DESC, NULLs last
+        (SQLite DESC ordering), LIMIT applied after ordering."""
+        self.get_recent_calls.append(limit)
+        rows = sorted(
+            self._library_albums,
+            key=lambda a: (a.get("added") is not None, a.get("added") or 0),
+            reverse=True)
+        return [copy.deepcopy(a) for a in rows[:limit]]
+
+    def get_album_detail(self, album_id: int) -> dict[str, Any] | None:
+        """Mirror of ``BeetsDB.get_album_detail`` — None when missing."""
+        self.get_album_detail_calls.append(album_id)
+        detail = self._album_detail.get(album_id)
+        return copy.deepcopy(detail) if detail is not None else None
+
+    @staticmethod
+    def _selectors_for(release_id: str) -> tuple[str, ...]:
+        """Selector tuple for an exact hit, derived from the id shape —
+        mirrors the dispatch in ``BeetsDB.locate`` (issue #121)."""
+        key = normalize_release_id(release_id)
+        if detect_release_source(key) == "discogs":
+            return (f"discogs_albumid:{key}", f"mb_albumid:{key}")
+        return (f"mb_albumid:{key}",)
+
+    def locate(self, release_id: str) -> ReleaseLocation:
+        """Mirror of ``BeetsDB.locate`` — the issue-#121 presence seam.
+
+        Queued results (``queue_locate_results``) win; otherwise the
+        answer is state-derived: exact hit iff the release has seeded
+        album ids, with selectors derived from the id shape.
+        """
+        self.locate_calls.append(release_id)
+        if self._locate_queue:
+            entry = (self._locate_queue.pop(0)
+                     if len(self._locate_queue) > 1
+                     else self._locate_queue[0])
+            if entry.kind == "exact" and not entry.selectors:
+                return ReleaseLocation(
+                    kind="exact", album_id=entry.album_id,
+                    selectors=self._selectors_for(release_id))
+            return entry
+        key = normalize_release_id(release_id)
+        ids = self._album_ids_lookup(key)
+        if ids:
+            return ReleaseLocation(
+                kind="exact", album_id=ids[0],
+                selectors=self._selectors_for(key))
+        return ReleaseLocation(kind="absent", album_id=None, selectors=())
+
+    def get_min_bitrate(self, mb_release_id: str) -> int | None:
+        """Mirror of ``BeetsDB.get_min_bitrate`` (kbps; None = no row).
+
+        Production resolves presence through ``locate`` first and
+        returns None for an absent release, so the fake gates on
+        ``_presence`` before consulting the (normalized-key) seed
+        store / ``_min_bitrate_default``.
+        """
+        self.get_min_bitrate_calls.append(mb_release_id)
+        if not self._presence(mb_release_id):
+            return None
+        key = normalize_release_id(mb_release_id)
+        return self._min_bitrate.get(key, self._min_bitrate_default)
 
     def get_album_info(
         self, mb_release_id: str, _cfg: Any = None,
