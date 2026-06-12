@@ -215,6 +215,28 @@ class TestPerThreadDbHandles(unittest.TestCase):
             # inherit a closed handle.
             srv._thread_state.db = None
 
+    def test_finish_closes_this_threads_handles_deterministically(self):
+        """#435: connection teardown closes the thread-local psycopg2
+        handle instead of leaving it to GC. Injected shared handles are
+        out of scope (the dev server / harness own those)."""
+        srv = self._srv
+        srv._db_dsn = TEST_DSN
+        srv.db = None
+
+        handle = srv._db()
+        self.assertFalse(handle.conn.closed)
+        srv._close_thread_handles()
+        self.assertTrue(handle.conn.closed)
+        self.assertIsNone(getattr(srv._thread_state, "db", None))
+
+    def test_close_thread_handles_leaves_injected_handle_alone(self):
+        srv = self._srv
+        srv._db_dsn = None
+        sentinel = object()
+        srv.db = sentinel  # type: ignore[assignment]
+        srv._close_thread_handles()
+        self.assertIs(srv.db, sentinel)
+
     def test_injected_handle_is_shared_across_threads(self):
         srv = self._srv
         srv._db_dsn = None
