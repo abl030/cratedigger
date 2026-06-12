@@ -10,7 +10,13 @@ from zoneinfo import ZoneInfo
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralMeasurement, ValidationResult
-from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI, FakeYTMusic
+from tests.fakes import (
+    FakeBeetsDB,
+    FakeCursor,
+    FakePipelineDB,
+    FakeSlskdAPI,
+    FakeYTMusic,
+)
 from tests.helpers import (
     make_album_quality_evidence,
     make_download_file,
@@ -4918,6 +4924,28 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
         self.assertEqual(
             {r["source"] for r in batch[42]}, {"slskd", "youtube"},
         )
+
+
+class TestFakeCursor(unittest.TestCase):
+    """FakeCursor pairs with FakePipelineDB.queue_execute_results for
+    raw-SQL seams (web.overlay.check_pipeline et al.)."""
+
+    def test_fetchall_returns_rows(self):
+        rows = [{"id": 1}, {"id": 2}]
+        self.assertEqual(FakeCursor(rows).fetchall(), rows)
+
+    def test_fetchone_returns_first_row_or_none(self):
+        self.assertEqual(FakeCursor([{"id": 1}]).fetchone(), {"id": 1})
+        self.assertIsNone(FakeCursor().fetchone())
+
+    def test_empty_default_fetchall(self):
+        self.assertEqual(FakeCursor().fetchall(), [])
+
+    def test_queued_through_fake_pipeline_db_execute(self):
+        db = FakePipelineDB()
+        db.queue_execute_results(FakeCursor([{"id": 7}]))
+        cur = db._execute("SELECT 1", ())
+        self.assertEqual(cur.fetchall(), [{"id": 7}])
 
 
 if __name__ == "__main__":

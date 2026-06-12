@@ -522,7 +522,6 @@ _WEB_HARNESS_OVERRIDE_RE = re.compile(
 WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {
     os.path.join("web", "_harness.py"): 31,
     os.path.join("web", "test_routes_imports.py"): 63,
-    os.path.join("web", "test_routes_library.py"): 4,
     os.path.join("web", "test_routes_pipeline.py"): 59,
     os.path.join("web", "test_routes_pipeline_mutations.py"): 98,
     os.path.join("web", "test_routes_pipeline_replace.py"): 26,

@@ -5200,6 +5200,25 @@ class FakePipelineDBSource:
         self.close_calls += 1
 
 
+class FakeCursor:
+    """Minimal DB-API cursor stand-in for raw-SQL seams.
+
+    Pair with :meth:`FakePipelineDB.queue_execute_results` when the
+    code under test goes through ``PipelineDB._execute`` directly
+    (e.g. ``web.overlay.check_pipeline``) — the fake cannot interpret
+    SQL, so the test supplies the rows the query would return.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        self._rows = list(rows) if rows else []
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
+
 class FakeBeetsDB:
     """In-memory fake for ``lib.beets_db.BeetsDB`` — minimal surface.
 
