@@ -5,7 +5,6 @@ Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
 
-import copy
 import json
 import os
 import sys
@@ -16,17 +15,27 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import (
-    _MOCK_PIPELINE_REQUEST,
-    _DEFAULT_WRONG_MATCH_ENTRY,
     _assert_required_fields,
-    _WebServerCase,
+    _FakeDbWebServerCase,
 )
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 
-class TestPipelineMutationRouteContracts(_WebServerCase):
+class _RacingDeleteDB(FakePipelineDB):
+    """delete_request races: a superseding descendant lands concurrently,
+    then the FK violation fires — the post-FK walk must see it."""
+
+    def delete_request(self, request_id: int) -> None:
+        import psycopg2.errors
+        self.seed_request(make_request_row(
+            id=250, status="wanted", mb_release_id="race-250",
+            replaces_request_id=request_id))
+        raise psycopg2.errors.ForeignKeyViolation("descendant landed")
+
+
+class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""
 
     ADD_REQUIRED_FIELDS = {"status", "id", "artist", "album", "tracks"}
@@ -48,15 +57,14 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
     DELETE_REQUIRED_FIELDS = {"status", "id"}
 
     def setUp(self) -> None:
-        # ``mock_db`` is class-scoped; reset call history so U4's
-        # assertions on ``update_request_fields.call_args_list`` see only
-        # the calls from the current test, not the previous one.
-        self.mock_db.reset_mock()
-        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
-        self.mock_db.get_request_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
-        self.mock_db.add_request.return_value = 501
-        self.mock_db.get_download_log_entry.return_value = copy.deepcopy(_DEFAULT_WRONG_MATCH_ENTRY)
+        super().setUp()
+        # Request 100: the lookup target for update/upgrade/set-quality
+        # bodies that pass mb_release_id="abc-123".
+        self.db.seed_request(make_request_row(
+            id=100, status="imported", min_bitrate=320,
+            mb_release_id="abc-123",
+            imported_path="/mnt/virtio/Music/Beets/Test",
+        ))
         # MB add path also calls ``get_release_raw`` (for the resolver's
         # raw payload) alongside the existing ``get_release`` (for slim
         # add_request fields). Class-wide stub so individual tests only
@@ -83,10 +91,12 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "Test Album",
             "year": 2024,
             "country": "US",
-            "tracks": [{"title": "Track"}],
+            "tracks": [{"title": "Track", "track_number": 1,
+                        "disc_number": 1}],
         }
 
-        status, data = self._post("/api/pipeline/add", {"mb_release_id": "abc-123"})
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "add-contract-mbid"})
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
@@ -101,8 +111,6 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         """Web add path generates a search plan after `set_tracks()`,
         consistent with the CLI add path. Failures must not break the
         HTTP response."""
-        import web.server as srv
-        fake_db = FakePipelineDB()
         mock_get_release.return_value = {
             "release_group_id": "rg-1",
             "artist_id": "artist-1",
@@ -118,15 +126,14 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             ],
         }
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post(
-                "/api/pipeline/add", {"mb_release_id": "abc-plan-1"})
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-plan-1"})
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add response (plan)")
         new_id = data["id"]
-        active = fake_db.get_active_search_plan(new_id)
+        active = self.db.get_active_search_plan(new_id)
         self.assertIsNotNone(active)
         assert active is not None
         from lib.search import SEARCH_PLAN_GENERATOR_ID
@@ -134,11 +141,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(active.next_ordinal, 0)
 
     def test_pipeline_add_exists_contract(self):
-        self.mock_db.get_request_by_mb_release_id.return_value = {
-            "id": 502,
-            "status": "wanted",
-        }
-
+        # Request 100 (setUp) already holds mb_release_id="abc-123".
         status, data = self._post("/api/pipeline/add", {"mb_release_id": "abc-123"})
 
         self.assertEqual(status, 200)
@@ -162,7 +165,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "Kid A",
             "year": 2008,  # reissue
             "country": "US",
-            "tracks": [{"title": "Everything In Its Right Place"}],
+            "tracks": [{"title": "Everything In Its Right Place",
+                        "track_number": 1, "disc_number": 1}],
         }
         mock_rgy.return_value = 2000  # release-group's first year
 
@@ -171,23 +175,20 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_rgy.assert_called_once_with("rg-kid-a")
-        add_kwargs = self.mock_db.add_request.call_args.kwargs
-        self.assertEqual(add_kwargs["year"], 2008)
+        row = self.db.get_request(_data["id"])
+        assert row is not None
+        self.assertEqual(row["year"], 2008)
         # add_request no longer carries release_group_year directly; the
         # resolver service writes it via update_request_fields once the
-        # FK in album_request_field_resolutions is satisfiable.
-        update_calls = self.mock_db.update_request_fields.call_args_list
+        # FK in album_request_field_resolutions is satisfiable. One
+        # write, landed on the row.
         rg_year_writes = [
-            c for c in update_calls
-            if "release_group_year" in c.kwargs
+            c for c in self.db.update_request_fields_calls
+            if "release_group_year" in c[1]
         ]
         self.assertEqual(len(rg_year_writes), 1)
-        self.assertEqual(
-            rg_year_writes[0].kwargs["release_group_year"], 2000,
-        )
-        self.assertEqual(
-            rg_year_writes[0].kwargs.get("is_va_compilation"), False,
-        )
+        self.assertEqual(row["release_group_year"], 2000)
+        self.assertIs(row["is_va_compilation"], False)
 
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
     @patch("web.routes.pipeline.mb_api.get_release")
@@ -203,7 +204,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "Willow",
             "year": 2007,
             "country": "AU",
-            "tracks": [{"title": "And Finally I Can Breathe"}],
+            "tracks": [{"title": "And Finally I Can Breathe",
+                        "track_number": 1, "disc_number": 1}],
         }
         mock_rgy.return_value = 2007
 
@@ -211,17 +213,15 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "/api/pipeline/add", {"mb_release_id": "willow-mbid"})
 
         self.assertEqual(status, 200)
-        add_kwargs = self.mock_db.add_request.call_args.kwargs
-        self.assertEqual(add_kwargs["year"], 2007)
-        update_calls = self.mock_db.update_request_fields.call_args_list
+        row = self.db.get_request(_data["id"])
+        assert row is not None
+        self.assertEqual(row["year"], 2007)
         rg_year_writes = [
-            c for c in update_calls
-            if "release_group_year" in c.kwargs
+            c for c in self.db.update_request_fields_calls
+            if "release_group_year" in c[1]
         ]
         self.assertEqual(len(rg_year_writes), 1)
-        self.assertEqual(
-            rg_year_writes[0].kwargs["release_group_year"], 2007,
-        )
+        self.assertEqual(row["release_group_year"], 2007)
 
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
     @patch("web.routes.pipeline.mb_api.get_release")
@@ -241,7 +241,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "T",
             "year": 2020,
             "country": "US",
-            "tracks": [{"title": "Track"}],
+            "tracks": [{"title": "Track", "track_number": 1,
+                        "disc_number": 1}],
         }
         mock_rgy.return_value = None  # mirror returned 404 / unparseable
 
@@ -251,12 +252,13 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add response (rg 404)")
-        add_kwargs = self.mock_db.add_request.call_args.kwargs
-        self.assertEqual(add_kwargs["year"], 2020)
-        update_calls = self.mock_db.update_request_fields.call_args_list
+        row = self.db.get_request(data["id"])
+        assert row is not None
+        self.assertEqual(row["year"], 2020)
+        self.assertIsNone(row["release_group_year"])
         rg_year_writes = [
-            c for c in update_calls
-            if "release_group_year" in c.kwargs
+            c for c in self.db.update_request_fields_calls
+            if "release_group_year" in c[1]
         ]
         self.assertEqual(rg_year_writes, [],
                          "unresolved rg_year must NOT be written")
@@ -277,7 +279,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "T",
             "year": 2020,
             "country": "US",
-            "tracks": [{"title": "Track"}],
+            "tracks": [{"title": "Track", "track_number": 1,
+                        "disc_number": 1}],
         }
 
         status, _data = self._post(
@@ -285,10 +288,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         mock_rgy.assert_not_called()
-        update_calls = self.mock_db.update_request_fields.call_args_list
         rg_year_writes = [
-            c for c in update_calls
-            if "release_group_year" in c.kwargs
+            c for c in self.db.update_request_fields_calls
+            if "release_group_year" in c[1]
         ]
         self.assertEqual(rg_year_writes, [],
                          "unresolved rg_year must NOT be written")
@@ -316,7 +318,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "Tarantino Presents",
             "year": 2008,
             "country": "US",
-            "tracks": [{"title": "T1"}],
+            "tracks": [{"title": "T1", "track_number": 1,
+                        "disc_number": 1}],
         }
         # Real-VA shape (post-#373): Compilation rg AND per-track
         # artist credits diverge from the album-level credit. The
@@ -340,13 +343,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         status, _data = self._post(
             "/api/pipeline/add", {"mb_release_id": "va-mbid"})
         self.assertEqual(status, 200)
-        update_calls = self.mock_db.update_request_fields.call_args_list
-        va_writes = [
-            c for c in update_calls
-            if c.kwargs.get("is_va_compilation") is True
-        ]
-        self.assertGreaterEqual(len(va_writes), 1,
-                                "is_va_compilation=True must be written")
+        row = self.db.get_request(_data["id"])
+        assert row is not None
+        self.assertTrue(row["is_va_compilation"],
+                        "is_va_compilation=True must land on the row")
 
     @patch("web.routes.pipeline.mb_api.get_release_raw")
     @patch("web.routes.pipeline.mb_api.get_release_group_year")
@@ -360,15 +360,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         — not a normal-shaped plan that would have to wait for the
         next operator regeneration to flip.
 
-        Uses a real ``FakePipelineDB`` because the active plan needs
-        to be fetched after the add lands; ``mock_db`` MagicMock can't
-        round-trip a plan through ``store_search_plan`` /
-        ``get_active_search_plan``.
+        The active plan is fetched after the add lands — the per-test
+        fake round-trips it through the real plan store.
         """
-        import web.server as srv
-        from tests.fakes import FakePipelineDB
-        fake_db = FakePipelineDB()
-
         mock_get_release.return_value = {
             "release_group_id": "rg-va",
             "artist_id": "a-1",
@@ -400,14 +394,13 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         }
         mock_rgy.return_value = 2008
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post(
-                "/api/pipeline/add", {"mb_release_id": "va-plan-mbid"})
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "va-plan-mbid"})
         self.assertEqual(status, 200)
 
         new_id = data["id"]
         # VA flag landed.
-        row = fake_db.get_request(new_id)
+        row = self.db.get_request(new_id)
         assert row is not None
         self.assertTrue(row["is_va_compilation"])
 
@@ -416,7 +409,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         # silently passed ``is_va_compilation=False`` into the
         # generator and the plan was the normal-shape (default /
         # literal / literal_flac).
-        active = fake_db.get_active_search_plan(new_id)
+        active = self.db.get_active_search_plan(new_id)
         assert active is not None
         strategies = [item.strategy for item in active.items]
         self.assertTrue(
@@ -450,7 +443,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "Album",
             "year": 2010,
             "country": "GB",
-            "tracks": [{"title": "T1"}],
+            "tracks": [{"title": "T1", "track_number": 1,
+                        "disc_number": 1}],
         }
         # Raw MB JSON shape with label-info present.
         mock_get_raw.return_value = {
@@ -462,12 +456,10 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "/api/pipeline/add", {"mb_release_id": "abc-mbid"})
         self.assertEqual(status, 200)
 
-        catno_writes = [
-            c for c in self.mock_db.update_request_fields.call_args_list
-            if c.kwargs.get("catalog_number") == "STRMRT-001"
-        ]
-        self.assertGreaterEqual(
-            len(catno_writes), 1,
+        row = self.db.get_request(_data["id"])
+        assert row is not None
+        self.assertEqual(
+            row["catalog_number"], "STRMRT-001",
             "resolver-extracted catalog_number must be persisted",
         )
 
@@ -475,12 +467,9 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         """U4 integration: full add-from-web flow against ``FakePipelineDB``
         creates the new row with ``release_group_year`` populated and
         the request reads back correctly."""
-        import web.server as srv
-        fake_db = FakePipelineDB()
         with patch("web.routes.pipeline.mb_api.get_release") as mock_rel, \
              patch("web.routes.pipeline.mb_api.get_release_group_year",
-                   return_value=2000) as mock_rgy, \
-             patch.object(srv, "db", fake_db):
+                   return_value=2000) as mock_rgy:
             mock_rel.return_value = {
                 "release_group_id": "rg-kid-a",
                 "artist_id": "rh-1",
@@ -498,7 +487,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
         self.assertEqual(status, 200)
         new_id = data["id"]
-        row = fake_db.get_request(new_id)
+        row = self.db.get_request(new_id)
         assert row is not None
         self.assertEqual(row["year"], 2008)
         self.assertEqual(row["release_group_year"], 2000)
@@ -507,33 +496,30 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
     def test_pipeline_add_duplicate_does_not_regenerate(self):
         """Duplicate add returns the existing request without generating
         a second plan."""
-        import web.server as srv
-        fake_db = FakePipelineDB()
         # Pre-seed an existing request matching the release id.
-        fake_db.add_request(
+        self.db.add_request(
             mb_release_id="abc-dupe",
             artist_name="Dupe", album_title="Existing", source="request",
         )
-        before = len(fake_db.search_plans)
+        before = len(self.db.search_plans)
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post(
-                "/api/pipeline/add", {"mb_release_id": "abc-dupe"})
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "abc-dupe"})
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "exists")
-        self.assertEqual(len(fake_db.search_plans), before)
+        self.assertEqual(len(self.db.search_plans), before)
 
     @patch("web.routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_contract(self, mock_get_release):
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
         mock_get_release.return_value = {
             "artist_id": "3840",
             "artist_name": "Radiohead",
             "title": "OK Computer",
             "year": 1997,
             "country": "Europe",
-            "tracks": [{"title": "Airbag"}],
+            "tracks": [{"title": "Airbag", "track_number": 1,
+                        "disc_number": 1}],
         }
 
         status, data = self._post("/api/pipeline/add", {"discogs_release_id": "83182"})
@@ -541,16 +527,17 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.ADD_REQUIRED_FIELDS,
                                 "pipeline add discogs response")
-        # Verify both columns populated
-        add_call = self.mock_db.add_request.call_args
-        self.assertEqual(add_call.kwargs["mb_release_id"], "83182")
-        self.assertEqual(add_call.kwargs["discogs_release_id"], "83182")
+        # Verify both columns populated on the persisted row
+        row = self.db.get_request(data["id"])
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], "83182")
+        self.assertEqual(row["discogs_release_id"], "83182")
 
     def test_pipeline_add_discogs_exists_contract(self):
-        self.mock_db.get_request_by_discogs_release_id.return_value = {
-            "id": 503,
-            "status": "imported",
-        }
+        self.db.seed_request(make_request_row(
+            id=503, status="imported",
+            mb_release_id="83182", discogs_release_id="83182",
+        ))
 
         status, data = self._post("/api/pipeline/add", {"discogs_release_id": "83182"})
 
@@ -568,8 +555,6 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
     @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_upgrade_contract(self, _mock_transition):
-        self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
-
         status, data = self._post("/api/pipeline/upgrade", {"mb_release_id": "abc-123"})
 
         self.assertEqual(status, 200)
@@ -583,9 +568,6 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self, mock_mb_get, mock_dg_get, _mock_transition,
     ):
         """Numeric mb_release_id (Discogs) routes to discogs_api, not mb_api."""
-        self.mock_db.get_request_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
-        self.mock_db.add_request.return_value = 999
         mock_dg_get.return_value = {
             "id": "12856590",
             "title": "New.Old.Rare",
@@ -604,16 +586,15 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         mock_dg_get.assert_called_once_with(12856590, fresh=True)
         mock_mb_get.assert_not_called()
         # Confirm Discogs ID is mirrored into both columns for pipeline-compat
-        add_kwargs = self.mock_db.add_request.call_args.kwargs
-        self.assertEqual(add_kwargs["mb_release_id"], "12856590")
-        self.assertEqual(add_kwargs["discogs_release_id"], "12856590")
+        row = self.db.get_request(data["id"])
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], "12856590")
+        self.assertEqual(row["discogs_release_id"], "12856590")
         _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
                                 "pipeline upgrade response (discogs)")
 
     @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_set_quality_contract(self, _mock_transition):
-        self.mock_db.get_request_by_mb_release_id.return_value = _MOCK_PIPELINE_REQUEST
-
         status, data = self._post(
             "/api/pipeline/set-quality",
             {"mb_release_id": "abc-123", "status": "manual", "min_bitrate": 245},
@@ -627,21 +608,17 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
     def test_pipeline_set_quality_discogs_request_normalizes_and_falls_back(
         self, _mock_transition,
     ):
-        import web.server as srv
-
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=100,
             status="imported",
             mb_release_id="12856590",
             discogs_release_id=None,
         ))
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post(
-                "/api/pipeline/set-quality",
-                {"mb_release_id": " 0012856590 ", "status": "manual", "min_bitrate": 245},
-            )
+        status, data = self._post(
+            "/api/pipeline/set-quality",
+            {"mb_release_id": " 0012856590 ", "status": "manual", "min_bitrate": 245},
+        )
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
@@ -649,21 +626,17 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
     @patch("web.routes.pipeline.finalize_request")
     def test_pipeline_upgrade_normalizes_uppercase_uuid(self, mock_transition):
-        import web.server as srv
-
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704,
             status="imported",
             mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             min_bitrate=320,
         ))
 
-        with patch.object(srv, "db", fake_db):
-            status, data = self._post(
-                "/api/pipeline/upgrade",
-                {"mb_release_id": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"},
-            )
+        status, data = self._post(
+            "/api/pipeline/upgrade",
+            {"mb_release_id": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"},
+        )
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.UPGRADE_REQUIRED_FIELDS,
@@ -671,7 +644,8 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         self.assertEqual(mock_transition.call_args.args[1], 1704)
 
     def test_pipeline_set_intent_contract(self):
-        self.mock_db.get_request.return_value = make_request_row(id=100, status="wanted")
+        self.db.seed_request(make_request_row(
+            id=100, status="wanted", mb_release_id="abc-123"))
 
         status, data = self._post("/api/pipeline/set-intent",
                                   {"id": 100, "intent": "lossless"})
@@ -693,20 +667,28 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
 
     @patch("web.routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
     def test_pipeline_force_import_contract(self, _mock_resolve):
-        status, data = self._post("/api/pipeline/force-import", {"download_log_id": 42})
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={
+                "failed_path": "/mnt/virtio/music/slskd/failed_imports/Test",
+                "scenario": "high_distance",
+            },
+        )
+        status, data = self._post(
+            "/api/pipeline/force-import", {"download_log_id": log_id})
 
         self.assertEqual(status, 202)
         _assert_required_fields(self, data, self.FORCE_IMPORT_REQUIRED_FIELDS,
                                 "pipeline force-import response")
 
     def test_pipeline_delete_contract(self):
-        # Default: no descendant — delete succeeds.
-        self.mock_db.get_request_by_replaces_request_id.return_value = None
+        # No descendant — delete succeeds and the row is gone.
         status, data = self._post("/api/pipeline/delete", {"id": 100})
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DELETE_REQUIRED_FIELDS,
                                 "pipeline delete response")
+        self.assertIsNone(self.db.get_request(100))
 
     def test_pipeline_delete_with_descendant_returns_409(self):
         """Deleting a request that has a superseding descendant is
@@ -715,56 +697,38 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         route walks the descendant chain and returns 409 with the
         list of descendant IDs so the operator can prune the lineage
         leaf-first."""
-        # Reset shared-class mock state from prior tests.
-        self.mock_db.delete_request.reset_mock()
-        self.mock_db.delete_request.side_effect = None
-        # Chain: 100 → 200 → 300.
-        def descendant_of(req_id):
-            if req_id == 100:
-                return {"id": 200, "status": "wanted",
-                        "replaces_request_id": 100}
-            if req_id == 200:
-                return {"id": 300, "status": "imported",
-                        "replaces_request_id": 200}
-            return None
-        self.mock_db.get_request_by_replaces_request_id.side_effect = (
-            descendant_of
-        )
+        # Real supersede chain: 100 ← 200 ← 300.
+        self.db.seed_request(make_request_row(
+            id=200, status="wanted", mb_release_id="chain-200",
+            replaces_request_id=100))
+        self.db.seed_request(make_request_row(
+            id=300, status="imported", mb_release_id="chain-300",
+            replaces_request_id=200))
         status, data = self._post("/api/pipeline/delete", {"id": 100})
 
         self.assertEqual(status, 409)
         self.assertIn("error", data)
         self.assertIn("descendant_request_ids", data)
         self.assertEqual(data["descendant_request_ids"], [200, 300])
-        # delete_request must NOT have been called on the route's
-        # happy path when the descendant block fires.
-        self.mock_db.delete_request.assert_not_called()
-        # Clear side_effect for downstream tests.
-        self.mock_db.get_request_by_replaces_request_id.side_effect = None
-        self.mock_db.get_request_by_replaces_request_id.return_value = None
+        # The descendant block fired before any delete — the row
+        # survives.
+        self.assertIsNotNone(self.db.get_request(100))
 
     def test_pipeline_delete_fk_violation_returns_409(self):
-        """Defensive race-window guard: a descendant landed between the
-        route's read and the delete. The FK violation surfaces as 409
-        rather than a 500, mirroring the pre-check shape."""
-        import psycopg2.errors
-        self.mock_db.get_request_by_replaces_request_id.side_effect = [
-            # First call (pre-check) sees no descendant.
-            None,
-            # Second call (post-FK error walk) sees the descendant.
-            {"id": 250, "status": "wanted", "replaces_request_id": 100},
-            # Third call (chain walk) sees no further descendants.
-            None,
-        ]
-        self.mock_db.delete_request.side_effect = (
-            psycopg2.errors.ForeignKeyViolation("descendant landed")
-        )
-        status, data = self._post("/api/pipeline/delete", {"id": 100})
+        """Defensive race-window guard: a descendant lands between the
+        route's read and the delete (modelled by a typed fake whose
+        delete seeds the descendant then raises the FK violation). The
+        violation surfaces as 409 rather than a 500, mirroring the
+        pre-check shape."""
+        import web.server as srv
+        racing = _RacingDeleteDB()
+        racing.seed_request(make_request_row(
+            id=100, status="imported", mb_release_id="abc-123"))
+        with patch.object(srv, "db", racing):
+            status, data = self._post("/api/pipeline/delete", {"id": 100})
         self.assertEqual(status, 409)
         self.assertIn("error", data)
         self.assertEqual(data["descendant_request_ids"], [250])
-        # Reset side_effects for downstream tests.
-        self.mock_db.delete_request.side_effect = None
 
     # -- fresh=True seam (Codex review on issue #101) ----------------
 
@@ -787,11 +751,12 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             "title": "Test Album",
             "year": 2024,
             "country": "US",
-            "tracks": [{"title": "Track"}],
+            "tracks": [{"title": "Track", "track_number": 1,
+                        "disc_number": 1}],
         }
 
         status, _data = self._post("/api/pipeline/add",
-                                   {"mb_release_id": "abc-123"})
+                                   {"mb_release_id": "fresh-add-mbid"})
 
         self.assertEqual(status, 200)
         # ``get_release`` is now called multiple times — once by the
@@ -801,20 +766,20 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         # stale cache snapshot.
         self.assertGreaterEqual(mock_get_release.call_count, 1)
         for call in mock_get_release.call_args_list:
-            self.assertEqual(call.args, ("abc-123",))
+            self.assertEqual(call.args, ("fresh-add-mbid",))
             self.assertEqual(call.kwargs, {"fresh": True})
 
     @patch("routes.pipeline.discogs_api.get_release")
     def test_pipeline_add_discogs_fetches_release_fresh(self, mock_get_release):
         """POST /api/pipeline/add (Discogs) MUST bypass the 24h meta cache."""
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
         mock_get_release.return_value = {
             "artist_id": "3840",
             "artist_name": "Radiohead",
             "title": "OK Computer",
             "year": 1997,
             "country": "Europe",
-            "tracks": [{"title": "Airbag"}],
+            "tracks": [{"title": "Airbag", "track_number": 1,
+                        "disc_number": 1}],
         }
 
         status, _data = self._post("/api/pipeline/add",
@@ -835,9 +800,6 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             self, mock_get_release, _mock_transition):
         """POST /api/pipeline/upgrade creating a brand-new MB request
         MUST bypass the meta cache — same rationale as add."""
-        self.mock_db.get_request_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
-        self.mock_db.add_request.return_value = 999
         mock_get_release.return_value = {
             "artist_id": "a-1", "artist_name": "A", "title": "T",
             "year": 2024, "country": "US", "tracks": [],
@@ -858,9 +820,6 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
             self, mock_get_release, _mock_transition):
         """POST /api/pipeline/upgrade creating a brand-new Discogs request
         MUST bypass the meta cache — same rationale as add."""
-        self.mock_db.get_request_by_mb_release_id.return_value = None
-        self.mock_db.get_request_by_discogs_release_id.return_value = None
-        self.mock_db.add_request.return_value = 999
         mock_get_release.return_value = {
             "id": "12856590", "title": "New.Old.Rare",
             "artist_name": "Blueline Medic", "artist_id": "3640",
@@ -875,7 +834,7 @@ class TestPipelineMutationRouteContracts(_WebServerCase):
         mock_get_release.assert_called_once_with(12856590, fresh=True)
 
 
-class TestUserRequeueOverridePreservation(_WebServerCase):
+class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
     """User-initiated requeue endpoints must preserve a stricter existing
     search_filetype_override — e.g. 'lossless' set by the quality gate after a
     CBR 320 import. Clicking Upgrade or flipping status back to wanted must not
@@ -890,6 +849,7 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     RELEASE_ID = "c6cd62c4-da2a-4a89-a219-adba66d6c7d4"
 
     def setUp(self) -> None:
+        super().setUp()
         import web.server as srv
         self._srv = srv
         self._orig_beets = srv._beets
@@ -966,10 +926,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     @patch("web.routes.pipeline.finalize_request")
     def test_upgrade_preserves_stricter_override(self, mock_transition):
         """Upgrade on an imported album with override='lossless' must keep it."""
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=320,
+            mb_release_id=self.RELEASE_ID,
             search_filetype_override="lossless",
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/upgrade",
                                     {"mb_release_id": self.RELEASE_ID})
@@ -980,10 +941,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     @patch("web.routes.pipeline.finalize_request")
     def test_upgrade_preserves_narrowed_override(self, mock_transition):
         """Upgrade must preserve a post-downgrade-narrow like 'lossless,mp3 v0'."""
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=320,
+            mb_release_id=self.RELEASE_ID,
             search_filetype_override="lossless,mp3 v0",
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/upgrade",
                                     {"mb_release_id": self.RELEASE_ID})
@@ -996,10 +958,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         """Upgrade on an imported album with no override falls back to the full ladder."""
         from lib.quality import QUALITY_UPGRADE_TIERS
 
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=160,
+            mb_release_id=self.RELEASE_ID,
             search_filetype_override=None,
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/upgrade",
                                     {"mb_release_id": self.RELEASE_ID})
@@ -1013,10 +976,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
             self, mock_transition):
         """Missing Beets quality data must not clear the existing DB baseline."""
         self._beets.get_min_bitrate.return_value = None
-        self.mock_db.get_request_by_mb_release_id.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=320,
+            mb_release_id=self.RELEASE_ID,
             search_filetype_override="lossless",
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/upgrade",
                                     {"mb_release_id": self.RELEASE_ID})
@@ -1031,11 +995,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     @patch("web.routes.pipeline.finalize_request")
     def test_update_to_wanted_preserves_stricter_override(self, mock_transition):
         """Flipping an imported album back to wanted must preserve 'lossless'."""
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
             search_filetype_override="lossless",
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/update",
                                     {"id": 1704, "status": "wanted"})
@@ -1049,11 +1013,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         """Flipping imported→wanted with no override uses the full upgrade ladder."""
         from lib.quality import QUALITY_UPGRADE_TIERS
 
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=160,
             search_filetype_override=None,
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/update",
                                     {"id": 1704, "status": "wanted"})
@@ -1067,11 +1031,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
     @patch("web.routes.pipeline.finalize_request")
     def test_ban_source_preserves_stricter_override(self, mock_transition):
         """Pin: ban_source already preserves override. Guard against future regression."""
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
             search_filetype_override="lossless",
-        )
+        ))
 
         status, _data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1095,16 +1059,15 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         clear-on-disk-quality. Issue #121 couples both sides via
         ``lib.release_cleanup.remove_and_reset_release``.
         """
-        self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
             returncode=0, stdout="", stderr="")
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=160,
             verified_lossless=False,
-        )
+        ))
         # First locate: was present. Second (after remove): gone.
         self._set_locate_sequence([
             ("exact", 1, ()),
@@ -1117,7 +1080,10 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         })
 
         self.assertEqual(status, 200)
-        self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
+        # The on-disk quality fields are wiped on the row itself.
+        row = self.db.request(1704)
+        self.assertIsNone(row["current_spectral_grade"])
+        self.assertIsNone(row["current_spectral_bitrate"])
 
     @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline.finalize_request")
@@ -1132,15 +1098,14 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         user the ban committed but the on-disk remove was incomplete
         (issue #123 PR B).
         """
-        self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
             returncode=1, stdout="", stderr="beet failed")
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
             current_spectral_grade="genuine",
             verified_lossless=True,
-        )
+        ))
         # Album is still there after the remove attempt. Seed the
         # selector tuple so the remove loop has something to iterate.
         self._set_locate_sequence([
@@ -1154,7 +1119,10 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         })
 
         self.assertEqual(status, 200)
-        self.mock_db.clear_on_disk_quality_fields.assert_not_called()
+        # Album still on disk → the on-disk quality stays accurate.
+        row = self.db.request(1704)
+        self.assertEqual(row["current_spectral_grade"], "genuine")
+        self.assertTrue(row["verified_lossless"])
         # #123 PR B + plan 2026-04-29-005 U4: the non-zero rc now
         # surfaces under ``partial_failures.cleanup_errors`` (the
         # unified shape). Distinguishes "banned cleanly" from
@@ -1177,13 +1145,12 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         every caller that asks 'is this release on disk?' agrees on
         the same selector set.
         """
-        self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
             returncode=0, stdout="", stderr="")
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id="12856590",
             min_bitrate=320,
-        )
+        ))
         # Was there (with BOTH Discogs selectors); after both removes, gone.
         self._set_locate_sequence([
             ("exact", 1, ("discogs_albumid:12856590", "mb_albumid:12856590")),
@@ -1217,16 +1184,15 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         doesn't keep deriving ``--override-min-bitrate`` from phantom
         baselines on the next import attempt.
         """
-        self.mock_db.clear_on_disk_quality_fields.reset_mock()
         mock_subprocess.return_value = MagicMock(
             returncode=0, stdout="", stderr="")
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=160,
             imported_path="/mnt/virtio/Music/Beets/Stale/Path",
-        )
+        ))
         # Album was already gone when ban-source ran (earlier beet rm).
         self._set_locate_sequence([
             ("absent", None, ()),
@@ -1239,7 +1205,10 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         })
 
         self.assertEqual(status, 200)
-        self.mock_db.clear_on_disk_quality_fields.assert_called_once_with(1704)
+        # Phantom baselines wiped on the row itself.
+        row = self.db.request(1704)
+        self.assertIsNone(row["current_spectral_grade"])
+        self.assertIsNone(row["current_spectral_bitrate"])
         # No remove ran — the handler had nothing to remove.
         mock_subprocess.assert_not_called()
 
@@ -1250,13 +1219,12 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
         ``remove_and_reset_release`` deletes them. Without it, there is
         no album to ban — return 400 rather than silently skip.
         """
-        self.mock_db.clear_on_disk_quality_fields.reset_mock()
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported",
             min_bitrate=320,
             current_spectral_grade="genuine",
             verified_lossless=True,
-        )
+        ))
 
         status, data = self._post("/api/pipeline/ban-source", {
             "request_id": 1704, "username": "baduser",
@@ -1265,10 +1233,11 @@ class TestUserRequeueOverridePreservation(_WebServerCase):
 
         self.assertEqual(status, 400)
         self.assertIn("mb_release_id", data.get("error", ""))
-        self.mock_db.clear_on_disk_quality_fields.assert_not_called()
+        row = self.db.request(1704)
+        self.assertEqual(row["current_spectral_grade"], "genuine")
 
 
-class TestBanSourceBadRipExtensions(_WebServerCase):
+class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
     """Plan 2026-04-29-005 U4: bad-rip hash capture + server-side
     username resolution + importer-race 409 + unified
     ``partial_failures`` response shape on ``POST /api/pipeline/ban-source``.
@@ -1281,6 +1250,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
     HASH_B = b"\x02" * 32
 
     def setUp(self) -> None:
+        super().setUp()
         import web.server as srv
         self._srv = srv
         self._orig_beets = srv._beets
@@ -1295,19 +1265,10 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         )
         srv._beets = self._beets
 
-        # Reset bad-rip-related mocks so cross-test state doesn't leak.
-        self.mock_db.get_active_import_job_for_request.reset_mock()
-        self.mock_db.get_active_import_job_for_request.return_value = None
-        self.mock_db.get_recent_successful_uploader.reset_mock()
-        self.mock_db.get_recent_successful_uploader.return_value = None
-        self.mock_db.add_bad_audio_hashes.reset_mock()
-        self.mock_db.add_bad_audio_hashes.return_value = 0
-        self.mock_db.add_denylist.reset_mock()
-        self.mock_db.log_download.reset_mock()
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
-        )
+        ))
 
     def tearDown(self) -> None:
         self._srv._beets = self._orig_beets
@@ -1322,14 +1283,16 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         download_log, hashes every track via ``hash_audio_content``,
         and persists them with the resolved username (R3, R5, R7).
         """
-        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        # A prior successful download from Hxrco — the server resolves
+        # the uploader from the real download_log.
+        self.db.log_download(
+            1704, outcome="success", soulseek_username="Hxrco")
         self._beets.get_item_paths.return_value = [
             (1, "/mnt/Music/Beets/A/track-01.flac"),
             (2, "/mnt/Music/Beets/A/track-02.flac"),
         ]
         # Distinct digests per call so the route inserts both rows.
         mock_hash.side_effect = [self.HASH_A, self.HASH_B]
-        self.mock_db.add_bad_audio_hashes.return_value = 2
 
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1341,29 +1304,29 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.assertEqual(data["hashes_recorded"], 2)
         # Happy path: no partial_failures on the response.
         self.assertNotIn("partial_failures", data)
-        # add_bad_audio_hashes called with the resolved username + reason.
-        self.mock_db.add_bad_audio_hashes.assert_called_once()
-        call_args = self.mock_db.add_bad_audio_hashes.call_args
-        self.assertEqual(call_args.args[0], 1704)
-        self.assertEqual(call_args.args[1], "Hxrco")
-        self.assertEqual(call_args.args[2], "manually banned via web UI")
-        hashes_arg = call_args.args[3]
-        self.assertEqual(len(hashes_arg), 2)
-        self.assertEqual(hashes_arg[0].hash_value, self.HASH_A)
-        self.assertEqual(hashes_arg[0].audio_format, "flac")
-        self.assertEqual(hashes_arg[1].hash_value, self.HASH_B)
+        # Both hashes persisted with the resolved username + reason.
+        rows = self.db.bad_audio_hashes
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].request_id, 1704)
+        self.assertEqual(rows[0].reported_username, "Hxrco")
+        self.assertEqual(rows[0].reason, "manually banned via web UI")
+        self.assertEqual(rows[0].hash_value, self.HASH_A)
+        self.assertEqual(rows[0].audio_format, "flac")
+        self.assertEqual(rows[1].hash_value, self.HASH_B)
         # Denylist written for the resolved user.
-        self.mock_db.add_denylist.assert_called_once_with(
-            1704, "Hxrco", "manually banned via web UI"
-        )
-        # #188 follow-up: a download_log row records the ban event.
-        self.mock_db.log_download.assert_called_once()
-        log_kwargs = self.mock_db.log_download.call_args.kwargs
-        self.assertEqual(log_kwargs["request_id"], 1704)
-        self.assertEqual(log_kwargs["soulseek_username"], "Hxrco")
-        self.assertEqual(log_kwargs["outcome"], "curator_ban")
-        self.assertIn("Marked bad rip", log_kwargs["beets_detail"])
-        ban_meta = json.loads(log_kwargs["validation_result"])
+        self.assertEqual(len(self.db.denylist), 1)
+        self.assertEqual(self.db.denylist[0].username, "Hxrco")
+        self.assertEqual(
+            self.db.denylist[0].reason, "manually banned via web UI")
+        # #188 follow-up: a download_log row records the ban event
+        # (newest row after the seeded success).
+        ban_row = self.db.download_logs[-1]
+        self.assertEqual(ban_row.request_id, 1704)
+        self.assertEqual(ban_row.soulseek_username, "Hxrco")
+        self.assertEqual(ban_row.outcome, "curator_ban")
+        assert ban_row.beets_detail is not None
+        self.assertIn("Marked bad rip", ban_row.beets_detail)
+        ban_meta = json.loads(ban_row.validation_result)
         self.assertEqual(ban_meta["scenario"], "curator_ban")
         self.assertEqual(ban_meta["hashes_recorded"], 2)
         self.assertEqual(ban_meta["denylisted_username"], "Hxrco")
@@ -1377,7 +1340,8 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         succeeded count, ``partial_failures.hash_capture_errors``
         names the failed path, denylist + remove + requeue still run.
         """
-        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self.db.log_download(
+            1704, outcome="success", soulseek_username="Hxrco")
         self._beets.get_item_paths.return_value = [
             (1, "/mnt/Music/Beets/A/track-01.flac"),
             (2, "/mnt/Music/Beets/A/track-02.flac"),
@@ -1390,7 +1354,6 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
             AudioHashError("ffmpeg failed (rc=1): truncated mp3"),
             self.HASH_B,
         ]
-        self.mock_db.add_bad_audio_hashes.return_value = 2
 
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1406,10 +1369,9 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
                          "/mnt/Music/Beets/A/track-02.flac")
         self.assertIn("truncated", errors[0]["reason"])
         # Denylist still runs for the resolved user.
-        self.mock_db.add_denylist.assert_called_once()
-        # ``add_bad_audio_hashes`` called with the two SUCCESSFUL hashes only.
-        hashes_arg = self.mock_db.add_bad_audio_hashes.call_args.args[3]
-        self.assertEqual(len(hashes_arg), 2)
+        self.assertEqual(len(self.db.denylist), 1)
+        # Only the two SUCCESSFUL hashes persisted.
+        self.assertEqual(len(self.db.bad_audio_hashes), 2)
 
     # E1.1 — no successful uploader on record.
     @patch("web.routes.pipeline.hash_audio_content")
@@ -1420,12 +1382,11 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         ``add_denylist`` not called, but hashes ARE recorded with
         ``reported_username=None`` (the bytes are still protected).
         """
-        self.mock_db.get_recent_successful_uploader.return_value = None
+        # No successful download on record — nothing seeded.
         self._beets.get_item_paths.return_value = [
             (1, "/mnt/Music/Beets/A/track-01.mp3"),
         ]
         mock_hash.return_value = self.HASH_A
-        self.mock_db.add_bad_audio_hashes.return_value = 1
 
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1437,15 +1398,14 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.assertEqual(data["hashes_recorded"], 1)
         self.assertNotIn("partial_failures", data)
         # #188 follow-up: ban event still logged with NULL username.
-        self.mock_db.log_download.assert_called_once()
-        log_kwargs = self.mock_db.log_download.call_args.kwargs
-        self.assertEqual(log_kwargs["outcome"], "curator_ban")
-        self.assertIsNone(log_kwargs["soulseek_username"])
+        ban_row = self.db.download_logs[-1]
+        self.assertEqual(ban_row.outcome, "curator_ban")
+        self.assertIsNone(ban_row.soulseek_username)
         # Hashes recorded with username=None.
-        call_args = self.mock_db.add_bad_audio_hashes.call_args
-        self.assertIsNone(call_args.args[1])
-        # No denylist call when no user resolved.
-        self.mock_db.add_denylist.assert_not_called()
+        self.assertEqual(len(self.db.bad_audio_hashes), 1)
+        self.assertIsNone(self.db.bad_audio_hashes[0].reported_username)
+        # No denylist entry when no user resolved.
+        self.assertEqual(self.db.denylist, [])
 
     # E1.2 — album not in beets / no track paths.
     @patch("web.routes.pipeline.finalize_request")
@@ -1456,7 +1416,8 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         ``no_tracks_in_beets`` entry; denylist still runs if
         username resolved; no hashes recorded.
         """
-        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self.db.log_download(
+            1704, outcome="success", soulseek_username="Hxrco")
         self._beets.get_item_paths.return_value = []
 
         status, data = self._post(
@@ -1472,11 +1433,10 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.assertIsNone(errors[0]["track_path"])
         self.assertEqual(errors[0]["reason"], "no_tracks_in_beets")
         # Denylist still written.
-        self.mock_db.add_denylist.assert_called_once_with(
-            1704, "Hxrco", "manually banned via web UI"
-        )
-        # No add_bad_audio_hashes call (empty list short-circuit).
-        self.mock_db.add_bad_audio_hashes.assert_not_called()
+        self.assertEqual(len(self.db.denylist), 1)
+        self.assertEqual(self.db.denylist[0].username, "Hxrco")
+        # No hashes persisted (empty list short-circuit).
+        self.assertEqual(self.db.bad_audio_hashes, [])
 
     # E1.3 — importer race: 409 before any work.
     def test_importer_busy_returns_409_no_writes(self):
@@ -1484,9 +1444,14 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         ``{error: "importer_busy", retry_after_seconds: 30}``. No
         denylist, no hashes, no beets_db calls.
         """
-        self.mock_db.get_active_import_job_for_request.return_value = {
-            "id": 99, "request_id": 1704, "status": "running",
-        }
+        # An active (queued) import job for the request — the fake's
+        # get_active_import_job_for_request treats queued and running
+        # alike, mirroring the production active-set.
+        self.db.enqueue_import_job(
+            "force_import", request_id=1704,
+            dedupe_key="force_import:download_log:99",
+            payload={"failed_path": "/tmp/Busy Album"},
+        )
 
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1498,8 +1463,8 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.assertEqual(data["error"], "importer_busy")
         self.assertEqual(data["retry_after_seconds"], 30)
         # No mutation of any kind.
-        self.mock_db.add_denylist.assert_not_called()
-        self.mock_db.add_bad_audio_hashes.assert_not_called()
+        self.assertEqual(self.db.denylist, [])
+        self.assertEqual(self.db.bad_audio_hashes, [])
         self._beets.get_item_paths.assert_not_called()
         self._beets.locate.assert_not_called()
 
@@ -1512,14 +1477,22 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         the DB layer; ``add_bad_audio_hashes`` returns 0). Response
         is 200 with ``hashes_recorded: 0`` and no ``partial_failures``.
         """
-        self.mock_db.get_recent_successful_uploader.return_value = "Hxrco"
+        self.db.log_download(
+            1704, outcome="success", soulseek_username="Hxrco")
         self._beets.get_item_paths.return_value = [
             (1, "/mnt/Music/Beets/A/track-01.flac"),
         ]
         mock_hash.return_value = self.HASH_A
-        # DB layer returns 0 — every (hash, format) already present.
-        self.mock_db.add_bad_audio_hashes.return_value = 0
 
+        # First click inserts the hash for real...
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["hashes_recorded"], 1)
+
+        # ...the second click dedupes on (hash, format) and inserts 0.
         status, data = self._post(
             "/api/pipeline/ban-source",
             {"request_id": 1704, "mb_release_id": self.RELEASE_ID},
@@ -1528,6 +1501,7 @@ class TestBanSourceBadRipExtensions(_WebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["hashes_recorded"], 0)
         self.assertNotIn("partial_failures", data)
+        self.assertEqual(len(self.db.bad_audio_hashes), 1)
 
 if __name__ == "__main__":
     unittest.main()
