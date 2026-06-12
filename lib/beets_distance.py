@@ -46,17 +46,17 @@ from typing import Callable, Optional, Protocol, Sequence
 
 import msgspec
 
-# Eager beets imports. Lazy-loading was tempting (the module is heavy
-# and quality_evidence/measurement do the same), but a sibling
-# ``tests/web/_harness.py`` adds ``lib/`` to sys.path early
-# in the test session, which then shadows the upstream ``beets``
-# package whenever we lazily ``from beets import library`` later. By
-# importing eagerly here we lock in the right module at this file's
-# load time, before any test fixture can prepend lib/ to sys.path.
-from beets import library as _beets_library  # noqa: E402
-from beets.autotag import distance as _beets_distance_mod  # noqa: E402
-from beets.autotag import hooks as _beets_hooks  # noqa: E402
-from beets.autotag import match as _beets_match_mod  # noqa: E402
+# Eager beets imports — deliberate. The module is heavy, but importing
+# at load time pins the upstream ``beets`` package once; lazy imports
+# inside call paths would re-resolve ``beets`` against whatever
+# sys.path looks like at call time. (Historically this guarded against
+# tests/web/_harness.py putting ``lib/`` on sys.path so ``lib/beets.py``
+# shadowed the real package — that insert is gone, and
+# tests/test_no_dual_load.py now bans the ambiguity outright.)
+from beets import library as _beets_library
+from beets.autotag import distance as _beets_distance_mod
+from beets.autotag import hooks as _beets_hooks
+from beets.autotag import match as _beets_match_mod
 
 from lib.validation_envelope import decode_validation_envelope
 

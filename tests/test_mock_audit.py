@@ -83,10 +83,10 @@ class TestSysPathAudit(unittest.TestCase):
     # Front-inserts of repo source dirs (lib/, web/, scripts/) shadow
     # same-named top-level packages — lib/beets.py out-ranks the real
     # ``beets`` package (the issue #95 dual-load footgun conftest.py
-    # documents). tests/web/_harness.py is the one DELIBERATE exception:
-    # it reproduces production's PYTHONPATH ambiguity on purpose (see
-    # TestPipelineRouteDirectEquivalence) and protects itself by eagerly
-    # importing the real ``beets`` first.
+    # documents). No exceptions: the tests/web/_harness.py inserts that
+    # deliberately reproduced the ambiguity were removed with #445
+    # item 3 (production now strips its script-dir entry too — see
+    # tests/test_no_dual_load.py).
     _SOURCE_DIR_INSERT_RE = __import__("re").compile(
         r'sys\.path\.insert\(\s*\d+\s*,\s*os\.path\.join\('
         r'os\.path\.dirname\(__file__\),\s*"\.\."(?:,\s*"\.\.")?,'
@@ -106,9 +106,7 @@ class TestSysPathAudit(unittest.TestCase):
                     continue  # mentions the pattern in its own source
                 with open(path, encoding="utf-8") as f:
                     for lineno, line in enumerate(f, 1):
-                        if (self._SOURCE_DIR_INSERT_RE.search(line)
-                                and rel != os.path.join(
-                                    "web", "_harness.py")):
+                        if self._SOURCE_DIR_INSERT_RE.search(line):
                             offenders.append(
                                 f"  - {rel}:{lineno} (source-dir insert)")
                             continue
