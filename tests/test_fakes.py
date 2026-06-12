@@ -5309,6 +5309,52 @@ class TestFakeCursor(unittest.TestCase):
         self.assertIsNone(cur.fetchone())
 
 
+class TestFakeDownloadLogCounts(unittest.TestCase):
+    """State-derived mirror of PipelineDB.get_download_log_counts —
+    parity with the real SQL is pinned in tests/test_pipeline_db.py."""
+
+    def test_counts_derive_from_logged_state(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.log_download(1, outcome="success")
+        db.log_download(1, outcome="force_import")
+        db.log_download(1, outcome="rejected")
+        db.log_search(1, outcome="found")
+        db.log_search(1, outcome="found")
+        db.log_search(1, outcome="error")
+        # Age one found-row out of the 6h window only, one out of both.
+        db.search_logs[0].created_at -= timedelta(hours=12)
+        db.log_search(1, outcome="found")
+        db.search_logs[-1].created_at -= timedelta(days=2)
+
+        counts = db.get_download_log_counts()
+        self.assertEqual(counts.total, 3)
+        self.assertEqual(counts.imported, 2)
+        self.assertEqual(counts.matches_24h, 2)
+        self.assertEqual(counts.matches_6h, 1)
+
+
+class TestFakeGetPipelineOverlay(unittest.TestCase):
+    def test_projects_overlay_fields_from_seeded_requests(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=7, mb_release_id="mbid-1", status="wanted",
+            search_filetype_override="lossless", min_bitrate=900))
+        db.seed_request(make_request_row(id=8, mb_release_id="mbid-2"))
+        info = db.get_pipeline_overlay(["mbid-1", "mbid-unknown"])
+        self.assertEqual(set(info), {"mbid-1"})
+        self.assertEqual(info["mbid-1"], {
+            "id": 7, "status": "wanted",
+            "search_filetype_override": "lossless",
+            "target_format": None, "min_bitrate": 900,
+        })
+
+    def test_empty_mbids_short_circuits(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, mb_release_id="mbid-1"))
+        self.assertEqual(db.get_pipeline_overlay([]), {})
+
+
 class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
     """The fake mirrors migrations/001's UNIQUE on album_requests.mb_release_id.
 

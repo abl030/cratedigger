@@ -83,6 +83,32 @@ class _RequestsMixin(_PipelineDBBase):
         return dict(row) if row else None
 
 
+    def get_pipeline_overlay(
+        self, mbids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Map mb_release_id → badge-overlay info for the browse /
+        library views (#445 item 2 — formerly inline SQL in
+        ``web/overlay.py::check_pipeline``)."""
+        if not mbids:
+            return {}
+        placeholders = ",".join(["%s"] * len(mbids))
+        cur = self._execute(
+            f"SELECT id, mb_release_id, status, search_filetype_override, "
+            f"target_format, min_bitrate "
+            f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
+            tuple(mbids),
+        )
+        return {
+            r["mb_release_id"]: {
+                "id": r["id"],
+                "status": r["status"],
+                "search_filetype_override": r["search_filetype_override"],
+                "target_format": r["target_format"],
+                "min_bitrate": r["min_bitrate"],
+            }
+            for r in cur.fetchall()
+        }
+
     def get_request_by_mb_release_id(self, mb_release_id: str) -> dict[str, Any] | None:
         cur = self._execute(
             "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)

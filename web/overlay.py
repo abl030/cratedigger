@@ -21,7 +21,9 @@ class OverlayPipelineDB(Protocol):
     """The slice of PipelineDB the overlay consumes (per-consumer
     protocol, the #409 pattern — FakePipelineDB satisfies it too)."""
 
-    def _execute(self, sql: str, params: tuple = ()) -> Any: ...
+    def get_pipeline_overlay(
+        self, mbids: list[str],
+    ) -> dict[str, dict[str, Any]]: ...
 
 
 class OverlayBeetsDB(Protocol):
@@ -80,22 +82,7 @@ def check_pipeline(pdb: "OverlayPipelineDB | None", mbids) -> dict:
     """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → info."""
     if not mbids or pdb is None:
         return {}
-    placeholders = ",".join(["%s"] * len(mbids))
-    cur = pdb._execute(
-        f"SELECT id, mb_release_id, status, search_filetype_override, target_format, min_bitrate "
-        f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
-        tuple(mbids),
-    )
-    return {
-        r["mb_release_id"]: {
-            "id": r["id"],
-            "status": r["status"],
-            "search_filetype_override": r["search_filetype_override"],
-            "target_format": r["target_format"],
-            "min_bitrate": r["min_bitrate"],
-        }
-        for r in cur.fetchall()
-    }
+    return pdb.get_pipeline_overlay([str(m) for m in mbids])
 
 
 def enrich_with_pipeline(

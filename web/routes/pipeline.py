@@ -242,50 +242,17 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         item["wrong_match_triage_detail"] = classified.wrong_match_triage_detail
         result.append(item)
     # Count recents filters plus found-search enqueue rates (single query).
-    count_cur = _server()._db()._execute("""
-        WITH download_counts AS (
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (
-                    WHERE outcome IN ('success', 'force_import')
-                ) AS imported
-            FROM download_log
-        ),
-        match_counts AS (
-            SELECT
-                COUNT(*) FILTER (
-                    WHERE outcome = 'found'
-                      AND created_at >= NOW() - INTERVAL '24 hours'
-                )::int AS matches_24h,
-                COUNT(*) FILTER (
-                    WHERE outcome = 'found'
-                      AND created_at >= NOW() - INTERVAL '6 hours'
-                )::int AS matches_6h
-            FROM search_log
-        )
-        SELECT
-            download_counts.total,
-            download_counts.imported,
-            match_counts.matches_24h,
-            match_counts.matches_6h
-        FROM download_counts
-        CROSS JOIN match_counts
-    """)
-    count_row = count_cur.fetchone()
-    total = count_row["total"] if count_row else 0
-    imported_c = count_row["imported"] if count_row else 0
-    matches_24h = count_row.get("matches_24h", 0) if count_row else 0
-    matches_6h = count_row.get("matches_6h", 0) if count_row else 0
+    counts = _server()._db().get_download_log_counts()
     h._json({
         "log": result,
         "counts": {
-            "all": total,
-            "imported": imported_c,
-            "rejected": total - imported_c,
-            "matches_24h": matches_24h,
-            "matches_6h": matches_6h,
-            "matches_per_hour_24h": matches_24h / 24,
-            "matches_per_hour_6h": matches_6h / 6,
+            "all": counts.total,
+            "imported": counts.imported,
+            "rejected": counts.total - counts.imported,
+            "matches_24h": counts.matches_24h,
+            "matches_6h": counts.matches_6h,
+            "matches_per_hour_24h": counts.matches_24h / 24,
+            "matches_per_hour_6h": counts.matches_6h / 6,
         },
     })
 

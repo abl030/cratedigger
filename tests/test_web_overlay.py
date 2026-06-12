@@ -10,7 +10,8 @@ import unittest
 
 from web import overlay
 
-from tests.fakes import FakeBeetsDB, FakeCursor, FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import make_request_row
 
 
 class TestSerializeRow(unittest.TestCase):
@@ -30,17 +31,12 @@ class TestCheckPipeline(unittest.TestCase):
     def test_empty_mbids_short_circuits(self):
         db = FakePipelineDB()
         self.assertEqual(overlay.check_pipeline(db, []), {})
-        self.assertEqual(db.execute_calls, [])
 
     def test_returns_info_keyed_by_mbid(self):
         db = FakePipelineDB()
-        db.queue_execute_results(FakeCursor([
-            {
-                "id": 7, "mb_release_id": "mbid-1", "status": "wanted",
-                "search_filetype_override": "lossless",
-                "target_format": None, "min_bitrate": 900,
-            },
-        ]))
+        db.seed_request(make_request_row(
+            id=7, mb_release_id="mbid-1", status="wanted",
+            search_filetype_override="lossless", min_bitrate=900))
         info = overlay.check_pipeline(db, ["mbid-1", "mbid-2"])
         self.assertEqual(set(info), {"mbid-1"})
         self.assertEqual(info["mbid-1"]["id"], 7)
@@ -57,13 +53,9 @@ class TestEnrichWithPipeline(unittest.TestCase):
 
     def test_wanted_with_override_marks_upgrade_queued(self):
         db = FakePipelineDB()
-        db.queue_execute_results(FakeCursor([
-            {
-                "id": 7, "mb_release_id": "mbid-1", "status": "wanted",
-                "search_filetype_override": "lossless",
-                "target_format": None, "min_bitrate": None,
-            },
-        ]))
+        db.seed_request(make_request_row(
+            id=7, mb_release_id="mbid-1", status="wanted",
+            search_filetype_override="lossless", min_bitrate=None))
         albums: list[dict[str, object]] = [
             {"mb_albumid": "mbid-1"}, {"mb_albumid": "other"}]
         overlay.enrich_with_pipeline(db, albums)
