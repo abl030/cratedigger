@@ -10,7 +10,6 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tagging-workspace", "scripts"))
 
 from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry, DownloadFile
