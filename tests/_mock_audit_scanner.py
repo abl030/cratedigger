@@ -544,3 +544,71 @@ def scan_web_harness_overrides() -> Dict[str, int]:
         if n:
             counts[rel] = n
     return counts
+
+
+# === Web beets-MagicMock ratchet (#445 item 1) ===
+#
+# The #430 migration covered the pipeline DB; the browse / library /
+# pipeline contract tests still configure MagicMock shapes for the
+# OTHER stateful collaborator — ``BeetsDB``. Those mocks evaded the
+# stateful-assign heuristic purely by variable naming: ``mock_beets``,
+# ``self._beets`` and ``self.beets`` don't match ``STATEFUL_VAR_NAMES``
+# (same evasion class the r1 ratchet review caught for ``mock_db``).
+#
+# This ratchet counts OCCURRENCES of the beets-mock variable names in
+# ``tests/web`` files: ``mock_beets`` (plus suffixed forms like
+# ``mock_beets_cls``), ``self._beets`` and ``self.beets``. It does NOT
+# count the production attribute ``web.server._beets`` itself —
+# migrated tests still inject a fake via ``srv._beets = fake`` (the
+# same constructor-replacement seam as ``web.server.db``), and
+# ``test_routes_browse``'s real-SQLite class fixture (``cls._beets =
+# BeetsDB(...)``) is legitimate. The audit test requires the live
+# counts to match this baseline EXACTLY — growth fails, and an
+# un-shrunk baseline after a migration also fails, so every migration
+# PR is forced to record its own progress. The replacement is
+# ``FakeBeetsDB`` from ``tests/fakes.py`` (extend it + add a self-test
+# in ``tests/test_fakes.py::TestFakeBeetsDB`` when a route exercises a
+# method it lacks).
+#
+# Known limits (adversarial review of the landing PR):
+# - Name the migrated attribute ``self.beets_db`` (uncounted), NOT
+#   ``self._beets = FakeBeetsDB()`` — the regex counts the name, not
+#   the type, so reusing the mock's name would keep the file's count
+#   inflated and make the failure message lie.
+# - ``cls``-level shapes are uncounted because browse's real-SQLite
+#   fixture legitimately uses ``cls._beets``. Do NOT introduce
+#   ``cls._beets = MagicMock()`` — the general stateful-assign audit
+#   misses it too; it is a review tripwire, not a sanctioned gap.
+# - Shrinking this baseline is only legitimate when the mocks were
+#   replaced with ``FakeBeetsDB`` seeding — aliasing
+#   (``b = self._beets``) also shrinks the count and is an evasion.
+
+_WEB_BEETS_MOCK_RE = re.compile(
+    r"\bmock_beets\w*|self\._beets\b|self\.beets\b")
+
+WEB_BEETS_MOCK_BASELINE: Dict[str, int] = {
+    os.path.join("web", "test_routes_browse.py"): 23,
+    os.path.join("web", "test_routes_labels.py"): 4,
+    os.path.join("web", "test_routes_library.py"): 31,
+    os.path.join("web", "test_routes_pipeline.py"): 6,
+    os.path.join("web", "test_routes_pipeline_mutations.py"): 19,
+}
+
+
+def count_beets_mock_overrides(text: str) -> int:
+    """Count beets-MagicMock variable-name occurrences in one file's text."""
+    return len(_WEB_BEETS_MOCK_RE.findall(text))
+
+
+def scan_web_beets_overrides() -> Dict[str, int]:
+    """Count beets-MagicMock occurrences per ``tests/web`` test file."""
+    counts: Dict[str, int] = {}
+    web_prefix = "web" + os.sep
+    for rel, path in iter_scan_paths():
+        if not rel.startswith(web_prefix):
+            continue
+        with open(path, encoding="utf-8") as f:
+            n = count_beets_mock_overrides(f.read())
+        if n:
+            counts[rel] = n
+    return counts
