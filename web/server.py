@@ -37,6 +37,7 @@ if __name__ == "__main__" or "web.server" not in sys.modules:
 
 from web import cache as cache
 from web import mb as mb_api
+from web import overlay as _overlay
 from lib.beets_db import BeetsDB
 from lib.pipeline_db import PipelineDB
 from web.routes import browse as _browse_routes
@@ -157,38 +158,12 @@ def _close_thread_handles() -> None:
         _thread_state.beets = None
 
 
-def _serialize_row(row: dict[str, object]) -> dict[str, object]:
-    """Serialize a DB row dict — convert datetime objects to ISO strings."""
-    result: dict[str, object] = {}
-    for k, v in row.items():
-        if hasattr(v, "isoformat"):
-            result[k] = v.isoformat()  # type: ignore[union-attr]
-        else:
-            result[k] = v
-    return result
-
-
-def check_beets_library(mbids: list[str] | list[object]) -> set[str]:
-    """Check which MBIDs are already in the beets library."""
-    b = _beets_db()
-    return b.check_mbids([str(m) for m in mbids]) if b else set()
-
-
-def check_beets_library_detail(mbids: list[str] | list[object]) -> dict[str, dict[str, object]]:
-    """Check beets library with track counts and audio quality."""
-    b = _beets_db()
-    return b.check_mbids_detail([str(m) for m in mbids]) if b else {}
-
-
-def get_library_artist(
-    artist_name: str,
-    mb_artist_id: str = "",
-) -> list[dict[str, object]]:
-    """Get albums by an artist from the beets library."""
-    b = _beets_db()
-    if not b:
-        return []
-    return b.get_albums_by_artist(artist_name, mb_artist_id)
+# ── Overlay wiring ───────────────────────────────────────────────────
+#
+# The overlay/domain logic lives in web/overlay.py with explicit DB
+# parameters (#432). This module is the composition root: it binds the
+# per-thread handles and re-exports the bound names that route modules
+# (and test patch targets) consume via ``srv.X``.
 
 
 def _db_available() -> bool:
@@ -197,96 +172,38 @@ def _db_available() -> bool:
     return bool(_db_dsn) or db is not None
 
 
+def _db_or_none() -> PipelineDB | None:  # noqa: same nominal type, server-owned
+    """This thread's pipeline DB, or None when no DB is configured."""
+    return _db() if _db_available() else None
+
+
+# Pure helpers — re-bound so routes / tests keep their existing names.
+_serialize_row = _overlay.serialize_row
+apply_pipeline_bitrate_override = _overlay.apply_pipeline_bitrate_override
+compute_library_rank = _overlay.compute_library_rank
+
+
+def check_beets_library(mbids: list[str] | list[object]) -> set[str]:
+    return _overlay.check_beets_library(_beets_db(), mbids)
+
+
+def check_beets_library_detail(mbids: list[str] | list[object]) -> dict[str, dict[str, object]]:
+    return _overlay.check_beets_library_detail(_beets_db(), mbids)
+
+
+def get_library_artist(
+    artist_name: str,
+    mb_artist_id: str = "",
+) -> list[dict[str, object]]:
+    return _overlay.get_library_artist(_beets_db(), artist_name, mb_artist_id)
+
+
 def check_pipeline(mbids):
-    """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → info."""
-    if not mbids or not _db_available():
-        return {}
-    pdb = _db()
-    placeholders = ",".join(["%s"] * len(mbids))
-    cur = pdb._execute(
-        f"SELECT id, mb_release_id, status, search_filetype_override, target_format, min_bitrate "
-        f"FROM album_requests WHERE mb_release_id IN ({placeholders})",
-        tuple(mbids),
-    )
-    return {
-        r["mb_release_id"]: {
-            "id": r["id"],
-            "status": r["status"],
-            "search_filetype_override": r["search_filetype_override"],
-            "target_format": r["target_format"],
-            "min_bitrate": r["min_bitrate"],
-        }
-        for r in cur.fetchall()
-    }
+    return _overlay.check_pipeline(_db_or_none(), mbids)
 
 
 def _enrich_with_pipeline(albums: list[dict[str, object]]) -> None:
-    """Add pipeline_status/upgrade_queued to album dicts. Mutates in place."""
-    if not _db_available():
-        return
-    mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
-    if not mbids:
-        return
-    pipeline_info = check_pipeline(mbids)
-    for a in albums:
-        pi = pipeline_info.get(a.get("mb_albumid"))
-        if pi:
-            apply_pipeline_bitrate_override(a, pi)
-
-
-_rank_cfg_cache = None
-
-
-def _rank_cfg():
-    """Cached QualityRankConfig from runtime config.ini.
-
-    Falls back to defaults if the ini can't be read (e.g. tests / first-
-    boot). The cache is module-scoped — a deploy restart picks up any
-    [Quality Ranks] changes via the cratedigger-web service restart that
-    deploy.md guarantees.
-    """
-    global _rank_cfg_cache
-    if _rank_cfg_cache is None:
-        try:
-            from lib.config import read_runtime_rank_config
-            _rank_cfg_cache = read_runtime_rank_config()
-        except Exception:
-            from lib.quality import QualityRankConfig
-            _rank_cfg_cache = QualityRankConfig.defaults()
-    return _rank_cfg_cache
-
-
-def compute_library_rank(format_str: str | None, bitrate_kbps: int | None) -> str:
-    """Codec-aware quality rank label for a beets album.
-
-    Single source of truth for the in-library badge's tier — same logic
-    the import gate uses, so what you see in the badge matches what the
-    pipeline's quality decisions act on. Returns lowercase rank name
-    ('lossless', 'transparent', 'excellent', 'good', 'acceptable',
-    'poor', 'unknown'). Treats MP3 as VBR — cratedigger's pipeline only
-    produces VBR-V0 MP3, and for the bitrate buckets the badge cares
-    about the VBR-vs-CBR distinction barely matters at the display level.
-
-    Thin wrapper supplying the web process's cached rank cfg; the pure
-    decision lives in ``lib.banding`` so the CLI bands without importing web.
-    """
-    from lib.banding import compute_library_rank as _band_rank
-    return _band_rank(format_str, bitrate_kbps, _rank_cfg())
-
-
-def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:
-    """Apply pipeline DB min_bitrate and upgrade_queued flag to a beets album dict.
-
-    Pipeline DB stores kbps, beets stores bps. Only overrides when pipeline is higher.
-    """
-    if pipeline_info.get("status") == "wanted" and (pipeline_info.get("search_filetype_override") or pipeline_info.get("target_format")):
-        album["upgrade_queued"] = True
-    pi_br = pipeline_info.get("min_bitrate")
-    a_br = album.get("min_bitrate")
-    if pi_br is not None and a_br is not None:
-        pi_br_bps = pi_br * 1000  # kbps → bps
-        if pi_br_bps > a_br:
-            album["min_bitrate"] = pi_br_bps
+    _overlay.enrich_with_pipeline(_db_or_none(), albums)
 
 
 class Handler(BaseHTTPRequestHandler):

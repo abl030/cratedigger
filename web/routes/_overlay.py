@@ -35,13 +35,13 @@ def _band_from_detail(
     membership / detail queries are the caller's responsibility (batched
     once); this is pure given them.
     """
-    from web import server as srv
+    from web import overlay
     from lib.banding import band_from_detail
 
     # Delegate to the shared lib decision, supplying the web process's cached
     # rank cfg. The decision lives in lib/ so the CLI bands without importing
     # web (no parallel three-way logic).
-    return band_from_detail(rid, in_library, quality, srv._rank_cfg())
+    return band_from_detail(rid, in_library, quality, overlay._rank_cfg())
 
 
 def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
