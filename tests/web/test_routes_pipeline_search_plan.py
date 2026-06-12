@@ -5,25 +5,24 @@ Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _WebServerCase
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
-from lib.pipeline_db import SearchPlanProvenance
 from tests.helpers import make_request_row
 
 
-class TestPipelineSearchPlanContract(_WebServerCase):
+class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
     """U6 contract for ``GET /api/pipeline/<id>/search-plan``.
 
     The frontend doesn't consume this in v1, but the route must be
@@ -86,161 +85,91 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         "result_count", "elapsed_s", "final_state",
     }
 
-    def _wire_inspection(
-        self,
-        *,
-        request_status: str = "wanted",
-        request_id: int = 100,
-        active: object = None,
-        latest_failed_deterministic: object = None,
-        latest_failed_transient: object = None,
-        superseded_count: int = 0,
-        legacy_log_count: int = 0,
-        legacy_head_history: list[dict] | None = None,
-    ) -> None:
-        from lib.pipeline_db import (
-            SearchPlanInspection,
-            SearchPlanStats,
-            SearchPlanStatsBucket,
-            CACHE_ATTRIBUTION_CYCLE_ONLY,
-        )
-        from tests.helpers import make_request_row
-        self.mock_db.get_request.return_value = make_request_row(
-            id=request_id, status=request_status,
-        )
-        self.mock_db.get_search_history.reset_mock()
-        self.mock_db.get_legacy_search_log_summary.reset_mock()
-        self.mock_db.get_search_plan_stats_history.reset_mock()
-        self.mock_db.get_search_plan_inspection.return_value = (
-            SearchPlanInspection(
-                request_id=request_id,
-                active=active,  # type: ignore[arg-type]
-                latest_failed_deterministic=latest_failed_deterministic,  # type: ignore[arg-type]
-                latest_failed_transient=latest_failed_transient,  # type: ignore[arg-type]
-                superseded_count=superseded_count,
-                legacy_search_log_count=legacy_log_count,
-            ))
-        self.mock_db.get_legacy_search_log_summary.return_value = (
-            legacy_log_count, legacy_head_history or [])
-        self.mock_db.get_search_plan_stats_history.return_value = []
-        empty_bucket = SearchPlanStatsBucket(
-            slots=[], query_groups=[], legacy_bucket=None,
-            cache_attribution_level=CACHE_ATTRIBUTION_CYCLE_ONLY,
-            cache_per_search_available=False,
-        )
-        self.mock_db.get_search_plan_stats.return_value = SearchPlanStats(
-            request_id=request_id,
-            current=empty_bucket,
-            superseded_and_legacy=empty_bucket,
-        )
+    def _seed_request(self, *, request_id: int = 100,
+                      status: str = "wanted") -> None:
+        self.db.seed_request(make_request_row(id=request_id, status=status))
 
-    def _make_active(
-        self, *,
-        generator_id: str = "search-plan/2026-05-25-1",
-        items_count: int = 2,
-        next_ordinal: int = 0,
-        cycle_count: int = 0,
-        plan_provenance: SearchPlanProvenance | None = None,
-    ):
-        from datetime import datetime, timezone
-        from lib.pipeline_db import (
-            ActiveSearchPlan, SearchPlanItemRow, SearchPlanRow,
-            SearchPlanMetadataSnapshot, SearchPlanItemProvenance,
-            SearchPlanProvenance,
-        )
-        plan = SearchPlanRow(
-            id=11, request_id=100, generator_id=generator_id,
-            status="active", failure_class=None,
-            metadata_snapshot=SearchPlanMetadataSnapshot(artist_name="X"),
-            provenance=plan_provenance,
-            error_message=None, superseded_at=None,
-            superseded_by_plan_id=None,
-            created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
-        )
-        items = [
-            SearchPlanItemRow(
-                id=1000 + i, plan_id=11, ordinal=i,
+    def _plan_items(self, items_count: int = 2):
+        from lib.pipeline_db import SearchPlanItemInput
+        return [
+            SearchPlanItemInput(
+                ordinal=i,
                 strategy=("default" if i == 0 else f"strategy_{i}"),
                 query=f"q{i}", canonical_query_key=f"k{i}",
                 repeat_group=("default-3" if i == 0 else None),
-                provenance=SearchPlanItemProvenance(values={"src": "gen"}) if i == 0 else None,
+                provenance={"src": "gen"} if i == 0 else None,
             )
             for i in range(items_count)
         ]
-        return ActiveSearchPlan(
-            plan=plan, items=items,
-            next_ordinal=next_ordinal, cycle_count=cycle_count,
+
+    def _seed_active_plan(
+        self, *,
+        generator_id: str = "search-plan/2026-05-25-1",
+        items_count: int = 2,
+        plan_provenance: dict | None = None,
+    ) -> int:
+        return self.db.create_successful_search_plan(
+            request_id=100, generator_id=generator_id,
+            items=self._plan_items(items_count),
+            metadata_snapshot={"artist_name": "X"},
+            provenance=plan_provenance,
         )
 
-    def _make_failed_plan(
+    def _seed_failed_plan(
         self, *,
-        plan_id: int,
-        status: str,
+        transient: bool,
         failure_class: str,
         error_message: str = "boom",
         generator_id: str = "search-plan/2026-05-19-1",
-    ):
-        from datetime import datetime, timezone
-        from lib.pipeline_db import SearchPlanRow, SearchPlanProvenance
-        return SearchPlanRow(
-            id=plan_id, request_id=100, generator_id=generator_id,
-            status=status, failure_class=failure_class,
-            metadata_snapshot=None,
-            provenance=SearchPlanProvenance(values={"reason": failure_class}),
-            error_message=error_message, superseded_at=None,
-            superseded_by_plan_id=None,
-            created_at=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+    ) -> int:
+        return self.db.create_failed_search_plan(
+            request_id=100, generator_id=generator_id,
+            failure_class=failure_class, error_message=error_message,
+            transient=transient,
+            provenance={"reason": failure_class},
         )
 
-    def tearDown(self) -> None:
-        # Reset mocks so other suites in this class don't see leakage.
-        from tests.helpers import make_request_row
-        self.mock_db.get_request.return_value = make_request_row(
-            id=100, status="imported", min_bitrate=320,
-            imported_path="/mnt/virtio/Music/Beets/Test",
-        )
-        self.mock_db.get_legacy_search_log_summary.return_value = (0, [])
-        self.mock_db.get_search_plan_stats_history.return_value = []
-        self.mock_db.get_search_plan_inspection.reset_mock(
-            return_value=True, side_effect=True)
-        self.mock_db.get_search_plan_stats.reset_mock(
-            return_value=True, side_effect=True)
+    def _seed_legacy_logs(self, n: int) -> None:
+        """Plan-less search_log rows — the fake counts plan_id IS NULL
+        rows as legacy, same as production."""
+        for i in range(1, n + 1):
+            self.db.log_search(
+                100, query=f"q{i}",
+                outcome=("found" if i % 2 == 0 else "no_match"),
+                variant="v1", result_count=(5 if i % 2 == 0 else 0),
+                elapsed_s=float(i), final_state="Completed",
+            )
 
     # -- happy path: active + failures + legacy logs --
 
     def test_search_plan_route_returns_full_inspection_payload(self):
-        from lib.pipeline_db import SearchPlanProvenance
-        active = self._make_active(plan_provenance=SearchPlanProvenance(values={
-            "omitted_candidates": [{"q": "x", "why": "low_entropy"}],
-            "dropped_low_entropy_tokens": ["the", "and"],
-        }))
-        det = self._make_failed_plan(
-            plan_id=22, status="failed_deterministic",
-            failure_class="no_runnable_query",
-            error_message="all queries dropped")
-        trans = self._make_failed_plan(
-            plan_id=23, status="failed_transient",
-            failure_class="resolver_unavailable",
-            error_message="resolver 503")
-        self._wire_inspection(
-            active=active,
-            latest_failed_deterministic=det,
-            latest_failed_transient=trans,
-            superseded_count=2,
-            legacy_log_count=5,
-            legacy_head_history=[
-                {"id": 1, "request_id": 100, "outcome": "no_match",
-                 "variant": "v1", "query": "q1", "result_count": 0,
-                 "elapsed_s": 1.0, "final_state": "Completed",
-                 "created_at": "2026-04-01T00:00:00+00:00",
-                 "plan_id": None},
-                {"id": 2, "request_id": 100, "outcome": "found",
-                 "variant": "v1", "query": "q2", "result_count": 5,
-                 "elapsed_s": 2.0, "final_state": "Completed",
-                 "created_at": "2026-04-02T00:00:00+00:00",
-                 "plan_id": None},
-            ],
+        self._seed_request()
+        # Three real generations: two get superseded, the third is the
+        # current active plan — superseded_count comes from real rows.
+        self._seed_active_plan()
+        self.db.supersede_search_plan_with_replacement(
+            request_id=100, generator_id="search-plan/2026-05-25-1",
+            items=self._plan_items(),
+            metadata_snapshot={"artist_name": "X"},
         )
+        self.db.supersede_search_plan_with_replacement(
+            request_id=100, generator_id="search-plan/2026-05-25-1",
+            items=self._plan_items(),
+            metadata_snapshot={"artist_name": "X"},
+            provenance={
+                "omitted_candidates": [{"q": "x", "why": "low_entropy"}],
+                "dropped_low_entropy_tokens": ["the", "and"],
+            },
+        )
+        self._seed_failed_plan(
+            transient=False, failure_class="no_runnable_query",
+            error_message="all queries dropped")
+        self._seed_failed_plan(
+            transient=True, failure_class="resolver_unavailable",
+            error_message="resolver 503")
+        # 7 plan-less rows: the head must cap at the route's limit of 5
+        # while the count reflects all 7.
+        self._seed_legacy_logs(7)
 
         status, data = self._get("/api/pipeline/100/search-plan")
 
@@ -284,11 +213,10 @@ class TestPipelineSearchPlanContract(_WebServerCase):
         _assert_required_fields(
             self, data["legacy_logs"], self.LEGACY_LOGS_REQUIRED_FIELDS,
             "search-plan legacy_logs")
-        self.assertEqual(data["legacy_logs"]["count"], 5)
-        self.mock_db.get_legacy_search_log_summary.assert_called_once_with(
-            100, limit=5)
-        self.mock_db.get_search_plan_stats_history.assert_called_once_with(100)
-        self.mock_db.get_search_history.assert_not_called()
+        self.assertEqual(data["legacy_logs"]["count"], 7)
+        # The head is capped at the route's limit (5) even though all
+        # 7 rows are counted — pins the limit the route passes down.
+        self.assertEqual(len(data["legacy_logs"]["head"]), 5)
         for row in data["legacy_logs"]["head"]:
             _assert_required_fields(
                 self, row, self.LEGACY_HEAD_REQUIRED_FIELDS,
@@ -315,7 +243,6 @@ class TestPipelineSearchPlanContract(_WebServerCase):
     # -- 404 missing request --
 
     def test_search_plan_missing_request_returns_404_with_error_body(self):
-        self.mock_db.get_request.return_value = None
         status, data = self._get("/api/pipeline/9999/search-plan")
         self.assertEqual(status, 404)
         self.assertIn("error", data)
@@ -323,12 +250,9 @@ class TestPipelineSearchPlanContract(_WebServerCase):
     # -- request with no plan at all (transient failure) --
 
     def test_search_plan_no_active_plan_with_only_transient_failure(self):
-        trans = self._make_failed_plan(
-            plan_id=23, status="failed_transient",
-            failure_class="resolver_unavailable")
-        self._wire_inspection(
-            active=None, latest_failed_transient=trans,
-        )
+        self._seed_request()
+        self._seed_failed_plan(
+            transient=True, failure_class="resolver_unavailable")
         status, data = self._get("/api/pipeline/100/search-plan")
         self.assertEqual(status, 200)
         self.assertIsNone(data["active_plan"])
@@ -339,22 +263,8 @@ class TestPipelineSearchPlanContract(_WebServerCase):
     # -- legacy logs section is non-empty when only legacy rows exist --
 
     def test_search_plan_surfaces_legacy_logs_when_no_plan_context(self):
-        self._wire_inspection(
-            active=None,
-            legacy_log_count=2,
-            legacy_head_history=[
-                {"id": 1, "request_id": 100, "outcome": "no_match",
-                 "variant": "v1", "query": "q1", "result_count": 0,
-                 "elapsed_s": 0.5, "final_state": "Completed",
-                 "created_at": "2026-04-01T00:00:00+00:00",
-                 "plan_id": None},
-                {"id": 2, "request_id": 100, "outcome": "no_results",
-                 "variant": "v2", "query": "q2", "result_count": 0,
-                 "elapsed_s": 0.6, "final_state": "Completed",
-                 "created_at": "2026-04-02T00:00:00+00:00",
-                 "plan_id": None},
-            ],
-        )
+        self._seed_request()
+        self._seed_legacy_logs(2)
         status, data = self._get("/api/pipeline/100/search-plan")
         self.assertEqual(status, 200)
         self.assertEqual(data["legacy_logs"]["count"], 2)
@@ -363,8 +273,8 @@ class TestPipelineSearchPlanContract(_WebServerCase):
     # -- generator id drift: active plan but stale generator id --
 
     def test_search_plan_flags_generator_id_mismatch_when_stale(self):
-        active = self._make_active(generator_id="search-plan/2026-01-01-old")
-        self._wire_inspection(active=active)
+        self._seed_request()
+        self._seed_active_plan(generator_id="search-plan/2026-01-01-old")
         status, data = self._get("/api/pipeline/100/search-plan")
         self.assertEqual(status, 200)
         self.assertTrue(data["currentness"]["has_active_plan"])
@@ -375,7 +285,7 @@ class TestPipelineSearchPlanContract(_WebServerCase):
             "search-plan/2026-01-01-old")
 
 
-class TestPipelineSearchPlanDryRunContract(_WebServerCase):
+class TestPipelineSearchPlanDryRunContract(_FakeDbWebServerCase):
     """U6 contract for ``GET /api/pipeline/<id>/search-plan/dry-run``.
 
     Read-only generator simulator. The route wraps
@@ -410,20 +320,19 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
     }
 
     def setUp(self) -> None:
-        from tests.helpers import make_request_row
-        self.mock_db.get_request.return_value = make_request_row(
+        super().setUp()
+        self.db.seed_request(make_request_row(
             id=100, status="wanted",
             artist_name="Radiohead", album_title="Kid A",
             year=2008, release_group_year=2000,
-        )
-        self.mock_db.get_tracks.return_value = [
+        ))
+        self.db.set_tracks(100, [
             {"disc_number": 1, "track_number": 1,
              "title": "Everything In Its Right Place"},
             {"disc_number": 1, "track_number": 2, "title": "Kid A"},
             {"disc_number": 1, "track_number": 3,
              "title": "The National Anthem"},
-        ]
-        self.mock_db.get_active_search_plan.return_value = None
+        ])
         # Route reads runtime config — patch to a default CratediggerConfig.
         from lib.config import CratediggerConfig
         import configparser
@@ -437,9 +346,6 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
 
     def tearDown(self) -> None:
         self._cfg_patcher.stop()
-        self.mock_db.get_active_search_plan.reset_mock(
-            return_value=True, side_effect=True)
-        self.mock_db.get_tracks.return_value = []
 
     def test_dry_run_happy_path_returns_200_with_required_fields(self):
         status, data = self._get(
@@ -473,14 +379,18 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
         # When an active plan exists, the response flags
         # would_supersede_active=True so operators understand the
         # current plan would be replaced by a real regeneration call.
-        self.mock_db.get_active_search_plan.return_value = MagicMock()
+        from lib.pipeline_db import SearchPlanItemInput
+        self.db.create_successful_search_plan(
+            request_id=100, generator_id="search-plan/2026-05-25-1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="radiohead kid a")],
+        )
         status, data = self._get(
             "/api/pipeline/100/search-plan/dry-run")
         self.assertEqual(status, 200)
         self.assertTrue(data["would_supersede_active"])
 
     def test_dry_run_request_not_found_returns_404(self):
-        self.mock_db.get_request.return_value = None
         status, data = self._get(
             "/api/pipeline/9999/search-plan/dry-run")
         self.assertEqual(status, 404)
@@ -497,7 +407,7 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
     def test_dry_run_request_with_no_tracks_succeeds(self):
         # Generator handles empty tracks — emits a plan without
         # track-fallback slots; the dry-run reflects exactly that.
-        self.mock_db.get_tracks.return_value = []
+        self.db.set_tracks(100, [])
         status, data = self._get(
             "/api/pipeline/100/search-plan/dry-run")
         self.assertEqual(status, 200)
@@ -513,17 +423,14 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
             f"{strategies}")
 
     def test_dry_run_does_not_persist_or_write_plan_rows(self):
-        # The simulator must never call into create_successful_search_plan
-        # / supersede_search_plan_with_replacement / create_failed_search_plan.
-        self.mock_db.create_successful_search_plan.reset_mock()
-        self.mock_db.supersede_search_plan_with_replacement.reset_mock()
-        self.mock_db.create_failed_search_plan.reset_mock()
+        # The simulator must never persist anything: after the call the
+        # fake's plan store is still empty and the request has no
+        # active plan — the domain version of "no write methods ran".
         status, _ = self._get(
             "/api/pipeline/100/search-plan/dry-run")
         self.assertEqual(status, 200)
-        self.mock_db.create_successful_search_plan.assert_not_called()
-        self.mock_db.supersede_search_plan_with_replacement.assert_not_called()
-        self.mock_db.create_failed_search_plan.assert_not_called()
+        self.assertEqual(self.db.search_plans, {})
+        self.assertIsNone(self.db.get_active_search_plan(100))
 
     def test_dry_run_carries_current_generator_id(self):
         from lib.search import SEARCH_PLAN_GENERATOR_ID
@@ -537,7 +444,7 @@ class TestPipelineSearchPlanDryRunContract(_WebServerCase):
             data["plan"]["generator_id"], SEARCH_PLAN_GENERATOR_ID)
 
 
-class TestPipelineSearchPlanSaturationContract(_WebServerCase):
+class TestPipelineSearchPlanSaturationContract(_FakeDbWebServerCase):
     """U7 contract for ``GET /api/pipeline/<id>/search-plan/saturation``.
 
     Read-only telemetry aggregator. The route wraps
@@ -560,18 +467,13 @@ class TestPipelineSearchPlanSaturationContract(_WebServerCase):
     }
 
     def setUp(self) -> None:
-        from tests.helpers import make_request_row
-        # Production-shape mock: use real datetime + UUID values on the
-        # request row so the JSON encoder path is exercised end-to-end.
-        # The route does not consult timestamps directly, but the
-        # ``get_request`` call walks through the JSON encoder boundary
-        # if anything else does — keep the row shape honest.
+        super().setUp()
         import uuid
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=100, status="wanted",
             artist_name="Radiohead", album_title="Kid A",
             mb_release_id=str(uuid.uuid4()),
-        )
+        ))
         # Route reads runtime config — patch to a default config.
         from lib.config import CratediggerConfig
         import configparser
@@ -582,22 +484,30 @@ class TestPipelineSearchPlanSaturationContract(_WebServerCase):
             return_value=CratediggerConfig.from_ini(cp),
         )
         self._cfg_patcher.start()
-        # Default saturation summary — happy-path scenario.
-        from lib.pipeline_db import SaturationSummary
-        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
-            total_searches=30,
-            saturated_searches=10,
-            saturation_rate=10 / 30,
-            total_pre_filter_skips=50,
-            window_days=14,
-        )
 
     def tearDown(self) -> None:
         self._cfg_patcher.stop()
-        self.mock_db.get_saturation_summary.reset_mock(
-            return_value=True, side_effect=True)
+
+    def _seed_search_logs(self, *, total: int, saturated: int,
+                          skips_total: int) -> None:
+        """Real search_log rows the fake's get_saturation_summary
+        aggregates: ``LimitReached`` in final_state counts as
+        saturated; pre_filter_skip_count sums."""
+        per, rem = divmod(skips_total, total)
+        for i in range(total):
+            self.db.log_search(
+                100, query=f"q{i}", outcome="no_match",
+                final_state=(
+                    "Completed, LimitReached" if i < saturated
+                    else "Completed"),
+                pre_filter_skip_count=per + (1 if i < rem else 0),
+            )
+
+    def _age_last_log(self, days: int) -> None:
+        self.db.search_logs[-1].created_at -= timedelta(days=days)
 
     def test_happy_path_returns_200_with_required_fields(self):
+        self._seed_search_logs(total=30, saturated=10, skips_total=50)
         status, data = self._get(
             "/api/pipeline/100/search-plan/saturation")
         self.assertEqual(status, 200)
@@ -613,13 +523,7 @@ class TestPipelineSearchPlanSaturationContract(_WebServerCase):
         self.assertIsNone(data["error_message"])
 
     def test_empty_window_is_200_with_zeros_not_404(self):
-        # Found-but-quiet: request exists, window is just empty.
-        from lib.pipeline_db import SaturationSummary
-        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
-            total_searches=0, saturated_searches=0,
-            saturation_rate=0.0, total_pre_filter_skips=0,
-            window_days=14,
-        )
+        # Found-but-quiet: request exists, no search_log rows at all.
         status, data = self._get(
             "/api/pipeline/100/search-plan/saturation")
         self.assertEqual(status, 200)
@@ -629,7 +533,6 @@ class TestPipelineSearchPlanSaturationContract(_WebServerCase):
         self.assertEqual(data["total_searches"], 0)
 
     def test_request_not_found_returns_404(self):
-        self.mock_db.get_request.return_value = None
         status, data = self._get(
             "/api/pipeline/9999/search-plan/saturation")
         self.assertEqual(status, 404)
@@ -642,24 +545,24 @@ class TestPipelineSearchPlanSaturationContract(_WebServerCase):
         self.assertEqual(data["total_searches"], 0)
         self.assertEqual(data["saturation_rate"], 0.0)
         self.assertIn("error", data)
-        # The DB aggregator must NOT be called when the request row
-        # itself is missing — wastes a query and risks misleading zeros.
-        self.mock_db.get_saturation_summary.assert_not_called()
 
     def test_window_days_query_string_propagates_to_service(self):
-        from lib.pipeline_db import SaturationSummary
-        self.mock_db.get_saturation_summary.return_value = SaturationSummary(
-            total_searches=5, saturated_searches=1,
-            saturation_rate=0.2, total_pre_filter_skips=3,
-            window_days=7,
-        )
+        self._seed_search_logs(total=5, saturated=1, skips_total=3)
+        # One older row inside the default 14d window but OUTSIDE the
+        # requested 7d window — if the route failed to propagate
+        # window_days to the aggregator, this row would inflate the
+        # totals below.
+        self.db.log_search(
+            100, query="old", outcome="no_match", final_state="Completed")
+        self._age_last_log(10)
         status, data = self._get(
             "/api/pipeline/100/search-plan/saturation?window_days=7")
         self.assertEqual(status, 200)
         self.assertEqual(data["window_days"], 7)
-        # The aggregator was called with the requested window.
-        self.mock_db.get_saturation_summary.assert_called_with(
-            100, window_days=7)
+        self.assertEqual(data["total_searches"], 5)
+        self.assertEqual(data["saturated_searches"], 1)
+        self.assertAlmostEqual(data["saturation_rate"], 0.2)
+        self.assertEqual(data["total_pre_filter_skips"], 3)
 
     def test_invalid_window_days_non_int_returns_400(self):
         status, data = self._get(
@@ -675,13 +578,19 @@ class TestPipelineSearchPlanSaturationContract(_WebServerCase):
         self.assertEqual(data["outcome"], "input_invalid")
 
     def test_default_window_is_14_when_omitted(self):
+        # The 10-day-old row IS inside the default 14d window — the
+        # complement of the 7d propagation test above.
+        self.db.log_search(
+            100, query="old", outcome="no_match", final_state="Completed")
+        self._age_last_log(10)
         status, data = self._get(
             "/api/pipeline/100/search-plan/saturation")
         self.assertEqual(status, 200)
         self.assertEqual(data["window_days"], 14)
+        self.assertEqual(data["total_searches"], 1)
 
 
-class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
+class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
     """U8 contract for ``POST /api/pipeline/<id>/search-plan/regenerate``.
 
     The endpoint must wrap ``SearchPlanService.generate_for_request``
@@ -713,10 +622,10 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         )
 
     def setUp(self) -> None:
-        from tests.helpers import make_request_row
-        self.mock_db.get_request.return_value = make_request_row(
+        super().setUp()
+        self.db.seed_request(make_request_row(
             id=100, status="wanted",
-        )
+        ))
         # The route reads the runtime config — patch it to a default.
         from lib.config import CratediggerConfig
         import configparser
@@ -747,10 +656,9 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(data["request_status"], "wanted")
 
     def test_regenerate_success_for_imported_request_marks_not_executable(self):
-        from tests.helpers import make_request_row
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=100, status="imported",
-        )
+        ))
         with self._patch_service(outcome="success", plan_id=99):
             status, data = self._post(
                 "/api/pipeline/100/search-plan/regenerate", {})
@@ -760,7 +668,6 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         self.assertEqual(data["request_status"], "imported")
 
     def test_regenerate_request_not_found_returns_404(self):
-        self.mock_db.get_request.return_value = None
         with self._patch_service(outcome="request_not_found"):
             status, data = self._post(
                 "/api/pipeline/9999/search-plan/regenerate", {})
@@ -885,7 +792,7 @@ class TestPipelineSearchPlanRegenerateContract(_WebServerCase):
         mock_gen.assert_not_called()
 
 
-class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
+class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
     """Contract for ``POST /api/pipeline/<id>/search-plan/advance``.
 
     The endpoint wraps ``SearchPlanService.advance_for_request``. Both
@@ -909,6 +816,7 @@ class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
     }
 
     def setUp(self) -> None:
+        super().setUp()
         from lib.config import CratediggerConfig
         import configparser
         cp = configparser.RawConfigParser()
@@ -1044,7 +952,7 @@ class TestPipelineSearchPlanAdvanceContract(_WebServerCase):
         mock_adv.assert_not_called()
 
 
-class TestPipelineSearchPlanHistoryContract(_WebServerCase):
+class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
     """Contract for ``GET /api/pipeline/<id>/search-plan/history``.
 
     The endpoint wraps ``SearchPlanService.history_for_request``. Both
@@ -1062,6 +970,7 @@ class TestPipelineSearchPlanHistoryContract(_WebServerCase):
     HISTORY_REQUIRED_FIELDS = {"request_id", "rows", "next_before_id"}
 
     def setUp(self) -> None:
+        super().setUp()
         from lib.config import CratediggerConfig
         import configparser
         cp = configparser.RawConfigParser()

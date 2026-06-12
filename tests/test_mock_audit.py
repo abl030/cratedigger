@@ -16,8 +16,14 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _mock_audit_scanner import (
+# Import through the ``tests`` package, NOT via a tests-dir sys.path
+# insert — putting tests/ at sys.path[0] makes a later ``import
+# web.server`` resolve ``web`` to tests/web in module-order-dependent
+# ways (the package shadows the real one whenever no earlier import
+# already registered repo-root ``web`` in sys.modules).
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".."))
+from tests._mock_audit_scanner import (
     WEB_HARNESS_MOCK_BASELINE,
     count_harness_overrides,
     iter_scan_paths,
