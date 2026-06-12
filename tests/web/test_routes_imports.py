@@ -237,6 +237,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         vr["soulseek_username"] = username
         vr.update(validation_overrides or {})
         if download_log_id is not None:
+            taken = {e.id for e in self.db.download_logs}
+            assert download_log_id not in taken and all(
+                existing < download_log_id for existing in taken), (
+                f"pinned log id {download_log_id} collides with or "
+                f"precedes existing ids {sorted(taken)} — production's "
+                "sequence-backed PK can never do that")
             self.db._next_download_log_id = download_log_id - 1
         return self.db.log_download(
             request_id, outcome="rejected", soulseek_username=username,
@@ -1179,17 +1185,17 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """Converge queues green rows and deletes high-distance leftovers."""
         self._seed_wrong_match(
             download_log_id=100, request_id=42, username="u1",
-            failed_path="/fi/a", distance=0.167,
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42",
             validation_overrides={"source_dirs": ["u1\\Artist\\Album"]})
         self._seed_wrong_match(
             download_log_id=101, request_id=42, username="u2",
-            failed_path="/fi/b", distance=0.180)
+            failed_path="/fi/b", distance=0.180, mb_release_id="mb-42")
         self._seed_wrong_match(
             download_log_id=102, request_id=42, username="u3",
-            failed_path="/fi/c", distance=0.226)
+            failed_path="/fi/c", distance=0.226, mb_release_id="mb-42")
         self._seed_wrong_match(
             download_log_id=200, request_id=99, username="other",
-            failed_path="/fi/other", distance=0.100)
+            failed_path="/fi/other", distance=0.100, mb_release_id="mb-99")
 
         def manual_delete_after_enqueue(_db, log_id, **_kwargs):
             # Both green rows were queued BEFORE the unmatched delete ran.
@@ -1226,11 +1232,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 "force_import:download_log:101",
             },
         )
-        # Queued rows stay visible: their failed_path survives.
-        entry_100 = self.db.get_download_log_entry(100)
-        assert entry_100 is not None
-        self.assertEqual(
-            entry_100["validation_result"]["failed_path"], "/fi/a")
+        # EVERY queued row stays visible: failed_path survives on both.
+        for lid, path in ((100, "/fi/a"), (101, "/fi/b")):
+            entry = self.db.get_download_log_entry(lid)
+            assert entry is not None
+            self.assertEqual(
+                entry["validation_result"]["failed_path"], path)
         self.assertEqual(
             jobs["force_import:download_log:100"]
             .payload["source_dirs"],
@@ -1243,13 +1250,13 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """Legacy true payloads still delete non-green rows while selected rows stay visible."""
         self._seed_wrong_match(
             download_log_id=100, request_id=42, username="u1",
-            failed_path="/fi/a", distance=0.167)
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
         self._seed_wrong_match(
             download_log_id=101, request_id=42, username="u2",
-            failed_path="/fi/b", distance=0.180)
+            failed_path="/fi/b", distance=0.180, mb_release_id="mb-42")
         self._seed_wrong_match(
             download_log_id=102, request_id=42, username="u3",
-            failed_path="/fi/c", distance=0.226)
+            failed_path="/fi/c", distance=0.226, mb_release_id="mb-42")
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
@@ -1275,10 +1282,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """
         self._seed_wrong_match(
             download_log_id=100, request_id=42, username="u1",
-            failed_path="/fi/a", distance=0.167)
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
         self._seed_wrong_match(
             download_log_id=102, request_id=42, username="u3",
-            failed_path="/fi/c", distance=0.226)
+            failed_path="/fi/c", distance=0.226, mb_release_id="mb-42")
 
         status, data = self._post("/api/wrong-matches/converge", {
             "request_id": 42,
@@ -1296,7 +1303,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """A green row with no surviving failed_path is not queued or dismissed."""
         self._seed_wrong_match(
             download_log_id=100, request_id=42, username="u1",
-            failed_path="/gone/a", distance=0.167)
+            failed_path="/gone/a", distance=0.167, mb_release_id="mb-42")
 
         with patch("web.routes.imports.resolve_failed_path", return_value=None):
             status, data = self._post("/api/wrong-matches/converge", {
@@ -1322,7 +1329,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """Existing active force-import jobs still count as selected but remain visible."""
         self._seed_wrong_match(
             download_log_id=100, request_id=42, username="u1",
-            failed_path="/fi/a", distance=0.167)
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
         # Pre-existing active job with the same dedupe key — converge's
         # enqueue dedupes against it for real.
         self.db.enqueue_import_job(

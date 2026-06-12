@@ -724,6 +724,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         racing = _RacingDeleteDB()
         racing.seed_request(make_request_row(
             id=100, status="imported", mb_release_id="abc-123"))
+        # Re-bind self.db so any assertion in this test targets the
+        # live fake, never setUp's now-shadowed one.
+        self.db = racing
         with patch.object(srv, "db", racing):
             status, data = self._post("/api/pipeline/delete", {"id": 100})
         self.assertEqual(status, 409)
@@ -1080,10 +1083,14 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         })
 
         self.assertEqual(status, 200)
-        # The on-disk quality fields are wiped on the row itself.
+        # The full wipe ran (recorder pins the helper, not an inline
+        # partial wipe) and the operator-visible fields are gone.
+        self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [1704])
         row = self.db.request(1704)
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
+        self.assertFalse(row["verified_lossless"])
+        self.assertIsNone(row["imported_path"])
 
     @patch("lib.beets_album_op.sp.run")
     @patch("web.routes.pipeline.finalize_request")
@@ -1119,7 +1126,8 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         })
 
         self.assertEqual(status, 200)
-        # Album still on disk → the on-disk quality stays accurate.
+        # Album still on disk → the wipe must not run at all.
+        self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [])
         row = self.db.request(1704)
         self.assertEqual(row["current_spectral_grade"], "genuine")
         self.assertTrue(row["verified_lossless"])
@@ -1205,10 +1213,13 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         })
 
         self.assertEqual(status, 200)
-        # Phantom baselines wiped on the row itself.
+        # Phantom baselines wiped on the row itself — INCLUDING the
+        # stale imported_path that misleads every downstream consumer.
+        self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [1704])
         row = self.db.request(1704)
         self.assertIsNone(row["current_spectral_grade"])
         self.assertIsNone(row["current_spectral_bitrate"])
+        self.assertIsNone(row["imported_path"])
         # No remove ran — the handler had nothing to remove.
         mock_subprocess.assert_not_called()
 
@@ -1233,6 +1244,7 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
 
         self.assertEqual(status, 400)
         self.assertIn("mb_release_id", data.get("error", ""))
+        self.assertEqual(self.db.clear_on_disk_quality_fields_calls, [])
         row = self.db.request(1704)
         self.assertEqual(row["current_spectral_grade"], "genuine")
 
@@ -1318,9 +1330,11 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(self.db.denylist[0].username, "Hxrco")
         self.assertEqual(
             self.db.denylist[0].reason, "manually banned via web UI")
-        # #188 follow-up: a download_log row records the ban event
-        # (newest row after the seeded success).
-        ban_row = self.db.download_logs[-1]
+        # #188 follow-up: EXACTLY ONE download_log row records the ban.
+        ban_rows = [r for r in self.db.download_logs
+                    if r.outcome == "curator_ban"]
+        self.assertEqual(len(ban_rows), 1)
+        ban_row = ban_rows[0]
         self.assertEqual(ban_row.request_id, 1704)
         self.assertEqual(ban_row.soulseek_username, "Hxrco")
         self.assertEqual(ban_row.outcome, "curator_ban")
@@ -1397,8 +1411,11 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertIsNone(data["username"])
         self.assertEqual(data["hashes_recorded"], 1)
         self.assertNotIn("partial_failures", data)
-        # #188 follow-up: ban event still logged with NULL username.
-        ban_row = self.db.download_logs[-1]
+        # #188 follow-up: EXACTLY ONE ban event, with NULL username.
+        ban_rows = [r for r in self.db.download_logs
+                    if r.outcome == "curator_ban"]
+        self.assertEqual(len(ban_rows), 1)
+        ban_row = ban_rows[0]
         self.assertEqual(ban_row.outcome, "curator_ban")
         self.assertIsNone(ban_row.soulseek_username)
         # Hashes recorded with username=None.
@@ -1468,14 +1485,33 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self._beets.get_item_paths.assert_not_called()
         self._beets.locate.assert_not_called()
 
+        # The active set is queued OR running — flip the job to the
+        # state the importer worker would hold and re-assert the 409.
+        self.db._import_jobs[0]["status"] = "running"
+        status, data = self._post(
+            "/api/pipeline/ban-source",
+            {"request_id": 1704, "mb_release_id": self.RELEASE_ID,
+             "username": "anyone"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "importer_busy")
+
     # E1.6 — idempotency: second click is a no-op insert.
     @patch("web.routes.pipeline.hash_audio_content")
     @patch("web.routes.pipeline.finalize_request")
     def test_idempotent_second_click_records_zero_new_hashes(
             self, _mock_transition, mock_hash):
         """Second call inserts 0 new rows (ON CONFLICT DO NOTHING in
-        the DB layer; ``add_bad_audio_hashes`` returns 0). Response
-        is 200 with ``hashes_recorded: 0`` and no ``partial_failures``.
+        the DB layer). Response is 200 with ``hashes_recorded: 0`` and
+        no ``partial_failures``.
+
+        Modeled timing window: the second click lands BEFORE the first
+        ban's beets removal completes — get_item_paths still returns
+        the track while locate reports absent. That impossible-looking
+        combination is deliberate: it isolates the real (hash, format)
+        dedupe in add_bad_audio_hashes. Do not "fix" the fixture to an
+        emptied library — that reroutes through no_tracks_in_beets and
+        silently loses the dedupe-path coverage.
         """
         self.db.log_download(
             1704, outcome="success", soulseek_username="Hxrco")
