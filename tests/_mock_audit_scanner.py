@@ -528,7 +528,6 @@ WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {
     os.path.join("web", "test_routes_imports.py"): 71,
     os.path.join("web", "test_routes_pipeline.py"): 66,
     os.path.join("web", "test_routes_pipeline_mutations.py"): 100,
-    os.path.join("web", "test_routes_pipeline_replace.py"): 27,
     os.path.join("web", "test_routes_pipeline_search_plan.py"): 42,
     os.path.join("web", "test_server_endpoints.py"): 53,
 }
