@@ -5,7 +5,6 @@ Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
 
-from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -18,42 +17,41 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _MOCK_PIPELINE_REQUEST, _make_server
+from tests.web._harness import _FakeDbWebServerCase
 
+from tests.fakes import FakeCursor, FakePipelineDB
 from tests.helpers import make_request_row
 
 
-class TestServerEndpoints(unittest.TestCase):
+class TestServerEndpoints(_FakeDbWebServerCase):
     """Test HTTP endpoints return expected status and structure."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.server, cls.port, cls.mock_db = _make_server()
-        cls.base = f"http://127.0.0.1:{cls.port}"
+    def setUp(self) -> None:
+        super().setUp()
+        self.db.seed_request(make_request_row(
+            id=100, status="imported", min_bitrate=320,
+            imported_path="/mnt/virtio/Music/Beets/Test",
+        ))
+        self.db.set_tracks(100, [
+            {"disc_number": 1, "track_number": 1, "title": "Track",
+             "length_seconds": 180},
+        ])
+        self.db.log_download(
+            100, outcome="success", beets_scenario="strong_match",
+            beets_distance=0.012, soulseek_username="testuser",
+            filetype="mp3", bitrate=320000, actual_filetype="mp3",
+            actual_min_bitrate=320, valid=True,
+        )
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-
-    def _get(self, path: str) -> tuple[int, dict]:
-        """GET a path and return (status, json)."""
-        url = f"{self.base}{path}"
-        try:
-            resp = urlopen(url)
-            return resp.status, json.loads(resp.read())
-        except HTTPError as e:
-            return e.code, json.loads(e.read())
-
-    def _post(self, path: str, body: dict) -> tuple[int, dict]:
-        """POST JSON and return (status, json)."""
-        url = f"{self.base}{path}"
-        data = json.dumps(body).encode()
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            resp = urlopen(req)
-            return resp.status, json.loads(resp.read())
-        except HTTPError as e:
-            return e.code, json.loads(e.read())
+    def _queue_log_counts(self, *, total: int = 1, imported: int = 1,
+                          matches_24h: int = 3, matches_6h: int = 1) -> None:
+        """The /api/pipeline/log counts come from one raw-SQL aggregate
+        the fake cannot interpret — the queued cursor IS that query's
+        result row. Unqueued calls degrade to all-zero counts."""
+        self.db.queue_execute_results(FakeCursor([{
+            "total": total, "imported": imported,
+            "matches_24h": matches_24h, "matches_6h": matches_6h,
+        }]))
 
     # --- GET endpoints ---
 
@@ -75,33 +73,56 @@ class TestServerEndpoints(unittest.TestCase):
                 self.assertIn(key, entry, f"Missing key '{key}' in log entry")
 
     def test_pipeline_log_filter_imported(self):
+        self.db.log_download(100, outcome="rejected",
+                             soulseek_username="rejuser")
         status, data = self._get("/api/pipeline/log?outcome=imported")
         self.assertEqual(status, 200)
-        self.assertIn("log", data)
-        # Verify the DB was called with the filter
-        self.mock_db.get_log.assert_called_with(limit=50, outcome_filter="imported")
+        self.assertTrue(data["log"])
+        self.assertEqual(
+            {e["outcome"] for e in data["log"]}, {"success"},
+            "imported filter must drop the rejected row")
 
     def test_pipeline_log_filter_rejected(self):
+        self.db.log_download(100, outcome="rejected",
+                             soulseek_username="rejuser")
         status, data = self._get("/api/pipeline/log?outcome=rejected")
         self.assertEqual(status, 200)
-        self.mock_db.get_log.assert_called_with(limit=50, outcome_filter="rejected")
+        self.assertEqual(
+            {e["outcome"] for e in data["log"]}, {"rejected"},
+            "rejected filter must drop the success row")
 
     def test_pipeline_log_limit_param(self):
-        status, data = self._get("/api/pipeline/log?outcome=rejected&limit=300")
+        self.db.log_download(100, outcome="rejected")
+        self.db.log_download(100, outcome="rejected")
+        status, data = self._get("/api/pipeline/log?outcome=rejected&limit=1")
         self.assertEqual(status, 200)
-        self.mock_db.get_log.assert_called_with(limit=300, outcome_filter="rejected")
+        self.assertEqual(len(data["log"]), 1)
 
     def test_pipeline_log_limit_param_is_capped(self):
+        # 501 extra rows + the setUp row = 502 total; the route must
+        # cap ?limit=5000 to 500 rows.
+        for _ in range(501):
+            self.db.log_download(100, outcome="success")
         status, data = self._get("/api/pipeline/log?limit=5000")
         self.assertEqual(status, 200)
-        self.mock_db.get_log.assert_called_with(limit=500, outcome_filter=None)
+        self.assertEqual(len(data["log"]), 500)
+        # And the no-param default is 50 — same seeded rows.
+        status, data = self._get("/api/pipeline/log")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["log"]), 50)
 
     def test_pipeline_log_filter_invalid_ignored(self):
+        self.db.log_download(100, outcome="rejected",
+                             soulseek_username="rejuser")
         status, data = self._get("/api/pipeline/log?outcome=badvalue")
         self.assertEqual(status, 200)
-        self.mock_db.get_log.assert_called_with(limit=50, outcome_filter=None)
+        # Invalid filter is ignored — BOTH outcomes are returned.
+        self.assertEqual(
+            {e["outcome"] for e in data["log"]}, {"success", "rejected"})
 
     def test_pipeline_log_counts_structure(self):
+        self._queue_log_counts(total=7, imported=2,
+                               matches_24h=3, matches_6h=1)
         status, data = self._get("/api/pipeline/log")
         self.assertEqual(status, 200)
         counts = data["counts"]
@@ -111,6 +132,13 @@ class TestServerEndpoints(unittest.TestCase):
         for key in ("matches_per_hour_24h", "matches_per_hour_6h"):
             self.assertIn(key, counts)
             self.assertIsInstance(counts[key], (int, float))
+        # The queued aggregate row actually flowed into the payload.
+        self.assertEqual(counts["all"], 7)
+        self.assertEqual(counts["imported"], 2)
+        # rejected (5) is coprime with matches_24h (3) so a wiring swap
+        # cannot pass by numeric coincidence.
+        self.assertEqual(counts["rejected"], 5)
+        self.assertAlmostEqual(counts["matches_per_hour_24h"], 3 / 24)
 
     def test_pipeline_status(self):
         status, data = self._get("/api/pipeline/status")
@@ -127,36 +155,29 @@ class TestServerEndpoints(unittest.TestCase):
 
     def test_pipeline_status_includes_downloading(self):
         """count_by_status includes downloading when albums are downloading."""
-        self.mock_db.count_by_status.return_value = {
-            "wanted": 3, "downloading": 2, "imported": 10, "manual": 1}
+        for rid in (201, 202):
+            self.db.seed_request(make_request_row(
+                id=rid, status="downloading", mb_release_id=f"dl-{rid}",
+            ))
         status, data = self._get("/api/pipeline/status")
         self.assertEqual(status, 200)
         self.assertEqual(data["counts"]["downloading"], 2)
-        # Restore
-        self.mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
 
     def test_pipeline_all_includes_downloading(self):
         """get_pipeline_all returns downloading albums in the response."""
-        downloading_row = make_request_row(
+        self.db.seed_request(make_request_row(
             id=200, album_title="Downloading Album", artist_name="DL Artist",
             mb_release_id="dl-uuid", status="downloading",
             active_download_state={"filetype": "flac", "enqueued_at": "now", "files": []},
-        )
-        self.mock_db.get_by_status.side_effect = lambda s, **kw: [downloading_row] if s == "downloading" else []
-        self.mock_db.count_by_status.return_value = {"downloading": 1}
-        self.mock_db.get_download_history_batch.return_value = {}
+        ))
         status, data = self._get("/api/pipeline/all")
         self.assertEqual(status, 200)
         self.assertIn("downloading", data)
         self.assertEqual(len(data["downloading"]), 1)
         self.assertEqual(data["downloading"][0]["album_title"], "Downloading Album")
-        # Restore
-        self.mock_db.get_by_status.side_effect = None
-        self.mock_db.get_by_status.return_value = []
-        self.mock_db.count_by_status.return_value = {"wanted": 0, "imported": 1, "manual": 0}
 
     def test_pipeline_downloading_returns_current_downloads_only(self):
-        downloading_row = make_request_row(
+        self.db.seed_request(make_request_row(
             id=201, album_title="Active Download", artist_name="DL Artist",
             mb_release_id="dl-uuid", status="downloading",
             active_download_state={
@@ -164,50 +185,38 @@ class TestServerEndpoints(unittest.TestCase):
                 "enqueued_at": "2026-05-05T12:00:00+00:00",
                 "files": [{"username": "peer", "bytes_transferred": 1, "size": 2}],
             },
+        ))
+        # A prior rejected attempt — its summary must be stamped onto the
+        # downloading row (the real get_latest_download_summaries path).
+        self.db.log_download(
+            201, outcome="rejected", soulseek_username="peer",
+            beets_scenario="high_distance",
         )
-        self.mock_db.get_by_status.side_effect = (
-            lambda s, **kw: [downloading_row] if s == "downloading" else []
-        )
-        self.mock_db.count_by_status.return_value = {"downloading": 1}
-        self.mock_db.get_latest_download_summaries.reset_mock()
-        self.mock_db.get_latest_download_summaries.return_value = {}
 
         status, data = self._get("/api/pipeline/downloading")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["counts"]["downloading"], 1)
         self.assertEqual(len(data["downloading"]), 1)
-        self.assertEqual(data["downloading"][0]["album_title"], "Active Download")
-        self.mock_db.get_by_status.assert_called_with("downloading")
-        self.mock_db.get_latest_download_summaries.assert_any_call([201])
-
-        self.mock_db.get_by_status.side_effect = None
-        self.mock_db.get_by_status.return_value = []
-        self.mock_db.get_latest_download_summaries.reset_mock()
-        self.mock_db.count_by_status.return_value = {
-            "wanted": 0, "imported": 1, "manual": 0}
+        row = data["downloading"][0]
+        self.assertEqual(row["album_title"], "Active Download")
+        # Request 100 (imported, from setUp) must NOT appear here.
+        self.assertNotIn(100, [r["id"] for r in data["downloading"]])
+        self.assertEqual(row["last_outcome"], "rejected")
+        self.assertEqual(row["last_username"], "peer")
 
     def test_pipeline_downloading_includes_active_youtube_ingest(self):
-        self.mock_db.get_by_status.side_effect = None
-        self.mock_db.get_by_status.return_value = []
-        self.mock_db.count_by_status.return_value = {"downloading": 0}
-        self.mock_db.get_download_history_batch.return_value = {}
-        self.mock_db.list_active_youtube_rescues.return_value = [{
-            "download_log_id": 301,
-            "request_id": 202,
-            "source": "youtube",
-            "outcome": "youtube_running",
-            "youtube_metadata": {
-                "browse_id": "yt-browse",
-                "expected_track_count": 2,
-                "yt_url": "https://music.youtube.com/playlist?list=abc",
-            },
-            "created_at": datetime(2026, 5, 28, tzinfo=timezone.utc),
-            "artist_name": "YT Artist",
-            "album_title": "YT Album",
-            "mb_release_id": "yt-mbid",
-            "request_status": "wanted",
-        }]
+        self.db.seed_request(make_request_row(
+            id=202, status="wanted", artist_name="YT Artist",
+            album_title="YT Album", mb_release_id="yt-mbid",
+        ))
+        log_id = self.db.insert_youtube_running(
+            request_id=202,
+            browse_id="yt-browse",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=abc",
+            expected_track_count=2,
+        )
 
         status, data = self._get("/api/pipeline/downloading")
 
@@ -215,17 +224,27 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(data["downloading"], [])
         self.assertEqual(len(data["youtube_ingest"]), 1)
         rescue = data["youtube_ingest"][0]
-        self.assertEqual(rescue["download_log_id"], 301)
+        self.assertEqual(rescue["download_log_id"], log_id)
         self.assertEqual(rescue["album_title"], "YT Album")
         self.assertEqual(rescue["youtube_metadata"]["browse_id"], "yt-browse")
-        self.assertTrue(rescue["created_at"].startswith("2026-05-28T00:00:00"))
-        self.mock_db.list_active_youtube_rescues.assert_called_with(limit=50)
+        self.assertEqual(rescue["request_status"], "wanted")
 
-        self.mock_db.get_by_status.return_value = []
-        self.mock_db.list_active_youtube_rescues.return_value = []
-        self.mock_db.get_download_history_batch.reset_mock()
-        self.mock_db.count_by_status.return_value = {
-            "wanted": 0, "imported": 1, "manual": 0}
+    def test_pipeline_downloading_caps_youtube_ingest_at_50(self):
+        """The route hardcodes limit=50 on list_active_youtube_rescues —
+        one running rescue per request (partial unique index), so 51
+        requests with running ingests page down to 50."""
+        for i in range(51):
+            rid = 300 + i
+            self.db.seed_request(make_request_row(
+                id=rid, status="wanted", mb_release_id=f"yt-{rid}"))
+            self.db.insert_youtube_running(
+                request_id=rid, browse_id=f"b{rid}",
+                audio_playlist_id=None, yt_url=f"https://yt/{rid}",
+                expected_track_count=2,
+            )
+        status, data = self._get("/api/pipeline/downloading")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["youtube_ingest"]), 50)
 
     def test_pipeline_detail(self):
         status, data = self._get("/api/pipeline/100")
@@ -239,11 +258,8 @@ class TestServerEndpoints(unittest.TestCase):
             self.assertIn("downloaded_label", data["history"][0])
 
     def test_pipeline_detail_not_found(self):
-        self.mock_db.get_request.return_value = None
         status, data = self._get("/api/pipeline/999")
         self.assertEqual(status, 404)
-        # Restore
-        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
 
     def test_unknown_get_returns_404(self):
         status, data = self._get("/api/nonexistent")
@@ -291,46 +307,52 @@ class TestServerEndpoints(unittest.TestCase):
     def test_post_force_import_passes_source_username(self, _mock_resolve):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 
-        self.mock_db.get_download_log_entry.return_value = {
-            "id": 42,
-            "request_id": 100,
-            "soulseek_username": "baduser",
-            "validation_result": {
+        log_id = self.db.log_download(
+            100, outcome="rejected", soulseek_username="baduser",
+            validation_result={
                 "failed_path": "/tmp/Test Album",
                 "scenario": "high_distance",
                 "source_dirs": ["baduser\\Artist\\Album"],
             },
-        }
+        )
 
-        status, data = self._post("/api/pipeline/force-import", {"download_log_id": 42})
+        status, data = self._post(
+            "/api/pipeline/force-import", {"download_log_id": log_id})
 
         self.assertEqual(status, 202)
         self.assertEqual(data["status"], "queued")
-        self.assertEqual(data["artist"], _MOCK_PIPELINE_REQUEST["artist_name"])
-        self.assertEqual(data["album"], _MOCK_PIPELINE_REQUEST["album_title"])
-        self.mock_db.enqueue_import_job.assert_called_once()
-        args, kwargs = self.mock_db.enqueue_import_job.call_args
-        self.assertEqual(args, (IMPORT_JOB_FORCE,))
-        self.assertEqual(kwargs["request_id"], 100)
-        self.assertEqual(kwargs["dedupe_key"], force_import_dedupe_key(42))
-        self.assertEqual(kwargs["payload"]["failed_path"], "/tmp/Test Album")
-        self.assertEqual(kwargs["payload"]["source_username"], "baduser")
-        self.assertEqual(kwargs["payload"]["source_dirs"], ["baduser\\Artist\\Album"])
+        req = self.db.request(100)
+        self.assertEqual(data["artist"], req["artist_name"])
+        self.assertEqual(data["album"], req["album_title"])
+        # The job landed in the real import queue with the full payload.
+        jobs = self.db.list_import_jobs()
+        self.assertEqual(len(jobs), 1)
+        job = jobs[0]
+        self.assertEqual(job.job_type, IMPORT_JOB_FORCE)
+        self.assertEqual(job.request_id, 100)
+        self.assertEqual(job.dedupe_key, force_import_dedupe_key(log_id))
+        self.assertEqual(job.payload["failed_path"], "/tmp/Test Album")
+        self.assertEqual(job.payload["source_username"], "baduser")
+        self.assertEqual(job.payload["source_dirs"], ["baduser\\Artist\\Album"])
 
     def test_post_set_intent_default_clears_stale_lossless_override(self):
-        self.mock_db.get_request.return_value = make_request_row(
+        self.db.seed_request(make_request_row(
             id=100, status="wanted", artist_name="Test Artist",
             album_title="Test Album", target_format="lossless",
             search_filetype_override="lossless",
-        )
-        self.mock_db.update_request_fields.reset_mock()
+        ))
         status, data = self._post("/api/pipeline/set-intent",
                                   {"id": 100, "intent": "default"})
         self.assertEqual(status, 200)
         self.assertFalse(data["requeued"])
-        self.mock_db.update_request_fields.assert_called_once_with(
-            100, target_format=None, search_filetype_override=None)
-        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+        # Both stale fields cleared on the row itself.
+        row = self.db.request(100)
+        self.assertIsNone(row["target_format"])
+        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(
+            self.db.update_request_fields_calls,
+            [(100, {"target_format": None,
+                    "search_filetype_override": None})])
 
     def test_post_set_intent_invalid(self):
         """POST /api/pipeline/set-intent with bad intent returns 400."""
@@ -358,7 +380,10 @@ class TestServerEndpoints(unittest.TestCase):
         if data["log"]:
             created = data["log"][0].get("created_at")
             self.assertIsInstance(created, str)
-            self.assertIn("2026", created)
+            # ISO-8601 round-trip — no fixed-year assertion (the seeded
+            # row carries the fake's "now", which outlives 2026).
+            from datetime import datetime as _dt
+            _dt.fromisoformat(created)
 
 
     def test_disambiguate_endpoint(self):
@@ -499,7 +524,22 @@ class TestFuzzyShimRemoved(unittest.TestCase):
         )
 
 
-class TestClientDisconnectHandling(unittest.TestCase):
+class _RaisingUpdateFieldsDB(FakePipelineDB):
+    """update_request_fields raises ``update_error`` when set —
+    deterministic stand-in for a client disconnect (or DB error)
+    surfacing mid-handler."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.update_error: Exception | None = None
+
+    def update_request_fields(self, request_id: int, **fields: object) -> None:
+        if self.update_error is not None:
+            raise self.update_error
+        super().update_request_fields(request_id, **fields)
+
+
+class TestClientDisconnectHandling(_FakeDbWebServerCase):
     """Issue #233 wedge regression: client closes mid-response.
 
     Before this fix, a BrokenPipeError raised inside do_GET/do_POST
@@ -517,29 +557,35 @@ class TestClientDisconnectHandling(unittest.TestCase):
     in both do_GET and do_POST. Disconnect errors get a single WARNING
     log line and a clean return — no DB reconnect, no second body-write.
 
-    These tests inject the exception via ``mock_db.<method>.side_effect``
-    rather than via raw-socket mid-body close. The mechanism is the same
-    code path (typed except clause inside do_POST's try block); the
-    side_effect approach is deterministic where raw-socket timing is
+    These tests inject the exception via a typed FakePipelineDB
+    subclass whose ``update_request_fields`` raises on demand, rather
+    than via raw-socket mid-body close. The mechanism is the same code
+    path (typed except clause inside do_POST's try block); the
+    injection approach is deterministic where raw-socket timing is
     flaky on localhost. R3 regression-guard tests confirm the existing
     catch-all still fires for real handler errors.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        cls.server, cls.port, cls.mock_db = _make_server()
-        cls.base = f"http://127.0.0.1:{cls.port}"
+    DB_FACTORY = _RaisingUpdateFieldsDB
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
+    @property
+    def raising_db(self) -> _RaisingUpdateFieldsDB:
+        assert isinstance(self.db, _RaisingUpdateFieldsDB)
+        return self.db
 
     def setUp(self):
-        # Ensure each test starts with a clean side_effect.
-        self.mock_db.update_request_fields.side_effect = None
-        self.mock_db.update_request_fields.return_value = None
+        super().setUp()
+        # set-intent "default" on a wanted row reaches the
+        # update_request_fields write — the injection point.
+        self.db.seed_request(make_request_row(
+            id=100, status="wanted", target_format="lossless",
+            search_filetype_override="lossless",
+        ))
 
-    def _post(self, path, body):
+    def _post_may_disconnect(self, path, body):
+        """Like ``_post`` but tolerates connection-level failures —
+        exactly what the wedge produces server-side. Tests assert on
+        server-side observable state, not on the client response."""
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
         req = Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -549,10 +595,6 @@ class TestClientDisconnectHandling(unittest.TestCase):
         except HTTPError as e:
             return e.code, json.loads(e.read())
         except Exception:
-            # Connection-level failures (which is exactly what the wedge
-            # produces server-side) surface client-side as URLError or
-            # similar. Tests assert on server-side observable state, not
-            # on the client response.
             return None, None
 
     def _assert_no_reconnect_no_traceback(self, mock_reconnect, log_records, kind):
@@ -591,27 +633,27 @@ class TestClientDisconnectHandling(unittest.TestCase):
     def test_brokenpipe_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Wedge regression: BrokenPipeError reaches the typed except
         clause first, never the catch-all that reconnects."""
-        self.mock_db.update_request_fields.side_effect = BrokenPipeError(32, "Broken pipe")
+        self.raising_db.update_error = BrokenPipeError(32, "Broken pipe")
         with self.assertLogs("cratedigger-web", level="WARNING") as cm:
-            self._post("/api/pipeline/set-intent",
+            self._post_may_disconnect("/api/pipeline/set-intent",
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "BrokenPipeError")
 
     @patch("web.server._try_reconnect_db")
     def test_connection_reset_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Sibling disconnect class — same handling expected."""
-        self.mock_db.update_request_fields.side_effect = ConnectionResetError(104, "Connection reset by peer")
+        self.raising_db.update_error = ConnectionResetError(104, "Connection reset by peer")
         with self.assertLogs("cratedigger-web", level="WARNING") as cm:
-            self._post("/api/pipeline/set-intent",
+            self._post_may_disconnect("/api/pipeline/set-intent",
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionResetError")
 
     @patch("web.server._try_reconnect_db")
     def test_connection_aborted_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Sibling disconnect class — same handling expected."""
-        self.mock_db.update_request_fields.side_effect = ConnectionAbortedError(103, "Software caused connection abort")
+        self.raising_db.update_error = ConnectionAbortedError(103, "Software caused connection abort")
         with self.assertLogs("cratedigger-web", level="WARNING") as cm:
-            self._post("/api/pipeline/set-intent",
+            self._post_may_disconnect("/api/pipeline/set-intent",
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionAbortedError")
 
@@ -621,9 +663,9 @@ class TestClientDisconnectHandling(unittest.TestCase):
         the catch-all and trigger _try_reconnect_db. The narrowing must
         not change behaviour for real DB errors."""
         import psycopg2
-        self.mock_db.update_request_fields.side_effect = psycopg2.OperationalError("simulated PG outage")
+        self.raising_db.update_error = psycopg2.OperationalError("simulated PG outage")
         with self.assertLogs("cratedigger-web", level="ERROR") as cm:
-            status, _ = self._post("/api/pipeline/set-intent",
+            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         # Real DB error → catch-all fires → reconnect attempted.
         self.assertEqual(
@@ -648,9 +690,9 @@ class TestClientDisconnectHandling(unittest.TestCase):
         (e.g. ValueError) still hits the catch-all. Narrowing this
         further (so non-DB exceptions skip the reconnect) is explicitly
         out of scope per the plan — see follow-up #234."""
-        self.mock_db.update_request_fields.side_effect = ValueError("simulated handler bug")
+        self.raising_db.update_error = ValueError("simulated handler bug")
         with self.assertLogs("cratedigger-web", level="ERROR") as cm:
-            status, _ = self._post("/api/pipeline/set-intent",
+            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         self.assertEqual(
             mock_reconnect.call_count, 1,
@@ -668,7 +710,7 @@ class TestClientDisconnectHandling(unittest.TestCase):
     def test_normal_post_no_reconnect_no_warning(self, mock_reconnect):
         """Happy path regression guard: a successful POST does not
         trigger any reconnect or disconnect-warning side effects."""
-        # mock_db.set_intent_for_request returns True by default per setUp.
+        # No update_error set — the fake's real write path runs.
         # Use assertNoLogs (Python 3.10+) to assert no WARNING/ERROR records.
         # Some logger setups still emit INFO; we only care that no WARNING
         # for "Client disconnect" appears and no ERROR is emitted.
@@ -676,7 +718,7 @@ class TestClientDisconnectHandling(unittest.TestCase):
             # assertLogs requires at least one record; a trivial DEBUG log
             # ensures the context manager is satisfied even on a quiet path.
             logging.getLogger("cratedigger-web").debug("test marker: normal POST path")
-            status, _ = self._post("/api/pipeline/set-intent",
+            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         self.assertEqual(mock_reconnect.call_count, 0)
         disconnect_warnings = [

@@ -3816,34 +3816,419 @@ class FakePipelineDB:
             },
         }
 
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _dashboard_search_window(
+        self, label: str, hours: int, now: datetime,
+    ) -> dict[str, Any]:
+        cutoff = now - timedelta(hours=hours)
+        rows = [e for e in self.search_logs
+                if self._as_utc(e.created_at) >= cutoff]
+        # Errors bucket mirrors the SQL FILTER exactly: only timeout /
+        # error / empty_query count — an unknown outcome counts toward
+        # ``searches`` but no bucket.
+        outcomes = {
+            "found": sum(1 for e in rows if e.outcome == "found"),
+            "no_match": sum(1 for e in rows if e.outcome == "no_match"),
+            "no_results": sum(
+                1 for e in rows if e.outcome == "no_results"),
+            "exhausted": sum(1 for e in rows if e.outcome == "exhausted"),
+            "errors": sum(
+                1 for e in rows
+                if e.outcome in ("timeout", "error", "empty_query")),
+        }
+        elapsed = sorted(
+            e.elapsed_s for e in rows if e.elapsed_s is not None)
+
+        def _pct(p: float) -> float | None:
+            if not elapsed:
+                return None
+            return elapsed[min(len(elapsed) - 1, int(len(elapsed) * p))]
+
+        return {
+            "label": label,
+            "hours": hours,
+            "searches": len(rows),
+            "distinct_requests": len({e.request_id for e in rows}),
+            "searches_per_hour": len(rows) / hours,
+            "searches_per_24h": len(rows) / hours * 24,
+            "avg_elapsed_s": (sum(elapsed) / len(elapsed)) if elapsed else None,
+            "median_elapsed_s": _pct(0.5),
+            "p95_elapsed_s": _pct(0.95),
+            "max_elapsed_s": elapsed[-1] if elapsed else None,
+            "outcomes": outcomes,
+            "cursor_wraps": sum(
+                1 for e in rows if e.cursor_update_status == "wrapped"),
+            "stale_completions": sum(
+                1 for e in rows if e.cursor_update_status == "stale"),
+            "non_consuming": sum(
+                1 for e in rows if e.attempt_consumed is False),
+            "cache_attribution_level": "cycle_only",
+        }
+
+    def _dashboard_cycle_window(
+        self, label: str, hours: int, now: datetime,
+    ) -> dict[str, Any]:
+        cutoff = now - timedelta(hours=hours)
+        rows = [r for r in self.cycle_metrics
+                if self._as_utc(r["created_at"]) >= cutoff]
+        totals = sorted(float(r["cycle_total_s"]) for r in rows)
+        searches = sorted(float(r["search_time_s"]) for r in rows)
+
+        def _pct(values: list[float], p: float) -> float | None:
+            if not values:
+                return None
+            return values[min(len(values) - 1, int(len(values) * p))]
+
+        return {
+            "label": label,
+            "hours": hours,
+            "cycles": len(rows),
+            "avg_cycle_s": (sum(totals) / len(totals)) if totals else None,
+            "median_cycle_s": _pct(totals, 0.5),
+            "p95_cycle_s": _pct(totals, 0.95),
+            "max_cycle_s": totals[-1] if totals else None,
+            "median_search_s": _pct(searches, 0.5),
+            "watchdog_kills": sum(
+                int(r["cycle_searches_watchdog_killed"]) for r in rows),
+            "find_download_queued": sum(
+                int(r["find_download_queued"]) for r in rows),
+            "find_download_completed": sum(
+                int(r["find_download_completed"]) for r in rows),
+            "cache_errors": sum(int(r["cache_errors"]) for r in rows),
+            "cache_write_errors": sum(
+                int(r["cache_write_errors"]) for r in rows),
+            "cache_fuse_tripped": sum(
+                int(r["cache_fuse_tripped"]) for r in rows),
+            "peers_browsed": sum(int(r["peers_browsed"]) for r in rows),
+            "peers_browsed_lazy": sum(
+                int(r["peers_browsed_lazy"]) for r in rows),
+            "fanout_waves": sum(int(r["fanout_waves"]) for r in rows),
+        }
+
+    def _dashboard_cycle_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Mirror ``PipelineDB._serialize_dashboard_cycle_row`` exactly:
+        fixed key set, ``cycle_searches_watchdog_killed`` renamed to
+        ``watchdog_kills``, cache hit/miss + wanted_total columns NOT
+        emitted, timestamps isoformatted."""
+        def _iso(value: Any) -> str | None:
+            return value.isoformat() if isinstance(value, datetime) else value
+        return {
+            "id": int(row["id"]),
+            "started_at": _iso(row.get("started_at")),
+            "created_at": _iso(row.get("created_at")),
+            "cycle_total_s": float(row["cycle_total_s"]),
+            "browse_time_s": float(row["browse_time_s"]),
+            "match_time_s": float(row["match_time_s"]),
+            "search_time_s": float(row["search_time_s"]),
+            "watchdog_kills": int(row["cycle_searches_watchdog_killed"]),
+            "find_download_queued": int(row["find_download_queued"]),
+            "find_download_completed": int(row["find_download_completed"]),
+            "find_download_drain_time_s": float(
+                row["find_download_drain_time_s"]),
+            "cache_errors": int(row["cache_errors"]),
+            "cache_write_errors": int(row["cache_write_errors"]),
+            "cache_fuse_tripped": int(row["cache_fuse_tripped"]),
+            "peers_browsed": int(row["peers_browsed"]),
+            "peers_browsed_lazy": int(row["peers_browsed_lazy"]),
+            "fanout_waves": int(row["fanout_waves"]),
+        }
+
+    def _dashboard_coverage(self, now: datetime) -> dict[str, Any]:
+        """Mirror the production coverage CTEs: backlog = wanted +
+        downloading; suspects = searched-in-24h rows ordered
+        (searches_24h DESC, searches_6h DESC, id ASC) LIMIT 12 with
+        reset_24h counting the HISTORICAL ``exhausted`` outcome and
+        problem_24h restricted to timeout/error/empty_query;
+        stale_wanted = ALL backlog rows ordered last_search_at ASC
+        NULLS FIRST LIMIT 12 (recently-searched rows included); the
+        match-rate series are DENSE generate_series mirrors (24 hourly /
+        28 daily zero-filled buckets); matches_* ride the wanted CTE
+        cross-join, so an empty backlog reports 0 matches even when
+        found rows exist."""
+        backlog = {
+            int(r["id"]): r for r in self._requests.values()
+            if r.get("status") in ("wanted", "downloading")
+        }
+
+        # One pass over search_log per request: rollup of windowed
+        # outcome counts + last_search_at.
+        rollup: dict[int, dict[str, Any]] = {}
+        cutoff_24h = now - timedelta(hours=24)
+        cutoff_6h = now - timedelta(hours=6)
+        for e in self.search_logs:
+            at = self._as_utc(e.created_at)
+            r = rollup.setdefault(e.request_id, {
+                "last_search_at": None, "searches_24h": 0, "searches_6h": 0,
+                "found_24h": 0, "no_match_24h": 0, "no_results_24h": 0,
+                "reset_24h": 0, "problem_24h": 0,
+            })
+            if r["last_search_at"] is None or at > r["last_search_at"]:
+                r["last_search_at"] = at
+            if at >= cutoff_24h:
+                r["searches_24h"] += 1
+                if e.outcome == "found":
+                    r["found_24h"] += 1
+                elif e.outcome == "no_match":
+                    r["no_match_24h"] += 1
+                elif e.outcome == "no_results":
+                    r["no_results_24h"] += 1
+                elif e.outcome == "exhausted":
+                    r["reset_24h"] += 1
+                elif e.outcome in ("timeout", "error", "empty_query"):
+                    r["problem_24h"] += 1
+            if at >= cutoff_6h:
+                r["searches_6h"] += 1
+
+        searched_24h = sum(
+            1 for rid in backlog
+            if rollup.get(rid, {}).get("searches_24h", 0) > 0)
+        searched_6h = sum(
+            1 for rid in backlog
+            if rollup.get(rid, {}).get("searches_6h", 0) > 0)
+        active_24h = sum(
+            rollup.get(rid, {}).get("searches_24h", 0) for rid in backlog)
+        active_6h = sum(
+            rollup.get(rid, {}).get("searches_6h", 0) for rid in backlog)
+
+        found_rows = [e for e in self.search_logs if e.outcome == "found"]
+        if backlog:
+            matches_24h = sum(
+                1 for e in found_rows
+                if self._as_utc(e.created_at) >= cutoff_24h)
+            matches_6h = sum(
+                1 for e in found_rows
+                if self._as_utc(e.created_at) >= cutoff_6h)
+        else:
+            # Production's summary SQL cross-joins match_rates against
+            # the wanted CTE — zero backlog rows mean the aggregates
+            # COALESCE to 0 regardless of found rows.
+            matches_24h = 0
+            matches_6h = 0
+
+        # Dense bucket mirrors of generate_series + LEFT JOIN.
+        hour_anchor = now.replace(minute=0, second=0, microsecond=0)
+        hourly_counts: dict[datetime, int] = {}
+        day_anchor = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_counts: dict[datetime, int] = {}
+        for e in found_rows:
+            at = self._as_utc(e.created_at)
+            hourly_counts[at.replace(minute=0, second=0, microsecond=0)] = (
+                hourly_counts.get(
+                    at.replace(minute=0, second=0, microsecond=0), 0) + 1)
+            daily_counts[at.replace(
+                hour=0, minute=0, second=0, microsecond=0)] = (
+                daily_counts.get(at.replace(
+                    hour=0, minute=0, second=0, microsecond=0), 0) + 1)
+        series_24h = []
+        for i in range(23, -1, -1):
+            bucket = hour_anchor - timedelta(hours=i)
+            n = hourly_counts.get(bucket, 0)
+            series_24h.append({
+                "bucket_start": bucket.isoformat(),
+                "matches": n,
+                "matches_per_hour": n,
+            })
+        series_28d = []
+        for i in range(27, -1, -1):
+            bucket = day_anchor - timedelta(days=i)
+            n = daily_counts.get(bucket, 0)
+            series_28d.append({
+                "bucket_start": bucket.isoformat(),
+                "matches": n,
+                "matches_per_day": n,
+            })
+
+        def _request_row(rid: int) -> dict[str, Any]:
+            req = backlog[rid]
+            r = rollup.get(rid, {})
+            at = r.get("last_search_at")
+            return {
+                "request_id": rid,
+                "artist_name": req.get("artist_name"),
+                "album_title": req.get("album_title"),
+                "status": req.get("status"),
+                "last_search_at": at.isoformat() if at else None,
+                "searches_24h": int(r.get("searches_24h", 0)),
+                "searches_6h": int(r.get("searches_6h", 0)),
+                "found_24h": int(r.get("found_24h", 0)),
+                "no_match_24h": int(r.get("no_match_24h", 0)),
+                "no_results_24h": int(r.get("no_results_24h", 0)),
+                "reset_24h": int(r.get("reset_24h", 0)),
+                "problem_24h": int(r.get("problem_24h", 0)),
+            }
+
+        suspects = [
+            _request_row(rid)
+            for rid in sorted(
+                (rid for rid in backlog
+                 if rollup.get(rid, {}).get("searches_24h", 0) > 0),
+                key=lambda rid: (
+                    -rollup[rid]["searches_24h"],
+                    -rollup[rid]["searches_6h"],
+                    rid,
+                ),
+            )
+        ][:12]
+
+        def _stale_sort_key(rid: int):
+            at = rollup.get(rid, {}).get("last_search_at")
+            req = backlog[rid]
+            created = self._as_utc(_as_datetime(req.get("created_at")))
+            # NULLS FIRST: never-searched rows sort before everything.
+            return (at is not None, at or created, created, rid)
+
+        stale = []
+        for rid in sorted(backlog, key=_stale_sort_key)[:12]:
+            row = _request_row(rid)
+            at = rollup.get(rid, {}).get("last_search_at")
+            row["hours_since_search"] = (
+                (now - at).total_seconds() / 3600 if at else None)
+            stale.append(row)
+
+        top_10_searches = sum(r["searches_24h"] for r in suspects[:10])
+        top_10_share = (top_10_searches / active_24h) if active_24h else 0
+
+        oldest = None
+        searched_ats = [
+            rollup[rid]["last_search_at"] for rid in backlog
+            if rid in rollup and rollup[rid]["last_search_at"] is not None
+        ]
+        if searched_ats:
+            oldest = min(searched_ats).isoformat()
+
+        return {
+            "wanted_total": len(backlog),
+            "wanted_searched_24h": searched_24h,
+            "wanted_searched_6h": searched_6h,
+            "wanted_unsearched_24h": max(len(backlog) - searched_24h, 0),
+            "wanted_unsearched_6h": max(len(backlog) - searched_6h, 0),
+            "wanted_never_searched": sum(
+                1 for rid in backlog
+                if rollup.get(rid, {}).get("last_search_at") is None),
+            "active_wanted_searches_24h": active_24h,
+            "active_wanted_searches_6h": active_6h,
+            "oldest_last_search_at": oldest,
+            "matches_24h": matches_24h,
+            "matches_6h": matches_6h,
+            "matches_per_hour_24h": matches_24h / 24,
+            "matches_per_hour_6h": matches_6h / 6,
+            "match_rate_series_24h": series_24h,
+            "match_rate_series_28d": series_28d,
+            "wanted_trend": self._dashboard_wanted_trend(
+                self._current_wanted_total()),
+            "top_10_share_24h": top_10_share,
+            "top_loop_suspects": suspects,
+            "stale_wanted": stale,
+        }
+
+    def _dashboard_heavy_queries(self, now: datetime) -> list[dict[str, Any]]:
+        """Mirror ``_dashboard_peer_browse_heavy_queries``: rows with
+        (peers_browsed + peers_browsed_lazy) > 0 in the last 24h,
+        ordered (peer_dirs DESC, fanout_waves DESC, created_at DESC,
+        id DESC), LIMIT 12, with the production serializer's int/float
+        coercions (result_count never None)."""
+        cutoff = now - timedelta(hours=24)
+        rows = [e for e in self.search_logs
+                if self._as_utc(e.created_at) >= cutoff
+                and (e.peers_browsed + e.peers_browsed_lazy) > 0]
+        rows.sort(key=lambda e: (
+            -(e.peers_browsed + e.peers_browsed_lazy),
+            -e.fanout_waves,
+            -self._as_utc(e.created_at).timestamp(),
+            -e.id,
+        ))
+        out: list[dict[str, Any]] = []
+        for e in rows[:12]:
+            req = self._requests.get(e.request_id, {})
+            out.append({
+                "search_log_id": e.id,
+                "request_id": e.request_id,
+                "mb_release_id": req.get("mb_release_id"),
+                "artist_name": req.get("artist_name"),
+                "album_title": req.get("album_title"),
+                "status": req.get("status"),
+                "created_at": self._as_utc(e.created_at).isoformat(),
+                "query": e.query,
+                "variant": e.variant,
+                "outcome": e.outcome,
+                "result_count": int(e.result_count or 0),
+                "elapsed_s": float(e.elapsed_s)
+                if e.elapsed_s is not None else None,
+                "browse_time_s": float(e.browse_time_s or 0.0),
+                "match_time_s": float(e.match_time_s or 0.0),
+                "peers_browsed": int(e.peers_browsed or 0),
+                "peers_browsed_lazy": int(e.peers_browsed_lazy or 0),
+                "peer_dirs": int(
+                    (e.peers_browsed or 0) + (e.peers_browsed_lazy or 0)),
+                "fanout_waves": int(e.fanout_waves or 0),
+            })
+        return out
+
     def get_pipeline_dashboard_metrics(
         self,
         *,
         plan_generator_id: str | None = None,
     ) -> dict[str, Any]:
+        """Python mirror of the production dashboard read-model.
+
+        Aggregates real seeded telemetry (``search_logs``,
+        ``cycle_metrics``, ``peer_observations``, request rows) into the
+        same envelope ``PipelineDB.get_pipeline_dashboard_metrics``
+        emits, with every timestamp isoformatted exactly like the
+        production ``_isoformat_or_none`` boundary (datetimes leaking
+        here 500 the dashboard route's json.dumps). Percentiles use a
+        simple nearest-rank cut — close enough for contract tests; the
+        production SQL is the authority on exact statistics.
+        """
         if plan_generator_id is None:
             from lib.search import SEARCH_PLAN_GENERATOR_ID
             plan_generator_id = SEARCH_PLAN_GENERATOR_ID
+        now = _utcnow()
         peers = self.get_peer_metrics()
-        peers["heavy_queries"] = []
+        peers["heavy_queries"] = self._dashboard_heavy_queries(now)
         peers["heavy_query_hours"] = 24
         return {
-            "generated_at": _utcnow().isoformat(),
-            "searches": {"windows": []},
+            "generated_at": now.isoformat(),
+            "searches": {
+                "windows": [
+                    self._dashboard_search_window("24h", 24, now),
+                    self._dashboard_search_window("6h", 6, now),
+                ],
+            },
             "cycles": {
-                "windows": [],
-                "recent": list(reversed(self.cycle_metrics[-12:])),
-                "outliers": sorted(
-                    self.cycle_metrics,
-                    key=lambda row: row["cycle_total_s"],
-                    reverse=True,
-                )[:8],
+                "windows": [
+                    self._dashboard_cycle_window("24h", 24, now),
+                    self._dashboard_cycle_window("6h", 6, now),
+                ],
+                # Production: ORDER BY created_at DESC LIMIT 12 — NOT
+                # insertion order (rows seeded with explicit
+                # completed_at values must sort by their timestamps).
+                "recent": [
+                    self._dashboard_cycle_row(r)
+                    for r in sorted(
+                        self.cycle_metrics,
+                        key=lambda row: self._as_utc(row["created_at"]),
+                        reverse=True,
+                    )[:12]
+                ],
+                # Production restricts outliers to the last 24 hours.
+                "outliers": [
+                    self._dashboard_cycle_row(r)
+                    for r in sorted(
+                        (row for row in self.cycle_metrics
+                         if self._as_utc(row["created_at"])
+                         >= now - timedelta(hours=24)),
+                        key=lambda row: row["cycle_total_s"],
+                        reverse=True,
+                    )[:8]
+                ],
             },
-            "coverage": {
-                "wanted_trend": self._dashboard_wanted_trend(
-                    self._current_wanted_total(),
-                ),
-            },
+            "coverage": self._dashboard_coverage(now),
             "peers": peers,
             "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
         }

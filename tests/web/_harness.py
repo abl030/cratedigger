@@ -174,10 +174,15 @@ class _FakeDbWebServerCase(_WebServerCase):
 
     db: FakePipelineDB
 
+    #: Override in subclasses that need a typed failure-injecting
+    #: FakePipelineDB subclass (e.g. raising connection errors from a
+    #: specific method) — still a stateful fake, never a MagicMock.
+    DB_FACTORY: type[FakePipelineDB] = FakePipelineDB
+
     def setUp(self) -> None:
         super().setUp()
         import web.server as srv
-        self.db = FakePipelineDB()
+        self.db = self.DB_FACTORY()
         patcher = patch.object(srv, "db", self.db)
         patcher.start()
         self.addCleanup(patcher.stop)

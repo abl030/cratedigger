@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 from tests.helpers import make_album_quality_evidence
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -7928,6 +7928,85 @@ class TestGetByStatusRecentWindow(unittest.TestCase):
             mb_release_id="legacy-order", status="wanted")
         rows = self.db.get_by_status("wanted")
         self.assertEqual(len(rows), 1)
+
+
+@requires_postgres
+class TestDashboardFakeParity(unittest.TestCase):
+    """Structural parity gate: FakePipelineDB's dashboard mirror vs the
+    real PostgreSQL read-model on identically-seeded telemetry.
+
+    The fake's get_pipeline_dashboard_metrics is a ~300-line Python
+    mirror of ~700 lines of SQL; this test makes drift mechanical
+    instead of review-archaeological. Both sides are seeded through the
+    SAME writer calls, then the payloads are compared as SHAPES —
+    recursive dict key sets, list lengths, first-element shapes, and
+    leaf type categories (null / bool / num / str). Values are not
+    compared (timestamps and rates are time-anchored); a key rename, a
+    dropped panel, a sparse-vs-dense series, or a None-vs-0 leaf all
+    fail loudly.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    @staticmethod
+    def _seed(db: Any) -> None:
+        rid = db.add_request(
+            "Parity Artist", "Parity Album", "request",
+            mb_release_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        db.log_search(
+            rid, query="found q", outcome="found", result_count=5,
+            elapsed_s=2.0, variant="v1", final_state="Completed",
+            browse_time_s=42.0, match_time_s=1.0, peers_browsed=110,
+            peers_browsed_lazy=5, fanout_waves=6,
+        )
+        db.log_search(rid, query="loop", outcome="no_match", elapsed_s=1.0)
+        db.log_search(rid, query="old style", outcome="exhausted")
+        db.record_cycle_metrics(
+            cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
+            search_time_s=240.0, peers_browsed=8, fanout_waves=2,
+            find_download_queued=4, find_download_completed=4,
+            wanted_total=10,
+        )
+        db.record_peer_observations(["peer-a", "peer-b"])
+
+    @classmethod
+    def _shape(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: cls._shape(v) for k, v in sorted(value.items())}
+        if isinstance(value, list):
+            head = cls._shape(value[0]) if value else None
+            return ("list", len(value), head)
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, (int, float)):
+            return "num"
+        if isinstance(value, str):
+            return "str"
+        return type(value).__name__
+
+    def test_fake_dashboard_shape_matches_real_pg(self):
+        from tests.fakes import FakePipelineDB
+        self._seed(self.db)
+        fake = FakePipelineDB()
+        self._seed(fake)
+
+        real_shape = self._shape(self.db.get_pipeline_dashboard_metrics())
+        fake_shape = self._shape(fake.get_pipeline_dashboard_metrics())
+
+        self.assertEqual(
+            real_shape, fake_shape,
+            "FakePipelineDB's dashboard mirror drifted from the real "
+            "PostgreSQL read-model — fix the fake (tests/fakes.py), "
+            "never the production SQL, unless the SQL change is the "
+            "point of your PR.",
+        )
 
 
 if __name__ == "__main__":
