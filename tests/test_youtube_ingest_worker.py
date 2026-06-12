@@ -62,10 +62,13 @@ EXPECTED_TRACKS = 10
 
 
 def _seed_wanted_request(pdb: FakePipelineDB, *, request_id: int = 42) -> None:
+    # Per-request mbid (default id 42 keeps MB_REL) — two wanted rows
+    # sharing one mb_release_id is a state production's UNIQUE forbids.
+    mb_release_id = MB_REL if request_id == 42 else f"{MB_REL[:-2]}{request_id}"
     pdb.seed_request(make_request_row(
         id=request_id,
         status="wanted",
-        mb_release_id=MB_REL,
+        mb_release_id=mb_release_id,
         mb_release_group_id=MB_RG,
     ))
 
