@@ -4927,6 +4927,67 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
         )
 
 
+class TestFakeDashboardMirror(unittest.TestCase):
+    """The dashboard read-model mirror aggregates real seeded telemetry
+    and must emit a fully JSON-serializable envelope (production
+    isoformats every timestamp at the _isoformat_or_none boundary —
+    a raw datetime here 500s the dashboard route)."""
+
+    def _seeded_db(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.record_cycle_metrics(
+            cycle_total_s=300.0, search_time_s=240.0, peers_browsed=8,
+            find_download_queued=4, find_download_completed=4,
+            wanted_total=10,
+        )
+        db.log_search(
+            1, query="q", outcome="found", result_count=5, elapsed_s=2.0,
+            variant="v1", final_state="Completed", browse_time_s=42.0,
+            peers_browsed=110, peers_browsed_lazy=5, fanout_waves=6,
+        )
+        db.log_search(1, query="q2", outcome="no_match", elapsed_s=1.0)
+        db.record_peer_observations(["peer-a", "peer-b"])
+        return db
+
+    def test_envelope_is_json_serializable_with_seeded_telemetry(self):
+        import json
+        db = self._seeded_db()
+        payload = db.get_pipeline_dashboard_metrics()
+        json.dumps(payload)  # raises TypeError on any leaked datetime
+
+    def test_windows_and_coverage_aggregate_seeded_rows(self):
+        db = self._seeded_db()
+        payload = db.get_pipeline_dashboard_metrics()
+        win24 = payload["searches"]["windows"][0]
+        self.assertEqual(win24["label"], "24h")
+        self.assertEqual(win24["searches"], 2)
+        self.assertEqual(win24["outcomes"]["found"], 1)
+        self.assertEqual(win24["outcomes"]["no_match"], 1)
+        cov = payload["coverage"]
+        self.assertEqual(cov["matches_24h"], 1)
+        self.assertEqual(cov["wanted_total"], 1)
+        self.assertEqual(cov["wanted_searched_24h"], 1)
+        self.assertEqual(len(cov["match_rate_series_24h"]), 1)
+        self.assertEqual(cov["match_rate_series_24h"][0]["matches"], 1)
+        # Heavy-query panel surfaces the browse-heavy row.
+        heavy = payload["peers"]["heavy_queries"]
+        self.assertEqual(len(heavy), 1)
+        self.assertEqual(heavy[0]["peers_browsed"], 110)
+        self.assertEqual(heavy[0]["peer_dirs"], 115)
+        cyc24 = payload["cycles"]["windows"][0]
+        self.assertEqual(cyc24["cycles"], 1)
+        self.assertEqual(cyc24["find_download_queued"], 4)
+
+    def test_empty_db_emits_complete_envelope(self):
+        import json
+        payload = FakePipelineDB().get_pipeline_dashboard_metrics()
+        json.dumps(payload)
+        self.assertEqual(payload["searches"]["windows"][0]["searches"], 0)
+        self.assertEqual(payload["coverage"]["wanted_total"], 0)
+        self.assertEqual(payload["peers"]["heavy_queries"], [])
+
+
 class TestFakeCursor(unittest.TestCase):
     """FakeCursor pairs with FakePipelineDB.queue_execute_results for
     raw-SQL seams (web.overlay.check_pipeline et al.). Consumption

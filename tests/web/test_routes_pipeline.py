@@ -5,7 +5,6 @@ Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
 
-import copy
 from datetime import datetime, timezone
 import os
 import sys
@@ -18,17 +17,15 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import (
-    _MOCK_PIPELINE_REQUEST,
     _assert_required_fields,
-    _WebServerCase,
+    _FakeDbWebServerCase,
     _fresh_triage_runner,
 )
 
-from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 
-class TestPipelineRouteContracts(_WebServerCase):
+class TestPipelineRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline GET routes."""
 
     PIPELINE_ITEM_REQUIRED_FIELDS = {
@@ -198,22 +195,26 @@ class TestPipelineRouteContracts(_WebServerCase):
     }
 
     def setUp(self) -> None:
-        self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
-        self.mock_db.get_tracks.return_value = [
-            {"disc_number": 1, "track_number": 1, "title": "Track", "length_seconds": 180},
-        ]
-        self.mock_db.get_wanted.return_value = [
-            make_request_row(id=101, status="wanted", source="request"),
-        ]
-        self.mock_db.count_by_status.return_value = {
-            "wanted": 1, "downloading": 0, "imported": 1, "manual": 0,
-        }
-        self.mock_db.get_by_status.side_effect = None
-        self.mock_db.get_by_status.return_value = []
-        self.mock_db.get_download_history_batch.return_value = {}
-        self.mock_db.get_latest_download_summaries.return_value = {}
-        self.mock_db.get_recent.return_value = []
-        self.mock_db.get_track_counts.return_value = {}
+        super().setUp()
+        # The detail/log fixtures: one imported request with a track and
+        # a real success download row, plus one wanted request.
+        self.db.seed_request(make_request_row(
+            id=100, status="imported", min_bitrate=320,
+            imported_path="/mnt/virtio/Music/Beets/Test",
+        ))
+        self.db.set_tracks(100, [
+            {"disc_number": 1, "track_number": 1, "title": "Track",
+             "length_seconds": 180},
+        ])
+        self.db.log_download(
+            100, outcome="success", beets_scenario="strong_match",
+            beets_distance=0.012, soulseek_username="testuser",
+            filetype="mp3", bitrate=320000, actual_filetype="mp3",
+            actual_min_bitrate=320, valid=True,
+        )
+        self.db.seed_request(make_request_row(
+            id=101, status="wanted", source="request",
+        ))
 
     def test_pipeline_log_contract(self):
         status, data = self._get("/api/pipeline/log")
@@ -237,8 +238,7 @@ class TestPipelineRouteContracts(_WebServerCase):
         from tests.fakes import FakeBeetsDB
         import web.server as srv
 
-        fake = self.mock_db._fake
-        fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=9001, status="wanted", mb_release_id="disk-missing-mbid",
             artist_name="Missing Artist", album_title="Missing Album",
         ))
@@ -282,16 +282,10 @@ class TestPipelineRouteContracts(_WebServerCase):
             "disk coverage inverse row")
 
     def test_pipeline_log_surfaces_wrong_match_triage_audit(self):
-        original_log = copy.deepcopy(self.mock_db.get_log.return_value)
-        row = copy.deepcopy(self.mock_db.get_log.return_value[0])
-        row.update({
-            "outcome": "rejected",
-            "beets_scenario": "high_distance",
-            "beets_distance": 0.190,
-            "soulseek_username": "moundsofass",
-            "album_title": "For Screening Purposes Only",
-            "artist_name": "Test Icicles",
-            "validation_result": {
+        self.db.log_download(
+            100, outcome="rejected", beets_scenario="high_distance",
+            beets_distance=0.190, soulseek_username="moundsofass",
+            validation_result={
                 "scenario": "wrong_match",
                 "wrong_match_triage": {
                     "action": "deleted_reject",
@@ -301,13 +295,9 @@ class TestPipelineRouteContracts(_WebServerCase):
                     "stage_chain": ["mp3_spectral:reject"],
                 },
             },
-        })
-        self.mock_db.get_log.return_value = [row]
+        )
 
-        try:
-            status, data = self._get("/api/pipeline/log")
-        finally:
-            self.mock_db.get_log.return_value = original_log
+        status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
         item = data["log"][0]
@@ -328,9 +318,8 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline status wanted item")
 
     def test_pipeline_all_contract(self):
-        row = make_request_row(id=201, status="wanted", album_title="Wanted Album")
-        self.mock_db.get_by_status.side_effect = (
-            lambda s, **kw: [row] if s == "wanted" else [])
+        self.db.seed_request(make_request_row(
+            id=201, status="wanted", album_title="Wanted Album"))
 
         status, data = self._get("/api/pipeline/all")
 
@@ -344,36 +333,36 @@ class TestPipelineRouteContracts(_WebServerCase):
     def test_pipeline_all_imported_is_a_recency_window(self):
         """#426: the imported bucket is capped (newest first) and the
         payload flags the truncation so the UI can say so."""
+        from datetime import timedelta
         from web.routes.pipeline import IMPORTED_RECENT_LIMIT
-        row = make_request_row(id=301, status="imported",
-                               album_title="Imported Album")
-        calls = []
-
-        def _by_status(s, **kw):
-            calls.append((s, kw))
-            return [row] if s == "imported" else []
-
-        self.mock_db.get_by_status.side_effect = _by_status
-        self.mock_db.count_by_status.return_value = {
-            "wanted": 0, "imported": IMPORTED_RECENT_LIMIT + 50, "manual": 0,
-        }
+        # setUp already seeded one imported row (id=100); add enough to
+        # exceed the cap by 10. Stagger updated_at so newest-first
+        # ordering is observable.
+        base = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        for i in range(IMPORTED_RECENT_LIMIT + 10):
+            self.db.seed_request(make_request_row(
+                id=1000 + i, status="imported",
+                album_title=f"Imported {i}",
+                updated_at=base + timedelta(minutes=i),
+            ))
 
         status, data = self._get("/api/pipeline/all")
 
         self.assertEqual(status, 200)
-        self.assertEqual(data["imported_total"], IMPORTED_RECENT_LIMIT + 50)
+        self.assertEqual(data["imported_total"], IMPORTED_RECENT_LIMIT + 11)
         self.assertTrue(data["imported_truncated"])
-        imported_call = next(c for c in calls if c[0] == "imported")
-        self.assertEqual(imported_call[1],
-                         {"limit": IMPORTED_RECENT_LIMIT, "newest_first": True})
+        # The bucket is capped at the limit, newest first.
+        self.assertEqual(len(data["imported"]), IMPORTED_RECENT_LIMIT)
+        self.assertEqual(data["imported"][0]["album_title"],
+                         f"Imported {IMPORTED_RECENT_LIMIT + 9}")
 
     SEARCH_REQUIRED_FIELDS = {"query", "items", "total"}
 
     def test_pipeline_search_contract(self):
-        row = make_request_row(id=401, status="imported",
-                               artist_name="The Mountain Goats",
-                               album_title="Tallahassee")
-        self.mock_db.search_requests.return_value = [row]
+        self.db.seed_request(make_request_row(
+            id=401, status="imported",
+            artist_name="The Mountain Goats",
+            album_title="Tallahassee"))
 
         status, data = self._get("/api/pipeline/search?q=mountain")
 
@@ -387,12 +376,50 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "pipeline search item")
 
     def test_pipeline_search_blank_query_is_empty(self):
-        self.mock_db.search_requests.return_value = []
         status, data = self._get("/api/pipeline/search")
         self.assertEqual(status, 200)
         self.assertEqual(data["items"], [])
 
+    def _seed_dashboard_telemetry(self) -> None:
+        """Real telemetry rows for every [0]-indexed dashboard assertion:
+        cycle metrics (windows + wanted-trend samples), found/loop search
+        logs (match-rate series, heavy queries, loop suspects), and peer
+        observations (totals + days)."""
+        from datetime import timedelta
+        base = datetime.now(timezone.utc)
+        self.db.record_cycle_metrics(
+            cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
+            search_time_s=240.0, peers_browsed=8, fanout_waves=2,
+            find_download_queued=4, find_download_completed=4,
+            completed_at=base - timedelta(hours=2), wanted_total=12,
+        )
+        self.db.record_cycle_metrics(
+            cycle_total_s=320.0, browse_time_s=22.0, match_time_s=11.0,
+            search_time_s=250.0, peers_browsed=9, fanout_waves=3,
+            find_download_queued=3, find_download_completed=3,
+            completed_at=base - timedelta(minutes=5), wanted_total=10,
+        )
+        # One found search (match-rate series) + enough no_match rows on
+        # the wanted request to register as a loop suspect, with browse
+        # telemetry so the heavy-queries panel has a row.
+        self.db.log_search(
+            101, query="found query", outcome="found", result_count=5,
+            elapsed_s=2.0, variant="v1", final_state="Completed",
+            browse_time_s=42.0, match_time_s=1.0, peers_browsed=110,
+            peers_browsed_lazy=5, fanout_waves=6,
+        )
+        for i in range(4):
+            self.db.log_search(
+                101, query=f"loop {i}", outcome="no_match",
+                result_count=500, elapsed_s=12.0, variant="track_0",
+                final_state="Completed", browse_time_s=42.0,
+                match_time_s=1.0, peers_browsed=110, peers_browsed_lazy=5,
+                fanout_waves=6,
+            )
+        self.db.record_peer_observations(["peer-a", "peer-b", "peer-c"])
+
     def test_pipeline_dashboard_contract(self):
+        self._seed_dashboard_telemetry()
         status, data = self._get("/api/pipeline/dashboard")
 
         self.assertEqual(status, 200)
@@ -521,7 +548,8 @@ class TestPipelineRouteContracts(_WebServerCase):
         """When the latest search_log row has candidates, the route emits the
         full slice (up to 20) by (matched_tracks DESC, avg_ratio DESC) via
         msgspec.to_builtins."""
-        candidates_blob = [
+        from lib.quality import CandidateScore
+        candidates_blob = msgspec.convert([
             {"username": "u1", "dir": "A", "filetype": "flac",
              "matched_tracks": 26, "total_tracks": 26, "avg_ratio": 0.95,
              "missing_titles": [], "file_count": 26},
@@ -534,19 +562,14 @@ class TestPipelineRouteContracts(_WebServerCase):
             {"username": "u4", "dir": "D", "filetype": "flac",
              "matched_tracks": 20, "total_tracks": 26, "avg_ratio": 0.99,
              "missing_titles": ["a", "b"], "file_count": 20},
-        ]
-        self.mock_db.get_search_history.return_value = [{
-            "id": 99, "request_id": 100, "query": "*rtist Album",
-            "result_count": 100, "elapsed_s": 1.2, "outcome": "no_match",
-            "created_at": "2026-04-29T00:00:00+00:00",
-            "candidates": candidates_blob,
-            "variant": "v3_artist_only", "final_state": "Completed",
-        }]
+        ], type=list[CandidateScore])
+        self.db.log_search(
+            100, query="*rtist Album", result_count=100, elapsed_s=1.2,
+            outcome="no_match", candidates=candidates_blob,
+            variant="v3_artist_only", final_state="Completed",
+        )
 
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_search_history.return_value = []
+        status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
         last = data["last_search"]
@@ -568,24 +591,20 @@ class TestPipelineRouteContracts(_WebServerCase):
     def test_pipeline_detail_caps_top_candidates_at_twenty(self):
         """U2: the peers panel widened from 3 to the full stored cap (20). A
         search row with >20 candidates surfaces exactly 20, still ranked."""
-        blob = [
+        from lib.quality import CandidateScore
+        blob = msgspec.convert([
             {"username": f"u{i:02d}", "dir": f"D{i}", "filetype": "flac",
              "matched_tracks": 26, "total_tracks": 26,
              "avg_ratio": 1.0 - i / 100.0,
              "missing_titles": [], "file_count": 26}
             for i in range(25)
-        ]
-        self.mock_db.get_search_history.return_value = [{
-            "id": 99, "request_id": 100, "query": "q",
-            "result_count": 100, "elapsed_s": 1.0, "outcome": "no_match",
-            "created_at": "2026-04-29T00:00:00+00:00",
-            "candidates": blob,
-            "variant": "v3_artist_only", "final_state": "Completed",
-        }]
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_search_history.return_value = []
+        ], type=list[CandidateScore])
+        self.db.log_search(
+            100, query="q", result_count=100, elapsed_s=1.0,
+            outcome="no_match", candidates=blob,
+            variant="v3_artist_only", final_state="Completed",
+        )
+        status, data = self._get("/api/pipeline/100")
         self.assertEqual(status, 200)
         top = data["last_search"]["top_candidates"]
         self.assertEqual(len(top), 20)
@@ -595,16 +614,12 @@ class TestPipelineRouteContracts(_WebServerCase):
 
     def test_pipeline_detail_handles_null_candidates_gracefully(self):
         """Historical search_log row with NULL candidates → top_candidates=[]."""
-        self.mock_db.get_search_history.return_value = [{
-            "id": 1, "request_id": 100, "query": "q",
-            "result_count": None, "elapsed_s": None, "outcome": "timeout",
-            "created_at": "2026-04-29T00:00:00+00:00",
-            "candidates": None, "variant": None, "final_state": None,
-        }]
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_search_history.return_value = []
+        self.db.log_search(
+            100, query="q", result_count=None, elapsed_s=None,
+            outcome="timeout", candidates=None,
+            variant=None, final_state=None,
+        )
+        status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
         self.assertIsNotNone(data["last_search"])
@@ -613,17 +628,12 @@ class TestPipelineRouteContracts(_WebServerCase):
 
     def test_pipeline_detail_handles_empty_candidates_list(self):
         """Latest search row with an empty candidates list → top_candidates=[]."""
-        self.mock_db.get_search_history.return_value = [{
-            "id": 1, "request_id": 100, "query": "q",
-            "result_count": 0, "elapsed_s": 0.5, "outcome": "no_results",
-            "created_at": "2026-04-29T00:00:00+00:00",
-            "candidates": [], "variant": "v2_artist_album_no_year",
-            "final_state": "Completed",
-        }]
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_search_history.return_value = []
+        self.db.log_search(
+            100, query="q", result_count=0, elapsed_s=0.5,
+            outcome="no_results", candidates=[],
+            variant="v2_artist_album_no_year", final_state="Completed",
+        )
+        status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["last_search"]["top_candidates"], [])
@@ -637,18 +647,17 @@ class TestPipelineRouteContracts(_WebServerCase):
         try/except msgspec.ValidationError; the web route must do the same so
         a corrupt row does not 500 the detail page.
         """
-        self.mock_db.get_search_history.return_value = [{
-            "id": 7, "request_id": 100, "query": "q",
-            "result_count": 5, "elapsed_s": 0.5, "outcome": "no_match",
-            "created_at": "2026-04-29T00:00:00+00:00",
-            # Wrong shape — missing every required CandidateScore field.
-            "candidates": [{"foo": "bar"}],
-            "variant": "v2_artist_album_no_year", "final_state": "Completed",
-        }]
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_search_history.return_value = []
+        import json as _json
+        self.db.log_search(
+            100, query="q", result_count=5, elapsed_s=0.5,
+            outcome="no_match", candidates=[],
+            variant="v2_artist_album_no_year", final_state="Completed",
+        )
+        # Corrupt the stored JSONB in place — historical rows whose
+        # shape predates CandidateScore. The fake stores the encoded
+        # JSON string exactly like the real column.
+        self.db.search_logs[-1].candidates = _json.dumps([{"foo": "bar"}])
+        status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
         self.assertIsNotNone(data["last_search"])
@@ -658,26 +667,18 @@ class TestPipelineRouteContracts(_WebServerCase):
 
     def test_pipeline_detail_surfaces_manual_reason(self):
         """manual_reason='search_exhausted' is exposed on the detail response."""
-        row = copy.deepcopy(_MOCK_PIPELINE_REQUEST)
-        row["manual_reason"] = "search_exhausted"
-        row["status"] = "manual"
-        self.mock_db.get_request.return_value = row
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST
+        self.db.update_request_fields(
+            100, status="manual", manual_reason="search_exhausted")
+        status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["manual_reason"], "search_exhausted")
 
     def test_pipeline_detail_history_surfaces_wrong_match_triage_audit(self):
-        original_history = copy.deepcopy(self.mock_db.get_download_history.return_value)
-        row = copy.deepcopy(self.mock_db.get_download_history.return_value[0])
-        row.update({
-            "outcome": "rejected",
-            "beets_scenario": "high_distance",
-            "beets_distance": 0.190,
-            "validation_result": {
+        self.db.log_download(
+            100, outcome="rejected", beets_scenario="high_distance",
+            beets_distance=0.190,
+            validation_result={
                 "wrong_match_triage": {
                     "action": "deleted_reject",
                     "reason": "requeue_upgrade",
@@ -686,13 +687,8 @@ class TestPipelineRouteContracts(_WebServerCase):
                     "stage_chain": ["stage1_spectral:reject"],
                 },
             },
-        })
-        self.mock_db.get_download_history.return_value = [row]
-
-        try:
-            status, data = self._get("/api/pipeline/100")
-        finally:
-            self.mock_db.get_download_history.return_value = original_history
+        )
+        status, data = self._get("/api/pipeline/100")
 
         self.assertEqual(status, 200)
         item = data["history"][0]
@@ -704,11 +700,16 @@ class TestPipelineRouteContracts(_WebServerCase):
                          ["stage1_spectral:reject"])
 
     def test_pipeline_recent_contract(self):
-        row = make_request_row(id=202, status="imported", album_title="Recent Album")
-        history = copy.deepcopy(self.mock_db.get_download_history.return_value[0])
-        self.mock_db.get_recent.return_value = [row]
-        self.mock_db.get_track_counts.return_value = {202: 11}
-        self.mock_db.get_download_history_batch.return_value = {202: [history]}
+        self.db.seed_request(make_request_row(
+            id=202, status="imported", album_title="Recent Album"))
+        self.db.set_tracks(202, [
+            {"disc_number": 1, "track_number": n, "title": f"T{n}"}
+            for n in range(1, 12)
+        ])
+        self.db.log_download(
+            202, outcome="success", beets_scenario="strong_match",
+            beets_distance=0.01, soulseek_username="testuser",
+        )
 
         status, data = self._get("/api/pipeline/recent")
 
@@ -733,12 +734,13 @@ class TestPipelineRouteContracts(_WebServerCase):
         even if a shim would have returned 12 tracks (mocked here with
         ``create=True`` so the test is RED against the current code).
         """
-        row = make_request_row(
+        self.db.seed_request(make_request_row(
             id=303, status="imported", album_title="Recent Album",
-            mb_release_id="no-such-id-in-beets")
-        self.mock_db.get_recent.return_value = [row]
-        self.mock_db.get_track_counts.return_value = {303: 8}
-        self.mock_db.get_download_history_batch.return_value = {}
+            mb_release_id="no-such-id-in-beets"))
+        self.db.set_tracks(303, [
+            {"disc_number": 1, "track_number": n, "title": f"T{n}"}
+            for n in range(1, 9)
+        ])
 
         status, data = self._get("/api/pipeline/recent")
         self.assertEqual(status, 200)
@@ -837,7 +839,7 @@ class TestPipelineRouteContracts(_WebServerCase):
 
         runner.join(timeout=5)
         mock_cleanup.assert_called_once_with(
-            self.mock_db,
+            self.db,
             confirm_all_wrong_matches=True,
         )
 
@@ -912,7 +914,17 @@ class TestPipelineRouteContracts(_WebServerCase):
         self.assertIn("confirm_all_wrong_matches", data.get("message") or data.get("error") or "")
         mock_cleanup.assert_not_called()
 
+    def _enqueue_force_job(self) -> int:
+        job = self.db.enqueue_import_job(
+            "force_import", request_id=100,
+            dedupe_key="force_import:download_log:42",
+            payload={"failed_path": "/tmp/Test Album"},
+            message="Import queued",
+        )
+        return job.id
+
     def test_import_jobs_contract(self):
+        self._enqueue_force_job()
         status, data = self._get("/api/import-jobs")
 
         self.assertEqual(status, 200)
@@ -921,7 +933,8 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "import jobs item")
 
     def test_import_job_detail_contract(self):
-        status, data = self._get("/api/import-jobs/77")
+        job_id = self._enqueue_force_job()
+        status, data = self._get(f"/api/import-jobs/{job_id}")
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, {"job"}, "import job detail response")
@@ -929,6 +942,7 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "import job detail")
 
     def test_import_jobs_timeline_contract(self):
+        self._enqueue_force_job()
         status, data = self._get("/api/import-jobs/timeline")
 
         self.assertEqual(status, 200)
@@ -938,7 +952,9 @@ class TestPipelineRouteContracts(_WebServerCase):
                                 "import jobs timeline item")
         _assert_required_fields(self, data["jobs"][0], {"artist_name", "album_title"},
                                 "import jobs timeline identity")
-        self.mock_db.list_import_job_timeline.assert_called_once_with(limit=50)
+        # The identity join resolved through the seeded request row.
+        self.assertEqual(data["jobs"][0]["artist_name"],
+                         self.db.request(100)["artist_name"])
 
     def test_import_jobs_rejects_invalid_filters(self):
         status, data = self._get("/api/import-jobs?status=bad")
@@ -1040,7 +1056,7 @@ def _kwargs_to_query(kwargs: dict) -> str:
     return "&".join(parts)
 
 
-class TestPipelineRouteDirectEquivalence(_WebServerCase):
+class TestPipelineRouteDirectEquivalence(_FakeDbWebServerCase):
     """Every pure-function web route must return the same value as a
     direct call to the underlying library function with equivalent inputs.
 
@@ -1237,7 +1253,7 @@ class TestApplyPipelineBitrateOverride(unittest.TestCase):
         self.assertNotIn("upgrade_queued", album)
 
 
-class TestBeetsDistanceRouteContract(_WebServerCase):
+class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
     """Contract for ``GET /api/beets-distance/<download_log_id>/<mbid>``.
 
     Service-layer correctness is covered by ``tests.test_beets_distance``.
@@ -1278,7 +1294,7 @@ class TestBeetsDistanceRouteContract(_WebServerCase):
     UUID_B = "12345678-1234-1234-1234-123456789abc"
 
     def setUp(self) -> None:
-        self.mock_db.reset_mock()
+        super().setUp()
         from lib.beets_distance import BeetsDistanceResult
         self._Result = BeetsDistanceResult
 
@@ -1414,7 +1430,7 @@ class TestBeetsDistanceRouteContract(_WebServerCase):
         self.assertEqual(status, 404)
 
 
-class TestTriageRouteContracts(_WebServerCase):
+class TestTriageRouteContracts(_FakeDbWebServerCase):
     """U17 contracts for ``GET /api/triage/<id>`` and ``GET /api/triage/list``.
 
     Both endpoints wrap ``lib.triage_service`` (U15) — the same service
@@ -1425,8 +1441,8 @@ class TestTriageRouteContracts(_WebServerCase):
     ⇄ API surface symmetry).
 
     Tests drive the real ``compose_triage_for_request`` and
-    ``list_triage`` paths against a real :class:`FakePipelineDB`
-    (reached via ``self.mock_db._fake``) — no service-layer mocking,
+    ``list_triage`` paths against the per-test :class:`FakePipelineDB`
+    (``self.db``) — no service-layer mocking,
     per ``code-quality.md`` § MOCKS: LEAF-SEAM ONLY. Seeded rows use
     production-shape values: ``datetime.datetime`` for timestamps via
     ``make_request_row``'s defaults, real ``FieldResolutionRow`` /
@@ -1452,51 +1468,6 @@ class TestTriageRouteContracts(_WebServerCase):
 
     LIST_REQUIRED_FIELDS = {"results", "next_after", "page_size", "filter"}
 
-    # MagicMock attribute names whose pre-set ``.return_value`` /
-    # ``.side_effect`` from ``_make_server`` would short-circuit a call
-    # to the wrapped fake. We need the triage path to hit the fresh
-    # FakePipelineDB on every method ``compose_triage_for_request`` /
-    # ``list_triage`` touches, so each test resets the relevant child
-    # mocks to forwarding ``side_effect`` lambdas that call through to
-    # the fresh backing fake.
-    _TRIAGE_DB_METHODS = (
-        "get_request",
-        "list_triage_page",
-        "get_field_resolutions_for_requests",
-        "get_search_summaries_for_requests",
-        "get_recent_search_log_for_requests",
-    )
-
-    def setUp(self) -> None:
-        # Each test gets its own FakePipelineDB so seeded rows from one
-        # test never bleed into the next. Re-wrap the harness so the
-        # MagicMock layer keeps recording but `._fake` points at the
-        # fresh fake.
-        fresh = FakePipelineDB()
-        self._old_backing = self.mock_db._fake
-        self.mock_db._mock_wraps = fresh
-        self.mock_db._fake = fresh
-        # Snapshot the pre-existing child-mock state for the methods
-        # the triage service touches, then force them to forward to the
-        # fresh fake. Without this, _make_server's static
-        # ``mock_db.get_request.return_value = _MOCK_PIPELINE_REQUEST``
-        # would short-circuit every composed triage to request_id=100.
-        self._triage_method_state: dict[str, MagicMock] = {}
-        for name in self._TRIAGE_DB_METHODS:
-            self._triage_method_state[name] = getattr(self.mock_db, name)
-            forwarder = MagicMock(side_effect=getattr(fresh, name))
-            setattr(self.mock_db, name, forwarder)
-
-    def tearDown(self) -> None:
-        for name, prev in self._triage_method_state.items():
-            setattr(self.mock_db, name, prev)
-        self.mock_db._mock_wraps = self._old_backing
-        self.mock_db._fake = self._old_backing
-
-    @property
-    def _fake(self) -> "FakePipelineDB":
-        return self.mock_db._fake
-
     # --- /api/triage/<id> -------------------------------------------------
 
     def test_show_returns_200_with_required_fields_and_roundtrips(self):
@@ -1505,7 +1476,7 @@ class TestTriageRouteContracts(_WebServerCase):
         through ``msgspec.convert(payload, type=TriageResult)`` — the
         wire-boundary contract per CLI ⇄ API symmetry."""
         from lib.triage_service import TriageResult
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=4242,
             artist_name="Triage Artist",
             album_title="Triage Album",
@@ -1562,14 +1533,14 @@ class TestTriageRouteContracts(_WebServerCase):
         """A seeded unfindable request shows up under
         ``filter=unfindable`` with the documented envelope shape."""
         from lib.triage_service import TriageResult
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=10, artist_name="Stuck Artist",
             unfindable_category="artist_absent",
             unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
         ))
         # Decoy row without any unfindable signal — must NOT appear in
         # the filtered cohort.
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=11, artist_name="Healthy Artist", status="imported",
         ))
 
@@ -1597,15 +1568,15 @@ class TestTriageRouteContracts(_WebServerCase):
         actually writes."""
         # Seeded request A: has a release_group_year resolution in the
         # sticky 4xx-client bucket — matches.
-        self._fake.seed_request(make_request_row(id=20))
-        self._fake.record_field_resolution(
+        self.db.seed_request(make_request_row(id=20))
+        self.db.record_field_resolution(
             request_id=20, field_name="release_group_year",
             status="unresolved_4xx_client", reason_code="http_400",
         )
         # Seeded request B: has a field resolution but a different
         # status bucket — must NOT appear.
-        self._fake.seed_request(make_request_row(id=21))
-        self._fake.record_field_resolution(
+        self.db.seed_request(make_request_row(id=21))
+        self.db.record_field_resolution(
             request_id=21, field_name="catalog_number",
             status="unresolved_mirror_unavailable",
             reason_code="ConnectionError",
@@ -1627,14 +1598,14 @@ class TestTriageRouteContracts(_WebServerCase):
         ``reason_code`` column (HTTP code specifier — http_400,
         http_410, http_422, etc.)."""
         # Seeded request A: 4xx-client status, reason_code=http_400 — matches.
-        self._fake.seed_request(make_request_row(id=22))
-        self._fake.record_field_resolution(
+        self.db.seed_request(make_request_row(id=22))
+        self.db.record_field_resolution(
             request_id=22, field_name="release_group_year",
             status="unresolved_4xx_client", reason_code="http_400",
         )
         # Seeded request B: 4xx-client status but reason_code=http_410 — excluded.
-        self._fake.seed_request(make_request_row(id=23))
-        self._fake.record_field_resolution(
+        self.db.seed_request(make_request_row(id=23))
+        self.db.record_field_resolution(
             request_id=23, field_name="catalog_number",
             status="unresolved_4xx_client", reason_code="http_410",
         )
@@ -1668,7 +1639,7 @@ class TestTriageRouteContracts(_WebServerCase):
         """When the page is exactly ``limit`` long the response carries
         ``next_after`` = last request_id so the operator can paginate."""
         for rid in (30, 31, 32):
-            self._fake.seed_request(make_request_row(
+            self.db.seed_request(make_request_row(
                 id=rid, status="imported",
             ))
 
@@ -1684,7 +1655,7 @@ class TestTriageRouteContracts(_WebServerCase):
     def test_list_default_filter_when_query_string_omitted(self):
         """Missing ``filter=`` defaults to ``all`` so a bare hit on
         ``/api/triage/list`` is meaningful."""
-        self._fake.seed_request(make_request_row(id=40, status="imported"))
+        self.db.seed_request(make_request_row(id=40, status="imported"))
 
         status, data = self._get("/api/triage/list")
 
@@ -1709,7 +1680,7 @@ class TestTriageRouteContracts(_WebServerCase):
         self.assertIn("error", data)
 
 
-class TestLongTailRouteContracts(_WebServerCase):
+class TestLongTailRouteContracts(_FakeDbWebServerCase):
     """U1 contract for ``GET /api/pipeline/long-tail``.
 
     Wraps ``lib.long_tail_service.list_long_tail`` — the same service
@@ -1734,41 +1705,15 @@ class TestLongTailRouteContracts(_WebServerCase):
     }
     ENVELOPE_REQUIRED_FIELDS = {"results", "band", "count"}
 
-    _LONG_TAIL_DB_METHODS = (
-        "get_long_tail_cohort",
-        "get_long_tail_request",
-    )
-
-    def setUp(self) -> None:
-        fresh = FakePipelineDB()
-        self._old_backing = self.mock_db._fake
-        self.mock_db._mock_wraps = fresh
-        self.mock_db._fake = fresh
-        self._lt_method_state: dict[str, MagicMock] = {}
-        for name in self._LONG_TAIL_DB_METHODS:
-            self._lt_method_state[name] = getattr(self.mock_db, name)
-            forwarder = MagicMock(side_effect=getattr(fresh, name))
-            setattr(self.mock_db, name, forwarder)
-
-    def tearDown(self) -> None:
-        for name, prev in self._lt_method_state.items():
-            setattr(self.mock_db, name, prev)
-        self.mock_db._mock_wraps = self._old_backing
-        self.mock_db._fake = self._old_backing
-
-    @property
-    def _fake(self) -> "FakePipelineDB":
-        return self.mock_db._fake
-
     def test_missing_row_bands_missing_and_imported_absent(self):
         """AE1 at the HTTP boundary: a wanted row with no beets album
         bands ``missing``; an imported request is absent from the
         result. (No beets configured → everything Missing.)"""
         from lib.long_tail_service import LongTailRow
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1",
             artist_name="Vanishing", album_title="Lost"))
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=2, status="imported", mb_release_id="rel-2"))
 
         status, data = self._get("/api/pipeline/long-tail")
@@ -1794,7 +1739,7 @@ class TestLongTailRouteContracts(_WebServerCase):
         seam is patched to report the release in-library with a
         lossless detail row."""
         import web.server as srv
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1"))
 
         mock_beets = MagicMock()
@@ -1814,7 +1759,7 @@ class TestLongTailRouteContracts(_WebServerCase):
     def test_unknown_band_when_in_library_but_unrankable(self):
         """In-library but no detail / unrankable → ``unknown``, not
         ``missing``."""
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1"))
 
         mock_beets = MagicMock()
@@ -1828,9 +1773,9 @@ class TestLongTailRouteContracts(_WebServerCase):
         self.assertEqual(data["results"][0]["band"], "unknown")
 
     def test_in_flight_rescue_stamped(self):
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1"))
-        self._fake.insert_youtube_running(
+        self.db.insert_youtube_running(
             request_id=1, browse_id="MPREb_z", audio_playlist_id=None,
             yt_url="https://music.youtube.com/playlist?list=z",
             expected_track_count=10,
@@ -1840,9 +1785,9 @@ class TestLongTailRouteContracts(_WebServerCase):
         self.assertTrue(data["results"][0]["in_flight_rescue"])
 
     def test_band_filter_narrows_result(self):
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="rel-1"))
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=2, status="wanted", mb_release_id="rel-2"))
         # No beets → both Missing.
         status, data = self._get("/api/pipeline/long-tail?band=missing")
@@ -1863,7 +1808,7 @@ class TestLongTailRouteContracts(_WebServerCase):
     def test_single_id_returns_one_banded_row(self):
         """KTD8: ``?id=`` returns just that request's authoritative band."""
         from lib.long_tail_service import LongTailRow
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id="rel-42",
             artist_name="One", album_title="Row"))
         status, data = self._get("/api/pipeline/long-tail?id=42")
@@ -1876,7 +1821,7 @@ class TestLongTailRouteContracts(_WebServerCase):
         self.assertEqual(row.band, "missing")
 
     def test_single_id_404_when_not_wanted(self):
-        self._fake.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id="rel-42"))
         status, data = self._get("/api/pipeline/long-tail?id=42")
         self.assertEqual(status, 404)

@@ -3816,34 +3816,324 @@ class FakePipelineDB:
             },
         }
 
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _dashboard_search_window(
+        self, label: str, hours: int, now: datetime,
+    ) -> dict[str, Any]:
+        cutoff = now - timedelta(hours=hours)
+        rows = [e for e in self.search_logs
+                if self._as_utc(e.created_at) >= cutoff]
+        outcomes = {"found": 0, "no_match": 0, "no_results": 0,
+                    "exhausted": 0, "errors": 0}
+        for e in rows:
+            if e.outcome in outcomes:
+                outcomes[e.outcome] += 1
+            else:
+                outcomes["errors"] += 1
+        elapsed = sorted(
+            e.elapsed_s for e in rows if e.elapsed_s is not None)
+
+        def _pct(p: float) -> float | None:
+            if not elapsed:
+                return None
+            return elapsed[min(len(elapsed) - 1, int(len(elapsed) * p))]
+
+        return {
+            "label": label,
+            "hours": hours,
+            "searches": len(rows),
+            "distinct_requests": len({e.request_id for e in rows}),
+            "searches_per_hour": len(rows) / hours,
+            "searches_per_24h": len(rows) / hours * 24,
+            "avg_elapsed_s": (sum(elapsed) / len(elapsed)) if elapsed else None,
+            "median_elapsed_s": _pct(0.5),
+            "p95_elapsed_s": _pct(0.95),
+            "max_elapsed_s": elapsed[-1] if elapsed else None,
+            "outcomes": outcomes,
+            "cursor_wraps": sum(
+                1 for e in rows if e.cursor_update_status == "wrapped"),
+            "stale_completions": sum(
+                1 for e in rows if e.execution_stage == "stale_completion"),
+            "non_consuming": sum(
+                1 for e in rows if e.attempt_consumed is False),
+            "cache_attribution_level": "cycle_only",
+        }
+
+    def _dashboard_cycle_window(
+        self, label: str, hours: int, now: datetime,
+    ) -> dict[str, Any]:
+        cutoff = now - timedelta(hours=hours)
+        rows = [r for r in self.cycle_metrics
+                if self._as_utc(r["created_at"]) >= cutoff]
+        totals = sorted(float(r["cycle_total_s"]) for r in rows)
+        searches = sorted(float(r["search_time_s"]) for r in rows)
+
+        def _pct(values: list[float], p: float) -> float | None:
+            if not values:
+                return None
+            return values[min(len(values) - 1, int(len(values) * p))]
+
+        return {
+            "label": label,
+            "hours": hours,
+            "cycles": len(rows),
+            "avg_cycle_s": (sum(totals) / len(totals)) if totals else None,
+            "median_cycle_s": _pct(totals, 0.5),
+            "p95_cycle_s": _pct(totals, 0.95),
+            "max_cycle_s": totals[-1] if totals else None,
+            "median_search_s": _pct(searches, 0.5),
+            "watchdog_kills": sum(
+                int(r["cycle_searches_watchdog_killed"]) for r in rows),
+            "find_download_queued": sum(
+                int(r["find_download_queued"]) for r in rows),
+            "find_download_completed": sum(
+                int(r["find_download_completed"]) for r in rows),
+            "cache_errors": sum(int(r["cache_errors"]) for r in rows),
+            "cache_write_errors": sum(
+                int(r["cache_write_errors"]) for r in rows),
+            "cache_fuse_tripped": sum(
+                int(r["cache_fuse_tripped"]) for r in rows),
+            "peers_browsed": sum(int(r["peers_browsed"]) for r in rows),
+            "peers_browsed_lazy": sum(
+                int(r["peers_browsed_lazy"]) for r in rows),
+            "fanout_waves": sum(int(r["fanout_waves"]) for r in rows),
+        }
+
+    def _dashboard_cycle_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        for key in ("started_at", "created_at"):
+            value = out.get(key)
+            out[key] = value.isoformat() if isinstance(value, datetime) else value
+        return out
+
+    def _dashboard_coverage(self, now: datetime) -> dict[str, Any]:
+        wanted_ids = {
+            int(r["id"]) for r in self._requests.values()
+            if r.get("status") in ("wanted", "downloading")
+        }
+        last_search: dict[int, datetime] = {}
+        for e in self.search_logs:
+            at = self._as_utc(e.created_at)
+            prev = last_search.get(e.request_id)
+            if prev is None or at > prev:
+                last_search[e.request_id] = at
+
+        def _searched_within(hours: int) -> set[int]:
+            cutoff = now - timedelta(hours=hours)
+            return {rid for rid in wanted_ids
+                    if last_search.get(rid) is not None
+                    and last_search[rid] >= cutoff}
+
+        def _searches_within(hours: int) -> list[SearchLogRow]:
+            cutoff = now - timedelta(hours=hours)
+            return [e for e in self.search_logs
+                    if e.request_id in wanted_ids
+                    and self._as_utc(e.created_at) >= cutoff]
+
+        searched_24h = _searched_within(24)
+        searched_6h = _searched_within(6)
+        active_24h = _searches_within(24)
+        active_6h = _searches_within(6)
+
+        found_rows = [e for e in self.search_logs if e.outcome == "found"]
+
+        def _matches_within(hours: int) -> int:
+            cutoff = now - timedelta(hours=hours)
+            return sum(1 for e in found_rows
+                       if self._as_utc(e.created_at) >= cutoff)
+
+        # Hourly buckets (24h) / daily buckets (28d), non-empty only —
+        # mirrors the SQL GROUP BY which never emits zero rows.
+        hourly: dict[datetime, int] = {}
+        daily: dict[datetime, int] = {}
+        for e in found_rows:
+            at = self._as_utc(e.created_at)
+            if at >= now - timedelta(hours=24):
+                bucket = at.replace(minute=0, second=0, microsecond=0)
+                hourly[bucket] = hourly.get(bucket, 0) + 1
+            if at >= now - timedelta(days=28):
+                day = at.replace(hour=0, minute=0, second=0, microsecond=0)
+                daily[day] = daily.get(day, 0) + 1
+
+        per_request_24h: dict[int, int] = {}
+        for e in active_24h:
+            per_request_24h[e.request_id] = (
+                per_request_24h.get(e.request_id, 0) + 1)
+        top10 = sorted(per_request_24h.values(), reverse=True)[:10]
+        top_10_share = (sum(top10) / len(active_24h)) if active_24h else None
+
+        def _request_outcome_counts(rid: int, hours: int) -> dict[str, int]:
+            cutoff = now - timedelta(hours=hours)
+            rows = [e for e in self.search_logs
+                    if e.request_id == rid
+                    and self._as_utc(e.created_at) >= cutoff]
+            known = ("found", "no_match", "no_results", "reset")
+            counts = {f"{k}_{hours}h": sum(
+                1 for e in rows if e.outcome == k) for k in known}
+            counts[f"problem_{hours}h"] = sum(
+                1 for e in rows if e.outcome not in known)
+            return counts
+
+        def _suspect_row(rid: int) -> dict[str, Any]:
+            req = self._requests.get(rid, {})
+            at = last_search.get(rid)
+            return {
+                "request_id": rid,
+                "artist_name": req.get("artist_name"),
+                "album_title": req.get("album_title"),
+                "status": req.get("status"),
+                "last_search_at": at.isoformat() if at else None,
+                "searches_24h": per_request_24h.get(rid, 0),
+                "searches_6h": sum(
+                    1 for e in active_6h if e.request_id == rid),
+                **{k: v for k, v in
+                   _request_outcome_counts(rid, 24).items()
+                   if k != "reset_24h" and k != "problem_24h"},
+                "reset_24h": _request_outcome_counts(rid, 24)["reset_24h"],
+                "problem_24h": _request_outcome_counts(rid, 24)["problem_24h"],
+            }
+
+        suspects = [
+            _suspect_row(rid)
+            for rid, n in sorted(per_request_24h.items(),
+                                 key=lambda kv: kv[1], reverse=True)
+            if n >= 2
+        ][:10]
+
+        stale = []
+        for rid in sorted(wanted_ids):
+            at = last_search.get(rid)
+            if at is not None and at >= now - timedelta(hours=24):
+                continue
+            row = _suspect_row(rid)
+            row["hours_since_search"] = (
+                (now - at).total_seconds() / 3600 if at else None)
+            stale.append(row)
+
+        oldest = None
+        searched_ats = [last_search[rid] for rid in wanted_ids
+                        if rid in last_search]
+        if searched_ats:
+            oldest = min(searched_ats).isoformat()
+
+        return {
+            "wanted_total": len(wanted_ids),
+            "wanted_searched_24h": len(searched_24h),
+            "wanted_searched_6h": len(searched_6h),
+            "wanted_unsearched_24h": len(wanted_ids) - len(searched_24h),
+            "wanted_unsearched_6h": len(wanted_ids) - len(searched_6h),
+            "wanted_never_searched": sum(
+                1 for rid in wanted_ids if rid not in last_search),
+            "active_wanted_searches_24h": len(active_24h),
+            "active_wanted_searches_6h": len(active_6h),
+            "oldest_last_search_at": oldest,
+            "matches_24h": _matches_within(24),
+            "matches_6h": _matches_within(6),
+            "matches_per_hour_24h": _matches_within(24) / 24,
+            "matches_per_hour_6h": _matches_within(6) / 6,
+            "match_rate_series_24h": [
+                {"bucket_start": bucket.isoformat(), "matches": n,
+                 "matches_per_hour": n}
+                for bucket, n in sorted(hourly.items())
+            ],
+            "match_rate_series_28d": [
+                {"bucket_start": day.isoformat(), "matches": n,
+                 "matches_per_day": n}
+                for day, n in sorted(daily.items())
+            ],
+            "wanted_trend": self._dashboard_wanted_trend(
+                self._current_wanted_total()),
+            "top_10_share_24h": top_10_share,
+            "top_loop_suspects": suspects,
+            "stale_wanted": stale,
+        }
+
+    def _dashboard_heavy_queries(self, now: datetime) -> list[dict[str, Any]]:
+        cutoff = now - timedelta(hours=24)
+        rows = [e for e in self.search_logs
+                if self._as_utc(e.created_at) >= cutoff
+                and (e.peers_browsed or e.browse_time_s)]
+        rows.sort(key=lambda e: e.browse_time_s, reverse=True)
+        out: list[dict[str, Any]] = []
+        for e in rows[:10]:
+            req = self._requests.get(e.request_id, {})
+            out.append({
+                "search_log_id": e.id,
+                "request_id": e.request_id,
+                "mb_release_id": req.get("mb_release_id"),
+                "artist_name": req.get("artist_name"),
+                "album_title": req.get("album_title"),
+                "status": req.get("status"),
+                "created_at": self._as_utc(e.created_at).isoformat(),
+                "query": e.query,
+                "variant": e.variant,
+                "outcome": e.outcome,
+                "result_count": e.result_count,
+                "elapsed_s": e.elapsed_s,
+                "browse_time_s": e.browse_time_s,
+                "match_time_s": e.match_time_s,
+                "peers_browsed": e.peers_browsed,
+                "peers_browsed_lazy": e.peers_browsed_lazy,
+                "peer_dirs": e.peers_browsed + e.peers_browsed_lazy,
+                "fanout_waves": e.fanout_waves,
+            })
+        return out
+
     def get_pipeline_dashboard_metrics(
         self,
         *,
         plan_generator_id: str | None = None,
     ) -> dict[str, Any]:
+        """Python mirror of the production dashboard read-model.
+
+        Aggregates real seeded telemetry (``search_logs``,
+        ``cycle_metrics``, ``peer_observations``, request rows) into the
+        same envelope ``PipelineDB.get_pipeline_dashboard_metrics``
+        emits, with every timestamp isoformatted exactly like the
+        production ``_isoformat_or_none`` boundary (datetimes leaking
+        here 500 the dashboard route's json.dumps). Percentiles use a
+        simple nearest-rank cut — close enough for contract tests; the
+        production SQL is the authority on exact statistics.
+        """
         if plan_generator_id is None:
             from lib.search import SEARCH_PLAN_GENERATOR_ID
             plan_generator_id = SEARCH_PLAN_GENERATOR_ID
+        now = _utcnow()
         peers = self.get_peer_metrics()
-        peers["heavy_queries"] = []
+        peers["heavy_queries"] = self._dashboard_heavy_queries(now)
         peers["heavy_query_hours"] = 24
         return {
-            "generated_at": _utcnow().isoformat(),
-            "searches": {"windows": []},
+            "generated_at": now.isoformat(),
+            "searches": {
+                "windows": [
+                    self._dashboard_search_window("24h", 24, now),
+                    self._dashboard_search_window("6h", 6, now),
+                ],
+            },
             "cycles": {
-                "windows": [],
-                "recent": list(reversed(self.cycle_metrics[-12:])),
-                "outliers": sorted(
-                    self.cycle_metrics,
-                    key=lambda row: row["cycle_total_s"],
-                    reverse=True,
-                )[:8],
+                "windows": [
+                    self._dashboard_cycle_window("24h", 24, now),
+                    self._dashboard_cycle_window("6h", 6, now),
+                ],
+                "recent": [
+                    self._dashboard_cycle_row(r)
+                    for r in reversed(self.cycle_metrics[-12:])
+                ],
+                "outliers": [
+                    self._dashboard_cycle_row(r)
+                    for r in sorted(
+                        self.cycle_metrics,
+                        key=lambda row: row["cycle_total_s"],
+                        reverse=True,
+                    )[:8]
+                ],
             },
-            "coverage": {
-                "wanted_trend": self._dashboard_wanted_trend(
-                    self._current_wanted_total(),
-                ),
-            },
+            "coverage": self._dashboard_coverage(now),
             "peers": peers,
             "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
         }
