@@ -116,12 +116,12 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 
 ## API Contract Tests
 - Every API endpoint consumed by the frontend must have a contract test in `tests/web/` — one `test_*.py` per `web/routes/*.py` module (e.g. `tests/web/test_routes_pipeline.py` for `web/routes/pipeline.py`)
-- Contract tests use a real `_WebServerCase` harness (HTTPServer on a random port + mocked DB) — see existing `TestPipelineRouteContracts`, `TestBrowseRouteContracts`, etc. as reference patterns
+- Contract tests use the real `_FakeDbWebServerCase` harness (HTTPServer on a random port + a fresh bare `FakePipelineDB` installed as `web.server.db` per test) — see existing `TestPipelineRouteContracts`, `TestBrowseRouteContracts`, etc. as reference patterns. Seed state (`self.db.seed_request(...)`, `self.db.log_download(...)`) and assert against the fake's real query semantics — never configure mock returns (#430; the `WEB_HARNESS_MOCK_BASELINE` ratchet in `tests/_mock_audit_scanner.py` is permanently empty and bans `mock_db` references in tests/web outright)
 - Define a `REQUIRED_FIELDS` set per endpoint — the fields the frontend JS relies on
 - Assert every returned dict includes all required fields via `_assert_required_fields(self, payload, REQUIRED_FIELDS, "label")`
 - When adding a field the frontend needs, add it to `REQUIRED_FIELDS` first (RED), then fix the backend (GREEN)
 - **Every new route MUST be added to `TestRouteContractAudit.CLASSIFIED_ROUTES`** — this is the guard test that introspects `Handler._FUNC_GET_ROUTES`/`_FUNC_POST_ROUTES`/`_FUNC_GET_PATTERNS` and fails if a registered route is unclassified or a stale entry is missing. The audit makes contract coverage self-enforcing — you cannot ship a route without classifying it.
-- The `_WebServerCase` harness in `tests/web/_harness.py` exposes `self._get(path)` and `self._post(path, body)` helpers that hit the real server. Reuse these (subclass `_WebServerCase`) instead of building your own harness — standalone per-class harness copies are exactly the drift #408 removed.
+- The harness in `tests/web/_harness.py` exposes `self._get(path)` and `self._post(path, body)` helpers that hit the real server. Reuse these (subclass `_FakeDbWebServerCase`; set `DB_FACTORY` to a typed `FakePipelineDB` subclass for failure injection) instead of building your own harness — standalone per-class harness copies are exactly the drift #408 removed.
 - **Mock data must mirror production row shape — synthetic int/str dicts are NOT acceptable.** When a contract test mocks a DB-row producer (any `PipelineDB`/`BeetsDB`/`psycopg2.extras.DictRow` source), at least one scenario must populate rows with production-shaped values: `datetime.datetime` for timestamps, `uuid.UUID` for UUIDs, the typed dataclass/`msgspec.Struct` for JSONB columns. Synthetic dicts of `str`/`int` values pass Pyright (`Dict[str, Any]` is permissive) and pass the contract test (mock matches assertion shape) but 500 on the first real call when the JSON encoder hits an unserializable type. This rule has bitten more than once — see `docs/solutions/testing/contract-test-mocks-must-mirror-production-shape.md` (search-plan-history datetime 500) and `docs/solutions/testing/mocked-contract-tests-miss-helper-mirror-integration-bugs.md` (search-by-id MB drift). The escape hatch when row-shape mocking is impractical: pair the contract test with an integration slice in `tests/test_integration_slices.py` that round-trips through real serialization. Every contract test that returns DB rows owes either a production-shaped mock OR a slice — never neither.
 
 ## Logging & Auditability
@@ -197,7 +197,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 |------------------|-----------|-------------------------|
 | A new pure decision function in `lib/quality.py` | A subTest table covering every branch | `tests/test_quality_decisions.py` patterns |
 | A new dispatch / orchestration path | An orchestration test asserting domain state + an integration slice | `FakePipelineDB`, `patch_dispatch_externals()`, `tests/test_integration_slices.py` |
-| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_WebServerCase` + `_assert_required_fields` from `tests/web/_harness.py`, the matching `tests/web/test_routes_<module>.py`, `scripts/pipeline_cli.py` |
+| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_FakeDbWebServerCase` + `_assert_required_fields` from `tests/web/_harness.py`, the matching `tests/web/test_routes_<module>.py`, `scripts/pipeline_cli.py` |
 | A new operator action (CLI subcommand or API endpoint) | A service-layer method with a typed `Result`, BOTH a CLI subcommand AND an API endpoint, exit-code and status-code tests for each | `tests/test_<service>.py` for the authoritative coverage; CLI/API tests check the wrapper only |
 | A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes.py` |
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
@@ -270,7 +270,7 @@ Always use these instead of inventing parallel scaffolding:
 - `FakeSlskdAPI` — stateful slskd client: `transfers` (enqueue, get_all_downloads, get_download, cancel_download, queued snapshots), `users` (directory with per-directory results and errors), call recording.
 - `FakePipelineDBSource` — typed PipelineDBSource fake wrapping a `FakePipelineDB`. Use via `make_ctx_with_fake_db(fake_db)` rather than constructing directly.
 
-**`tests/web/`** — per-route-module contract tests mirroring `web/routes/*.py`. Shared harness in `tests/web/_harness.py` (`_WebServerCase` with `_get`/`_post` helpers, `_assert_required_fields`, `_pipeline_db_test_harness`, `_fresh_triage_runner`, `_make_server`); `TestRouteContractAudit` guard in `tests/web/test_route_audit.py`.
+**`tests/web/`** — per-route-module contract tests mirroring `web/routes/*.py`. Shared harness in `tests/web/_harness.py` (`_FakeDbWebServerCase` with a per-test bare `FakePipelineDB` as `self.db`, `_get`/`_post` helpers, `_assert_required_fields`, `_fresh_triage_runner`); `TestRouteContractAudit` guard in `tests/web/test_route_audit.py`.
 
 ### General test rules
 

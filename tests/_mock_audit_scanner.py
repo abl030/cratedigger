@@ -501,31 +501,23 @@ def scan_tree() -> Dict[str, Dict[str, int]]:
 # the harness and every per-route test to a bare ``FakePipelineDB``,
 # route-module by route-module.
 #
-# This ratchet pins the per-file count of remaining MagicMock-harness
-# usage OCCURRENCES: every ``mock_db`` reference in a ``tests/web``
-# file (dotted, aliased, passed bare — aliasing the mock away is the
-# evasion the occurrence count exists to close) plus every
-# ``_pipeline_db_test_harness`` reference in ANY scanned test file
-# (the transitional wrapped-MagicMock constructor must not leak
-# outside tests/web where the per-file mock_db count can't see it).
-# The audit test requires the live counts to match this baseline
-# EXACTLY:
-#
-# - a count above baseline fails — new tests must seed FakePipelineDB
-#   state instead of configuring mock returns, even in unmigrated files
-# - a count below baseline fails — shrink the entry here in the same
-#   commit so the baseline always reflects reality
-# - a file at zero must have NO entry; delete the line when a module
-#   finishes migrating
-#
-# The migration is done when this dict is empty.
+# This ratchet counts MagicMock-harness usage OCCURRENCES: every
+# ``mock_db`` reference in a ``tests/web`` file (dotted, aliased,
+# passed bare — aliasing the mock away is the evasion the occurrence
+# count exists to close) plus every ``_pipeline_db_test_harness``
+# reference in ANY scanned test file. The audit test requires the live
+# counts to match this baseline EXACTLY — and the baseline is now
+# permanently empty: contract tests seed FakePipelineDB state, never
+# configure mock returns.
 
 _WEB_HARNESS_MOCK_DB_RE = re.compile(r"\bmock_db\b")
 _HARNESS_CTOR_RE = re.compile(r"\b_pipeline_db_test_harness\b")
 
-WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {
-    os.path.join("web", "_harness.py"): 39,
-}
+# EMPTY — the #430 migration is complete (PRs #440-#443 + the final
+# harness deletion). The ratchet stays armed at zero: any reintroduced
+# ``mock_db`` reference in tests/web, or ``_pipeline_db_test_harness``
+# reference anywhere, fails the audit immediately.
+WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {}
 
 
 def count_harness_overrides(text: str, *, web_file: bool) -> int:
