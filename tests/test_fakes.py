@@ -5111,5 +5111,140 @@ class TestFakeCursor(unittest.TestCase):
         self.assertIsNone(cur.fetchone())
 
 
+class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
+    """The fake mirrors migrations/001's UNIQUE on album_requests.mb_release_id.
+
+    Test-fidelity Rule B — the fake must not be more permissive than the
+    real INSERT. Two rows sharing a non-NULL mb_release_id is a state
+    production can never hold (#445 item 4).
+    """
+
+    def test_seed_request_rejects_duplicate_mb_release_id(self):
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="mbid-dup"))
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.seed_request(make_request_row(id=2, mb_release_id="mbid-dup"))
+
+    def test_seed_request_same_id_reseed_is_an_update(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="mbid-x", status="wanted"))
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="mbid-x", status="manual"))
+        self.assertEqual(db.request(1)["status"], "manual")
+
+    def test_seed_request_allows_multiple_null_mb_release_ids(self):
+        # PG UNIQUE permits any number of NULLs (Discogs-only rows).
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id=None, discogs_release_id="111"))
+        db.seed_request(make_request_row(
+            id=2, mb_release_id=None, discogs_release_id="222"))
+        self.assertEqual(db.request(2)["discogs_release_id"], "222")
+
+    def test_add_request_rejects_duplicate_mb_release_id(self):
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.add_request("A", "B", "request", mb_release_id="mbid-dup")
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.add_request("C", "D", "request", mb_release_id="mbid-dup")
+
+    def test_add_request_allows_distinct_and_null_mb_release_ids(self):
+        db = FakePipelineDB()
+        db.add_request("A", "B", "request", mb_release_id="mbid-1")
+        db.add_request("C", "D", "request", mb_release_id=None)
+        rid = db.add_request("E", "F", "request", mb_release_id=None)
+        self.assertEqual(db.request(rid)["artist_name"], "E")
+
+    def test_reseed_cannot_steal_another_rows_mb_release_id(self):
+        # exclude_id only exempts the row's OWN id — re-seeding id=1
+        # with an mbid held by row 2 must still raise.
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+        db.seed_request(make_request_row(id=2, mb_release_id="mbid-2"))
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.seed_request(make_request_row(id=1, mb_release_id="mbid-2"))
+
+    def test_add_request_collides_with_seeded_row(self):
+        # seed_request and add_request share one uniqueness check.
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, mb_release_id="mbid-seeded"))
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.add_request("A", "B", "request", mb_release_id="mbid-seeded")
+
+    def test_update_request_fields_rejects_duplicate_mb_release_id(self):
+        # Production's UPDATE hits the same UNIQUE as the INSERT.
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+        db.seed_request(make_request_row(id=2, mb_release_id="mbid-2"))
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.update_request_fields(2, mb_release_id="mbid-1")
+        self.assertEqual(db.request(2)["mb_release_id"], "mbid-2")
+
+    def test_update_request_fields_setting_own_mbid_is_a_noop(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+        db.update_request_fields(1, mb_release_id="mbid-1", status="manual")
+        self.assertEqual(db.request(1)["status"], "manual")
+
+
+class TestFakeDownloadLogIdMint(unittest.TestCase):
+    """Minted download_log ids mirror production's sequence-backed PK.
+
+    A test that rewinds ``_next_download_log_id`` below an existing id
+    used to mint duplicates silently — the three accessors then disagree
+    (oldest vs max-id vs insertion order). The mint guard makes that a
+    hard error (#445 item 4; previously a local assert in
+    ``test_routes_imports._seed_wrong_match``).
+    """
+
+    def test_log_download_rejects_rewound_counter_collision(self):
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.log_download(1, outcome="rejected")
+        db._next_download_log_id = 0
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.log_download(1, outcome="rejected")
+
+    def test_log_download_rejects_regressed_id_even_without_collision(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db._next_download_log_id = 4  # pin → next id is 5
+        db.log_download(1, outcome="rejected")
+        db._next_download_log_id = 1  # would mint 2 — a sequence never regresses
+        with self.assertRaises(AssertionError):
+            db.log_download(1, outcome="rejected")
+
+    def test_insert_youtube_running_shares_the_mint_guard(self):
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.log_download(1, outcome="rejected")
+        db._next_download_log_id = 0
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            db.insert_youtube_running(
+                request_id=1, browse_id="b", audio_playlist_id=None,
+                yt_url="u", expected_track_count=10)
+
+    def test_forward_pinning_still_works(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.log_download(1, outcome="rejected")
+        db._next_download_log_id = 41  # forward pin — ids stay monotonic
+        self.assertEqual(db.log_download(1, outcome="rejected"), 42)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -237,12 +237,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         vr["soulseek_username"] = username
         vr.update(validation_overrides or {})
         if download_log_id is not None:
-            taken = {e.id for e in self.db.download_logs}
-            assert download_log_id not in taken and all(
-                existing < download_log_id for existing in taken), (
-                f"pinned log id {download_log_id} collides with or "
-                f"precedes existing ids {sorted(taken)} — production's "
-                "sequence-backed PK can never do that")
+            # Forward pin only — the fake's id-mint guard raises if the
+            # pinned id collides with or precedes an existing id.
             self.db._next_download_log_id = download_log_id - 1
         return self.db.log_download(
             request_id, outcome="rejected", soulseek_username=username,

@@ -109,6 +109,13 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
     }
     row.update(overrides)
+    if "mb_release_id" not in overrides:
+        # Default derives from the row id (id=1 → "test-mbid-0001") so
+        # multi-row fixtures get distinct mbids and don't collide with
+        # the UNIQUE(mb_release_id) FakePipelineDB enforces (#445 item 4).
+        rid = row["id"]
+        suffix = f"{rid:04d}" if isinstance(rid, int) else str(rid)
+        row["mb_release_id"] = f"test-mbid-{suffix}"
     return row
 
 

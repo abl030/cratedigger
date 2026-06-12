@@ -2035,7 +2035,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             "album_title": "Test Album",
             "artist_name": "Test Artist",
             "year": 2020,
-            "mb_release_id": "test-mbid",
+            # Per-row mbid — the fake enforces UNIQUE(mb_release_id).
+            "mb_release_id": f"test-mbid-{request_id}",
             "source": "request",
             "search_filetype_override": None,
             "target_format": None,

@@ -24,10 +24,13 @@ import unittest
 sys.path.insert(0, os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..")))
 from tests._mock_audit_scanner import (
+    WEB_BEETS_MOCK_BASELINE,
     WEB_HARNESS_MOCK_BASELINE,
+    count_beets_mock_overrides,
     count_harness_overrides,
     iter_scan_paths,
     scan_tree,
+    scan_web_beets_overrides,
     scan_web_harness_overrides,
 )
 
@@ -190,6 +193,72 @@ class TestWebHarnessMockRatchet(unittest.TestCase):
             self.fail(
                 "Web-harness MagicMock ratchet (#430) out of sync with "
                 "WEB_HARNESS_MOCK_BASELINE:\n" + "\n".join(problems)
+            )
+
+
+class TestWebBeetsMockRatchet(unittest.TestCase):
+    """Ratchet for the #445 beets-MagicMock → FakeBeetsDB migration.
+
+    Per-file counts of remaining beets-mock variable-name occurrences in
+    ``tests/web`` must match ``WEB_BEETS_MOCK_BASELINE`` exactly: growth
+    means a new test configured beets mock shapes instead of seeding
+    ``FakeBeetsDB`` state; shrink means a migration landed and the
+    baseline entry must drop with it.
+    """
+
+    def test_counter_pins_evasion_shapes(self) -> None:
+        """Document exactly what the ratchet counts — occurrences of the
+        beets-mock variable names, including alias / suffixed / dotted
+        shapes, while leaving the production ``web.server._beets``
+        attribute and real-BeetsDB class fixtures uncounted."""
+        cases = [
+            ("dotted config",
+             "self._beets.album_exists.return_value = True", 1),
+            ("bare assignment", "mock_beets = MagicMock()", 1),
+            ("suffixed patch arg", "mock_beets_cls: MagicMock,", 1),
+            ("alias assignment", "b = self._beets", 1),
+            ("library dotted form", "self.beets.get_recent.return_value", 1),
+            ("injection counts the mock side only",
+             "srv._beets = self.beets", 1),
+            ("two occurrences one line",
+             "srv._beets = self._beets; m = mock_beets", 2),
+            ("production attr alone does not count",
+             "self._orig_beets = srv._beets", 0),
+            ("real-BeetsDB class fixture does not count",
+             "cls._beets = BeetsDB(cls._db_path)", 0),
+            ("beets_db var name does not count (general audit owns it)",
+             "self.beets_db = FakeBeetsDB()", 0),
+        ]
+        for desc, line, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(count_beets_mock_overrides(line), expected)
+
+    def test_counts_match_baseline_exactly(self) -> None:
+        current = scan_web_beets_overrides()
+        problems: list[str] = []
+        for rel in sorted(set(current) | set(WEB_BEETS_MOCK_BASELINE)):
+            cur = current.get(rel, 0)
+            base = WEB_BEETS_MOCK_BASELINE.get(rel, 0)
+            if cur > base:
+                problems.append(
+                    f"  - {rel}: {base} → {cur} beets-mock occurrences. "
+                    "New tests must seed FakeBeetsDB state (see "
+                    "tests/fakes.py), not configure beets mock returns."
+                )
+            elif cur < base:
+                problems.append(
+                    f"  - {rel}: {base} → {cur} beets-mock occurrences. "
+                    "Migration progress — shrink WEB_BEETS_MOCK_BASELINE "
+                    "in tests/_mock_audit_scanner.py to match"
+                    + (" (delete the entry)." if cur == 0 else ".")
+                    + " Only shrink if the mocks were replaced with "
+                    "FakeBeetsDB seeding — aliasing the mock away is "
+                    "an evasion, not progress."
+                )
+        if problems:
+            self.fail(
+                "Web beets-MagicMock ratchet (#445) out of sync with "
+                "WEB_BEETS_MOCK_BASELINE:\n" + "\n".join(problems)
             )
 
 

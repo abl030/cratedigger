@@ -1088,9 +1088,67 @@ class FakePipelineDB:
 
     # --- Seeding ---
 
+    def _assert_mb_release_id_unique(
+        self, mb_release_id: Any, exclude_id: int | None = None,
+    ) -> None:
+        """Mirror migrations/001's UNIQUE on album_requests.mb_release_id.
+
+        PG UNIQUE permits any number of NULLs, so ``None`` always passes.
+        Test-fidelity Rule B — the fake must not be more permissive than
+        the real INSERT (#445 item 4).
+        """
+        if mb_release_id is None:
+            return
+        for rid, row in self._requests.items():
+            if rid == exclude_id:
+                continue
+            if row.get("mb_release_id") == mb_release_id:
+                import psycopg2.errors
+
+                raise psycopg2.errors.UniqueViolation(
+                    "duplicate key value violates unique constraint "
+                    f'"album_requests_mb_release_id_key" — mb_release_id '
+                    f"{mb_release_id!r} is already on request {rid}"
+                )
+
+    def _mint_download_log_id(self) -> int:
+        """Advance the download_log id counter, mirroring a PG sequence.
+
+        A sequence-backed PK never regresses and never collides. Tests
+        may pin ids FORWARD (``db._next_download_log_id = 41`` → next id
+        42); rewinding below an existing id is the bug this guard exists
+        to catch — the three log accessors silently disagree on duplicate
+        ids (#445 item 4).
+        """
+        new_id = self._next_download_log_id + 1
+        taken = {entry.id for entry in self.download_logs}
+        if new_id in taken:
+            import psycopg2.errors
+
+            raise psycopg2.errors.UniqueViolation(
+                "duplicate key value violates unique constraint "
+                f'"download_log_pkey" — id {new_id} already exists '
+                "(a test rewound _next_download_log_id)"
+            )
+        if any(existing > new_id for existing in taken):
+            raise AssertionError(
+                f"minted download_log id {new_id} precedes existing ids "
+                f"{sorted(taken)} — production's sequence-backed PK can "
+                "never do that (rewound _next_download_log_id)"
+            )
+        self._next_download_log_id = new_id
+        return new_id
+
     def seed_request(self, row: dict[str, Any]) -> None:
-        """Add a request row to the fake DB. Must include 'id'."""
+        """Add a request row to the fake DB. Must include 'id'.
+
+        Re-seeding an existing id replaces that row (an update); a NEW id
+        carrying a non-NULL ``mb_release_id`` already held by another row
+        raises ``UniqueViolation``, mirroring the production schema.
+        """
         rid = row["id"]
+        self._assert_mb_release_id_unique(
+            row.get("mb_release_id"), exclude_id=rid)
         self._requests[rid] = copy.deepcopy(row)
         if rid > self._next_request_id:
             self._next_request_id = rid
@@ -1989,7 +2047,7 @@ class FakePipelineDB:
                 'null value in column "request_id" of relation '
                 '"download_log" violates not-null constraint'
             )
-        self._next_download_log_id += 1
+        new_log_id = self._mint_download_log_id()
         auxiliary: dict[str, Any] = {
             "download_path": download_path,
             "valid": valid,
@@ -2030,10 +2088,10 @@ class FakePipelineDB:
             error_message=error_message,
             validation_result=validation_result,
             import_result=import_result,
-            id=self._next_download_log_id,
+            id=new_log_id,
             extra=auxiliary,
         ))
-        return self._next_download_log_id
+        return new_log_id
 
     # --- YouTube rescue ingest (mirrors PipelineDB U2 methods) ---
 
@@ -2076,7 +2134,7 @@ class FakePipelineDB:
             from lib.pipeline_db import YoutubeInFlightError as _YIFE
             raise _YIFE(request_id, existing_id)
 
-        self._next_download_log_id += 1
+        new_log_id = self._mint_download_log_id()
         metadata: dict[str, Any] = {
             "yt_url": yt_url,
             "browse_id": browse_id,
@@ -2094,9 +2152,9 @@ class FakePipelineDB:
             outcome="youtube_running",
             source="youtube",
             youtube_metadata=metadata,
-            id=self._next_download_log_id,
+            id=new_log_id,
         ))
-        return self._next_download_log_id
+        return new_log_id
 
     def enqueue_youtube_import_and_mark_success(
         self,
@@ -2765,6 +2823,12 @@ class FakePipelineDB:
         self.update_request_fields_calls.append((request_id, dict(fields)))
         row = self._requests.get(request_id)
         if row:
+            if fields.get("mb_release_id") is not None:
+                # Production's UPDATE hits the same UNIQUE(mb_release_id)
+                # as the INSERT — re-pointing a row at another row's mbid
+                # raises there too (setting a row's own mbid is a no-op).
+                self._assert_mb_release_id_unique(
+                    fields["mb_release_id"], exclude_id=request_id)
             row.update(fields)
             row["updated_at"] = _utcnow()
 
@@ -3039,6 +3103,7 @@ class FakePipelineDB:
         or ``*_attempts`` see the same NULL/0 defaults production
         callers get from PostgreSQL. Codex R7.
         """
+        self._assert_mb_release_id_unique(mb_release_id)
         self._next_request_id += 1
         rid = self._next_request_id
         now = _utcnow()
