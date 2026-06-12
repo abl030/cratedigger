@@ -103,6 +103,39 @@ class TestNoDualLoad(unittest.TestCase):
             "contains the repo root, and every import uses its prefixed form."
         )
 
+    def test_web_server_strips_script_dir_from_sys_path(self):
+        """Production boots ``web/server.py`` as a script (via the Nix
+        wrapper's ``coverage run .../web/server.py``), so Python puts the
+        ``web/`` directory itself at ``sys.path[0]``. With that entry
+        live, one bare import anywhere (``import mb``, ``from routes
+        import ...``) silently double-loads a web module under a second
+        name. server.py must strip its own directory from sys.path at
+        import time so the bare names are never resolvable."""
+        bootstrap = (
+            "import sys, os\n"
+            "web_dir = os.path.abspath('web')\n"
+            # Simulate script-mode boot: web/ at sys.path[0].
+            "sys.path.insert(0, web_dir)\n"
+            "import web.server\n"
+            "live = [p for p in sys.path\n"
+            "        if os.path.abspath(p or os.getcwd()) == web_dir]\n"
+            "assert not live, f'web/ still on sys.path: {sys.path}'\n"
+            # The structural consequence: bare web-module names must not
+            # be importable at all.
+            "try:\n"
+            "    import routes  # noqa: F401\n"
+            "except ImportError:\n"
+            "    pass\n"
+            "else:\n"
+            "    raise AssertionError('bare `routes` is importable')\n"
+        )
+        modules = _run_entrypoint_and_dump_modules(bootstrap)
+        offenders = _dual_loaded(modules)
+        self.assertEqual(
+            offenders, [],
+            f"Modules loaded under both bare and prefixed names: {offenders}."
+        )
+
     def test_cratedigger_main_no_dual_load(self):
         """Booting cratedigger.py must not load any module twice."""
         bootstrap = (
