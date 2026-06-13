@@ -649,7 +649,7 @@ def check_for_match(
             and browse_attempts == len(uncached)
             and len(uncached) == len(dirs_to_try)
         ):
-            ctx.broken_user.append(username)
+            ctx.broken_user.add(username)
             logger.debug(f"All browses failed for {username}, marked as broken")
             return _build_no_match()
 

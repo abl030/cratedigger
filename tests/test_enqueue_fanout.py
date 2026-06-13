@@ -412,7 +412,7 @@ class TestBrokenUserPerCycle(unittest.TestCase):
             slskd=FakeSlskdAPI(),
             pipeline_db_source=FakePipelineDBSource(),
         )
-        self.assertEqual(ctx.broken_user, [])
+        self.assertEqual(ctx.broken_user, set())
 
 
 class _PrefetchSource(FakePipelineDBSource):
