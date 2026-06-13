@@ -269,23 +269,13 @@ class TestSearchReleasesVaRewrite(unittest.TestCase):
 
     The dump's VA artist (id 194) has no name row, so "Various Artists"
     tokens can never match — pre-fix they ANDed into the title match and
-    returned zero results. The fix strips the tokens from the title param
-    and floats VA-credited rows to the top of the result list.
+    returned zero results. The fix strips the tokens from the title and
+    pins the mirror's ``artist_id=194`` exact filter so the mirror itself
+    returns only VA-credited releases.
     """
 
-    # Non-VA single first, VA-credited compilation second — mirrors the
-    # live "Rock Christmas" ranking where 7" singles outrank VA comps.
     SEARCH_DATA = {
         "results": [
-            {
-                "id": 9830575,
-                "title": "Rock Around The Christmas Tree",
-                "master_id": None,
-                "primary_type": "Other",
-                "score": 0.26,
-                "released": "1957",
-                "artists": [{"id": 5567902, "name": "Jack Harrell"}],
-            },
             {
                 "id": 32457180,
                 "title": "Rock Christmas (The Very Best Of)",
@@ -300,44 +290,55 @@ class TestSearchReleasesVaRewrite(unittest.TestCase):
         ],
     }
 
-    def _requested_title(self, mock_urlopen):
+    def _requested_qs(self, mock_urlopen) -> dict:
         url = mock_urlopen.call_args[0][0].full_url
-        qs = urllib.parse.urlparse(url).query
-        return urllib.parse.parse_qs(qs)["title"][0]
+        return urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
 
-    def test_va_query_strips_tokens_from_title_param(self):
+    def test_va_query_strips_tokens_and_pins_artist_id(self):
         with _mock_urlopen(self.SEARCH_DATA) as m:
             search_releases("Rock Christmas Various Artists")
-        self.assertEqual(self._requested_title(m), "Rock Christmas")
+        qs = self._requested_qs(m)
+        self.assertEqual(qs["title"][0], "Rock Christmas")
+        self.assertEqual(qs["artist_id"][0], "194")
 
-    def test_va_query_floats_va_credited_results_first(self):
-        with _mock_urlopen(self.SEARCH_DATA):
-            results = search_releases("Rock Christmas Various Artists")
-        self.assertEqual(results[0]["artist_id"], "194")
-        self.assertEqual(results[0]["title"], "Rock Christmas (The Very Best Of)")
-        self.assertEqual(results[1]["artist_name"], "Jack Harrell")
+    def test_plain_query_sends_no_artist_id(self):
+        with _mock_urlopen(self.SEARCH_DATA) as m:
+            search_releases("Rock Christmas")
+        qs = self._requested_qs(m)
+        self.assertEqual(qs["title"][0], "Rock Christmas")
+        self.assertNotIn("artist_id", qs)
 
-    def test_plain_query_preserves_mirror_order(self):
-        with _mock_urlopen(self.SEARCH_DATA):
-            results = search_releases("Rock Christmas")
-        self.assertEqual(results[0]["artist_name"], "Jack Harrell")
-        self.assertEqual(results[1]["artist_id"], "194")
-
-    def test_va_only_query_keeps_raw_title(self):
+    def test_va_only_query_keeps_raw_title_and_no_pin(self):
         # No title remainder after the strip — keep the raw passthrough
-        # rather than sending an empty title to the mirror.
+        # rather than pinning artist_id with an empty title (which would
+        # make the mirror scan every one of artist 194's releases).
         with _mock_urlopen(self.SEARCH_DATA) as m:
             search_releases("Various Artists")
-        self.assertEqual(self._requested_title(m), "Various Artists")
+        qs = self._requested_qs(m)
+        self.assertEqual(qs["title"][0], "Various Artists")
+        self.assertNotIn("artist_id", qs)
 
-    def test_cache_key_shares_stripped_query_with_plain_search(self):
-        # The mirror fetch for "Rock Christmas Various Artists" is the
-        # same as for "Rock Christmas"; the VA boost is applied after
-        # memoization so both queries share one cache entry.
+    def _cache_key_for(self, query: str) -> str:
         with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
-            search_releases("Rock Christmas Various Artists")
-        self.assertEqual(memo.call_args[0][0],
-                         "discogs:search:releases:Rock Christmas")
+            search_releases(query)
+        return memo.call_args[0][0]
+
+    def test_va_query_uses_distinct_cache_key(self):
+        # The artist_id-pinned fetch is a different upstream query than
+        # the bare-title fetch, so it must NOT collide with the plain
+        # "Rock Christmas" cache entry.
+        va_key = self._cache_key_for("Rock Christmas Various Artists")
+        plain_key = self._cache_key_for("Rock Christmas")
+        self.assertNotEqual(va_key, plain_key)
+        self.assertTrue(va_key.startswith("discogs:search:releases:"))
+
+    def test_va_flag_cannot_be_forged_by_user_text(self):
+        # The va discriminator sits before the user query text, so a plain
+        # query crafted to look like the VA key's tail must not collide.
+        va_key = self._cache_key_for("Rock Christmas Various Artists")
+        for adversarial in ("Rock Christmas:va", "va=1:Rock Christmas",
+                            "Rock Christmas va=1"):
+            self.assertNotEqual(self._cache_key_for(adversarial), va_key)
 
 
 class TestSearchArtists(unittest.TestCase):

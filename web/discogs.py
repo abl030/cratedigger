@@ -151,21 +151,27 @@ def search_releases(query: str) -> list[dict]:
     master-level metadata (master_title, master_first_released, primary_type, score)
     that the mirror provides on each search hit.
 
-    "Various Artists" tokens are stripped from the title match (#199) —
-    the dump's VA artist (id 194) has no name row, so the tokens can
-    never match and pre-fix VA queries returned zero results. The mirror
-    fetch then equals the bare-title search (one shared cache entry);
-    the VA intent is honoured post-cache by floating VA-credited rows to
-    the top. Full artist-id pinning needs an ``artist_id`` filter on the
-    mirror's /api/search — tracked in #199 as discogs-api follow-up.
+    "Various Artists" tokens are stripped from the title and routed to
+    the mirror's ``artist_id`` exact filter (#199) — the dump's VA artist
+    (id 194) has no name row, so the tokens can never match the text
+    index and pre-fix VA queries returned zero results. Pinning
+    ``artist_id=194`` makes the mirror return only VA-credited releases.
+    The pinned fetch is a distinct upstream query, so it gets its own
+    cache entry (the bare-title fetch returns a different, unfiltered
+    set). A VA query with no title remainder ("Various Artists" alone)
+    keeps the raw passthrough — an artist_id pin with no title would make
+    the mirror scan every one of artist 194's releases.
     """
     remainder, is_va = split_va_query(query)
-    if is_va and remainder:
-        query = remainder
+    va_pin = is_va and bool(remainder)
+    effective_query = remainder if va_pin else query
 
     def _fetch() -> list[dict]:
-        q = urllib.parse.quote(query)
-        data = _get(f"{DISCOGS_API_BASE}/api/search?title={q}&per_page=25")
+        q = urllib.parse.quote(effective_query)
+        url = f"{DISCOGS_API_BASE}/api/search?title={q}&per_page=25"
+        if va_pin:
+            url += f"&artist_id={VA_ARTIST_ID}"
+        data = _get(url)
         seen_master: set[int] = set()
         results = []
         for r in data.get("results", []):
@@ -191,11 +197,13 @@ def search_releases(query: str) -> list[dict]:
             })
         return results
 
-    cache_query = _search_cache_query_part(query)
-    results = _cache.memoize_meta(f"discogs:search:releases:{cache_query}", _fetch)
-    if is_va:
-        results = sorted(results, key=lambda r: r.get("artist_id") != VA_ARTIST_ID)
-    return results
+    # The va flag sits in a FIXED position before the (unbounded) user
+    # query text, so a plain query can never forge the VA-pinned key by
+    # ending in the discriminator — the two fetches hit different upstream
+    # URLs and must never share a cache entry.
+    cache_query = _search_cache_query_part(effective_query)
+    cache_key = f"discogs:search:releases:va={int(va_pin)}:{cache_query}"
+    return _cache.memoize_meta(cache_key, _fetch)
 
 
 def search_artists(query: str) -> list[dict]:
