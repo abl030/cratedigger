@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import unittest
+import urllib.parse
 from unittest.mock import patch, MagicMock
 
 import msgspec
@@ -261,6 +262,82 @@ class TestSearchReleases(unittest.TestCase):
         self.assertTrue(cache_key.startswith("discogs:search:releases:"))
         self.assertIn(f":#{len(long_query)}:", cache_key)
         self.assertLess(len(cache_key), len(f"discogs:search:releases:{long_query}"))
+
+
+class TestSearchReleasesVaRewrite(unittest.TestCase):
+    """VA-token handling in the Discogs title search (#199).
+
+    The dump's VA artist (id 194) has no name row, so "Various Artists"
+    tokens can never match — pre-fix they ANDed into the title match and
+    returned zero results. The fix strips the tokens from the title param
+    and floats VA-credited rows to the top of the result list.
+    """
+
+    # Non-VA single first, VA-credited compilation second — mirrors the
+    # live "Rock Christmas" ranking where 7" singles outrank VA comps.
+    SEARCH_DATA = {
+        "results": [
+            {
+                "id": 9830575,
+                "title": "Rock Around The Christmas Tree",
+                "master_id": None,
+                "primary_type": "Other",
+                "score": 0.26,
+                "released": "1957",
+                "artists": [{"id": 5567902, "name": "Jack Harrell"}],
+            },
+            {
+                "id": 32457180,
+                "title": "Rock Christmas (The Very Best Of)",
+                "master_id": 3673686,
+                "master_title": "Rock Christmas (The Very Best Of)",
+                "master_first_released": "1992",
+                "primary_type": "Album",
+                "score": 0.10,
+                "released": "2024",
+                "artists": [{"id": 194, "name": "Various"}],
+            },
+        ],
+    }
+
+    def _requested_title(self, mock_urlopen):
+        url = mock_urlopen.call_args[0][0].full_url
+        qs = urllib.parse.urlparse(url).query
+        return urllib.parse.parse_qs(qs)["title"][0]
+
+    def test_va_query_strips_tokens_from_title_param(self):
+        with _mock_urlopen(self.SEARCH_DATA) as m:
+            search_releases("Rock Christmas Various Artists")
+        self.assertEqual(self._requested_title(m), "Rock Christmas")
+
+    def test_va_query_floats_va_credited_results_first(self):
+        with _mock_urlopen(self.SEARCH_DATA):
+            results = search_releases("Rock Christmas Various Artists")
+        self.assertEqual(results[0]["artist_id"], "194")
+        self.assertEqual(results[0]["title"], "Rock Christmas (The Very Best Of)")
+        self.assertEqual(results[1]["artist_name"], "Jack Harrell")
+
+    def test_plain_query_preserves_mirror_order(self):
+        with _mock_urlopen(self.SEARCH_DATA):
+            results = search_releases("Rock Christmas")
+        self.assertEqual(results[0]["artist_name"], "Jack Harrell")
+        self.assertEqual(results[1]["artist_id"], "194")
+
+    def test_va_only_query_keeps_raw_title(self):
+        # No title remainder after the strip — keep the raw passthrough
+        # rather than sending an empty title to the mirror.
+        with _mock_urlopen(self.SEARCH_DATA) as m:
+            search_releases("Various Artists")
+        self.assertEqual(self._requested_title(m), "Various Artists")
+
+    def test_cache_key_shares_stripped_query_with_plain_search(self):
+        # The mirror fetch for "Rock Christmas Various Artists" is the
+        # same as for "Rock Christmas"; the VA boost is applied after
+        # memoization so both queries share one cache entry.
+        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+            search_releases("Rock Christmas Various Artists")
+        self.assertEqual(memo.call_args[0][0],
+                         "discogs:search:releases:Rock Christmas")
 
 
 class TestSearchArtists(unittest.TestCase):

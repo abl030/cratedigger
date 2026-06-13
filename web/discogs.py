@@ -39,7 +39,10 @@ LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS = 20
 # comparison against `artist_id` fields, which are always normalised to str.
 # Single declaration site at ``lib/va_identity.py`` — re-exported here so
 # the existing ``from web.discogs import VA_ARTIST_ID`` imports keep working.
-from lib.va_identity import DISCOGS_VA_ARTIST_ID as VA_ARTIST_ID  # noqa: E402
+from lib.va_identity import (  # noqa: E402
+    DISCOGS_VA_ARTIST_ID as VA_ARTIST_ID,
+    split_va_query,
+)
 
 
 def _get(url: str, *, timeout: int = DEFAULT_HTTP_TIMEOUT_SECONDS) -> dict:
@@ -147,7 +150,19 @@ def search_releases(query: str) -> list[dict]:
     Deduplicates by master_id (like MB's release-group dedup) and surfaces
     master-level metadata (master_title, master_first_released, primary_type, score)
     that the mirror provides on each search hit.
+
+    "Various Artists" tokens are stripped from the title match (#199) —
+    the dump's VA artist (id 194) has no name row, so the tokens can
+    never match and pre-fix VA queries returned zero results. The mirror
+    fetch then equals the bare-title search (one shared cache entry);
+    the VA intent is honoured post-cache by floating VA-credited rows to
+    the top. Full artist-id pinning needs an ``artist_id`` filter on the
+    mirror's /api/search — tracked in #199 as discogs-api follow-up.
     """
+    remainder, is_va = split_va_query(query)
+    if is_va and remainder:
+        query = remainder
+
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
         data = _get(f"{DISCOGS_API_BASE}/api/search?title={q}&per_page=25")
@@ -177,7 +192,10 @@ def search_releases(query: str) -> list[dict]:
         return results
 
     cache_query = _search_cache_query_part(query)
-    return _cache.memoize_meta(f"discogs:search:releases:{cache_query}", _fetch)
+    results = _cache.memoize_meta(f"discogs:search:releases:{cache_query}", _fetch)
+    if is_va:
+        results = sorted(results, key=lambda r: r.get("artist_id") != VA_ARTIST_ID)
+    return results
 
 
 def search_artists(query: str) -> list[dict]:
