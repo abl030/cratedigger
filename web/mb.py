@@ -29,7 +29,10 @@ USER_AGENT = "cratedigger-web/1.0"
 # (the MB artist→release-group endpoint takes ~23s for VA). Single
 # declaration site at ``lib/va_identity.py`` — re-exported here so the
 # existing ``from web.mb import VA_ARTIST_MBID`` imports keep working.
-from lib.va_identity import MB_VA_ARTIST_MBID as VA_ARTIST_MBID  # noqa: E402
+from lib.va_identity import (  # noqa: E402
+    MB_VA_ARTIST_MBID as VA_ARTIST_MBID,
+    split_va_query,
+)
 
 
 def _get(url):
@@ -53,7 +56,17 @@ def search_release_groups(query):
 
     Uses /release search (not /release-group) because the local MB mirror's
     search index only covers releases.
+
+    "Various Artists" tokens in the query are rewritten to a Lucene
+    ``arid:`` pin on the canonical VA artist (#199) — as title terms they
+    only match albums literally titled "Various Artists". A VA-only query
+    (no title remainder) keeps the raw passthrough: an arid-only pin
+    would return 25 arbitrary VA releases, no more useful than today.
     """
+    remainder, is_va = split_va_query(query)
+    if is_va and remainder:
+        query = f"arid:{VA_ARTIST_MBID} AND ({remainder})"
+
     def _fetch() -> list[dict]:
         q = urllib.parse.quote(query)
         data = _get(f"{MB_API_BASE}/release?query={q}&fmt=json&limit=25")
