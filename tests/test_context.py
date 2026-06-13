@@ -25,7 +25,7 @@ class TestCratediggerContext(unittest.TestCase):
         self.assertIsInstance(ctx.search_cache, dict)
         self.assertIsInstance(ctx.folder_cache, dict)
         self.assertIsInstance(ctx.user_upload_speed, dict)
-        self.assertIsInstance(ctx.broken_user, list)
+        self.assertIsInstance(ctx.broken_user, set)
         self.assertIsNotNone(ctx.browse_coordinator_lock)
         self.assertEqual(len(ctx.search_cache), 0)
         self.assertEqual(len(ctx.broken_user), 0)
@@ -49,7 +49,7 @@ class TestCratediggerContext(unittest.TestCase):
 
         # Mutating one context's caches should not affect the other
         ctx1.search_cache[42] = {"user1": {}}
-        ctx1.broken_user.append("bad_user")
+        ctx1.broken_user.add("bad_user")
         ctx1.user_upload_speed["user1"] = 50000
 
         self.assertEqual(len(ctx2.search_cache), 0)

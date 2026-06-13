@@ -533,7 +533,7 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
 
     def test_broken_user_returns_empty_candidates(self) -> None:
         """Broken-user short-circuit returns empty candidates."""
-        self.ctx.broken_user.append(self.username)
+        self.ctx.broken_user.add(self.username)
         result = check_for_match(
             self.tracks, "flac", ["dirA"], self.username, self.ctx,
         )
@@ -552,7 +552,7 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
 
         self.assertFalse(self._matched(result))
         self.assertEqual(self._candidates(result), [])
-        self.assertEqual(self.ctx.broken_user, [])
+        self.assertEqual(self.ctx.broken_user, set())
         self.assertNotIn((self.username, "dirA", 3, "flac"), self.ctx.negative_matches)
         self.assertEqual(self.ctx.peers_browsed_lazy, 0)
         self.assertEqual(self.ctx.cache_neg_hits, 1)
@@ -1275,7 +1275,7 @@ class TestCheckForMatchRejectionReasonEndToEnd(unittest.TestCase):
     def test_broken_user_short_circuit_returns_none_reason(self) -> None:
         # Broken-user fast-path emits no candidates and no pre-filter
         # skip count → rejection_reason is None (upstream issue).
-        self.ctx.broken_user.append(self.username)
+        self.ctx.broken_user.add(self.username)
         result = check_for_match(
             self.tracks, "flac", ["dirA"], self.username, self.ctx,
         )
