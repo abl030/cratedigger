@@ -28,7 +28,7 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Status, release count, last import time, dump date |
-| GET | `/api/search?artist=X&title=Y&page=1&per_page=25` | Full-text search, enriched with artists/labels/formats |
+| GET | `/api/search?artist=X&title=Y&artist_id=N&page=1&per_page=25` | Full-text search, enriched with artists/labels/formats. `artist_id` is an exact structural filter (release credited to that artist id) — `web/discogs.py::search_releases` pins `artist_id=194` (Various Artists, whose name row is absent from the dump and can't match the text index) for VA compilation queries. See #199. |
 | GET | `/api/releases/{id}` | Full release: tracks, genres, styles, identifiers |
 | GET | `/api/masters/{id}` | Master release with all child releases |
 | GET | `/api/artists/{id}` | Artist profile, aliases, name variations |
