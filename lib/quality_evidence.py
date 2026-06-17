@@ -943,7 +943,25 @@ def propagate_candidate_evidence_to_current(
         and library_codec is not None
         and source_codec != library_codec
     )
-    source_is_lossless = source_codec in LOSSLESS_CODECS if source_codec else False
+    # ``codec`` is labelled by container extension (snapshot_audio_files), so
+    # ``.m4a`` records ``"m4a"`` for BOTH lossless ALAC and lossy AAC — the
+    # container string alone cannot prove the source was lossless. The
+    # authoritative signal is the candidate's V0 probe lineage: the harness
+    # only grinds a ``lossless_source`` probe after ffprobe confirms a
+    # lossless container (ALAC/FLAC/WAV). Trust that lineage so an
+    # ALAC-in-m4a anchor survives the transcode instead of being stripped as
+    # if it were AAC — otherwise the next candidate sees no comparable probe
+    # and imports for free, ratcheting the V0 anchor downward (request 5219,
+    # Fred again.. *Actual Life 3*: 253 ALAC anchor wiped, 239 FLAC imported).
+    source_v0 = candidate_evidence.v0_metric
+    source_has_lossless_v0_lineage = (
+        source_v0 is not None
+        and source_v0.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+    )
+    source_is_lossless = (
+        (source_codec in LOSSLESS_CODECS if source_codec else False)
+        or source_has_lossless_v0_lineage
+    )
     strip_source_fields = is_transcode and not source_is_lossless
 
     candidate_measurement = candidate_evidence.measurement

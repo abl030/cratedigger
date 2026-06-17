@@ -155,11 +155,14 @@ console.log('renderDownloadHistoryItem() renders lossless V0 probe with inline (
     'lossless probe omits the noisy kind suffix');
 }
 
-console.log('renderDownloadHistoryItem() falls back to existing min bitrate for V0 probe (was X) when existing has no V0 probe');
+console.log('renderDownloadHistoryItem() omits the V0 probe (was X) suffix when existing has no comparable V0 probe');
 {
-  // Lossless candidate upgrading a lossy library album — the existing
-  // side has no V0 probe but does have a min bitrate. Show that as the
-  // "(was X)" comparison rather than dropping it entirely.
+  // Lossless candidate over a library album with no recorded V0 probe.
+  // The V0-probe row must NOT borrow the existing raw min bitrate as a
+  // "(was X)" — painting a V0-probe avg next to a container min reads as
+  // a fake upgrade ("260kbps avg (was 192kbps)" mixes two metrics). The
+  // min-vs-min comparison still renders on the Bitrate row, so nothing is
+  // lost.
   const html = renderDownloadHistoryItem({
     outcome: 'success',
     soulseek_username: 'awellregulatedabbey',
@@ -175,9 +178,14 @@ console.log('renderDownloadHistoryItem() falls back to existing min bitrate for 
 
   assertContains(html, 'class="p-hist-label">V0 probe</span>',
     'V0 probe row present');
-  assertContains(html, '260kbps avg', 'candidate V0 probe avg rendered');
+  // The V0-probe value cell carries the candidate alone — no fabricated
+  // "(was X)". A precise cell match (not a whole-HTML substring) so the
+  // Bitrate row's legitimate "(was 192kbps)" cannot leak into this assertion.
+  assertContains(html, '<span class="p-hist-value">260kbps avg</span>',
+    'V0 probe value has no (was X) suffix when existing has no V0 probe');
+  // The legitimate min-vs-min comparison still renders on the Bitrate row.
   assertContains(html, 'class="p-hist-was">(was 192kbps)',
-    'V0 probe (was X) falls back to existing min bitrate when no existing V0 probe');
+    'Bitrate row keeps the apples-to-apples min comparison');
 }
 
 console.log('renderDownloadHistoryItem() drops the V0 probe row for non-lossless candidates');
