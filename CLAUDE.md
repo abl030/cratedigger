@@ -29,7 +29,7 @@ If a future design decision drifts toward "good enough" matches, "smart" default
    ```
    The key works for both machines. You may need `-o StrictHostKeyChecking=no` on first use.
 3. **nixosconfig changes MUST be made on doc1.** The repo lives at `~/nixosconfig` on doc1. Doc1 has the git push credentials; doc2 and Windows do not. SSH to doc1 first, edit, commit, push, then deploy to doc2.
-4. **Pipeline DB is PostgreSQL on doc2** (nspawn container at `192.168.100.11:5432`). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH; for non-root SSH sessions, source `/run/secrets/cratedigger-pgpass` and export `PGPASSWORD` before running `pipeline-cli` (example below). Raw TCP reachability to `192.168.100.11:5432` exists on doc1/doc2, not on the Framework laptop by default. Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
+4. **Pipeline DB is PostgreSQL on doc2** (nspawn container `cratedigger-db` at `10.20.0.11:5432`; the live DSN is in `/var/lib/cratedigger/config.ini` and the `PIPELINE_DB_DSN` env on `cratedigger.service`). Data lives at `/mnt/virtio/cratedigger/postgres`. Access via `pipeline-cli` on doc2's PATH; for non-root SSH sessions, source `/run/secrets/cratedigger-pgpass` and export `PGPASSWORD` before running `pipeline-cli` (example below). The `10.20.0.0/24` nspawn subnet is doc2-local — raw TCP reachability to `10.20.0.11:5432` exists only on doc2; doc1 and the Framework laptop cannot reach it directly (query via `pipeline-cli` over SSH to doc2). Request statuses: `wanted`, `downloading`, `imported`, `manual`. Import queue statuses: `queued`, `running`, `completed`, `failed`.
 5. **This is a curated music collection.** Multiple editions/pressings of the same album are intentional. NEVER delete or merge duplicate albums — they are different MusicBrainz releases (countries, track counts, labels) and the user wants them all. Beets must disambiguate them into separate folders.
 6. **The pipeline self-heals — the request is the source of truth, everything else is derived.** Files, beets entries, wrong-matches folders, search plans, denylist, overrides, evidence — all derived state. Operator actions that touch identity supersede the row rather than mutate it, and let the pipeline rebuild from the new row. Audit trail (the frozen old row and its content-addressed child rows) is preserved by virtue of the old row never being mutated or deleted. The Replace operator action (`lib/mbid_replace_service.py`) is the canonical example: it flips the old row to `status='replaced'`, inserts a new row with `replaces_request_id` pointing back, and lets the next 5-minute cycle re-source from the new MBID. Request statuses also include `replaced` (terminal, frozen audit row).
 7. **Don't duplicate convergence — reuse the cleanup paths that already exist.** When an operator action could leave behind orphans (in-flight slskd transfers, stale staging, dangling rows), prefer letting existing convergence pick them up over adding bespoke teardown to the action. Where convergence does not yet exist, file an issue and ship the closest direct cleanup in the action itself. Replace deliberately leaves in-flight slskd transfers running rather than building a partial cancellation path that would duplicate that work.
@@ -62,7 +62,7 @@ If a future design decision drifts toward "good enough" matches, "smart" default
 
 | Path | Machine | Purpose |
 |------|---------|---------|
-| `192.168.100.11:5432/cratedigger` | doc2 nspawn | Pipeline DB (PostgreSQL) |
+| `10.20.0.11:5432/cratedigger` | doc2 nspawn | Pipeline DB (PostgreSQL) |
 | `/mnt/virtio/cratedigger/postgres` | shared | PostgreSQL data dir |
 | `/mnt/virtio/Music/beets-library.db` | shared | Beets library DB |
 | `/mnt/virtio/Music/Beets` | shared | Beets library (tagged files) |
@@ -85,7 +85,7 @@ ssh doc2 'sudo cat /var/lib/cratedigger/config.ini'
 
 #### Querying the pipeline DB (do this, in this order)
 
-1. **Run the query ON doc2.** doc1/Framework cannot reach the nspawn DB (`192.168.100.11:5432` times out). Only doc2 (where the nspawn container lives) connects reliably. `pipeline-cli` lives on doc2's PATH.
+1. **Run the query ON doc2.** doc1/Framework cannot reach the nspawn DB (`10.20.0.11:5432` times out — the `10.20.0.0/24` subnet is doc2-local). Only doc2 (where the nspawn container lives) connects reliably. `pipeline-cli` lives on doc2's PATH. For **write** SQL, `pipeline-cli query` won't work (it forces a read-only session) — use `psql "postgresql://cratedigger@10.20.0.11:5432/cratedigger"` on doc2 with `PGPASSWORD` exported.
 2. **Pull the live schema first — never guess column names.** Query `information_schema.columns` for the table(s) you're about to touch, then write your real query against what's actually there. Column names are often not what you'd guess, and they drift across releases. The schema is deliberately NOT transcribed into this file — it would go stale. Pull it every time.
 3. **Then write whatever query you need.**
 
