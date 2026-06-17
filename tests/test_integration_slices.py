@@ -7926,6 +7926,253 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
             self.assertEqual(new_evidence.codec, "mp3")
             self.assertEqual(new_evidence.container, "mp3")
 
+    def test_transcoded_alac_m4a_to_opus_propagates_source_evidence(self):
+        """ALAC-in-m4a source → Opus library: source-side evidence propagates.
+
+        Live regression — request 5219 (Fred again.. *Actual Life 3*), peer
+        ``denleschae``. ALAC is lossless, but ``snapshot_audio_files`` labels
+        codec by extension, so an ``.m4a`` file records ``codec="m4a"``.
+        ``"m4a"`` is not in ``LOSSLESS_CODECS`` ``{flac, alac, wav}``, so the
+        codec-only lossless gate misread the ALAC source as a lossy transcode
+        and STRIPPED the candidate's V0 probe (avg 253) onto NULL. The next
+        FLAC candidate (avg 239) then saw "no comparable source probe", imported
+        unconditionally, and regressed the library's V0 anchor 253 → 239.
+
+        The authoritative "was this source lossless?" signal is the candidate's
+        V0 probe lineage (``lossless_source`` — the harness only grinds a
+        lossless-source probe after ffprobe confirms ALAC). Propagation must
+        honour that signal, not the noisy container string. Positive sibling of
+        ``test_transcoded_flac_to_v0_propagates_source_evidence``; the m4a
+        container that carries a lossless-source V0 probe is the only difference.
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import AlbumQualityV0Metric
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=5219, mb_release_id="mbid-alac-m4a"))
+
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.m4a"])
+            self._stage_audio(library_dir, filenames=["01 - Library.opus"])
+
+            from lib.quality_evidence import snapshot_audio_files
+            candidate_files = snapshot_audio_files(source_dir)
+            # snapshot_audio_files labels codec by extension: an ALAC-in-m4a
+            # source records codec="m4a", exactly as production stored it
+            # (album_quality_evidence row 24558).
+            self.assertEqual(candidate_files[0].codec, "m4a")
+
+            # The harness only emits a lossless_source V0 lineage after
+            # ffprobe confirms the .m4a holds ALAC — this is the truth-of-
+            # source anchor the gate must trust.
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=192,
+                avg_bitrate_kbps=253,
+                median_bitrate_kbps=250,
+                source_lineage="lossless_source",
+                source_provenance="lossless_source",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                avg_bitrate_kbps=253,
+                median_bitrate_kbps=250,
+                format="ALAC",
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                verified_lossless=False,
+                was_converted_from="m4a",
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-alac-m4a",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 6, 16, 23, 53, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="m4a",
+                container="m4a",
+                storage_format="m4a",
+                target_format="opus",
+                v0_metric=v0_metric,
+                verified_lossless_proof=None,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(candidate_files),
+                filetype_band="lossless",
+                matched_bad_audio_hash_id=None,
+                matched_bad_audio_hash_path=None,
+            )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-alac-m4a",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+
+            beets_info = AlbumInfo(
+                album_id=5,
+                track_count=1,
+                min_bitrate_kbps=102,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                is_cbr=False,
+                album_path=library_dir,
+                format="Opus",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=5219,
+                    mb_release_id="mbid-alac-m4a",
+                    quality_ranks=None,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="provisional_lossless_upgrade",
+                        new_min_bitrate=102,
+                    ),
+                )
+
+            request_row = db.request(5219)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
+
+            # ALAC is lossless — the V0 probe lineage and spectral grade
+            # describe the upstream lossless source and MUST survive the
+            # transcode to Opus, so the next candidate compares against the
+            # 253 anchor instead of importing for free.
+            self.assertEqual(
+                new_evidence.v0_metric, v0_metric,
+                "ALAC-m4a V0 probe lineage was stripped — anchor lost",
+            )
+            self.assertEqual(
+                new_evidence.measurement.spectral_grade, "likely_transcode")
+            self.assertEqual(new_evidence.measurement.spectral_bitrate_kbps, 96)
+
+            # Bitrate / format still reflect the Opus output from album_info.
+            self.assertEqual(new_evidence.measurement.format, "Opus")
+            self.assertEqual(new_evidence.codec, "opus")
+
+    def test_transcoded_aac_m4a_to_opus_strips_source_evidence(self):
+        """AAC-in-m4a source → Opus library: source-side evidence is STRIPPED.
+
+        Negative sibling of
+        ``test_transcoded_alac_m4a_to_opus_propagates_source_evidence``. Both
+        sources record ``codec="m4a"`` (the container is ambiguous), so the
+        gate must NOT key on the container string — it must key on the V0
+        probe lineage. AAC is lossy, so the harness emits a
+        ``native_lossy_research`` lineage (never ``lossless_source``), and the
+        source-side fields must be stripped exactly as for an MP3 source. This
+        proves the fix admits ALAC-m4a without widening the gate to admit every
+        ``.m4a`` (which would re-import AAC junk as a lossless anchor).
+        """
+        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.quality import AlbumQualityV0Metric
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=146, mb_release_id="mbid-aac-m4a"))
+
+        with tempfile.TemporaryDirectory() as source_dir, \
+                tempfile.TemporaryDirectory() as library_dir:
+            self._stage_audio(source_dir, filenames=["01 - source.m4a"])
+            self._stage_audio(library_dir, filenames=["01 - Library.opus"])
+
+            from lib.quality_evidence import snapshot_audio_files
+            candidate_files = snapshot_audio_files(source_dir)
+            self.assertEqual(candidate_files[0].codec, "m4a")
+
+            # Lossy AAC → native_lossy_research lineage (NOT lossless_source).
+            v0_metric = AlbumQualityV0Metric(
+                min_bitrate_kbps=210,
+                avg_bitrate_kbps=240,
+                median_bitrate_kbps=235,
+                source_lineage="native_lossy_research",
+                source_provenance="native_lossy_research",
+            )
+            candidate_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=256,
+                format="AAC",
+                is_cbr=False,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=256,
+                verified_lossless=False,
+                was_converted_from=None,
+            )
+            from lib.quality import AlbumQualityEvidence
+            from datetime import datetime, timezone
+            from lib.quality_evidence import snapshot_fingerprint
+            candidate_evidence = AlbumQualityEvidence(
+                mb_release_id="mbid-aac-m4a",
+                snapshot_fingerprint=snapshot_fingerprint(candidate_files),
+                source_path=source_dir,
+                measurement=candidate_measurement,
+                measured_at=datetime(2026, 6, 16, 23, 53, 0, tzinfo=timezone.utc),
+                files=candidate_files,
+                codec="m4a",
+                container="m4a",
+                storage_format="m4a",
+                target_format="opus",
+                v0_metric=v0_metric,
+                verified_lossless_proof=None,
+                audio_corrupt=False,
+                folder_layout="flat",
+                audio_file_count=len(candidate_files),
+                filetype_band="aac",
+                matched_bad_audio_hash_id=55,
+                matched_bad_audio_hash_path="/some/known/bad.m4a",
+            )
+            db.upsert_album_quality_evidence(candidate_evidence)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id="mbid-aac-m4a",
+                snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
+            )
+            assert persisted_candidate is not None
+
+            beets_info = AlbumInfo(
+                album_id=6,
+                track_count=1,
+                min_bitrate_kbps=119,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=125,
+                is_cbr=False,
+                album_path=library_dir,
+                format="Opus",
+            )
+            with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                _refresh_current_evidence_after_import(
+                    db,  # type: ignore[arg-type]
+                    request_id=146,
+                    mb_release_id="mbid-aac-m4a",
+                    quality_ranks=None,
+                    source_candidate=persisted_candidate,
+                    import_result=make_import_result(
+                        decision="import", new_min_bitrate=119,
+                    ),
+                )
+
+            request_row = db.request(146)
+            new_evidence_id = request_row["current_evidence_id"]
+            self.assertIsNotNone(new_evidence_id)
+            new_evidence = db.load_album_quality_evidence_by_id(new_evidence_id)
+            assert new_evidence is not None
+
+            # Lossy m4a source: every source-side field stripped onto NULL.
+            self.assertIsNone(new_evidence.v0_metric)
+            self.assertIsNone(new_evidence.measurement.spectral_grade)
+            self.assertIsNone(new_evidence.measurement.spectral_bitrate_kbps)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_id)
+            self.assertIsNone(new_evidence.matched_bad_audio_hash_path)
+            self.assertEqual(new_evidence.measurement.format, "Opus")
+            self.assertEqual(new_evidence.codec, "opus")
+
     def test_transcoded_mp3_to_opus_strips_source_evidence(self):
         """AE5: non-lossless-source transcoded import does NOT propagate
         source-side evidence.
