@@ -11,7 +11,7 @@ Browser → https://music.ablz.au
            → nginx (localProxy on doc2, ACME cert)
              → localhost:8085
                → web/server.py (stdlib http.server)
-                 → PostgreSQL (pipeline DB, nspawn container 192.168.100.11)
+                 → PostgreSQL (pipeline DB, nspawn container 10.20.0.11)
                  → SQLite (beets library, /mnt/virtio/Music/beets-library.db, read-only)
                  → MusicBrainz API (local mirror, 192.168.1.35:5200)
 ```
@@ -125,11 +125,11 @@ ssh -N -L 18096:127.0.0.1:8096 <backend-host>
 nix-shell --run "python3 scripts/web_dev_server.py --data prod-api --prod-base-url http://127.0.0.1:18096 --host 127.0.0.1 --port 8096"
 ```
 
-If the backend host does not have direct reachability to `192.168.100.11:5432`,
+If the backend host does not have direct reachability to `10.20.0.11:5432`,
 add an SSH tunnel there first:
 
 ```bash
-ssh -N -L 15432:192.168.100.11:5432 doc2
+ssh -N -L 15432:10.20.0.11:5432 doc2
 ```
 
 The local proxy forwards byte-range headers, so wrong-match audio preview and

@@ -58,5 +58,5 @@ pipeline-cli query "SELECT * FROM user_cooldowns ORDER BY cooldown_until DESC"
 pipeline-cli query "SELECT soulseek_username, COUNT(*) FROM download_log WHERE outcome = 'timeout' GROUP BY soulseek_username ORDER BY count DESC LIMIT 10"
 
 # Manually seed cooldowns for all users with 5+ consecutive failures
-psql -h 192.168.100.11 -U cratedigger cratedigger -c "INSERT INTO user_cooldowns ..."
+psql -h 10.20.0.11 -U cratedigger cratedigger -c "INSERT INTO user_cooldowns ..."
 ```

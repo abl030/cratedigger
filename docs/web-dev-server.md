@@ -19,7 +19,7 @@ Canonical remote-dev flow from any machine with SSH access:
 1. Start a `live-db` backend on a host that can see the files. If that host
    does not have direct DB reachability, tunnel PostgreSQL first:
    ```bash
-   ssh -N -L 15432:192.168.100.11:5432 doc2
+   ssh -N -L 15432:10.20.0.11:5432 doc2
    PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
      nix-shell --run "python3 scripts/web_dev_server.py --data live-db --host 127.0.0.1 --port 8096"
    ```

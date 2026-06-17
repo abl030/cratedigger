@@ -9,7 +9,7 @@ paths:
 
 # Pipeline DB Rules (PostgreSQL)
 
-- Connection: `postgresql://cratedigger@192.168.100.11:5432/cratedigger`
+- Connection: `postgresql://cratedigger@10.20.0.11:5432/cratedigger`
 - **MUST use `autocommit=True`** in `PipelineDB` — prevents idle-in-transaction deadlocks
 - 4 statuses: wanted, downloading, imported, manual
 - JSONB columns: use for structured audit data (`import_result`, `validation_result`)
@@ -27,7 +27,7 @@ paths:
 2. Write the change as plain SQL. Each file runs in its own transaction. **Do not** wrap statements in `IF NOT EXISTS` / `EXCEPTION WHEN duplicate_column` guards — versioned migrations only run once per DB, so guards just hide bugs.
 3. The file is the contract. Once shipped, never edit it. To fix a mistake, add a new migration.
 4. Run `nix-shell --run "python3 -m unittest tests.test_migrator -v"` to confirm the file parses and applies cleanly against the ephemeral PG.
-5. Backup before deploying anything destructive: `ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
+5. Backup before deploying anything destructive: `ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
 
 ## What NOT to do
 

@@ -48,7 +48,7 @@ To add a schema change:
 
 For destructive changes, backup first:
 ```bash
-ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql
+ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql
 ```
 
 To run the migrator manually (e.g. after editing `migrations/` and pulling the flake on doc2 without a full rebuild):
