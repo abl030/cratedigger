@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info/
 .mypy_cache/
 .pyright/
+.pyright-venv
 .mcp.json
 .playwright-mcp/
 # Claude Code — only ignore machine-specific files
