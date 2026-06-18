@@ -27,3 +27,9 @@
 - [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
 - [Converge is operator-authority](project_converge_operator_authority.md) — Wrong Matches converge button must NOT route deletions through the evidence classifier
 - [Full suite before merge](feedback_full_suite_before_merge.md) — Re-run full suite + pyright after review-fixer edits before commit/push/merge; partial run shipped a broken import to main (2026-05-31)
+- [SSH signing agent hang](project_ssh_signing_agent_hang.md) — git commit hangs in ssh-keygen when a wedged forwarded agent socket lingers; ssh-keygen -Y sign asks the agent before the key file; fix: SSH_AUTH_SOCK= git commit
+- [Issue #430 FakePipelineDB migration done](project_430_fakedb_migration_done.md) — 2026-06-12, PRs #440-#444; reuse the ratchet-first + real-PG parity-gate patterns
+- [Issue #445 beets-mock migration done](project_445_beets_mock_migration_done.md) — 2026-06-12, PRs #446-#450; items 1/2/4/5 done (ratchet empty, named DB methods deployed, fakes package); only item 3 (dual-module-load, own session) remains
+- [Issue #445 COMPLETE — dual-load killed](project_445_complete_dual_load_killed.md) — 2026-06-12 PR #451 deployed; gdb live-probe technique, AST audit > regex ratchet, script-mode sys.path[0] hazard
+- [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — Mirror deploys via Forgejo/fleet-update (its own CLAUDE.md is stale on GitHub); nspawn DB is at 10.20.0.13 (not .192.168.100.13), pw in /run/secrets/discogs-pgpass
+- [Pipeline DB direct psql writes](project_pipeline_db_direct_psql_writes.md) — For write SQL (pipeline-cli query is read-only) use psql on doc2 with DSN postgresql://cratedigger@10.20.0.11:5432/cratedigger; CLAUDE.md's 192.168.100.11 is stale
