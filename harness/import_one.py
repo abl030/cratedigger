@@ -22,6 +22,7 @@ Exit codes:
 
 import argparse
 import json
+import math
 import os
 import select
 import signal
@@ -734,10 +735,15 @@ def _temp_v0_probe(
                 *V0_SPEC.metadata_args,
                 "-y", out_path,
             ]
+            # Same duration-scaled budget as convert_lossless — a flat 300s
+            # makes this probe loop measurement_failed forever on long-form
+            # tracks (the 24h "7 Skies H3") for keep-lossless requests.
+            probe_timeout = _conversion_timeout_seconds(
+                _probe_duration_seconds(src_path))
             try:
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, errors="replace",
-                    timeout=300)
+                    timeout=probe_timeout)
             except subprocess.TimeoutExpired:
                 failed += 1
                 continue
@@ -793,6 +799,54 @@ def _probe_source_channels(path: str) -> int | None:
     if isinstance(channels, int) and channels > 0:
         return channels
     return None
+
+
+def _probe_duration_seconds(path: str) -> float | None:
+    """Read total playback duration (seconds) from an audio file via mutagen.
+
+    Returns the float duration or ``None`` if the probe fails. mutagen reads
+    the stream header (FLAC STREAMINFO etc.), not the whole file, so this is
+    cheap even for multi-GB sources. Used to scale the ffmpeg conversion
+    timeout to track length — see ``_conversion_timeout_seconds``.
+    """
+    try:
+        from mutagen import File as _MutagenFile  # type: ignore[import-untyped,attr-defined]  # pyright: ignore[reportPrivateImportUsage]
+    except ImportError:
+        return None
+    try:
+        mf = _MutagenFile(path)
+    except Exception:
+        return None
+    if mf is None:
+        return None
+    length = getattr(getattr(mf, "info", None), "length", None)
+    if isinstance(length, (int, float)) and length > 0:
+        return float(length)
+    return None
+
+
+# Conversion timeout budget — a flat 300s is fine for songs but guarantees a
+# TimeoutExpired on long-form single tracks (the 24-hour Flaming Lips
+# "7 Skies H3" cannot transcode to V0 in 5 minutes, so request 4873 looped
+# measurement_failed forever). Scale the budget to the source duration:
+# assume the encoder sustains at least ~4x realtime, add fixed headroom, and
+# floor at 300s so normal-length tracks are unaffected. The budget is only a
+# ceiling — fast encodes finish well under it; it just lets slow/huge ones
+# complete instead of being killed mid-stream.
+_CONVERSION_TIMEOUT_FLOOR_S = 300
+_CONVERSION_MIN_REALTIME_FACTOR = 4
+_CONVERSION_TIMEOUT_HEADROOM_S = 120
+
+
+def _conversion_timeout_seconds(duration_s: float | None) -> int:
+    """ffmpeg conversion budget (seconds) scaled to source duration (pure)."""
+    if duration_s is None or duration_s <= 0:
+        return _CONVERSION_TIMEOUT_FLOOR_S
+    scaled = (
+        math.ceil(duration_s / _CONVERSION_MIN_REALTIME_FACTOR)
+        + _CONVERSION_TIMEOUT_HEADROOM_S
+    )
+    return max(_CONVERSION_TIMEOUT_FLOOR_S, scaled)
 
 
 def convert_lossless(album_path: str, spec: ConversionSpec,
@@ -868,15 +922,17 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
                "-c:a", spec.codec, *spec.codec_args,
                *spec.metadata_args,
                "-y", temp_out_path]
+        conv_timeout = _conversion_timeout_seconds(
+            _probe_duration_seconds(src_path))
         try:
             # errors="replace" so non-UTF-8 bytes in ffmpeg stderr (e.g.
             # CP1252-tagged FLAC Vorbis comments echoed in verbose output)
             # don't raise UnicodeDecodeError during capture and crash the
             # whole import — request 580 (78 Saab — Crossed Lines) hit this.
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    errors="replace", timeout=300)
+                                    errors="replace", timeout=conv_timeout)
         except subprocess.TimeoutExpired:
-            print(f"  [FAIL] {fname}: ffmpeg timed out after 300s",
+            print(f"  [FAIL] {fname}: ffmpeg timed out after {conv_timeout}s",
                   file=sys.stderr)
             if os.path.exists(temp_out_path):
                 os.remove(temp_out_path)
