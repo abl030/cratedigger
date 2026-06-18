@@ -135,6 +135,16 @@ class TestWriteSidecarHappyPath(_SidecarServiceCase):
         self.assertEqual(result.outcome, "written")
         self.assertIsNone(self._read_sidecar().source_username)
 
+    def test_written_file_is_world_readable(self):
+        # The sidecar exists to be read by other processes/peers — mkstemp's
+        # default 0600 would defeat that. Must land world-readable (0644).
+        self._seed_current_evidence(self._verified_lossless_evidence())
+        result = write_sidecar_for_request(
+            self.db, self.beets, REQUEST_ID, mb_release_id=MBID
+        )
+        assert result.path is not None
+        self.assertEqual(os.stat(result.path).st_mode & 0o777, 0o644)
+
 
 class TestImportDispatchSidecarHook(_SidecarServiceCase):
     """The importer success hook writes the sidecar via the shared service."""
