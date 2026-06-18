@@ -71,6 +71,7 @@ from lib.util import (beets_subprocess_env, cleanup_disambiguation_orphans,
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.grab_list import GrabListEntry
+    from lib.sidecar_service import SidecarDB, SidecarWriteResult
     from lib.pipeline_db import PipelineDB
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
@@ -920,6 +921,41 @@ def _refresh_current_evidence_after_import(
             import_result is None or decision == "preflight_existing"
         ),
     )
+
+
+def _write_album_sidecar_after_import(
+    db: "SidecarDB",
+    *,
+    request_id: int,
+    mb_release_id: str,
+    cfg: "CratediggerConfig | None",
+    beets_factory: "Callable[..., Any] | None" = None,
+) -> "SidecarWriteResult":
+    """Write the verified-lossless ``cratedigger.json`` sidecar after import.
+
+    Reads the request's freshly-persisted current evidence (set by
+    ``_refresh_current_evidence_after_import``) and delegates to the shared
+    ``write_sidecar_for_request`` service — the same entry point the one-shot
+    backfill uses, so there is no parallel sidecar-writing code path. The
+    sidecar is derived state; re-running rebuilds it idempotently.
+
+    ``beets_factory`` is a kwarg-DI seam for tests; production constructs a
+    short-lived ``BeetsDB`` (mirroring ``_refresh_current_evidence_after_import``).
+    """
+    from lib.beets_db import BeetsDB
+    from lib.sidecar_service import write_sidecar_for_request
+
+    factory = beets_factory if beets_factory is not None else BeetsDB
+    root = cfg.beets_directory if cfg is not None else ""
+    quality_ranks = cfg.quality_ranks if cfg is not None else None
+    with factory(library_root=root) as beets:
+        return write_sidecar_for_request(
+            db,
+            beets,
+            request_id,
+            mb_release_id=mb_release_id,
+            quality_ranks=quality_ranks,
+        )
 
 
 def _reject_import_from_evidence_decision(
@@ -2031,6 +2067,19 @@ def dispatch_import_core(
                     except Exception:
                         logger.exception(
                             "Failed to refresh current quality evidence "
+                            "after import for request %s",
+                            request_id,
+                        )
+                    try:
+                        _write_album_sidecar_after_import(
+                            db,
+                            request_id=request_id,
+                            mb_release_id=mb_release_id,
+                            cfg=cfg,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to write verified-lossless sidecar "
                             "after import for request %s",
                             request_id,
                         )

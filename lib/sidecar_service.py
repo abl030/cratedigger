@@ -1,0 +1,139 @@
+"""Orchestration for the verified-lossless album sidecar (issue #184).
+
+``write_sidecar_for_request`` is the single entry point both the importer
+success hook (``lib/import_dispatch.py``) and the one-shot backfill call — no
+parallel code paths. It loads the request's current (library-side) evidence,
+gates on verified-lossless, resolves the on-disk album folder via beets, and
+atomically writes ``cratedigger.json``.
+
+The sidecar is derived state, so this is idempotent: re-running rebuilds the
+same file from the same evidence. That is also the long-term-preservation
+answer — if beets ever clobbers the file, regenerate by re-running the
+backfill.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Protocol
+
+import msgspec
+
+from lib.quality import QualityRankConfig
+from lib.quality_evidence import (
+    QualityEvidenceDB,
+    SnapshotAudioFilesError,
+    snapshot_audio_files,
+    snapshot_fingerprint,
+)
+from lib.sidecar import SIDECAR_FILENAME, build_sidecar, should_write_sidecar
+
+if TYPE_CHECKING:
+    from lib.beets_db import AlbumInfo
+
+logger = logging.getLogger("cratedigger")
+
+OUTCOME_WRITTEN = "written"
+OUTCOME_SKIPPED_NO_EVIDENCE = "skipped_no_evidence"
+OUTCOME_SKIPPED_NOT_VERIFIED_LOSSLESS = "skipped_not_verified_lossless"
+OUTCOME_SKIPPED_NO_ALBUM_PATH = "skipped_no_album_path"
+OUTCOME_SKIPPED_EVIDENCE_STALE = "skipped_evidence_stale"
+
+
+class SidecarDB(QualityEvidenceDB, Protocol):
+    """PipelineDB surface this service reads. ``PipelineDB`` and
+    ``FakePipelineDB`` satisfy it structurally."""
+
+    def get_recent_successful_uploader(self, request_id: int) -> str | None: ...
+
+
+class SidecarBeets(Protocol):
+    """BeetsDB surface this service reads (positional-only to ignore the
+    ``cfg``/``_cfg`` param-name split between real and fake)."""
+
+    def get_album_info(
+        self, mb_release_id: str, cfg: QualityRankConfig, /,
+    ) -> "AlbumInfo | None": ...
+
+
+@dataclass(frozen=True)
+class SidecarWriteResult:
+    """Outcome of one sidecar write attempt. ``path`` is set only on success."""
+
+    outcome: str
+    path: str | None = None
+
+
+def write_sidecar_for_request(
+    db: SidecarDB,
+    beets: SidecarBeets,
+    request_id: int,
+    *,
+    mb_release_id: str,
+    quality_ranks: QualityRankConfig | None = None,
+    generated_at: datetime | None = None,
+) -> SidecarWriteResult:
+    """Write/refresh the verified-lossless sidecar for one imported album."""
+    evidence = db.load_album_quality_evidence_by_id(
+        db.get_request_current_evidence_id(request_id)
+    )
+    if evidence is None:
+        return SidecarWriteResult(OUTCOME_SKIPPED_NO_EVIDENCE)
+    if not should_write_sidecar(evidence):
+        return SidecarWriteResult(OUTCOME_SKIPPED_NOT_VERIFIED_LOSSLESS)
+
+    cfg = quality_ranks if quality_ranks is not None else QualityRankConfig.defaults()
+    album_info = beets.get_album_info(mb_release_id, cfg)
+    if (
+        album_info is None
+        or not album_info.album_path
+        or not os.path.isdir(album_info.album_path)
+    ):
+        return SidecarWriteResult(OUTCOME_SKIPPED_NO_ALBUM_PATH)
+
+    # Self-validate against disk: the sidecar must faithfully describe the
+    # bytes next to it. If the current evidence no longer matches the on-disk
+    # audio — e.g. the post-import evidence refresh failed and
+    # current_evidence_id still points at a prior row — skip rather than
+    # publish a stale payload. snapshot_fingerprint mirrors how
+    # propagate_candidate_evidence_to_current derived the row's fingerprint.
+    try:
+        on_disk = snapshot_audio_files(album_info.album_path)
+    except SnapshotAudioFilesError:
+        return SidecarWriteResult(OUTCOME_SKIPPED_NO_ALBUM_PATH)
+    if snapshot_fingerprint(on_disk) != evidence.snapshot_fingerprint:
+        return SidecarWriteResult(OUTCOME_SKIPPED_EVIDENCE_STALE)
+
+    sidecar = build_sidecar(
+        evidence,
+        source_username=db.get_recent_successful_uploader(request_id),
+        generated_at=(
+            generated_at if generated_at is not None
+            else datetime.now(timezone.utc)
+        ),
+    )
+    path = os.path.join(album_info.album_path, SIDECAR_FILENAME)
+    _atomic_write_bytes(path, msgspec.json.encode(sidecar))
+    return SidecarWriteResult(OUTCOME_WRITTEN, path)
+
+
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write ``data`` to ``path`` via a same-dir temp file + ``os.replace``."""
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory, prefix=".cratedigger-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
