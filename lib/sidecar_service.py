@@ -121,6 +121,13 @@ def write_sidecar_for_request(
     return SidecarWriteResult(OUTCOME_WRITTEN, path)
 
 
+# World-readable: the sidecar exists to be read by other processes and peers
+# (slskd reshare, the operator, other Cratedigger instances). mkstemp creates
+# 0600, which would make the file useless for that purpose, so widen it to the
+# conventional 0644 for a generated read-only metadata file.
+_SIDECAR_FILE_MODE = 0o644
+
+
 def _atomic_write_bytes(path: str, data: bytes) -> None:
     """Write ``data`` to ``path`` via a same-dir temp file + ``os.replace``."""
     directory = os.path.dirname(path)
@@ -130,6 +137,7 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+        os.chmod(tmp_path, _SIDECAR_FILE_MODE)
         os.replace(tmp_path, path)
     except BaseException:
         try:
