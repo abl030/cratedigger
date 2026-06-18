@@ -334,6 +334,49 @@ class TestConversionDecision(unittest.TestCase):
         self.assertFalse(r.is_terminal)
 
 
+# ============================================================================
+# _conversion_timeout_seconds — duration-scaled ffmpeg budget (request 4873)
+# ============================================================================
+
+class TestConversionTimeoutSeconds(unittest.TestCase):
+    """The conversion timeout must scale with source duration so long-form
+    single tracks (the 24-hour "7 Skies H3") get enough budget to transcode,
+    while normal-length tracks keep the 300s floor (pure)."""
+
+    # (description, duration_seconds, expected_timeout)
+    CASES = [
+        ("none probe -> floor", None, 300),
+        ("zero duration -> floor", 0, 300),
+        ("negative duration -> floor", -5.0, 300),
+        ("4-minute song -> floor", 240.0, 300),
+        ("12-minute boundary -> floor", 720.0, 300),
+        ("20-minute track -> scaled", 1200.0, 420),
+        ("1-hour set -> scaled", 3600.0, 1020),
+        ("2-hour set -> scaled", 7200.0, 1920),
+        ("24-hour 7 Skies H3 -> scaled", 86400.0, 21720),
+    ]
+
+    def test_timeout_scaling(self):
+        from harness.import_one import _conversion_timeout_seconds
+        for desc, duration, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    _conversion_timeout_seconds(duration), expected)
+
+    def test_long_track_exceeds_flat_300s_floor(self):
+        """Regression guard: the 24h track that looped measurement_failed
+        forever must now get a budget far above the old flat 300s."""
+        from harness.import_one import _conversion_timeout_seconds
+        self.assertGreater(_conversion_timeout_seconds(86400.0), 300)
+
+    def test_probe_duration_missing_file_returns_none(self):
+        """The probe must degrade to None (caller falls back to the floor),
+        never raise, on an unreadable path."""
+        from harness.import_one import _probe_duration_seconds
+        self.assertIsNone(
+            _probe_duration_seconds("/nonexistent/does-not-exist.flac"))
+
+
 class TestM4aAlacDetection(unittest.TestCase):
     """ALAC .m4a detection gates lossless conversion."""
 

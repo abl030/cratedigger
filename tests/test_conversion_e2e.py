@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
@@ -65,6 +67,47 @@ class TestAudioFixtures(unittest.TestCase):
             for p in paths:
                 self.assertTrue(os.path.exists(p))
                 self.assertTrue(p.endswith(".flac"))
+
+
+# ============================================================================
+# Conversion-timeout wiring — the duration-scaled budget must reach ffmpeg
+# ============================================================================
+
+class TestConversionTimeoutWiring(unittest.TestCase):
+    """Guard the wiring (not just the pure helper): a long-form source must
+    cause convert_lossless to pass a scaled timeout to subprocess.run, so a
+    regression back to a flat constant is caught. Request 4873 (24h track)."""
+
+    def test_scaled_timeout_reaches_ffmpeg(self):
+        from harness.import_one import (
+            convert_lossless, V0_SPEC,
+            _conversion_timeout_seconds, _probe_duration_seconds,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            os.makedirs(album)
+            flac = os.path.join(album, "01 long.flac")
+            # > 716s break-even so the budget exceeds the 300s floor and the
+            # assertion actually exercises the scaled branch.
+            make_test_flac(flac, duration=800)
+            expected = _conversion_timeout_seconds(
+                _probe_duration_seconds(flac))
+            self.assertGreater(
+                expected, 300, "fixture must exercise the scaled branch")
+
+            captured = {}
+
+            def _fake_run(*_args, **kwargs):
+                captured["timeout"] = kwargs.get("timeout")
+                # returncode!=0 short-circuits the post-conversion file ops;
+                # we only care that the timeout was computed and forwarded.
+                return SimpleNamespace(returncode=1, stderr="", stdout="")
+
+            with mock.patch("harness.import_one.subprocess.run",
+                            side_effect=_fake_run):
+                convert_lossless(album, V0_SPEC, keep_source=True)
+
+            self.assertEqual(captured.get("timeout"), expected)
 
 
 # ============================================================================
