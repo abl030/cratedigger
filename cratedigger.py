@@ -1586,6 +1586,22 @@ def main():
                 "search execution.")
             return
 
+        # --- Plex addedAt pin reconciliation (migration 040) ---
+        # Restore the original "added" date on albums that an upgrade
+        # re-import (and its Plex rescan) bumped to now, so re-acquired
+        # albums don't wrongly appear in Plex "Recently Added". Bounded,
+        # best-effort, never blocks the cycle. Normal cycles only (skipped
+        # under --reconcile-dry-run via the return above).
+        try:
+            from lib.plex_pin_service import reconcile_plex_added_at_pins
+            pin_result = reconcile_plex_added_at_pins(
+                cfg, pipeline_db_source._get_db(),
+                now=datetime.now(timezone.utc))
+            logger.info(pin_result.to_log_line())
+        except Exception:
+            logger.exception(
+                "PLEX PIN: reconciliation failed; continuing with the cycle.")
+
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
             phase1_future = pool.submit(_run_phase1)

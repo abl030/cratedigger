@@ -14,9 +14,10 @@ import shutil
 import subprocess as sp
 import unicodedata
 import difflib
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -550,6 +551,198 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
             logger.info(f"PLEX: triggered full library scan (HTTP {status})")
     except Exception as e:
         logger.warning(f"PLEX: scan trigger failed: {e}")
+
+
+# === Plex addedAt pin (read + edit) ===
+#
+# Read/edit half of the "Recently Added" pin feature (migration 040). The
+# capture/reconcile orchestration lives in lib/plex_pin_service.py; these
+# functions are the thin, testable Plex client it drives.
+
+
+@dataclass(frozen=True)
+class PlexAlbumRef:
+    """A located Plex album: its rating key and current ``addedAt`` (epoch
+    seconds), plus title/artist for logging."""
+    rating_key: str
+    added_at: int
+    title: str = ""
+    artist: str = ""
+
+
+FetchXml = Callable[..., ET.Element]
+PutFn = Callable[..., int]
+
+
+def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | None:
+    """Translate a beets ``imported_path`` to the absolute path Plex stores in
+    ``Media.Part.file`` — the join key for locating an album in Plex.
+
+    Mirrors the absolutize + path_map transform in ``trigger_plex_scan``. Kept
+    as a separate function deliberately: ``trigger_plex_scan`` has a documented
+    five-week silent-failure history (see
+    ``docs/solutions/runtime-errors/plex-partial-scan-silent-200.md``) and is
+    not refactored here to avoid regressing it. Returns ``None`` when the
+    result is not absolute (Plex can't match a relative path)."""
+    if not imported_path:
+        return None
+    out = imported_path
+    if not os.path.isabs(out) and cfg.beets_directory:
+        out = os.path.join(cfg.beets_directory, out)
+    if cfg.plex_path_map:
+        local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
+        if out.startswith(local_prefix):
+            out = container_prefix + out[len(local_prefix):]
+        elif not os.path.isabs(out):
+            out = container_prefix.rstrip("/") + "/" + out
+    return out if os.path.isabs(out) else None
+
+
+def _plex_urlopen(req: "urllib.request.Request", timeout: int = 15) -> Any:
+    """urlopen with a verify-then-unverified SSL fallback. The homelab Plex
+    reverse proxy can present a cert that fails default verification from the
+    cratedigger host; the pin must still read/write, so fall back to an
+    unverified context (LAN-local, best-effort) rather than silently failing."""
+    import ssl
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except ssl.SSLError:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
+def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> ET.Element:
+    """Thin urllib GET → parsed Plex XML. Network leaf seam."""
+    from urllib.parse import urlencode
+    params = dict(params)
+    params["X-Plex-Token"] = cfg.resolved_plex_token() or ""
+    url = f"{cfg.plex_url}{path}?{urlencode(params)}"
+    req = urllib.request.Request(url, headers={"Accept": "application/xml"})
+    with _plex_urlopen(req) as resp:
+        return ET.fromstring(resp.read())
+
+
+def _plex_put(cfg: "CratediggerConfig", path: str, **params: str) -> int:
+    """Thin urllib PUT → HTTP status. Network leaf seam."""
+    from urllib.parse import urlencode
+    params = dict(params)
+    params["X-Plex-Token"] = cfg.resolved_plex_token() or ""
+    url = f"{cfg.plex_url}{path}?{urlencode(params)}"
+    req = urllib.request.Request(url, method="PUT")
+    with _plex_urlopen(req) as resp:
+        return resp.status
+
+
+def _parse_artist_album(imported_path: str) -> tuple[str, str]:
+    """Best-effort ``(artist, album_title)`` from a beets ``imported_path``.
+
+    The album folder is always the LAST segment (``YYYY - Album``) and the
+    artist the second-to-last — this holds whether the importer hands us a
+    relative ``Artist/YYYY - Album`` or an absolute
+    ``/mnt/.../Beets/Artist/YYYY - Album`` (``ir.postflight.imported_path`` is
+    the latter in production). Used only to narrow the Plex search; the
+    authoritative match is the on-disk path verification afterward, so a
+    slightly-off parse degrades to "search returns the wrong set, path check
+    rejects it", never a false positive."""
+    parts = imported_path.strip("/").split("/")
+    artist = parts[-2] if len(parts) >= 2 else ""
+    folder = parts[-1] if parts else ""
+    m = re.match(r"^\d{4} - (.+)$", folder)
+    album = m.group(1) if m else folder
+    return artist, album
+
+
+def plex_find_album_by_path(
+    cfg: "CratediggerConfig",
+    imported_path: str,
+    *,
+    fetch_xml: FetchXml | None = None,
+) -> PlexAlbumRef | None:
+    """Locate the Plex album whose track files live under ``imported_path``.
+
+    Narrows candidates by album-title then artist search, and confirms each by
+    checking its ``Media.Part.file`` paths start with the translated container
+    folder — the authoritative join (resilient to the extension change an
+    upgrade causes, since it matches the folder prefix, not the filename).
+    Returns ``None`` when Plex has no album there (e.g. a genuinely-new album
+    not yet scanned). Transport/parse failures raise to the caller, which
+    treats Plex work as non-fatal."""
+    if not cfg.plex_url:
+        return None
+    container = _plex_container_path(cfg, imported_path)
+    if not container:
+        return None
+    fetch: FetchXml = fetch_xml or (lambda path, **p: _plex_fetch_xml(cfg, path, **p))
+    section = cfg.plex_library_section_id or "1"
+    artist, album = _parse_artist_album(imported_path)
+    prefix = container.rstrip("/") + "/"
+
+    def _candidates() -> Iterator[ET.Element]:
+        if album:
+            root = fetch(f"/library/sections/{section}/search", type="9", query=album)
+            for d in root.findall(".//Directory"):
+                if d.get("type") == "album":
+                    yield d
+        if artist:
+            aroot = fetch(f"/library/sections/{section}/search", type="8", query=artist)
+            for ad in aroot.findall(".//Directory"):
+                if ad.get("type") != "artist":
+                    continue
+                ark = ad.get("ratingKey")
+                if not ark:
+                    continue
+                albroot = fetch(f"/library/metadata/{ark}/children")
+                for d in albroot.findall(".//Directory"):
+                    if d.get("type") == "album":
+                        yield d
+
+    seen: set[str] = set()
+    for d in _candidates():
+        rk = d.get("ratingKey")
+        if not rk or rk in seen:
+            continue
+        seen.add(rk)
+        children = fetch(f"/library/metadata/{rk}/children")
+        files = [p.get("file", "") or "" for p in children.findall(".//Part")]
+        if any(f.startswith(prefix) for f in files):
+            added = d.get("addedAt")
+            try:
+                added_int = int(added) if added is not None else 0
+            except (TypeError, ValueError):
+                added_int = 0
+            return PlexAlbumRef(
+                rating_key=rk,
+                added_at=added_int,
+                title=d.get("title", "") or "",
+                artist=d.get("parentTitle", "") or "",
+            )
+    return None
+
+
+def plex_set_added_at(
+    cfg: "CratediggerConfig",
+    rating_key: str,
+    added_at: int,
+    *,
+    put_fn: PutFn | None = None,
+) -> bool:
+    """Pin an album's ``addedAt`` to ``added_at`` (epoch seconds) and lock the
+    field so future Plex metadata refreshes don't clobber it. Returns ``True``
+    on HTTP 200. The ``addedAt.locked=1`` is load-bearing — without it the next
+    scan re-stamps the date (the cause of the "PUT didn't stick" reports)."""
+    if not cfg.plex_url:
+        return False
+    section = cfg.plex_library_section_id or "1"
+    put: PutFn = put_fn or (lambda path, **p: _plex_put(cfg, path, **p))
+    status = put(
+        f"/library/sections/{section}/all",
+        type="9",
+        id=str(rating_key),
+        **{"addedAt.value": str(int(added_at)), "addedAt.locked": "1"},
+    )
+    return status == 200
 
 
 # === Jellyfin integration ===

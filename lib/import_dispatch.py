@@ -2336,6 +2336,18 @@ def dispatch_import_core(
                     )
                 if action.trigger_notifiers and cfg is not None:
                     _trigger_meelo(cfg)
+                    # Capture the album's pre-upgrade Plex addedAt BEFORE the
+                    # refresh re-stamps it, so the reconciler (5-min cycle) can
+                    # restore it and keep upgrades out of "Recently Added"
+                    # (migration 040). No-op for genuinely-new albums (not yet
+                    # in Plex) and when Plex is unconfigured; best-effort.
+                    try:
+                        from lib.plex_pin_service import capture_plex_added_at_pin
+                        capture_plex_added_at_pin(
+                            cfg, db, ir.postflight.imported_path, request_id)
+                    except Exception:
+                        logger.exception(
+                            "PLEX PIN: capture wiring failed (non-fatal)")
                     _trigger_plex(cfg, ir.postflight.imported_path)
                     _trigger_jellyfin(cfg)
                 if action.cleanup and _should_cleanup_path(scenario, action):

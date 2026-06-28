@@ -44,6 +44,29 @@ Single function: `lib/util.py::trigger_plex_scan(cfg, imported_path)`.
 - Sends `GET <plex_url>/library/sections/<id>/refresh?path=<...>&X-Plex-Token=<...>`.
 - Best-effort — failures don't block the import.
 
+### "Recently Added" pin on upgrades (migration 040)
+
+An upgrade re-import replaces an album's on-disk files (and the extension
+usually changes, e.g. FLAC/MP3 → Opus), so the partial refresh above makes
+Plex re-stamp the album's `addedAt` to now and it wrongly jumps to the top of
+"Recently Added". To preserve the original date, cratedigger now also *reads
+and edits* Plex metadata (the only place it does more than the refresh GET):
+
+- **Capture** (`lib/plex_pin_service.py::capture_plex_added_at_pin`, called in
+  `import_dispatch.py` *before* the refresh): locate the album by its container
+  folder path (`Media.Part.file` prefix match — robust to the extension change)
+  and stash its current `addedAt` as a `pending` row in `plex_added_at_pins`.
+  A genuinely-new album isn't in Plex yet, so nothing is captured — the table
+  self-selects upgrades.
+- **Reconcile** (`reconcile_plex_added_at_pins`, called each 5-min cratedigger
+  cycle): for each pending pin past a 180s settle window, re-find the album and,
+  if Plex bumped its `addedAt`, `PUT …/library/sections/<id>/all?type=9&id=<rk>&addedAt.value=<orig>&addedAt.locked=1`. The `addedAt.locked=1` is
+  load-bearing — without it the next metadata refresh re-stamps the date.
+
+The Plex read/edit client lives in `lib/util.py` (`plex_find_album_by_path`,
+`plex_set_added_at`) with verify-then-unverified SSL fallback. Both are
+best-effort; failures never block an import or the cycle.
+
 ### How paths get to Plex
 
 Beets stores file paths as **relative** to its `directory:` root, so

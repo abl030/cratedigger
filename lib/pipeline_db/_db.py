@@ -7,6 +7,7 @@ from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.pipeline_db.youtube import _YoutubeMixin
 from lib.pipeline_db.search_plan import _SearchPlanMixin
 from lib.pipeline_db.dashboard import _DashboardMixin
+from lib.pipeline_db.plex_pins import _PlexPinsMixin
 from lib.pipeline_db.misc import _MiscMixin
 
 
@@ -19,6 +20,7 @@ class PipelineDB(
     _YoutubeMixin,
     _SearchPlanMixin,
     _DashboardMixin,
+    _PlexPinsMixin,
     _MiscMixin,
 ):
     """PostgreSQL-backed pipeline database.
