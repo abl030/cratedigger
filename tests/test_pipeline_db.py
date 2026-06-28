@@ -53,6 +53,7 @@ def make_db():
         "album_request_field_resolutions",  # migration 030
         "youtube_album_mappings",  # migration 034
         "youtube_album_empty_resolutions",  # migration 035
+        "plex_added_at_pins",  # migration 040
         "album_tracks",
         "album_requests",
     ]:
@@ -96,6 +97,84 @@ class TestAddRequestRoundTrip(unittest.TestCase):
             self.assertEqual(
                 row[col], val,
                 f"add_request field {col!r} did not round-trip through PG")
+
+
+@requires_postgres
+class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
+    """Rule A round-trip for the Plex addedAt pin store (migration 040).
+    Every field the writer persists must read back unchanged through real PG —
+    a FakePipelineDB pass alone can't catch a column dropped at the SQL seam."""
+
+    def test_add_pin_round_trips_every_field(self):
+        # Read back via a raw SELECT (not the getter) so the assertion targets
+        # exactly what PG preserved — the strongest Rule A form.
+        db = make_db()
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="Muse/2026 - The Wow! Signal",
+            original_added_at=1782611948,
+            rating_key="458495",
+            request_id=8812,
+        )
+        self.assertIsInstance(pin_id, int)
+        cur = db._execute(
+            "SELECT imported_path, original_added_at, rating_key, request_id, "
+            "status FROM plex_added_at_pins WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["imported_path"], "Muse/2026 - The Wow! Signal")
+        self.assertEqual(row["original_added_at"], 1782611948)
+        self.assertEqual(row["rating_key"], "458495")
+        self.assertEqual(row["request_id"], 8812)
+        self.assertEqual(row["status"], "pending")
+
+    def test_add_pin_round_trips_nullable_fields(self):
+        # rating_key and request_id are nullable — they must round-trip as NULL.
+        db = make_db()
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="A/B", original_added_at=100,
+            rating_key=None, request_id=None)
+        cur = db._execute(
+            "SELECT rating_key, request_id FROM plex_added_at_pins "
+            "WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertIsNone(row["rating_key"])
+        self.assertIsNone(row["request_id"])
+
+    def test_mark_pin_round_trips_status_and_excludes_from_pending(self):
+        from datetime import datetime, timedelta, timezone
+        db = make_db()
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="A/B", original_added_at=100,
+            rating_key=None, request_id=None)
+        now = datetime.now(timezone.utc)
+        db.mark_plex_added_at_pin(pin_id, status="done", reconciled_at=now)
+        # Round-trip the mutated columns via a raw SELECT.
+        cur = db._execute(
+            "SELECT status, reconciled_at FROM plex_added_at_pins "
+            "WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "done")
+        self.assertIsNotNone(row["reconciled_at"])
+        # ...and a 'done' pin drops out of the pending working set.
+        rows = db.get_pending_plex_added_at_pins(
+            captured_before=now + timedelta(days=1), limit=100)
+        self.assertEqual([r for r in rows if r["id"] == pin_id], [],
+                         "done pin must not appear in pending")
+
+    def test_pending_getter_respects_captured_before_cutoff(self):
+        from datetime import datetime, timedelta, timezone
+        db = make_db()
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="C/D", original_added_at=200,
+            rating_key="rk", request_id=1)
+        # A cutoff in the past (before the just-now capture) excludes the pin —
+        # this is the reconciler's settle-window guard.
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        rows = db.get_pending_plex_added_at_pins(captured_before=past, limit=100)
+        self.assertEqual([r for r in rows if r["id"] == pin_id], [])
 
 
 @requires_postgres

@@ -915,6 +915,186 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
         trigger_jellyfin_scan(cfg)
 
 
+class TestPlexAddedAtPinClient(unittest.TestCase):
+    """Read/edit half of the Plex 'Recently Added' pin (migration 040).
+    Path translation + find-by-path matching are driven through injected
+    fetch/put seams; the urllib leaf is asserted once via the real PUT path."""
+
+    def _cfg(self, **kw):
+        from lib.config import CratediggerConfig
+        return CratediggerConfig(**kw)
+
+    def test_container_path_absolutize_then_path_map(self):
+        from lib.util import _plex_container_path
+        cfg = self._cfg(
+            beets_directory="/mnt/virtio/Music/Beets",
+            plex_path_map="/mnt/virtio/Music/Beets:/prom_music")
+        self.assertEqual(
+            _plex_container_path(cfg, "Artist/Album"),
+            "/prom_music/Artist/Album")
+        self.assertEqual(
+            _plex_container_path(cfg, "/mnt/virtio/Music/Beets/X/Y"),
+            "/prom_music/X/Y")
+
+    def test_container_path_relative_anchored_under_container_prefix(self):
+        from lib.util import _plex_container_path
+        cfg = self._cfg(plex_path_map="/mnt/virtio/Music/Beets:/prom_music")
+        self.assertEqual(
+            _plex_container_path(cfg, "Artist/Album"),
+            "/prom_music/Artist/Album")
+
+    def test_container_path_none_when_not_absolutizable(self):
+        from lib.util import _plex_container_path
+        cfg = self._cfg()  # no beets_directory, no path_map
+        self.assertIsNone(_plex_container_path(cfg, "Artist/Album"))
+        self.assertIsNone(_plex_container_path(cfg, ""))
+
+    def _fetch(self, search_xml: str, children_xml: str):
+        import xml.etree.ElementTree as ET
+
+        def _fn(path, **params):
+            if "/search" in path:
+                return ET.fromstring(search_xml)
+            if "/children" in path:
+                return ET.fromstring(children_xml)
+            return ET.fromstring("<MediaContainer/>")
+        return _fn
+
+    def test_find_album_by_path_matches_on_part_prefix(self):
+        from lib.util import plex_find_album_by_path
+        cfg = self._cfg(
+            plex_url="http://plex:32400",
+            beets_directory="/mnt/virtio/Music/Beets",
+            plex_path_map="/mnt/virtio/Music/Beets:/prom_music",
+            plex_library_section_id="3")
+        search = (
+            '<MediaContainer><Directory type="album" ratingKey="458495" '
+            'title="The Wow! Signal" parentTitle="Muse" '
+            'addedAt="1782611948"/></MediaContainer>')
+        children = (
+            '<MediaContainer><Track><Media><Part '
+            'file="/prom_music/Muse/2026 - The Wow! Signal/01 a.opus"/>'
+            '</Media></Track></MediaContainer>')
+        ref = plex_find_album_by_path(
+            cfg, "Muse/2026 - The Wow! Signal",
+            fetch_xml=self._fetch(search, children))
+        self.assertIsNotNone(ref)
+        assert ref is not None
+        self.assertEqual(ref.rating_key, "458495")
+        self.assertEqual(ref.added_at, 1782611948)
+        self.assertEqual(ref.title, "The Wow! Signal")
+        self.assertEqual(ref.artist, "Muse")
+
+    def test_find_album_by_path_none_when_parts_dont_match(self):
+        from lib.util import plex_find_album_by_path
+        cfg = self._cfg(
+            plex_url="http://plex:32400",
+            beets_directory="/mnt/virtio/Music/Beets",
+            plex_path_map="/mnt/virtio/Music/Beets:/prom_music",
+            plex_library_section_id="3")
+        search = (
+            '<MediaContainer><Directory type="album" ratingKey="1" '
+            'title="The Wow! Signal" parentTitle="Muse" '
+            'addedAt="111"/></MediaContainer>')
+        # Parts live under a DIFFERENT folder — the path join must reject it.
+        children = (
+            '<MediaContainer><Track><Media><Part '
+            'file="/prom_music/Other/Album/01 a.opus"/>'
+            '</Media></Track></MediaContainer>')
+        ref = plex_find_album_by_path(
+            cfg, "Muse/2026 - The Wow! Signal",
+            fetch_xml=self._fetch(search, children))
+        self.assertIsNone(ref)
+
+    def test_find_album_by_path_none_when_plex_unconfigured(self):
+        from lib.util import plex_find_album_by_path
+        cfg = self._cfg()  # no plex_url
+        self.assertIsNone(plex_find_album_by_path(cfg, "Artist/Album"))
+
+    def test_find_album_via_artist_fallback_with_production_absolute_path(self):
+        # Production passes an ABSOLUTE path (ir.postflight.imported_path).
+        # When the album-title search misses, the artist-search fallback must
+        # fire with the real artist ("Muse"), not the FS-root segment ("mnt").
+        import xml.etree.ElementTree as ET
+        from lib.util import plex_find_album_by_path
+        cfg = self._cfg(
+            plex_url="http://plex:32400",
+            beets_directory="/mnt/virtio/Music/Beets",
+            plex_path_map="/mnt/virtio/Music/Beets:/prom_music",
+            plex_library_section_id="3")
+
+        def _fetch(path, **params):
+            if "/search" in path and params.get("type") == "9":
+                return ET.fromstring("<MediaContainer/>")  # title search misses
+            if "/search" in path and params.get("type") == "8":
+                # The fix (parts[-2]) must yield "Muse" here, not "mnt".
+                self.assertEqual(params.get("query"), "Muse")
+                return ET.fromstring(
+                    '<MediaContainer><Directory type="artist" ratingKey="art1" '
+                    'title="Muse"/></MediaContainer>')
+            if path == "/library/metadata/art1/children":
+                return ET.fromstring(
+                    '<MediaContainer><Directory type="album" ratingKey="458495" '
+                    'title="The Wow! Signal" parentTitle="Muse" '
+                    'addedAt="1782611948"/></MediaContainer>')
+            if path == "/library/metadata/458495/children":
+                return ET.fromstring(
+                    '<MediaContainer><Track><Media><Part '
+                    'file="/prom_music/Muse/2026 - The Wow! Signal/01 a.opus"/>'
+                    '</Media></Track></MediaContainer>')
+            return ET.fromstring("<MediaContainer/>")
+
+        ref = plex_find_album_by_path(
+            cfg, "/mnt/virtio/Music/Beets/Muse/2026 - The Wow! Signal",
+            fetch_xml=_fetch)
+        self.assertIsNotNone(ref)
+        assert ref is not None
+        self.assertEqual(ref.rating_key, "458495")
+        self.assertEqual(ref.added_at, 1782611948)
+
+    def test_set_added_at_builds_locked_pin_params(self):
+        from lib.util import plex_set_added_at
+        cfg = self._cfg(plex_url="http://plex:32400",
+                        plex_library_section_id="3")
+        calls = []
+
+        def _put(path, **params):
+            calls.append((path, params))
+            return 200
+        ok = plex_set_added_at(cfg, "458495", 1782611948, put_fn=_put)
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+        path, params = calls[0]
+        self.assertEqual(path, "/library/sections/3/all")
+        self.assertEqual(params["type"], "9")
+        self.assertEqual(params["id"], "458495")
+        self.assertEqual(params["addedAt.value"], "1782611948")
+        self.assertEqual(params["addedAt.locked"], "1")
+
+    def test_set_added_at_false_on_non_200(self):
+        from lib.util import plex_set_added_at
+        cfg = self._cfg(plex_url="http://plex:32400")
+        self.assertFalse(
+            plex_set_added_at(cfg, "1", 1, put_fn=lambda p, **kw: 404))
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_set_added_at_urllib_leaf_sends_put_with_token(self, mock_urlopen):
+        from lib.util import plex_set_added_at
+        cfg = self._cfg(plex_url="http://plex:32400", plex_token="tok",
+                        plex_library_section_id="3")
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.status = 200
+        mock_urlopen.return_value = mock_resp
+        self.assertTrue(plex_set_added_at(cfg, "458495", 1782611948))
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.method, "PUT")
+        self.assertIn("addedAt.value=1782611948", req.full_url)
+        self.assertIn("addedAt.locked=1", req.full_url)
+        self.assertIn("X-Plex-Token=tok", req.full_url)
+
+
 class TestBeetsSubprocessEnv(unittest.TestCase):
     """beets_subprocess_env() is the single source of truth for the env dict
     used by every subprocess that invokes beets (directly or via the harness

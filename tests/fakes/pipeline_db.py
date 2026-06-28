@@ -206,6 +206,11 @@ class FakePipelineDB:
         self.search_plan_items: dict[int, _FakeSearchPlanItemRow] = {}
         self._next_search_plan_id = 0
         self._next_search_plan_item_id = 0
+        # Migration 040 — Plex addedAt pin store. Rows mirror the production
+        # column shape (status 'pending'|'done'|'skipped'); ids assigned
+        # monotonically like the other fakes.
+        self.plex_added_at_pins: list[dict[str, Any]] = []
+        self._next_plex_pin_id = 0
         # ``_execute`` stubbing for tests that drive raw-SQL CLI paths
         # (``pipeline-cli query``, ``pipeline-cli repair-spectral``, ...).
         # ``queue_execute_results`` lets tests register a deterministic
@@ -304,6 +309,57 @@ class FakePipelineDB:
     def request(self, request_id: int) -> dict[str, Any]:
         """Get a request row (for test assertions). Raises KeyError if missing."""
         return self._requests[request_id]
+
+    # --- Migration 040: Plex addedAt pin store ---
+
+    def add_plex_added_at_pin(
+        self,
+        *,
+        imported_path: str,
+        original_added_at: int,
+        rating_key: str | None,
+        request_id: int | None,
+    ) -> int:
+        self._next_plex_pin_id += 1
+        pin_id = self._next_plex_pin_id
+        self.plex_added_at_pins.append({
+            "id": pin_id,
+            "request_id": request_id,
+            "imported_path": imported_path,
+            "original_added_at": int(original_added_at),
+            "rating_key": rating_key,
+            "status": "pending",
+            "captured_at": _utcnow(),
+            "reconciled_at": None,
+        })
+        return pin_id
+
+    def get_pending_plex_added_at_pins(
+        self,
+        *,
+        captured_before: datetime,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            copy.deepcopy(p) for p in self.plex_added_at_pins
+            if p["status"] == "pending"
+            and _as_datetime(p["captured_at"]) < captured_before
+        ]
+        rows.sort(key=lambda p: (_as_datetime(p["captured_at"]), p["id"]))
+        return rows[:limit]
+
+    def mark_plex_added_at_pin(
+        self,
+        pin_id: int,
+        *,
+        status: str,
+        reconciled_at: datetime,
+    ) -> None:
+        for p in self.plex_added_at_pins:
+            if p["id"] == pin_id:
+                p["status"] = status
+                p["reconciled_at"] = reconciled_at
+                return
 
     def queue_execute_results(self, *results: Any) -> None:
         """Register a deterministic cursor sequence for ``_execute`` calls.

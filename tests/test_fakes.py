@@ -522,6 +522,39 @@ class TestFakePipelineDB(unittest.TestCase):
 
         self.assertEqual([row["id"] for row in rows], [1, 2])
 
+    def test_plex_added_at_pin_add_get_pending_and_mark(self):
+        """The fake mirrors migration-040 semantics: monotonic ids, pending
+        filtered by status + captured_before cutoff, mark moves it terminal."""
+        db = FakePipelineDB()
+        now = datetime(2026, 6, 28, 12, 0, tzinfo=timezone.utc)
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="Muse/2026 - The Wow! Signal",
+            original_added_at=1782611948,
+            rating_key="458495",
+            request_id=8812,
+        )
+        self.assertEqual(pin_id, 1)
+        # Force a deterministic capture time in the past, then read pending.
+        db.plex_added_at_pins[0]["captured_at"] = now - timedelta(minutes=10)
+        pending = db.get_pending_plex_added_at_pins(captured_before=now, limit=100)
+        self.assertEqual(len(pending), 1)
+        row = pending[0]
+        self.assertEqual(row["original_added_at"], 1782611948)
+        self.assertEqual(row["rating_key"], "458495")
+        self.assertEqual(row["request_id"], 8812)
+        self.assertEqual(row["status"], "pending")
+        # A cutoff before the capture excludes the pin (settle-window guard).
+        self.assertEqual(
+            db.get_pending_plex_added_at_pins(
+                captured_before=now - timedelta(hours=1), limit=100),
+            [])
+        # Marking terminal removes it from pending.
+        db.mark_plex_added_at_pin(pin_id, status="done", reconciled_at=now)
+        self.assertEqual(
+            db.get_pending_plex_added_at_pins(captured_before=now, limit=100), [])
+        self.assertEqual(db.plex_added_at_pins[0]["status"], "done")
+        self.assertEqual(db.plex_added_at_pins[0]["reconciled_at"], now)
+
     def test_assert_log_passes(self):
         db = FakePipelineDB()
         log_id = db.log_download(42, outcome="success", soulseek_username="user1")
