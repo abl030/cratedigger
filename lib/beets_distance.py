@@ -55,7 +55,11 @@ import msgspec
 # tests/test_no_dual_load.py + TestSysPathAudit ban the ambiguity
 # outright.
 from beets import library as _beets_library
-from beets.autotag import distance as _beets_distance_mod
+# beets 2.x's autotag/__init__ re-exports the `distance` *function* (from
+# .distance import distance), shadowing the submodule of the same name — so
+# `from beets.autotag import distance` binds the function, not the module.
+# Call it directly; `_beets_distance_mod.distance(...)` would AttributeError.
+from beets.autotag import distance as _beets_distance_fn
 from beets.autotag import hooks as _beets_hooks
 from beets.autotag import match as _beets_match_mod
 
@@ -620,7 +624,7 @@ def compute_beets_distance(
         album_info = _build_album_info(mb_release, mbid)
         mapping, extra_items, extra_tracks = _beets_match_mod.assign_items(
             items, album_info.tracks)
-        dist = _beets_distance_mod.distance(items, album_info, mapping)
+        dist = _beets_distance_fn(items, album_info, mapping)
     except Exception as exc:  # noqa: BLE001 — beets bugs shouldn't 500 us
         return _result(
             "distance_failed",
