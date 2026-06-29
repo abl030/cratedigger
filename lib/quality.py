@@ -1857,7 +1857,7 @@ class MovedSibling(msgspec.Struct, frozen=True):
 
 
 class DuplicateRemoveCandidate(msgspec.Struct, frozen=True):
-    """One beets album that ``resolve_duplicate`` said Beets would remove."""
+    """One beets album that ``get_duplicate_action`` said Beets would remove."""
 
     beets_album_id: Optional[int] = None
     mb_albumid: str = ""

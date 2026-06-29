@@ -22,9 +22,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from beets import config, library, plugins  # type: ignore[attr-defined]
+from beets.importer.actions import Action, DuplicateAction
 from beets.importer.session import ImportSession
-from beets.importer.tasks import Action, ImportTask as BeetsImportTask
-from beets.ui import get_path_formats, get_replacements
+from beets.importer.tasks import ImportTask as BeetsImportTask
 
 if TYPE_CHECKING:
     from beets.importer.tasks import ImportTask
@@ -229,9 +229,9 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
     If the key is misplaced (e.g. top-level `duplicate_keys =` in config.yaml)
     the user's override is silently ignored and beets falls back to the default
     `[albumartist, album]`. `find_duplicates()` then matches cross-MBID siblings
-    on album title alone, and the harness's duplicate resolution can trigger
-    beets' `task.should_remove_duplicates = True` blast radius — the exact shape
-    of the 2026-04-20 Shearwater "Palo Santo" data-loss event.
+    on album title alone, and the harness's duplicate resolution can answer
+    `DuplicateAction.REMOVE`, whose `remove_duplicates` blast radius is the
+    exact shape of the 2026-04-20 Shearwater "Palo Santo" data-loss event.
 
     The key set also must not include mutable metadata like albumartist/album:
     live upgrade attempts can carry normalized artist/title differences, which
@@ -266,7 +266,7 @@ def _duplicate_lookup_metadata(task: "ImportTask") -> dict:
     metadata is applied. MusicBrainz release ids are named ``album_id`` there,
     but the library column and ``duplicate_keys`` field are ``mb_albumid``.
     Without applying AlbumInfo's media-field mapping, Beets queries
-    ``albums.mb_albumid = ''`` and never reaches ``resolve_duplicate``.
+    ``albums.mb_albumid = ''`` and never reaches ``get_duplicate_action``.
     """
     info = task.chosen_info()
     if hasattr(info, "item_data"):
@@ -381,8 +381,9 @@ def _serialize_duplicate_album(album) -> dict:
     """Serialize a beets Album from ``found_duplicates``.
 
     This is the exact album object Beets will feed to ``duplicate_items()``
-    when ``task.should_remove_duplicates = True``. Keep the payload small but
-    diagnostic: album id, release ids, path, item count, and human labels.
+    when ``get_duplicate_action`` returns ``DuplicateAction.REMOVE``. Keep the
+    payload small but diagnostic: album id, release ids, path, item count, and
+    human labels.
     """
     return {
         "beets_album_id": getattr(album, "id", None),
@@ -485,7 +486,7 @@ class HarnessImportSession(ImportSession):
             # Defensive default. Cratedigger's two controllers
             # (lib/beets.py::beets_validate and harness/import_one.py)
             # only ever send "apply" / "skip" / "remove" (the last is
-            # handled in resolve_duplicate, not here); the asis /
+            # handled in get_duplicate_action, not here); the asis /
             # tracks / albums actions beets itself supports are never
             # selected by us. Surface anything unexpected so a future
             # controller change shows up loud instead of silently
@@ -496,8 +497,22 @@ class HarnessImportSession(ImportSession):
             })
             return Action.SKIP
 
-    def resolve_duplicate(self, task: ImportTask, found_duplicates):
-        """Ask controller how to handle duplicates.
+    def get_duplicate_action(
+        self, task: ImportTask, found_duplicates
+    ) -> DuplicateAction:
+        """Ask the controller how to handle duplicates (beets 2.x hook).
+
+        Beets 2.x replaced the 1.x ``resolve_duplicate`` /
+        ``task.should_remove_duplicates`` mechanism: the import pipeline now
+        calls ``session.get_duplicate_action(task, found_duplicates)`` and
+        stores the returned ``DuplicateAction`` on ``task.duplicate_action``.
+        The ``manipulate_files`` stage later calls
+        ``task.remove_duplicates(lib)`` iff the action is ``REMOVE`` (atomic
+        add-new-then-remove-old), and ``task.skip`` becomes true for ``SKIP``.
+        The JSON protocol is unchanged — we emit the same ``resolve_duplicate``
+        message and read the controller's decision — only the return contract
+        differs (return an enum rather than mutate ``should_remove_duplicates``,
+        which no longer exists).
 
         Emits two parallel arrays, one entry per duplicate (same index):
 
@@ -533,14 +548,17 @@ class HarnessImportSession(ImportSession):
         decision = _recv()
         resolution = decision.get("action", "skip")
 
-        # Cratedigger's importer (harness/import_one.py) only ever sends
-        # "skip" (dup-guard refuse) or "remove" (dup-guard allow,
-        # beets-owned replacement). "keep" / "merge" were never selected
-        # and are folded into the defensive skip default.
+        # Cratedigger's controllers (lib/beets.py::beets_validate and
+        # harness/import_one.py) only ever send "skip" (dup-guard refuse) or
+        # "remove" (dup-guard allow, beets-owned atomic replacement).
+        # "keep" / "merge" were never selected and fold into the defensive
+        # SKIP default. Returning SKIP makes ``task.skip`` true so beets never
+        # calls ``task.add`` (see ImportTask.skip / _apply_choice); returning
+        # REMOVE leaves the new album in place and removes the old duplicate
+        # rows in the manipulate_files stage.
         if resolution == "remove":
-            task.should_remove_duplicates = True
-        else:
-            task.set_choice(Action.SKIP)
+            return DuplicateAction.REMOVE
+        return DuplicateAction.SKIP
 
     def should_resume(self, path):
         """Ask controller whether to resume a previously interrupted import."""
@@ -632,16 +650,19 @@ def main():
     # The old approach (copy=False, move=False, write=False) still let beets
     # write to the DB and run scrub, which poisoned the source files.
 
-    # Open the beets library — must pass ALL four args to match what the beet CLI
-    # does in beets.ui._open_library(). Without path_formats and replacements,
-    # Library() falls back to its hardcoded default "$artist/$album/$track $title"
-    # which ignores the user's config (wrong folder structure, no year, splits
-    # multi-artist albums by track artist instead of albumartist).
+    # Open the beets library. beets 2.x reorganised the library API:
+    # beets.ui.get_path_formats / get_replacements were removed —
+    # get_path_formats moved to beets.util.pathformats (and now requires a
+    # config subview) and get_replacements became a Library staticmethod.
+    # Library() now derives BOTH the path formats (from config["paths"]) and
+    # the replacements (from config["replace"]) internally, so the old beets
+    # 1.x four-arg form both fails to import and raises TypeError. Passing only
+    # (library, directory) preserves the user's configured folder structure and
+    # replacements — the cached_property Library.path_formats calls
+    # get_path_formats(config["paths"]) and __init__ calls get_replacements().
     lib = library.Library(
         config["library"].as_filename(),
         config["directory"].as_filename(),
-        get_path_formats(),
-        get_replacements(),
     )
     plugins.send("library_opened", lib=lib)
 

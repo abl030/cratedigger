@@ -29,16 +29,19 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 
-# beets isn't installed in the test nix-shell — mock it before import.
+# beets 2.x IS in the dev shell, but these unit tests mock it to isolate the
+# harness's pure helpers from beets internals. The real-beets import + API
+# contract (beets 2.12 get_duplicate_action / Library) is covered by
+# tests/test_harness_beets2_contract.py.
 _beets_mocks = {
     "beets": MagicMock(),
     "beets.config": MagicMock(),
     "beets.library": MagicMock(),
     "beets.plugins": MagicMock(),
     "beets.importer": MagicMock(),
+    "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
     "beets.importer.tasks": MagicMock(),
-    "beets.ui": MagicMock(),
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)

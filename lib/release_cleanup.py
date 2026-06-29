@@ -18,7 +18,7 @@ the point — do not collapse or route around it:
   from the harness (which runs as a subprocess with no PipelineDB
   handle) — this is what the pre-flight same-MBID removal in
   ``harness/import_one.py`` uses to avoid the cross-MBID blast
-  radius of beets' ``task.should_remove_duplicates = True`` path.
+  radius of beets' ``DuplicateAction.REMOVE`` / ``remove_duplicates`` path.
 
 - ``remove_and_reset_release(beets_db, pipeline_db, release_id,
   request_id)`` wraps the primitive and adds one extra step:

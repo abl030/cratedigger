@@ -353,7 +353,7 @@ class TestRemoveAlbumBySelectorsSeam(unittest.TestCase):
     the Palo Santo failure mode: even if the beets config regresses
     (``import.duplicate_keys.album`` missing ``mb_albumid`` — the
     actual 2026-04-20 RC, traced 2026-04-21) and ``find_duplicates()``
-    drags in cross-MBID siblings, the harness's ``resolve_duplicate``
+    drags in cross-MBID siblings, the harness's ``get_duplicate_action``
     always answers ``"keep"`` so the blast radius is defused. The
     pre-flight surgical remove keeps the same-MBID cleanup path
     working without needing the destructive ``"remove"`` answer.
