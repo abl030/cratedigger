@@ -13,7 +13,7 @@ Usage:
 
 Or as a context manager:
     with EphemeralSlskd("tests/.slskd-creds.json") as s:
-        client = slskd_api.SlskdClient(host=s.host_url, api_key=s.api_key)
+        client = SlskdClient(host=s.host_url, api_key=s.api_key)
 """
 
 import atexit

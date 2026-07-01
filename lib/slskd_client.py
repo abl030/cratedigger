@@ -18,6 +18,7 @@ wire contract notes below are verified against slskd 0.24.5 on doc2:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 import uuid
 from urllib.parse import quote
@@ -28,6 +29,8 @@ from requests.adapters import HTTPAdapter
 
 from lib.config import CratediggerConfig
 
+
+logger = logging.getLogger("cratedigger")
 
 SLSKD_HTTP_POOL_ADMIN_SLACK = 4
 SLSKD_HTTP_TIMEOUT_S = 120.0
@@ -95,10 +98,15 @@ def decode_download_directory_complete(
 
 @dataclass(frozen=True)
 class SlskdEventsPage:
-    """One page of the events feed plus the retained-event total."""
+    """One page of the events feed plus the retained-event total.
+
+    ``total_count`` is ``None`` when slskd omitted the ``X-Total-Count``
+    header — callers must then rely on empty-page / cursor / page-cap
+    stops rather than silently truncating the scan.
+    """
 
     events: list[SlskdRawEvent]
-    total_count: int
+    total_count: int | None
 
 
 # === Client ===
@@ -283,12 +291,30 @@ class SlskdEventsApi:
         self._client = client
 
     def list(self, *, limit: int = 500, offset: int = 0) -> SlskdEventsPage:
-        """One page of the events feed, newest-first."""
+        """One page of the events feed, newest-first.
+
+        Envelope rows are converted individually: one malformed event
+        (a future slskd version emitting ``data: null``, say) is skipped
+        with a warning instead of failing the whole page — a page-level
+        strict decode would permanently wedge the ingest cursor behind
+        the poison event.
+        """
         response = self._client._request(
             "GET", "/events", params={"limit": limit, "offset": offset})
-        events = msgspec.json.decode(
-            response.content, type=list[SlskdRawEvent])
-        total = int(response.headers.get("X-Total-Count", "0"))
+        events: list[SlskdRawEvent] = []
+        for row in msgspec.json.decode(response.content, type=list):
+            try:
+                events.append(msgspec.convert(row, type=SlskdRawEvent))
+            except msgspec.ValidationError:
+                logger.warning(
+                    "slskd events: skipping malformed envelope row "
+                    "(id=%s type=%s)",
+                    row.get("id") if isinstance(row, dict) else None,
+                    row.get("type") if isinstance(row, dict) else None,
+                    exc_info=True,
+                )
+        raw_total = response.headers.get("X-Total-Count")
+        total = int(raw_total) if raw_total is not None else None
         return SlskdEventsPage(events=events, total_count=total)
 
 

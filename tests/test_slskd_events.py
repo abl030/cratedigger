@@ -329,6 +329,51 @@ class TestCursorPaging(SlskdEventIngestCase):
         self.assertEqual(result.events_seen, 1)
         self.assertFalse(result.cursor_gap)
 
+    def test_unparseable_new_event_timestamp_does_not_terminate_scan(self):
+        # A garbage timestamp on one NEW event must not act as an
+        # "older than cursor" terminator stranding everything behind it.
+        self.seed_downloading()
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-2", timestamp="not-a-timestamp", type="Noise"),
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.events_seen, 2)
+        self.assertEqual(result.files_stamped, 1)
+        self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
+
+    def test_missing_total_count_keeps_paging_to_cursor(self):
+        # total_count=None (header absent) must not stop the scan after
+        # page 1 — the cursor stop still has to be reached.
+        self.seed_downloading()
+        events = [
+            self.event(
+                id=f"ev-{i}",
+                timestamp="2026-07-01T10:00:00.0000000Z", type="Noise")
+            for i in range(EVENT_PAGE_LIMIT + 3)
+        ]
+        events.append(self.event(
+            id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"))
+        self.slskd.events.set_events(events)
+        self.slskd.events.omit_total_count = True
+
+        result = self.ingest()
+
+        self.assertEqual(result.outcome, "ingested")
+        self.assertEqual(result.events_seen, EVENT_PAGE_LIMIT + 3)
+        self.assertFalse(result.cursor_gap)
+        self.assertGreaterEqual(len(self.slskd.events.list_calls), 2)
+
     def test_multi_page_scan_collects_across_pages(self):
         events = [
             self.event(

@@ -359,6 +359,9 @@ class FakeSlskdEvents:
         self._event_cls = SlskdRawEvent
         self._events: list[Any] = []
         self.total_count_override: int | None = None
+        # Mirror slskd omitting the X-Total-Count header entirely
+        # (page.total_count = None).
+        self.omit_total_count = False
         self.list_calls: list[tuple[int, int]] = []
         self.list_error: Exception | None = None
 
@@ -373,11 +376,13 @@ class FakeSlskdEvents:
         self.list_calls.append((limit, offset))
         if self.list_error is not None:
             raise self.list_error
-        total = (
-            self.total_count_override
-            if self.total_count_override is not None
-            else len(self._events)
-        )
+        total: int | None
+        if self.omit_total_count:
+            total = None
+        elif self.total_count_override is not None:
+            total = self.total_count_override
+        else:
+            total = len(self._events)
         return self._page_cls(
             events=self._events[offset:offset + limit],
             total_count=total,

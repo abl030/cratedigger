@@ -8216,11 +8216,6 @@ class TestGetPipelineOverlay(unittest.TestCase):
             "FakePipelineDB's overlay mirror drifted from the real SQL — "
             "fix the fake (tests/fakes.py), never the production SQL, "
             "unless the SQL change is the point of your PR.")
-
-
-if __name__ == "__main__":
-    unittest.main()
-
 @requires_postgres
 class TestSlskdEventCursorRoundTrip(unittest.TestCase):
     """Rule A round-trip for upsert_slskd_event_cursor (issue #146)."""
@@ -8272,3 +8267,7 @@ class TestSlskdEventCursorRoundTrip(unittest.TestCase):
         assert real is not None and mirrored is not None
         strip = lambda c: {k: v for k, v in c.items() if k != "updated_at"}
         self.assertEqual(strip(real), strip(mirrored))
+
+
+if __name__ == "__main__":
+    unittest.main()

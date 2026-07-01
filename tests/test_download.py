@@ -2077,6 +2077,20 @@ class TestEventPathComparisonLogging(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("no event local_path", lines[0])
 
+    def test_resolver_miss_with_event_path_is_not_a_mismatch(self):
+        """Resolver=None + event-present is evidence FOR the event stream —
+        it must stay out of the ``match=False`` bucket the phase-2
+        switchover grep reads."""
+        from lib.download import _log_event_path_comparison
+        file = make_download_file(
+            filename="@@x\\Music\\A\\01.mp3", file_dir="@@x\\Music\\A")
+        file.local_path = "/dl/A/01.mp3"
+        with self.assertLogs("cratedigger", level=logging.WARNING) as captured:
+            _log_event_path_comparison(file, None)
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("resolver_miss=True", captured.output[0])
+        self.assertNotIn("match=False", captured.output[0])
+
     def test_resolver_still_wins_on_mismatch(self):
         # Phase 1 contract: the move uses the resolver's answer even when
         # the event stream disagrees.

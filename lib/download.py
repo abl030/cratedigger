@@ -465,6 +465,14 @@ def _log_event_path_comparison(
             "EVENT-PATH COMPARE: no event local_path for %s "
             "(resolver=%s)", file.filename, resolver_path)
         return
+    if resolver_path is None:
+        # Resolver came up empty while the event stream knows the path —
+        # evidence FOR the event stream, so keep it out of the
+        # ``match=False`` bucket the phase-2 switchover grep reads.
+        logger.warning(
+            "EVENT-PATH COMPARE: resolver_miss=True event=%s for %s",
+            file.local_path, file.filename)
+        return
     match = resolver_path == file.local_path
     logger.log(
         logging.INFO if match else logging.WARNING,

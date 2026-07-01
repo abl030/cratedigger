@@ -70,13 +70,19 @@ class EventIngestResult:
         )
 
 
-def _parse_event_timestamp(value: str) -> datetime:
-    """Tolerant parse of slskd's ISO-8601 event timestamps (7-digit fractions)."""
+def _parse_event_timestamp(value: str) -> datetime | None:
+    """Tolerant parse of slskd's ISO-8601 event timestamps (7-digit fractions).
+
+    Returns ``None`` when unparseable — callers must NOT treat an
+    unparseable timestamp as "older than the cursor", or one bad new
+    event would silently terminate the scan and strand everything
+    behind it.
+    """
     text = str(value).replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
@@ -97,6 +103,7 @@ def _collect_new_events(
     """
     last_ts = _parse_event_timestamp(last_event_timestamp)
     collected: list[SlskdRawEvent] = []
+    seen_ids: set[str] = set()
     offset = 0
     for _ in range(MAX_EVENT_PAGES):
         page = slskd.events.list(limit=EVENT_PAGE_LIMIT, offset=offset)
@@ -105,12 +112,17 @@ def _collect_new_events(
         for event in page.events:
             if event.id == last_event_id:
                 return collected, False
-            if _parse_event_timestamp(event.timestamp) < last_ts:
+            event_ts = _parse_event_timestamp(event.timestamp)
+            if last_ts is not None and event_ts is not None and event_ts < last_ts:
                 # Cursor event pruned/missing — everything older is seen.
                 return collected, False
-            collected.append(event)
+            # Mid-scan arrivals shift offsets and can repeat an event
+            # across pages — collect each id once.
+            if event.id not in seen_ids:
+                seen_ids.add(event.id)
+                collected.append(event)
         offset += len(page.events)
-        if offset >= page.total_count:
+        if page.total_count is not None and offset >= page.total_count:
             return collected, False
     return collected, True
 
@@ -166,17 +178,19 @@ def _stamp_local_paths(
                 "SLSKD EVENTS: unparseable active_download_state for "
                 "request %s — skipping", row.get("id"), exc_info=True)
             continue
-        changed = False
+        row_stamped = 0
         for file_state in state.files:
             local_path = local_paths.get(
                 (file_state.username, file_state.filename))
             if local_path is not None and file_state.local_path != local_path:
                 file_state.local_path = local_path
-                changed = True
-                files_stamped += 1
-        if changed and db.update_download_state_if_downloading(
+                row_stamped += 1
+        if row_stamped and db.update_download_state_if_downloading(
                 row["id"], state.to_json()):
+            # Count only what actually persisted — a row that left
+            # 'downloading' mid-ingest contributes nothing.
             requests_updated += 1
+            files_stamped += row_stamped
     return files_stamped, requests_updated
 
 

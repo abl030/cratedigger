@@ -56,7 +56,7 @@ class CratediggerContext:
 
     # --- Core dependencies (set once in main()) ---
     cfg: CratediggerConfig
-    slskd: Any  # slskd_api.SlskdClient — Any to avoid import
+    slskd: Any  # lib.slskd_client.SlskdClient — Any so tests can wire FakeSlskdAPI
     pipeline_db_source: PipelineDBSource
     download_ownership: Any = None
 

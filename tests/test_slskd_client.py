@@ -240,6 +240,34 @@ class TestEventsEndpoint(SlskdClientTestCase):
             "/mnt/virtio/music/slskd/The Twilight Sad - Acoustic EP")
         self.assertEqual(payload.username, "Triple Sun")
 
+    def test_malformed_envelope_row_is_skipped_not_fatal(self):
+        # One poison event (data: null) must not brick the whole page —
+        # a page-level strict decode would wedge the ingest cursor
+        # behind it forever.
+        malformed = {
+            "timestamp": "2026-07-01T23:59:00.0000000Z",
+            "type": "SomeFutureEvent",
+            "data": None,
+            "id": "bad-row",
+        }
+        self.set_fixture("GET", "/events", [malformed, *EVENTS_FIXTURE],
+                         headers={"X-Total-Count": "3"})
+
+        page = self.client.events.list()
+
+        self.assertEqual(
+            [e.id for e in page.events],
+            [e["id"] for e in EVENTS_FIXTURE])
+
+    def test_missing_total_count_header_reports_none(self):
+        # Callers must treat an absent X-Total-Count as "unknown", not 0 —
+        # a 0 default would silently truncate multi-page scans.
+        self.set_fixture("GET", "/events", EVENTS_FIXTURE)
+
+        page = self.client.events.list()
+
+        self.assertIsNone(page.total_count)
+
     def test_wire_type_drift_raises_validation_error(self):
         # RED-boundary guard per code-quality rules: an int-typed field
         # arriving as a string must fail loudly at the decode site.
