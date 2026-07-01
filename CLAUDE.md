@@ -320,7 +320,7 @@ Browser automation for testing `music.ablz.au`. Configured per-machine in `.mcp.
 
 ## Finding dead code
 
-vulture (static, `nix-shell --run "bash scripts/find_dead_code.sh"` — diffs against `tools/vulture/whitelist.py`) plus coverage.py against production traffic (runtime). After deleting dead code, regenerate the whitelist and watch for **cascading orphans** — deleting one helper frequently exposes its now-unreferenced callees, so the next `vulture --make-whitelist` run surfaces them. Full tooling, the runtime-coverage flow, and the per-deletion cascading-orphan workflow are in `docs/dead-code.md`.
+vulture (static, `nix-shell --run "bash scripts/find_dead_code.sh"` — diffs against `tools/vulture/whitelist.py`). After deleting dead code, regenerate the whitelist and watch for **cascading orphans** — deleting one helper frequently exposes its now-unreferenced callees, so the next `vulture --make-whitelist` run surfaces them. Full tooling and the per-deletion cascading-orphan workflow are in `docs/dead-code.md` (which also records why production-coverage dead-code detection was tried and removed — issue #352).
 
 ## Critical rules
 

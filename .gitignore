@@ -18,8 +18,5 @@ tests/fixtures/albums/
 tests/fixtures/analysis_cache.json
 tests/fixtures/pipeline_db_snapshot_*.sql
 
-# Dead-code / coverage tooling output (scripts/find_dead_code.sh,
-# scripts/coverage_report.sh, scripts/coverage_diff.py).
+# Build / tooling output (e.g. scripts/find_dead_code.sh).
 /build/
-.coverage
-.coverage.*

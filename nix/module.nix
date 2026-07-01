@@ -18,41 +18,11 @@
   cfg = config.services.cratedigger;
   src = cfg.src;
 
-  # Same python env the dev shell uses — single source of truth. When
-  # services.cratedigger.coverage.enable = true, swap in the variant that
-  # bundles coverage.py + the subprocess .pth shim (nix/coverage-subprocess.nix).
+  # Same python env the dev shell uses — single source of truth.
   cratedigger = pkgs.callPackage ./package.nix {};
-  pythonEnv =
-    if cfg.coverage.enable
-    then cratedigger.pythonEnvWithCoverage
-    else cratedigger.pythonEnv;
+  pythonEnv = cratedigger.pythonEnv;
 
-  # Production runtime instrumentation. The .coveragerc checked in at the repo
-  # root drives both parent processes (via `coverage run --rcfile=...`) and
-  # subprocesses (via COVERAGE_PROCESS_START which the .pth file reads).
-  coveragercFile = "${src}/.coveragerc";
-
-  # Replaces bare `python` in each wrapper. coverage run --parallel-mode emits
-  # one .coverage.<host>.<pid>.<random> data file per process, which
-  # `coverage combine` later merges (see scripts/coverage_report.sh). Without
-  # --parallel-mode, concurrent processes (importer + preview worker + web +
-  # the periodic oneshot) would clobber each other's .coverage file.
-  pyRunner =
-    if cfg.coverage.enable
-    then "${pythonEnv}/bin/coverage run --parallel-mode --rcfile=${coveragercFile}"
-    else "${pythonEnv}/bin/python";
-
-  # Shell snippet that prepares the coverage environment. Empty string when
-  # coverage is disabled, so the wrappers stay tidy in the common case.
-  # COVERAGE_FILE pins where the parallel data files land — overrides the
-  # rcfile's `data_file = .coverage` so the relative path doesn't escape into
-  # whatever CWD systemd left us in. COVERAGE_PROCESS_START is the env var
-  # the .pth shim reads; subprocesses spawned by our code inherit it and
-  # auto-attach via coverage.process_startup().
-  coverageShellSetup = optionalString cfg.coverage.enable ''
-    export COVERAGE_FILE="${cfg.coverage.dataDir}/.coverage"
-    export COVERAGE_PROCESS_START="${coveragercFile}"
-  '';
+  pyRunner = "${pythonEnv}/bin/python";
 
   runtimePath = lib.makeBinPath [
     pkgs.bash
@@ -71,7 +41,6 @@
   # CLI wrappers — the only place PYTHONPATH is set.
   cratediggerPkg = pkgs.writeShellScriptBin "cratedigger" ''
     export PATH="${runtimePath}:$PATH"
-    ${coverageShellSetup}
     exec ${pyRunner} ${src}/cratedigger.py \
       --redis-host "${cfg.redis.host}" \
       --redis-port ${toString cfg.redis.port} "$@"
@@ -85,12 +54,6 @@
   # crashes it with ModuleNotFoundError. All internal imports use
   # `from lib.X import Y` / `from web.X import Y` against the repo root
   # already, so the flat entries are both unnecessary and harmful.
-  # pipeline-cli is intentionally NOT wrapped in `coverage run` even when
-  # coverage is enabled — it's an interactive operator tool whose JSON output
-  # would be polluted by coverage's exit-time banner, and short-lived enough
-  # that its coverage contribution is marginal compared to the long-running
-  # web / importer / oneshot services. Same for pipeline-migrate (single
-  # idempotent DDL pass on every deploy).
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
@@ -108,7 +71,6 @@
   importerPkg = pkgs.writeShellScriptBin "cratedigger-importer" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/importer.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
@@ -116,7 +78,6 @@
   previewWorkerPkg = pkgs.writeShellScriptBin "cratedigger-import-preview-worker" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/import_preview_worker.py \
       --dsn "${cfg.pipelineDb.dsn}" \
       --workers ${toString cfg.importer.previewWorkers} "$@"
@@ -125,7 +86,6 @@
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    ${coverageShellSetup}
     exec ${pyRunner} ${src}/web/server.py \
       --port ${toString cfg.web.port} \
       --dsn "${cfg.pipelineDb.dsn}" \
@@ -144,7 +104,6 @@
   youtubeIngestWorkerPkg = pkgs.writeShellScriptBin "cratedigger-youtube-ingest" ''
     export PATH="${pkgs.yt-dlp}/bin:${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/youtube_ingest_worker.py \
       --dsn "${cfg.pipelineDb.dsn}" \
       --temp-dir "${cfg.youtubeIngest.tempDir}" \
@@ -160,7 +119,6 @@
   unfindableDetectionPkg = pkgs.writeShellScriptBin "cratedigger-unfindable" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    ${coverageShellSetup}
     exec ${pyRunner} ${src}/scripts/run_unfindable_detection.py \
       --dsn "${cfg.pipelineDb.dsn}" "$@"
   '';
@@ -716,36 +674,6 @@ in {
       };
     };
 
-    coverage = {
-      enable = mkOption {
-        type = types.bool;
-        default = false;
-        description = ''
-          Instrument the long-running cratedigger services (oneshot pipeline,
-          importer, preview worker, web) with coverage.py. Each process writes
-          parallel-mode data files into `coverage.dataDir`; combine them later
-          with `nix-shell --run "bash scripts/coverage_report.sh"`.
-
-          Use this together with the static dead-code finder
-          (`scripts/find_dead_code.sh`) to triage code that tests cover but
-          production never executes — see CLAUDE.md § "Finding dead code".
-
-          Overhead is ~5-10% CPU per traced process plus a few MB of data per
-          day. Safe to leave on for weeks; disable when not actively auditing.
-        '';
-      };
-      dataDir = mkOption {
-        type = types.str;
-        default = "${cfg.stateDir}/coverage";
-        defaultText = lib.literalExpression ''"''${cfg.stateDir}/coverage"'';
-        description = ''
-          Directory to write parallel-mode coverage data files into. Must be
-          writable by services.cratedigger.user. Survives reboots so coverage
-          accumulates across runs until you explicitly clear it.
-        '';
-      };
-    };
-
     healthCheck = {
       enable = mkOption {
         type = types.bool;
@@ -974,8 +902,6 @@ in {
     # restrictive modes from whatever provisioned them (sops-nix, agenix, etc).
     systemd.tmpfiles.rules =
       [ "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -" ]
-      ++ optional cfg.coverage.enable
-        "d ${cfg.coverage.dataDir} 0755 ${cfg.user} ${cfg.group} -"
       ++ optional cfg.youtubeIngest.enable
         "d ${cfg.youtubeIngest.tempDir} 0755 ${cfg.user} ${cfg.group} -";
 

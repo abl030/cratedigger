@@ -11,9 +11,10 @@ import os
 import sys
 
 # Script-mode Python puts this file's directory (web/) at sys.path[0]
-# (production boots `coverage run .../web/server.py`), which makes every
-# web module importable under a bare second name (`import mb`, `from
-# routes import ...`) — the issue #95 / PR #94 dual-load bug class, where
+# (production boots `python .../web/server.py` from the systemd wrapper),
+# which makes every web module importable under a bare second name
+# (`import mb`, `from routes import ...`) — the issue #95 / PR #94 dual-load
+# bug class, where
 # two copies of the same class break `is` and isinstance across the
 # boundary. Strip it (realpath: a symlink-aliased spelling of web/ must
 # not survive the filter) before ANY other import so each module has

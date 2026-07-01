@@ -13,9 +13,6 @@
 #   nix-shell --run "bash scripts/find_dead_code.sh"             # diff vs whitelist
 #   nix-shell --run "bash scripts/find_dead_code.sh --baseline"  # all candidates
 #   nix-shell --run "bash scripts/find_dead_code.sh --confidence 80"
-#
-# Combine with the production coverage diff (scripts/coverage_diff.py) to find
-# code that's only exercised by tests — the most actionable category.
 
 set -euo pipefail
 

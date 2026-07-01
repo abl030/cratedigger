@@ -2,7 +2,6 @@
 
 let
   slskd-api = pkgs.callPackage ./slskd-api.nix { };
-  coverageSubprocess = pkgs.callPackage ./coverage-subprocess.nix { };
 
   # Production python deps. Includes beets only as a Python library —
   # ``lib/beets_distance.py`` calls ``beets.autotag.distance`` directly
@@ -25,17 +24,8 @@ let
     ps.ytmusicapi # YouTube Music album resolver — anonymous `YTMusic()` for search + get_album
     slskd-api
   ];
-
-  # Coverage instrumentation layer. Adding coverageSubprocess pulls in
-  # coverage.py + a .pth file that attaches to subprocesses when
-  # COVERAGE_PROCESS_START is set. The .pth is a no-op without the env var,
-  # so this is safe to layer onto the prod env unconditionally when the
-  # operator opts into services.cratedigger.coverage.enable. See
-  # nix/coverage-subprocess.nix.
-  pythonPackagesWithCoverage = ps: pythonPackages ps ++ [ coverageSubprocess ];
 in {
-  inherit slskd-api pythonPackages pythonPackagesWithCoverage coverageSubprocess;
+  inherit slskd-api pythonPackages;
 
   pythonEnv = pkgs.python3.withPackages pythonPackages;
-  pythonEnvWithCoverage = pkgs.python3.withPackages pythonPackagesWithCoverage;
 }
