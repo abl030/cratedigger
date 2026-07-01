@@ -11,12 +11,9 @@ let
   #
   # Dev-only additions:
   #   - vulture: static dead-code finder (scripts/find_dead_code.sh)
-  #   - coverage: runtime coverage for both the test suite and
-  #     production-instrumented systemd units (scripts/coverage_report.sh
-  #     + scripts/coverage_diff.py)
   testPythonEnv = pkgs.python3.withPackages (ps:
     cratedigger.pythonPackages ps
-    ++ [ ps.vulture ps.coverage ]
+    ++ [ ps.vulture ]
   );
 in
 pkgs.mkShell {

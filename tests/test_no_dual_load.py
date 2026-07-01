@@ -114,7 +114,7 @@ class TestNoDualLoad(unittest.TestCase):
 
     def test_web_server_strips_script_dir_from_sys_path(self):
         """Production boots ``web/server.py`` as a script (via the Nix
-        wrapper's ``coverage run .../web/server.py``), so Python puts the
+        wrapper's ``python .../web/server.py``), so Python puts the
         ``web/`` directory itself at ``sys.path[0]``. With that entry
         live, one bare import anywhere (``import mb``, ``from routes
         import ...``) silently double-loads a web module under a second
