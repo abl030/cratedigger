@@ -50,7 +50,7 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 
 ## What the module does
 
-1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard, slskd-api).
+1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard).
 2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH.
 3. Renders `/var/lib/cratedigger/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path. App units render through an atomic temp-file-and-rename step because importer, preview, web, and timer-driven services can start concurrently after migrations.
 4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
@@ -100,7 +100,6 @@ If you don't use sops or have one key per encrypted file, skip the splitter and 
 ```
 github:abl030/cratedigger
 ├── nixosModules.default              ← upstream NixOS module
-├── packages.<system>.slskd-api        ← slskd-api PyPI build (not in nixpkgs)
 ├── devShells.<system>.default         ← test/dev environment
 └── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
 ```

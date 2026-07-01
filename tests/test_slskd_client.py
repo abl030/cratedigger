@@ -413,6 +413,53 @@ class TestApplicationEndpoint(SlskdClientTestCase):
         self.assertEqual(self.client.application.version(), "0.24.5")
 
 
+class TestPoolSizing(unittest.TestCase):
+    def test_pool_size_is_derived_from_concurrency_values(self):
+        from dataclasses import replace
+
+        from lib.config import CratediggerConfig
+        from lib.slskd_client import (
+            SLSKD_HTTP_POOL_ADMIN_SLACK,
+            derive_slskd_http_pool_size,
+        )
+
+        cfg = replace(
+            CratediggerConfig(),
+            browse_global_max_workers=32,
+            search_max_inflight=4,
+            page_size=10,
+        )
+        self.assertEqual(
+            derive_slskd_http_pool_size(cfg),
+            32 + 4 + 10 + SLSKD_HTTP_POOL_ADMIN_SLACK,
+        )
+
+    def test_cratedigger_factory_builds_client_with_derived_pool(self):
+        from dataclasses import replace
+
+        import cratedigger
+        from lib.config import CratediggerConfig
+        from lib.slskd_client import derive_slskd_http_pool_size
+
+        cfg = replace(
+            CratediggerConfig(),
+            slskd_host_url="http://slskd.example",
+            slskd_api_key="secret",
+            slskd_url_base="/base",
+        )
+        client = cratedigger._create_slskd_client(cfg)
+
+        self.assertIsInstance(client, SlskdClient)
+        self.assertEqual(client.api_url, "http://slskd.example/base/api/v0")
+        self.assertEqual(client._session.headers["X-API-Key"], "secret")
+        adapter = client._session.adapters["http://"]
+        self.assertEqual(
+            adapter._pool_maxsize,  # type: ignore[attr-defined]
+            derive_slskd_http_pool_size(cfg),
+        )
+        self.assertTrue(adapter._pool_block)  # type: ignore[attr-defined]
+
+
 class TestClientConstruction(unittest.TestCase):
     def test_pool_adapters_configured_blocking_at_derived_size(self):
         client = SlskdClient(

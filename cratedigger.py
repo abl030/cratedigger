@@ -11,8 +11,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
 
-import slskd_api
-from lib.slskd_client import SLSKD_HTTP_TIMEOUT_S, configure_slskd_http_pool
+from lib.slskd_client import (
+    SLSKD_HTTP_TIMEOUT_S,
+    SlskdClient,
+    derive_slskd_http_pool_size,
+)
 
 if TYPE_CHECKING:
     from album_source import DatabaseSource
@@ -49,7 +52,7 @@ class SlskdDirectory(TypedDict):
 cfg: CratediggerConfig = None  # type: ignore[assignment]  # Set in main()
 
 # === API Clients & Logging ===
-slskd: slskd_api.SlskdClient = None  # type: ignore[assignment]  # Set in main()
+slskd: SlskdClient = None  # type: ignore[assignment]  # Set in main()
 logger = logging.getLogger("cratedigger")
 
 # === Per-search progress watchdog (issue #212) ===
@@ -141,16 +144,15 @@ pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set i
 _module_ctx: Any = None  # CratediggerContext — set in main()
 
 
-def _create_slskd_client(client_cfg: CratediggerConfig) -> slskd_api.SlskdClient:
-    """Create the slskd client and configure its HTTP connection pool."""
-    client = slskd_api.SlskdClient(
+def _create_slskd_client(client_cfg: CratediggerConfig) -> SlskdClient:
+    """Create the slskd client with a pool sized for the pipeline width."""
+    return SlskdClient(
         host=client_cfg.slskd_host_url,
         api_key=client_cfg.resolved_slskd_api_key(),
         url_base=client_cfg.slskd_url_base,
         timeout=SLSKD_HTTP_TIMEOUT_S,
+        pool_size=derive_slskd_http_pool_size(client_cfg),
     )
-    configure_slskd_http_pool(client, client_cfg)
-    return client
 
 from lib.browse import (
     _browse_directories,

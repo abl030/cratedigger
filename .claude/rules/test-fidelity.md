@@ -35,7 +35,7 @@ External dependencies in scope:
 - `web/mb.py::get_release` and `get_release_group_releases` — raises `urllib.error.HTTPError` on 404, `urllib.error.URLError` on transport failure
 - `web/discogs.py::get_release` and `get_master_releases` — same exception shape plus `requests.HTTPError` paths
 - `ytmusicapi.YTMusic.search` and `get_album` — raises `YTMusicServerError` / `YTMusicUserError` / `requests.Timeout` / `requests.ConnectionError` / `KeyError`
-- `slskd_api` — `requests.HTTPError` with structural `.response.text`
+- `lib/slskd_client.py` — `requests.HTTPError` with structural `.response.text`
 
 **Forbidden anti-pattern:**
 

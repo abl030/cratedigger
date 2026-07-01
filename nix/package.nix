@@ -1,8 +1,6 @@
 { pkgs }:
 
 let
-  slskd-api = pkgs.callPackage ./slskd-api.nix { };
-
   # Production python deps. Includes beets only as a Python library —
   # ``lib/beets_distance.py`` calls ``beets.autotag.distance`` directly
   # from cratedigger-web to compute Replace-picker distance scores. The
@@ -22,10 +20,9 @@ let
     ps.zstandard # peer cache compresses msgpack directory payloads before writing Redis bytes
     ps.beets     # beets.autotag.distance for /api/beets-distance — library import only
     ps.ytmusicapi # YouTube Music album resolver — anonymous `YTMusic()` for search + get_album
-    slskd-api
   ];
 in {
-  inherit slskd-api pythonPackages;
+  inherit pythonPackages;
 
   pythonEnv = pkgs.python3.withPackages pythonPackages;
 }

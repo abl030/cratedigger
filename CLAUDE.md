@@ -115,8 +115,8 @@ harness/          — beets_harness.py (JSON protocol), import_one.py
 migrations/       — Versioned SQL (NNN_name.sql), run by lib/migrator.py
 scripts/          — pipeline_cli.py + dev/ops scripts
 tests/            — shared infra in fakes.py + helpers.py
-nix/              — slskd-api build, package.nix, shell.nix, module.nix, VM check
-flake.nix         — Outputs: slskd-api, devShell, nixosModules.default, checks.moduleVm
+nix/              — package.nix, shell.nix, module.nix, VM check
+flake.nix         — Outputs: devShell, nixosModules.default, checks.moduleVm
 docs/             — Subsystem docs referenced from this file
 docs/solutions/   — Compounding lessons from past bugs (YAML frontmatter; grep when debugging)
 .claude/rules/    — Path-scoped auto-loaded rules
@@ -271,7 +271,7 @@ grep "^FAIL\|^ERROR" /tmp/cratedigger-test-output.txt      # check after the fac
 nix-shell --run "python3 -m unittest tests.test_X -v"      # single module
 ```
 
-**ALWAYS use `nix-shell --run` for Python** — the dev shell provides psycopg2, sox, ffmpeg, music-tag, slskd-api. `.claude/rules/nix-shell.md` enforces this on `.py` edits. `.claude/rules/code-quality.md` covers test taxonomy (pure / seam / orchestration / slice), shared fakes/builders in `tests/fakes.py` + `tests/helpers.py`, and the new-work checklist that maps each kind of change to the tests you owe.
+**ALWAYS use `nix-shell --run` for Python** — the dev shell provides psycopg2, sox, ffmpeg, music-tag. `.claude/rules/nix-shell.md` enforces this on `.py` edits. `.claude/rules/code-quality.md` covers test taxonomy (pure / seam / orchestration / slice), shared fakes/builders in `tests/fakes.py` + `tests/helpers.py`, and the new-work checklist that maps each kind of change to the tests you owe.
 
 **Never re-run the full suite just to grep output differently.** Read `/tmp/cratedigger-test-output.txt`.
 

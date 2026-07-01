@@ -107,7 +107,6 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^music_tag\."),
     re.compile(r"\.redis\.Redis$"),
     re.compile(r"^redis\."),
-    re.compile(r"\.slskd_api"),
     # MusicBrainz / Discogs client objects on the web side
     re.compile(r"^web\.(mb|discogs)\."),
     re.compile(r"^web\.routes\.\w+\.(mb_api|discogs_api)"),
@@ -127,20 +126,20 @@ _LEAF_SEAM_PATTERNS = [
     # Cratedigger entry-point shims (the top-level cratedigger.py wrapper
     # functions are thin and patched on a per-test basis; the real ones
     # live in lib/* and have their own audit coverage)
-    re.compile(r"^cratedigger\.(slskd_api|configure_slskd_http_pool|_create_slskd_client|sp|urllib)"),
+    re.compile(r"^cratedigger\.(_create_slskd_client|sp|urllib)"),
 
     # === Thin seam-wrapper functions in lib/ ===
     # These are functions whose body is mostly "construct args and
     # dispatch to a network/subprocess/filesystem call." Patching them
     # is the most ergonomic point to mock the underlying seam — the
-    # alternative (mocking the slskd_api / sox subprocess / harness
+    # alternative (mocking the slskd HTTP client / sox subprocess / harness
     # subprocess at its own boundary) often requires elaborate per-test
     # fixture setup for no additional coverage. Each entry below has a
     # rationale.
 
-    # slskd network wrappers. Each forwards to slskd_api.* and lightly
+    # slskd network wrappers. Each forwards to the slskd client and lightly
     # transforms the result; mocking them is morally equivalent to
-    # mocking slskd_api directly, which is on the third-party allowlist.
+    # mocking the HTTP boundary directly.
     re.compile(r"^lib\.enqueue\._fanout_browse_users$"),
     re.compile(r"^lib\.enqueue\.slskd_do_enqueue$"),
     re.compile(r"^lib\.enqueue\.slskd_enqueue_with_outcome$"),
@@ -390,7 +389,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.pipeline_cli\._resolve_failed_path$"),
 
     # scripts.repair helpers that wrap external boundaries.
-    # ``_get_slskd_active_transfers`` is a thin slskd_api call;
+    # ``_get_slskd_active_transfers`` is a thin slskd HTTP call;
     # ``_get_all_rows`` runs a single SELECT against the pipeline DB.
     re.compile(r"^scripts\.repair\._get_slskd_active_transfers$"),
     re.compile(r"^scripts\.repair\._get_all_rows$"),
