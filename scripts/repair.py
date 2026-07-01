@@ -40,8 +40,8 @@ DEFAULT_DSN = os.environ.get(
 
 def _get_slskd_active_transfers(host: str, api_key: str) -> set[tuple[str, str]]:
     """Fetch active (username, filename) pairs from slskd API."""
-    import slskd_api
-    client = slskd_api.SlskdClient(host=host, api_key=api_key)
+    from lib.slskd_client import SlskdClient
+    client = SlskdClient(host=host, api_key=api_key)
     downloads: Any = client.transfers.get_all_downloads(includeRemoved=False)
     pairs: set[tuple[str, str]] = set()
     if not isinstance(downloads, list):

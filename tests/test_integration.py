@@ -20,9 +20,6 @@ if TYPE_CHECKING:
 
 # Mock heavy deps before importing cratedigger
 sys.modules["music_tag"] = MagicMock()
-sys.modules["slskd_api"] = MagicMock()
-sys.modules["slskd_api.apis"] = MagicMock()
-sys.modules["slskd_api.apis.users"] = MagicMock()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

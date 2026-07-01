@@ -67,6 +67,9 @@ class DownloadFile:
     retry: Optional[int] = None     # retry counter, initialized on error
     bytes_transferred: Optional[int] = None
     last_state: Optional[str] = None
+    # slskd's authoritative post-rename local path, stamped from the
+    # DownloadFileComplete event stream (issue #146 phase 1).
+    local_path: Optional[str] = None
 
     # Transient: process_completed_album
     import_path: Optional[str] = None

@@ -31,9 +31,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import slskd_api  # noqa: E402  — must be after sys.path insert
-
 from lib.config import read_runtime_config  # noqa: E402
+from lib.slskd_client import SlskdClient  # noqa: E402
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB  # noqa: E402
 from lib.unfindable_detection_service import (  # noqa: E402
     DEFAULT_BATCH_SIZE,
@@ -49,14 +48,14 @@ from lib.unfindable_detection_service import (  # noqa: E402
 logger = logging.getLogger("cratedigger-unfindable")
 
 
-def _build_slskd_client(cfg) -> slskd_api.SlskdClient:
+def _build_slskd_client(cfg) -> SlskdClient:
     """Construct the slskd client from the runtime config.
 
     Mirrors ``cratedigger._create_slskd_client`` minus the connection-
     pool tuning — the detection job issues at most one search per
     cohort member per day, so the default pool is fine.
     """
-    return slskd_api.SlskdClient(
+    return SlskdClient(
         host=cfg.slskd_host_url,
         api_key=cfg.resolved_slskd_api_key(),
         url_base=cfg.slskd_url_base,

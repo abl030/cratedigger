@@ -54,6 +54,7 @@ def make_db():
         "youtube_album_mappings",  # migration 034
         "youtube_album_empty_resolutions",  # migration 035
         "plex_added_at_pins",  # migration 040
+        "slskd_event_cursor",  # migration 041
         "album_tracks",
         "album_requests",
     ]:
@@ -8215,6 +8216,57 @@ class TestGetPipelineOverlay(unittest.TestCase):
             "FakePipelineDB's overlay mirror drifted from the real SQL — "
             "fix the fake (tests/fakes.py), never the production SQL, "
             "unless the SQL change is the point of your PR.")
+@requires_postgres
+class TestSlskdEventCursorRoundTrip(unittest.TestCase):
+    """Rule A round-trip for upsert_slskd_event_cursor (issue #146)."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_get_returns_none_before_first_upsert(self):
+        self.assertIsNone(self.db.get_slskd_event_cursor())
+
+    def test_upsert_round_trip_preserves_every_field(self):
+        self.db.upsert_slskd_event_cursor(
+            "11da6649-4ffc-4d72-afc0-b4238afcc4ec",
+            "2026-07-01T23:00:10.7447018Z",
+        )
+
+        cursor = self.db.get_slskd_event_cursor()
+
+        assert cursor is not None
+        self.assertEqual(
+            cursor["last_event_id"], "11da6649-4ffc-4d72-afc0-b4238afcc4ec")
+        # Stored verbatim — 7-digit fractional seconds must survive.
+        self.assertEqual(
+            cursor["last_event_timestamp"], "2026-07-01T23:00:10.7447018Z")
+        self.assertIsNotNone(cursor["updated_at"])
+
+    def test_upsert_is_single_row_replace(self):
+        self.db.upsert_slskd_event_cursor("ev-1", "2026-07-01T00:00:00.0000000Z")
+        self.db.upsert_slskd_event_cursor("ev-2", "2026-07-02T00:00:00.0000000Z")
+
+        cursor = self.db.get_slskd_event_cursor()
+
+        assert cursor is not None
+        self.assertEqual(cursor["last_event_id"], "ev-2")
+        cur = self.db._execute("SELECT COUNT(*) AS n FROM slskd_event_cursor")
+        self.assertEqual(cur.fetchone()["n"], 1)
+
+    def test_fake_parity_on_identical_state(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        for db in (self.db, fake):
+            db.upsert_slskd_event_cursor("ev-1", "2026-07-01T00:00:00.0000000Z")
+        real = self.db.get_slskd_event_cursor()
+        mirrored = fake.get_slskd_event_cursor()
+        assert real is not None and mirrored is not None
+        strip = lambda c: {k: v for k, v in c.items() if k != "updated_at"}
+        self.assertEqual(strip(real), strip(mirrored))
 
 
 if __name__ == "__main__":

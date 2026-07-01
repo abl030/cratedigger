@@ -5523,5 +5523,79 @@ class TestFakeDownloadLogIdMint(unittest.TestCase):
         self.assertEqual(db.log_download(1, outcome="rejected"), 42)
 
 
+
+class TestFakePipelineDBSlskdEventCursor(unittest.TestCase):
+    """Self-tests for the slskd event cursor stubs (issue #146)."""
+
+    def test_cursor_starts_absent(self):
+        db = FakePipelineDB()
+        self.assertIsNone(db.get_slskd_event_cursor())
+
+    def test_upsert_round_trip_and_replace(self):
+        db = FakePipelineDB()
+        db.upsert_slskd_event_cursor("ev-1", "2026-07-01T00:00:00.0000000Z")
+        cursor = db.get_slskd_event_cursor()
+        assert cursor is not None
+        self.assertEqual(cursor["last_event_id"], "ev-1")
+        self.assertEqual(
+            cursor["last_event_timestamp"], "2026-07-01T00:00:00.0000000Z")
+        self.assertIsNotNone(cursor["updated_at"])
+
+        db.upsert_slskd_event_cursor("ev-2", "2026-07-02T00:00:00.0000000Z")
+        cursor = db.get_slskd_event_cursor()
+        assert cursor is not None
+        self.assertEqual(cursor["last_event_id"], "ev-2")
+
+    def test_returned_cursor_is_a_copy(self):
+        db = FakePipelineDB()
+        db.upsert_slskd_event_cursor("ev-1", "2026-07-01T00:00:00.0000000Z")
+        first = db.get_slskd_event_cursor()
+        assert first is not None
+        first["last_event_id"] = "mutated"
+        second = db.get_slskd_event_cursor()
+        assert second is not None
+        self.assertEqual(second["last_event_id"], "ev-1")
+
+
+class TestFakeSlskdEvents(unittest.TestCase):
+    """Self-tests for the events sub-API fake (issue #146)."""
+
+    def _api(self):
+        from tests.fakes import FakeSlskdAPI
+        return FakeSlskdAPI()
+
+    def test_pagination_slices_newest_first_feed(self):
+        api = self._api()
+        events = [
+            api.events.make_event(
+                id=f"ev-{i}", timestamp="2026-07-01T00:00:00.0000000Z",
+                type="Noise", data="{}")
+            for i in range(5)
+        ]
+        api.events.set_events(events)
+
+        page = api.events.list(limit=2, offset=1)
+
+        self.assertEqual([e.id for e in page.events], ["ev-1", "ev-2"])
+        self.assertEqual(page.total_count, 5)
+        self.assertEqual(api.events.list_calls, [(2, 1)])
+
+    def test_total_count_override(self):
+        api = self._api()
+        api.events.total_count_override = 389110
+
+        page = api.events.list()
+
+        self.assertEqual(page.total_count, 389110)
+        self.assertEqual(page.events, [])
+
+    def test_list_error_injection(self):
+        api = self._api()
+        api.events.list_error = RuntimeError("events API down")
+
+        with self.assertRaises(RuntimeError):
+            api.events.list()
+
+
 if __name__ == "__main__":
     unittest.main()

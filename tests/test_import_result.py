@@ -1246,6 +1246,33 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(j["files"][0]["bytes_transferred"], 1024)
         self.assertEqual(j["files"][0]["last_state"], "InProgress")
 
+    def test_active_download_file_state_local_path_round_trip(self):
+        """local_path (issue #146 phase 1) survives to_dict/from_dict; absent
+        key deserializes to None (pre-141 rows have no local_path)."""
+        from lib.quality import ActiveDownloadFileState
+        stamped = ActiveDownloadFileState(
+            username="user1",
+            filename="user1\\Music\\01.flac",
+            file_dir="user1\\Music",
+            size=30000000,
+            local_path="/dl/Album/01_638827305447447018.flac",
+        )
+        d = stamped.to_dict()
+        self.assertEqual(d["local_path"], "/dl/Album/01_638827305447447018.flac")
+        restored = ActiveDownloadFileState.from_dict(d)
+        self.assertEqual(
+            restored.local_path, "/dl/Album/01_638827305447447018.flac")
+
+        unstamped = ActiveDownloadFileState(
+            username="user1",
+            filename="user1\\Music\\01.flac",
+            file_dir="user1\\Music",
+            size=30000000,
+        )
+        d = unstamped.to_dict()
+        self.assertNotIn("local_path", d)
+        self.assertIsNone(ActiveDownloadFileState.from_dict(d).local_path)
+
     def test_active_download_state_from_json(self):
         """Deserialize, verify all fields."""
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState

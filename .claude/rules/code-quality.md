@@ -285,7 +285,7 @@ Always use these instead of inventing parallel scaffolding:
 - Allowlisting a pure decision function. Drive the test with real inputs that produce the branch you care about — fixtures usually already exist in the decision's own coverage.
 
 **Allowed leaf seams (mock freely, never tripped by the audit):**
-Subprocess, urllib/requests, third-party libs (`music_tag`, `redis`, `slskd_api`), `os.path.*`, `shutil.*`, `time.sleep`, threading/signal primitives, fire-and-forget notifier helpers (`lib.util.trigger_*_scan`), module-level `logger` objects, and ergonomic envelopes (`args = MagicMock()` for parsed argparse args, `proc = MagicMock()` for subprocess return-value structs).
+Subprocess, urllib/requests, third-party libs (`music_tag`, `redis`), `os.path.*`, `shutil.*`, `time.sleep`, threading/signal primitives, fire-and-forget notifier helpers (`lib.util.trigger_*_scan`), module-level `logger` objects, and ergonomic envelopes (`args = MagicMock()` for parsed argparse args, `proc = MagicMock()` for subprocess return-value structs).
 
 **Allowed thin seam-wrappers (allowlisted in `_mock_audit_scanner.py`):**
 A function in `lib/` is a legitimate seam-wrapper iff its body is **≤10 lines AND mostly forwards to a process / network / filesystem boundary**. Fatter than that means pure logic with a side effect — drive it with a fake, not a patch.

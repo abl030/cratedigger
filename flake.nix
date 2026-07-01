@@ -19,10 +19,6 @@
         pkgs = import nixpkgs { inherit system; };
       });
     in {
-      packages = forAllSystems ({ pkgs, ... }: {
-        slskd-api = pkgs.callPackage ./nix/slskd-api.nix { };
-      });
-
       devShells = forAllSystems ({ pkgs, ... }: {
         default = import ./nix/shell.nix { inherit pkgs; };
       });

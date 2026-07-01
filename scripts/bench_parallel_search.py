@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import slskd_api
+from lib.slskd_client import SlskdClient  # noqa: E402  — after sys.path insert
 
 
 # Diverse queries: mix of popular (guaranteed results) and less common artists.
@@ -53,7 +53,7 @@ class SingleSearchResult:
     error: str | None = None
 
 
-def run_single_search(client: slskd_api.SlskdClient, query: str,
+def run_single_search(client: SlskdClient, query: str,
                       search_timeout: int = 30000) -> SingleSearchResult:
     """Run one search and return timing + result count."""
     t0 = time.time()
@@ -87,7 +87,7 @@ def run_single_search(client: slskd_api.SlskdClient, query: str,
                               elapsed_s=elapsed)
 
 
-def run_batch(client: slskd_api.SlskdClient, queries: list[str],
+def run_batch(client: SlskdClient, queries: list[str],
               concurrency: int, search_timeout: int = 30000) -> list[SingleSearchResult]:
     """Run all queries at the given concurrency level."""
     if concurrency <= 1:
@@ -169,7 +169,7 @@ def main():
     print(f"Queries: {', '.join(q[:30] for q in queries)}")
     print()
 
-    client = slskd_api.SlskdClient(host=host, api_key=api_key)
+    client = SlskdClient(host=host, api_key=api_key)
 
     # Verify connection
     try:
