@@ -449,6 +449,29 @@ def _safe_getsize(path: str) -> int | None:
         return None
 
 
+def _log_event_path_comparison(
+    file: "DownloadFile",
+    resolver_path: str | None,
+) -> None:
+    """Issue #146 phase 1 instrumentation: resolver vs event-stream path.
+
+    The resolver's answer is still authoritative in phase 1; this log line
+    is the evidence base for the phase-2 switchover. Mismatches log at
+    WARNING so "a week of clean logs" is a grep for
+    ``EVENT-PATH COMPARE .* match=False`` returning nothing.
+    """
+    if file.local_path is None:
+        logger.info(
+            "EVENT-PATH COMPARE: no event local_path for %s "
+            "(resolver=%s)", file.filename, resolver_path)
+        return
+    match = resolver_path == file.local_path
+    logger.log(
+        logging.INFO if match else logging.WARNING,
+        "EVENT-PATH COMPARE: resolver=%s event=%s match=%s",
+        resolver_path, file.local_path, match)
+
+
 def _canonical_import_folder_path(
     album_data: GrabListEntry,
     slskd_download_dir: str,
@@ -1122,6 +1145,7 @@ def _materialize_processing_dir(
         resolved_src = resolve_slskd_local_path(file, ctx.cfg.slskd_download_dir)
         src_file = resolved_src if resolved_src is not None \
             else os.path.join(expected_folder, filename)
+        _log_event_path_comparison(file, resolved_src)
         src_folder = os.path.dirname(src_file)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)
@@ -1789,6 +1813,7 @@ def build_active_download_state(
             retry_count=f.retry or 0,
             bytes_transferred=f.bytes_transferred or 0,
             last_state=f.last_state,
+            local_path=f.local_path,
         )
         for f in entry.files
     ]
@@ -1998,6 +2023,7 @@ def reconstruct_grab_list_entry(
             bytes_transferred=f.bytes_transferred,
             last_state=f.last_state,
             status=restored_status,
+            local_path=f.local_path,
         ))
     year = request.get("year")
     return GrabListEntry(
@@ -2418,6 +2444,20 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     """
     db = ctx.pipeline_db_source._get_db()
     downloading = db.get_downloading()
+
+    # Issue #146 phase 1: stamp authoritative local paths from slskd's
+    # DownloadFileComplete events before processing. Runs even with no
+    # downloading rows so the cursor keeps tracking the feed. Any failure
+    # degrades to resolver-only behaviour — never blocks polling.
+    try:
+        from lib.slskd_events import ingest_download_file_events
+        ingest_result = ingest_download_file_events(db, ctx.slskd, downloading)
+        logger.info(ingest_result.to_log_line())
+        if ingest_result.files_stamped:
+            downloading = db.get_downloading()  # re-read stamped state
+    except Exception:
+        logger.exception(
+            "SLSKD EVENTS: ingest failed — resolver covers this cycle")
 
     if not downloading:
         return

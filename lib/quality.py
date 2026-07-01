@@ -550,6 +550,11 @@ class ActiveDownloadFileState:
     retry_count: int = 0
     bytes_transferred: int = 0
     last_state: str | None = None
+    # Authoritative post-rename local path from slskd's
+    # DownloadFileComplete event (issue #146 phase 1). Persisted because
+    # multi-file albums complete file-by-file across poll cycles while
+    # each event is consumed exactly once.
+    local_path: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         d: dict[str, object] = {
@@ -566,6 +571,8 @@ class ActiveDownloadFileState:
             d["disk_count"] = self.disk_count
         if self.last_state is not None:
             d["last_state"] = self.last_state
+        if self.local_path is not None:
+            d["local_path"] = self.local_path
         return d
 
     @staticmethod
@@ -582,6 +589,11 @@ class ActiveDownloadFileState:
             last_state=(
                 str(d["last_state"])
                 if d.get("last_state") is not None
+                else None
+            ),
+            local_path=(
+                str(d["local_path"])
+                if d.get("local_path") is not None
                 else None
             ),
         )

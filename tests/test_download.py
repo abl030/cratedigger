@@ -12,6 +12,7 @@ and end-to-end through
 
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
+import logging
 import os
 import shutil
 import tempfile
@@ -2016,6 +2017,78 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             self.assertEqual(moved, [fname])
 
 
+class TestEventPathComparisonLogging(unittest.TestCase):
+    """Issue #146 phase 1: side-by-side resolver-vs-event instrumentation.
+
+    The resolver still wins in phase 1; these pin the log contract the
+    phase-2 switchover decision reads (grep key ``EVENT-PATH COMPARE``).
+    """
+
+    def _process(self, tmpdir, local_path=None):
+        from lib.download import process_completed_album
+        folder = os.path.join(tmpdir, "Kid A")
+        os.makedirs(folder, exist_ok=True)
+        fname = "04 How To Disappear Completely.mp3"
+        with open(os.path.join(folder, fname), "w") as fp:
+            fp.write("fake audio")
+        files = [make_download_file(
+            filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{fname}",
+            file_dir="@@wcren\\Music\\Radiohead\\Kid A",
+            size=len("fake audio"),
+        )]
+        files[0].local_path = local_path
+        album = make_grab_list_entry(
+            files=files, mb_release_id="", artist="Radiohead",
+            title="Kid A", year="2000")
+        ctx = _make_ctx()
+        cfg = cast(Any, ctx.cfg)
+        cfg.slskd_download_dir = tmpdir
+        cfg.beets_validation_enabled = False
+        with self.assertLogs("cratedigger", level=logging.INFO) as captured:
+            result = process_completed_album(album, [], ctx, import_job_id=1)
+        self.assertTrue(result)
+        return [
+            line for line in captured.output
+            if "EVENT-PATH COMPARE" in line
+        ]
+
+    def test_matching_event_path_logs_match_true_at_info(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolver_path = os.path.join(
+                tmpdir, "Kid A", "04 How To Disappear Completely.mp3")
+            lines = self._process(tmpdir, local_path=resolver_path)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("match=True", lines[0])
+        self.assertTrue(lines[0].startswith("INFO"))
+
+    def test_mismatching_event_path_logs_match_false_at_warning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lines = self._process(tmpdir, local_path="/somewhere/else.mp3")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("match=False", lines[0])
+        self.assertTrue(lines[0].startswith("WARNING"))
+
+    def test_missing_event_path_logs_no_local_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lines = self._process(tmpdir, local_path=None)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("no event local_path", lines[0])
+
+    def test_resolver_still_wins_on_mismatch(self):
+        # Phase 1 contract: the move uses the resolver's answer even when
+        # the event stream disagrees.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._process(tmpdir, local_path="/somewhere/else.mp3")
+            import_folder = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
+            self.assertEqual(
+                os.listdir(import_folder),
+                ["04 How To Disappear Completely.mp3"])
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 
@@ -2097,6 +2170,56 @@ class TestPollActiveDownloads(unittest.TestCase):
         state = fake_db.request(request_id)["active_download_state"]
         assert isinstance(state, dict)
         return state
+
+    def test_poll_ingests_events_and_persists_local_path(self):
+        """Issue #146 phase 1 wiring: a DownloadFileComplete event seen at
+        poll time lands as ``local_path`` in the persisted state."""
+        import json as _json
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row()
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
+        fake_db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00.0000000Z")
+        slskd = cast(Any, ctx.slskd)
+        slskd.events.set_events([
+            slskd.events.make_event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                type="DownloadFileComplete",
+                data=_json.dumps({
+                    "version": 0,
+                    "localFilename": "/dl/Music/01.flac",
+                    "remoteFilename": "user1\\Music\\01.flac",
+                    "transfer": {
+                        "id": "tid-1", "username": "user1",
+                        "filename": "user1\\Music\\01.flac",
+                        "size": 30000000,
+                    },
+                })),
+            slskd.events.make_event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z",
+                type="Noise", data="{}"),
+        ])
+
+        poll_active_downloads(ctx)
+
+        state = self._download_state(fake_db)
+        self.assertEqual(state["files"][0]["local_path"], "/dl/Music/01.flac")
+        cursor = fake_db.get_slskd_event_cursor()
+        assert cursor is not None
+        self.assertEqual(cursor["last_event_id"], "ev-1")
+
+    def test_poll_survives_events_api_failure(self):
+        """Events API outage degrades to resolver-only — polling continues."""
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row()
+        ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
+        cast(Any, ctx.slskd).events.list_error = RuntimeError("events down")
+
+        poll_active_downloads(ctx)  # must not raise
+
+        # Row still got polled (transfer id re-derived, state persisted).
+        self.assertIsNone(
+            self._download_state(fake_db)["files"][0].get("local_path"))
 
     def test_poll_active_no_downloading(self):
         """No downloading albums → no-op."""

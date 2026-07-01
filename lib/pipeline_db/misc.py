@@ -25,6 +25,40 @@ class _MiscMixin(_PipelineDBBase):
     """Tracks, denylist/cooldowns, bad-audio hashes, field-resolution, triage."""
 
 
+    # --- slskd events cursor (issue #146 phase 1) ---
+
+    def get_slskd_event_cursor(self) -> dict[str, Any] | None:
+        """Return the single cursor row for the slskd events poller, or None."""
+        cur = self._execute("""
+            SELECT last_event_id, last_event_timestamp, updated_at
+            FROM slskd_event_cursor
+            WHERE id = 1
+        """)
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def upsert_slskd_event_cursor(
+        self,
+        last_event_id: str,
+        last_event_timestamp: str,
+    ) -> None:
+        """Record the newest slskd event the poller has processed.
+
+        ``last_event_timestamp`` is the raw ISO-8601 string slskd emits
+        (7-digit fractional seconds) — stored verbatim, compared in Python.
+        """
+        now = datetime.now(timezone.utc)
+        self._execute("""
+            INSERT INTO slskd_event_cursor (id, last_event_id, last_event_timestamp, updated_at)
+            VALUES (1, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                last_event_id = EXCLUDED.last_event_id,
+                last_event_timestamp = EXCLUDED.last_event_timestamp,
+                updated_at = EXCLUDED.updated_at
+        """, (last_event_id, last_event_timestamp, now))
+        self.conn.commit()
+
+
     # --- Track management ---
 
     def set_tracks(self, request_id: int, tracks: list[dict[str, Any]]) -> None:

@@ -344,6 +344,46 @@ class FakeSlskdSearches:
         self.delete_calls.append(search_id)
 
 
+class FakeSlskdEvents:
+    """Stateful fake for the slskd events API (issue #146).
+
+    Seed with ``set_events(events_newest_first)``; ``list`` slices the
+    seeded feed exactly like slskd's offset/limit pagination and reports
+    ``total_count`` from the seeded feed length (overridable via
+    ``total_count_override`` for retention/pruning scenarios).
+    """
+
+    def __init__(self) -> None:
+        from lib.slskd_client import SlskdEventsPage, SlskdRawEvent
+        self._page_cls = SlskdEventsPage
+        self._event_cls = SlskdRawEvent
+        self._events: list[Any] = []
+        self.total_count_override: int | None = None
+        self.list_calls: list[tuple[int, int]] = []
+        self.list_error: Exception | None = None
+
+    def set_events(self, events: list[Any]) -> None:
+        """Seed the feed, newest-first (index 0 = most recent)."""
+        self._events = list(events)
+
+    def make_event(self, *, id: str, timestamp: str, type: str, data: str) -> Any:
+        return self._event_cls(id=id, timestamp=timestamp, type=type, data=data)
+
+    def list(self, *, limit: int = 500, offset: int = 0) -> Any:
+        self.list_calls.append((limit, offset))
+        if self.list_error is not None:
+            raise self.list_error
+        total = (
+            self.total_count_override
+            if self.total_count_override is not None
+            else len(self._events)
+        )
+        return self._page_cls(
+            events=self._events[offset:offset + limit],
+            total_count=total,
+        )
+
+
 class FakeSlskdAPI:
     """In-memory fake for slskd API clients used by download tests."""
 
@@ -356,6 +396,7 @@ class FakeSlskdAPI:
         self.transfers = FakeSlskdTransfers(self)
         self.users = FakeSlskdUsers()
         self.searches = FakeSlskdSearches()
+        self.events = FakeSlskdEvents()
         self._downloads = copy.deepcopy(downloads or [])
         self._download_snapshots = [
             copy.deepcopy(snapshot) for snapshot in (download_snapshots or [])

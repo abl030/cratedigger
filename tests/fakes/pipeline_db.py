@@ -135,6 +135,7 @@ class FakePipelineDB:
         # Keyed by username_hash.
         self.peer_observations: dict[str, dict[str, Any]] = {}
         self.user_cooldowns: dict[str, UserCooldownRow] = {}
+        self._slskd_event_cursor: dict[str, Any] | None = None
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
         # Call-count tracking for the bad-audio-hash gate. Tests that
@@ -4052,6 +4053,23 @@ class FakePipelineDB:
             "expected_track_count": entry.expected_track_count,
             "matcher_score_top1": entry.matcher_score_top1,
             "query_template": entry.query_template,
+        }
+
+    # --- slskd events cursor (issue #146 phase 1) ---
+
+    def get_slskd_event_cursor(self) -> dict[str, Any] | None:
+        cursor = self._slskd_event_cursor
+        return dict(cursor) if cursor is not None else None
+
+    def upsert_slskd_event_cursor(
+        self,
+        last_event_id: str,
+        last_event_timestamp: str,
+    ) -> None:
+        self._slskd_event_cursor = {
+            "last_event_id": last_event_id,
+            "last_event_timestamp": last_event_timestamp,
+            "updated_at": _utcnow(),
         }
 
     # --- User cooldowns ---
