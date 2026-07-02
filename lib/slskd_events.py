@@ -14,14 +14,16 @@ share. Newest event wins when the same file completed more than once
 (a re-download after retry): the feed is newest-first, so the first
 occurrence seen is kept.
 
-Phase 2 is active: ``process_completed_album`` moves files from the
-stamped ``local_path`` when it exists on disk and falls back to
-``resolve_slskd_local_path`` otherwise (grep key ``EVENT-PATH``,
-fallbacks log ``chosen=resolver`` at WARNING). Phase 3 deletes the
-resolver once fallbacks are down to the known-benign residue.
+Phase 3 is active: the stamped ``local_path`` is the ONLY source of
+file locations. ``process_completed_album`` hard-fails an unstamped
+file (grep key ``EVENT-PATH MISSING``); the poller retries within a
+grace window (benign completion-vs-event-write race) and self-heals to
+re-download past it.
 
 Failure isolation: the caller wraps ingestion in try/except — an events
-API outage degrades to resolver-only behaviour, never blocks polling.
+API outage stamps nothing that cycle and never blocks polling; affected
+completions ride the materialize grace window until the next successful
+ingest.
 """
 
 from __future__ import annotations
@@ -47,7 +49,8 @@ EVENT_PAGE_LIMIT = 500
 # Bounds one cycle's catch-up scan at 10k events (~ a very heavy day on
 # doc2). If the cursor is not found within the cap the scan stops, the
 # cursor still advances to the newest event, and ``cursor_gap=True`` is
-# reported — older unprocessed completions fall back to the resolver.
+# reported — older unprocessed completions stay unstamped and ride the
+# materialize grace window (self-heal to re-download past it).
 MAX_EVENT_PAGES = 20
 
 

@@ -149,6 +149,12 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
 
 
 MAX_FILE_RETRIES = 5
+# How long a completed download may keep failing local materialization
+# (e.g. an event-stamp that never arrives) before the poller stops
+# retrying and self-heals the request back to 'wanted' for re-download.
+# Generous relative to the 5-min cycle: the benign completion-vs-event
+# race resolves on the very next cycle.
+PROCESSING_MATERIALIZE_GRACE_S = 3600
 AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
     "audio_corrupt",
     "spectral_reject",
@@ -217,20 +223,15 @@ def _run_post_rejection_wrong_match_cleanup(
         return None
 
 
-# === slskd on-disk path resolution ===
+# === slskd file locations ===
 #
-# Most installs save a remote path like
-#   @@user\Share\Artist\Album\CD1\17 - Track.mp3
-# to
-#   {download_root}/CD1/17 - Track.mp3
-# but production has seen two backwards-compat variants:
-# - files still under ``{download_root}/incomplete/...``
-# - on-disk names that differ only by filename casing from the remote path
-# We therefore resolve in layers: fast leaf-folder lookup first, then
-# case-insensitive / collision-suffix matches, then bounded recursive
-# searches rooted in likely ancestor folders.
+# The authoritative local path of every completed download comes from
+# slskd's DownloadFileComplete event, stamped onto
+# ``active_download_state.files[].local_path`` by
+# ``lib.slskd_events.ingest_download_file_events`` at the top of each
+# poll cycle (issue #146). There is no on-disk path inference: a
+# completed file without a stamp is a hard failure.
 
-_TICKS_SUFFIX = re.compile(r"^(?P<base>.+)_(?P<ticks>\d{17,20})$")
 _REMOTE_PATH_SEPARATORS = re.compile(r"[\\/]+")
 _REQUEST_SCOPED_STAGE_SUFFIX = re.compile(r" \[request-\d+\]$")
 
@@ -260,240 +261,6 @@ def _is_request_scoped_auto_import_path(
         normalized_path,
         stage_to_ai_root(staging_dir=staging_dir, auto_import=True),
     )
-
-
-def _matching_slskd_paths(
-    search_root: str,
-    *,
-    expected_name: str,
-    max_depth: int,
-) -> list[str]:
-    """Return files under ``search_root`` matching the expected basename.
-
-    Matches both exact basenames (case-insensitive) and slskd's
-    ``_<ticks>`` collision suffix. ``max_depth`` is relative to
-    ``search_root``: 0 = only the root dir, 1 = one level below, etc.
-    """
-    if not os.path.isdir(search_root):
-        return []
-
-    expected_fold = expected_name.casefold()
-    expected_base, expected_ext = os.path.splitext(expected_name)
-    expected_base_fold = expected_base.casefold()
-    expected_ext_fold = expected_ext.casefold()
-    matches: list[str] = []
-
-    for dirpath, dirnames, filenames in os.walk(search_root):
-        rel = os.path.relpath(dirpath, search_root)
-        depth = 0 if rel == "." else rel.count(os.sep) + 1
-        if depth > max_depth:
-            dirnames[:] = []
-            continue
-        if depth == max_depth:
-            dirnames[:] = []
-
-        for filename in filenames:
-            basename_fold = filename.casefold()
-            if basename_fold == expected_fold:
-                matches.append(os.path.join(dirpath, filename))
-                continue
-
-            stem, ext = os.path.splitext(filename)
-            if ext.casefold() != expected_ext_fold:
-                continue
-            suffix = _TICKS_SUFFIX.fullmatch(stem)
-            if suffix is None:
-                continue
-            if suffix.group("base").casefold() == expected_base_fold:
-                matches.append(os.path.join(dirpath, filename))
-
-    return matches
-
-
-def _choose_slskd_match(
-    matches: list[str],
-    *,
-    expected_name: str,
-    expected_folder: str,
-    file_size: int | None,
-    context: str,
-) -> str:
-    """Pick the best on-disk file from a candidate list and log why."""
-    if len(matches) == 1:
-        chosen = matches[0]
-        logger.info(
-            f"slskd file resolved via {context}: {expected_name} → "
-            f"{os.path.relpath(chosen, expected_folder)}")
-        return chosen
-
-    if file_size:
-        size_matches = [c for c in matches if _safe_getsize(c) == file_size]
-        if len(size_matches) == 1:
-            chosen = size_matches[0]
-            logger.info(
-                f"slskd file resolved by size via {context}: {expected_name} → "
-                f"{os.path.relpath(chosen, expected_folder)} "
-                f"(size={file_size}, {len(matches)} candidates)")
-            return chosen
-
-    exact_case_matches = [c for c in matches if os.path.basename(c) == expected_name]
-    if len(exact_case_matches) == 1:
-        chosen = exact_case_matches[0]
-        logger.info(
-            f"slskd file resolved by exact basename via {context}: "
-            f"{expected_name} → {os.path.relpath(chosen, expected_folder)}")
-        return chosen
-
-    casefold_matches = [
-        c for c in matches
-        if os.path.basename(c).casefold() == expected_name.casefold()
-    ]
-    if len(casefold_matches) == 1:
-        chosen = casefold_matches[0]
-        logger.info(
-            f"slskd file resolved by case-insensitive basename via {context}: "
-            f"{expected_name} → {os.path.relpath(chosen, expected_folder)}")
-        return chosen
-
-    chosen = sorted(matches)[0]
-    logger.warning(
-        f"AMBIGUOUS slskd path resolution for {expected_name} via {context}: "
-        f"{len(matches)} candidates, picked "
-        f"{os.path.relpath(chosen, expected_folder)} deterministically. "
-        f"Target size={file_size}, candidates="
-        f"{[(os.path.relpath(c, expected_folder), _safe_getsize(c)) for c in matches]}")
-    return chosen
-
-
-def _slskd_search_roots(
-    file_dir: str,
-    slskd_download_dir: str,
-) -> list[tuple[str, int, str]]:
-    """Ordered search roots for resolving one downloaded file on disk.
-
-    Intentionally stops at the album/ancestor folders derived from the
-    Soulseek remote path. A whole-download-root scan can silently pick an
-    unrelated sibling album that happens to contain the same basename.
-    """
-    components = _remote_path_components(file_dir)
-    incomplete_root = os.path.join(slskd_download_dir, "incomplete")
-    plans: list[tuple[str, int, str]] = []
-    seen: set[tuple[str, int]] = set()
-
-    def add(root: str, max_depth: int, label: str) -> None:
-        key = (root, max_depth)
-        if key in seen:
-            return
-        seen.add(key)
-        plans.append((root, max_depth, label))
-
-    leaf = components[-1] if components else ""
-    if leaf:
-        add(os.path.join(slskd_download_dir, leaf), 0, "leaf folder")
-        add(os.path.join(incomplete_root, leaf), 0, "incomplete leaf folder")
-
-    for width in range(2, min(len(components), 3) + 1):
-        suffix = components[-width:]
-        joined = os.path.join(*suffix)
-        add(os.path.join(slskd_download_dir, joined), 1, "leaf suffix")
-        add(os.path.join(incomplete_root, joined), 1, "incomplete leaf suffix")
-
-    for component in reversed(components[-3:]):
-        add(os.path.join(slskd_download_dir, component), 2, "ancestor folder")
-        add(os.path.join(incomplete_root, component), 2, "incomplete ancestor folder")
-    return plans
-
-
-def resolve_slskd_local_path(file: "DownloadFile",
-                             slskd_download_dir: str) -> str | None:
-    """Resolve the actual on-disk path of a downloaded slskd file.
-
-    Returns the full path, or ``None`` if the file cannot be located.
-    Tries the exact expected path first, then falls back to matching the
-    ``_<ticks>`` collision-rename variants. When multiple collision variants
-    exist, prefers the one whose byte size matches ``file.size``, else
-    picks deterministically and logs a warning so ambiguous cases are
-    visible in journald. The fallback search is restricted to path-derived
-    album folders; it never walks the whole slskd root because basename-only
-    matches there can cross album boundaries.
-    """
-    filename_components = _remote_path_components(file.filename)
-    expected_name = filename_components[-1] if filename_components else file.filename
-    expected_folder = slskd_local_folder(file.file_dir, slskd_download_dir)
-
-    for root, max_depth, label in _slskd_search_roots(file.file_dir, slskd_download_dir):
-        matches = _matching_slskd_paths(
-            root, expected_name=expected_name, max_depth=max_depth)
-        if not matches:
-            continue
-        return _choose_slskd_match(
-            matches,
-            expected_name=expected_name,
-            expected_folder=slskd_download_dir,
-            file_size=file.size,
-            context=label,
-        )
-
-    # Keep the old fast-path fallback shape in the logs: callers still build
-    # ``src_folder/expected_name`` when this returns None.
-    logger.debug(
-        f"slskd local path not found for {expected_name}; expected under "
-        f"{expected_folder} or compatible legacy layouts")
-    return None
-
-
-def _safe_getsize(path: str) -> int | None:
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return None
-
-
-def _select_download_source_path(
-    file: "DownloadFile",
-    resolver_path: str | None,
-    fallback_path: str,
-) -> str:
-    """Issue #146 phase 2: the event-stream local_path is authoritative.
-
-    Preference order:
-    1. ``file.local_path`` when stamped AND still on disk — slskd's own
-       post-rename answer, collision suffix included.
-    2. ``resolver_path`` — the legacy reverse-engineered answer, kept as
-       a fallback for pre-bootstrap completions and missed events.
-    3. ``fallback_path`` (expected_folder/basename) — feeds the
-       already-moved resume check exactly as before.
-
-    Every fallback logs ``chosen=resolver`` / ``chosen=expected_fallback``
-    at WARNING with a reason — the phase-3 resolver-deletion gate reads
-    these. The gate is a RATE judgment, not a literal zero: known-benign
-    fallback sources are (a) pre-bootstrap completions (no event exists),
-    (b) the residual completion-vs-event-write race inside one snapshot
-    fetch, and (c) cursor_gap catch-up truncation on very heavy days.
-    Phase 3 goes ahead when fallbacks are down to that residue — i.e.
-    every ``chosen=resolver`` line has an explanation in this list.
-    Phase-1 evidence for the flip (2026-07-02): 174 match=True,
-    0 match=False.
-    """
-    event_path = file.local_path
-    if event_path is not None and os.path.exists(event_path):
-        agrees = resolver_path == event_path
-        logger.log(
-            logging.INFO if agrees else logging.WARNING,
-            "EVENT-PATH: chosen=event path=%s resolver=%s resolver_agrees=%s",
-            event_path, resolver_path, agrees)
-        return event_path
-    if event_path is not None:
-        logger.info(
-            "EVENT-PATH: stamped local_path missing on disk for %s "
-            "(event=%s) — falling back", file.filename, event_path)
-    chosen = resolver_path if resolver_path is not None else fallback_path
-    logger.warning(
-        "EVENT-PATH: chosen=%s reason=%s path=%s for %s",
-        "resolver" if resolver_path is not None else "expected_fallback",
-        "not_stamped" if event_path is None else "stale_stamp",
-        chosen, file.filename)
-    return chosen
 
 
 def _canonical_import_folder_path(
@@ -1141,6 +908,40 @@ def _materialize_processing_dir(
         album_data.import_folder = staged_album.current_path
         return True
 
+    # Pre-flight: every file must carry a stamped, on-disk local_path from
+    # slskd's DownloadFileComplete event — or already-moved evidence at the
+    # destination. Checked for the whole album BEFORE any move so a
+    # missing stamp never causes move-then-rollback churn. A stamp can be
+    # legitimately absent for one cycle (completion-vs-event-write race);
+    # the poller retries within ``PROCESSING_MATERIALIZE_GRACE_S`` and
+    # self-heals to re-download past it.
+    missing_stamps: list[str] = []
+    for file in album_data.files:
+        dst_file = staged_album.import_path_for(file)
+        file.import_path = dst_file
+        src = file.local_path
+        if src is not None and os.path.exists(src):
+            continue
+        if os.path.exists(dst_file):
+            continue  # Already moved by a prior crashed attempt.
+        if src is None:
+            missing_stamps.append(f"{file.filename} (not_stamped)")
+        else:
+            missing_stamps.append(f"{file.filename} (stale_stamp: {src})")
+    if missing_stamps:
+        logger.error(
+            "EVENT-PATH MISSING: request_id=%s %s - %s has no authoritative "
+            "local path for %d file(s): %s. The DownloadFileComplete event "
+            "was never ingested (pre-bootstrap completion or cursor gap) or "
+            "the stamped file vanished from disk.",
+            album_data.db_request_id,
+            album_data.artist,
+            album_data.title,
+            len(missing_stamps),
+            "; ".join(missing_stamps),
+        )
+        return False
+
     rm_dirs: list[str] = []
     moved_files_history: list[tuple[str, str]] = []
     if os.path.exists(canonical_path):
@@ -1161,27 +962,20 @@ def _materialize_processing_dir(
             return False
 
     for file in album_data.files:
-        # Destination filename keeps the remote basename (no ticks suffix,
-        # even if slskd appended one on the source).
-        filename_components = _remote_path_components(file.filename)
-        filename = filename_components[-1] if filename_components else file.filename
-        expected_folder = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
-        resolved_src = resolve_slskd_local_path(file, ctx.cfg.slskd_download_dir)
-        src_file = _select_download_source_path(
-            file,
-            resolved_src,
-            os.path.join(expected_folder, filename),
-        )
+        dst_file = file.import_path
+        assert dst_file is not None
+        src_file = file.local_path
+        if src_file is None or not os.path.exists(src_file):
+            # Pre-flight proved the destination copy exists.
+            logger.info(f"Already-moved file detected: {dst_file} (src gone, skipping)")
+            continue
         src_folder = os.path.dirname(src_file)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)
-        dst_file = staged_album.import_path_for(file)
-        file.import_path = dst_file
-        if os.path.exists(dst_file) and not os.path.exists(src_file):
-            # Resume safely after a crash that already moved this file.
-            logger.info(f"Already-moved file detected: {dst_file} (src gone, skipping)")
-            continue
         try:
+            # Destination keeps the clean remote basename (via
+            # ``import_path_for``) even when slskd appended a ``_<ticks>``
+            # collision suffix to the source.
             shutil.move(src_file, dst_file)
             moved_files_history.append((src_file, dst_file))
         except Exception:
@@ -2290,6 +2084,20 @@ def _active_import_job_for_request(
     return db.get_active_import_job_for_request(request_id)
 
 
+def _materialize_grace_expired(state: ActiveDownloadState) -> bool:
+    """True once processing has been failing longer than the grace window."""
+    if state.processing_started_at is None:
+        return False
+    try:
+        started = datetime.fromisoformat(state.processing_started_at)
+    except ValueError:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    return elapsed > PROCESSING_MATERIALIZE_GRACE_S
+
+
 def _enqueue_completed_processing(
     entry: GrabListEntry,
     request_id: int,
@@ -2320,6 +2128,41 @@ def _enqueue_completed_processing(
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
     if materialized is not True:
+        # ``None`` marks guarded paths needing manual recovery — never
+        # auto-reset those. ``False`` failures retry cycle-to-cycle until
+        # the grace window closes, then self-heal via re-download: the
+        # request row is the source of truth and a fresh download arrives
+        # with a fresh event stamp.
+        if materialized is False and _materialize_grace_expired(state):
+            detail = (
+                "Completed download could not be materialized within "
+                f"{PROCESSING_MATERIALIZE_GRACE_S}s of processing start; "
+                "resetting to wanted for re-download"
+            )
+            logger.error(
+                "MATERIALIZE GRACE EXPIRED: request_id=%s %s - %s — %s",
+                request_id,
+                entry.artist,
+                entry.title,
+                detail,
+            )
+            dl_info = _build_download_info(entry)
+            db.log_download(
+                request_id=request_id,
+                soulseek_username=dl_info.username,
+                filetype=dl_info.filetype,
+                outcome="error",
+                error_message=detail,
+            )
+            transitions.finalize_request(
+                db,
+                request_id,
+                transitions.RequestTransition.to_wanted(
+                    from_status="downloading",
+                    attempt_type="download",
+                ),
+            )
+            return None
         logger.warning(
             "Completed download for request %s could not be materialized "
             "for import preview; leaving it for the next poll cycle",
@@ -2477,16 +2320,17 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     # before the ingest below — so its DownloadFileComplete event is in
     # the feed and the file reaches processing stamped. The reverse order
     # left a cycle-length race where same-cycle completions processed
-    # unstamped and tripped the phase-3 ``chosen=resolver`` gate.
+    # unstamped.
     cycle_snapshot = None
     if downloading:
         cycle_snapshot = _get_all_downloads_snapshot(
             ctx.slskd, purpose="poll cycle snapshot")
 
-    # Issue #146 phase 2: stamp authoritative local paths from slskd's
+    # Issue #146: stamp authoritative local paths from slskd's
     # DownloadFileComplete events before processing. Runs even with no
-    # downloading rows so the cursor keeps tracking the feed. Any failure
-    # degrades to resolver-only behaviour — never blocks polling.
+    # downloading rows so the cursor keeps tracking the feed. An ingest
+    # failure stamps nothing this cycle — completions ride the
+    # materialize grace window — and never blocks polling.
     try:
         from lib.slskd_events import ingest_download_file_events
         ingest_result = ingest_download_file_events(db, ctx.slskd, downloading)
@@ -2503,7 +2347,8 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
             ]
     except Exception:
         logger.exception(
-            "SLSKD EVENTS: ingest failed — resolver covers this cycle")
+            "SLSKD EVENTS: ingest failed — nothing stamped this cycle; "
+            "completions ride the materialize grace window")
 
     if not downloading:
         return
