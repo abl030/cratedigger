@@ -4352,5 +4352,100 @@ class TestDownloadDBProtocolParity(unittest.TestCase):
         self.assertTrue(issubclass(DownloadOwnershipDB, TransitionsDB))
 
 
+class TestConvergeSlskdOrphans(unittest.TestCase):
+    """#278 Phase 0 convergence: cancel live transfers no downloading row owns."""
+
+    OWNED_FILE = "Music\\Owned\\01.flac"
+    ORPHAN_FILE = "Music\\Orphan\\01.flac"
+
+    def _make_ctx(self, slskd, rows=()):
+        fake_db = FakePipelineDB()
+        for row in rows:
+            fake_db.seed_request(row)
+        return make_ctx_with_fake_db(fake_db, slskd=slskd)
+
+    def _seed_slskd(self):
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(username="peer1", directory="Music\\Owned",
+                           filename=self.OWNED_FILE, id="t-owned",
+                           state="InProgress")
+        slskd.add_transfer(username="peer2", directory="Music\\Orphan",
+                           filename=self.ORPHAN_FILE, id="t-orphan",
+                           state="Queued, Remotely")
+        slskd.add_transfer(username="peer3", directory="Music\\Done",
+                           filename="Music\\Done\\01.flac", id="t-done",
+                           state="Completed, Succeeded")
+        return slskd
+
+    def _owning_row(self):
+        return make_request_row(
+            id=1, status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "files": [{"username": "peer1",
+                           "filename": self.OWNED_FILE}]})
+
+    def test_cancels_only_live_unowned_transfers(self):
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = self._seed_slskd()
+        ctx = self._make_ctx(slskd, rows=[self._owning_row()])
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 1)
+        calls = slskd.transfers.cancel_download_calls
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].username, "peer2")
+        self.assertEqual(calls[0].id, "t-orphan")
+
+    def test_no_downloading_rows_cancels_stranded_transfer(self):
+        """The Replace scenario: zero downloading rows, one live transfer."""
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = self._seed_slskd()
+        ctx = self._make_ctx(slskd, rows=[])
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 2)
+        cancelled_ids = {c.id for c in slskd.transfers.cancel_download_calls}
+        self.assertEqual(cancelled_ids, {"t-owned", "t-orphan"})
+
+    def test_snapshot_failure_cancels_nothing(self):
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = self._seed_slskd()
+        slskd.transfers.get_all_downloads_error = RuntimeError("slskd down")
+        ctx = self._make_ctx(slskd, rows=[])
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 0)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_cancel_error_does_not_abort_remaining_orphans(self):
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = self._seed_slskd()
+        slskd.transfers.cancel_download_error = RuntimeError("cancel failed")
+        ctx = self._make_ctx(slskd, rows=[])
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 0)
+        # Both live orphans were still attempted despite the first failure.
+        self.assertEqual(len(slskd.transfers.cancel_download_calls), 2)
+
+    def test_clean_state_is_a_noop(self):
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(username="peer1", directory="Music\\Owned",
+                           filename=self.OWNED_FILE, id="t-owned",
+                           state="InProgress")
+        ctx = self._make_ctx(slskd, rows=[self._owning_row()])
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 0)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
