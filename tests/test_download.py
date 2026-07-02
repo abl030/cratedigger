@@ -2396,7 +2396,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         self.assertEqual(fake_db._import_jobs, [])
         self.assertEqual(len(fake_db.download_logs), 1)
-        self.assertEqual(fake_db.download_logs[0].outcome, "error")
+        self.assertEqual(fake_db.download_logs[0].outcome, "failed")
         self.assertIn("EVENT-PATH MISSING", "\n".join(logs.output))
 
     def test_poll_active_all_complete_uses_async_preview_gate(self):

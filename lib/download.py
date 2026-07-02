@@ -555,7 +555,7 @@ def _enqueue_completed_processing(
                 request_id=request_id,
                 soulseek_username=dl_info.username,
                 filetype=dl_info.filetype,
-                outcome="error",
+                outcome="failed",
                 error_message=detail,
             )
             transitions.finalize_request(

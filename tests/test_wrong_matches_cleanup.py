@@ -341,7 +341,7 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             log_id = self._log_download(
                 db,
                 failed_path=source,
-                outcome="accepted",
+                outcome="success",
             )
 
             result = delete_wrong_match(db, log_id, require_visible=True)
