@@ -114,7 +114,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     }
     DASHBOARD_REQUIRED_FIELDS = {
         "generated_at", "redis", "searches", "cycles", "coverage",
-        "peers", "plan_readiness",
+        "peers", "plan_readiness", "disk_coverage",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS = {
         "label", "hours", "searches", "distinct_requests",
@@ -279,6 +279,53 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(
             self, data["inverse"][0], self.DISK_COVERAGE_INVERSE_FIELDS,
             "disk coverage inverse row")
+
+    def test_pipeline_dashboard_disk_coverage_contract(self):
+        import web.server as srv
+
+        self.db.seed_request(make_request_row(
+            id=9101, status="imported", mb_release_id="dash-on-disk",
+        ))
+        self.db.seed_request(make_request_row(
+            id=9102, status="imported", mb_release_id="dash-drifted",
+            artist_name="Drift Artist", album_title="Drift Album",
+        ))
+        self.db.seed_request(make_request_row(
+            id=9103, status="wanted", mb_release_id="dash-not-yet",
+        ))
+        self.db.seed_request(make_request_row(
+            id=9104, status="downloading", mb_release_id="dash-in-flight",
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_exists("dash-on-disk", True)
+        # The class setUp baseline (id=100, imported) must read as
+        # on-disk so it doesn't pollute the drift assertion below.
+        beets.set_album_exists(self.db.request(100)["mb_release_id"], True)
+
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        dc = data["disk_coverage"]
+        _assert_required_fields(
+            self, dc, {"counts", "drift_rows"},
+            "pipeline dashboard disk coverage")
+        _assert_required_fields(
+            self, dc["counts"], self.DISK_COVERAGE_COUNT_FIELDS,
+            "pipeline dashboard disk coverage counts")
+        # Only off-disk `imported` rows are drift — wanted (not yet
+        # acquired), downloading (in flight), and manual (staged for
+        # review) are all expected to be absent from beets.
+        self.assertEqual([r["id"] for r in dc["drift_rows"]], [9102])
+        _assert_required_fields(
+            self, dc["drift_rows"][0], self.DISK_COVERAGE_ROW_FIELDS,
+            "pipeline dashboard drift row")
+
+    def test_pipeline_dashboard_disk_coverage_null_without_beets(self):
+        status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["disk_coverage"])
 
     def test_pipeline_log_surfaces_wrong_match_triage_audit(self):
         self.db.log_download(

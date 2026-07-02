@@ -41,6 +41,7 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          should_clear_lossless_search_override,
                          top_candidates,
                          get_decision_tree)
+from lib.disk_coverage_service import disk_coverage
 from lib.import_preview import ImportPreviewValues, preview_import_from_values
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
@@ -418,7 +419,31 @@ def get_pipeline_dashboard(h, params: dict[str, list[str]]) -> None:
     s = _server()
     data = s._db().get_pipeline_dashboard_metrics()
     data["redis"] = cache_api.redis_metrics()
+    data["disk_coverage"] = _dashboard_disk_coverage(s)
     h._json(data)
+
+
+def _dashboard_disk_coverage(s) -> dict[str, object] | None:
+    """Pipeline-vs-beets coverage block for the dashboard, or None when
+    no beets DB is configured.
+
+    Only ``imported`` claims beets presence, so ``drift_rows`` carries
+    off-disk ``imported`` rows only (a release that vanished from beets
+    is the Lucksmiths-class out-of-band drift signal). Off-disk wanted
+    (not yet acquired), downloading (in flight), and manual (staged for
+    review) rows are lifecycle-normal, not drift."""
+    beets = s._beets_db()
+    if beets is None:
+        return None
+    result = disk_coverage(s._db(), beets, include_rows=True)
+    return {
+        "counts": msgspec.to_builtins(result.counts),
+        "drift_rows": [
+            msgspec.to_builtins(row)
+            for row in (result.off_disk or [])
+            if row.status == "imported"
+        ],
+    }
 
 
 def _runtime_rank_config():
