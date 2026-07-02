@@ -3313,7 +3313,7 @@ class TestSpectralColumns(unittest.TestCase):
 
     def test_v0_probe_state_update_fields_set_current_source_probe(self):
         """``RequestV0ProbeStateUpdate.as_update_fields()`` is the live wire
-        between the importer (``lib/import_dispatch.py``) and the request
+        between the importer (``lib/dispatch/``) and the request
         row. Production funnels the fields through ``finalize_request`` →
         ``mark_imported_with_rescue`` / ``update_status``; this test drives
         the same column names through ``update_request_fields`` (both

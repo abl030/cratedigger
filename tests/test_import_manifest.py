@@ -4,7 +4,7 @@ import unittest
 from typing import Any, cast
 
 from lib.grab_list import DownloadFile
-from lib.import_dispatch import (
+from lib.dispatch import (
     DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
     dispatch_import_from_db,
 )

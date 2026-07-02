@@ -1,7 +1,7 @@
 """CratediggerContext — runtime state container for the pipeline engine.
 
 Replaces module-level globals in cratedigger.py. Functions extracted to
-lib/download.py, lib/import_dispatch.py, etc. receive a CratediggerContext
+lib/download.py, lib/dispatch/, etc. receive a CratediggerContext
 as their first parameter instead of reading globals.
 """
 

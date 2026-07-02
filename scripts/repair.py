@@ -22,7 +22,7 @@ from lib.config import read_runtime_config
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
-# ``lib.import_dispatch.finalize_request`` for the rationale.
+# ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
 
 from lib.download_recovery import (find_blocked_processing_path_issues,

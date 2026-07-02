@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-from lib.import_dispatch import DispatchOutcome
+from lib.dispatch import DispatchOutcome
 from lib.transitions import RequestTransition, finalize_request
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row

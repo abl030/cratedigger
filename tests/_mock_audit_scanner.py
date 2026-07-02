@@ -158,7 +158,7 @@ _LEAF_SEAM_PATTERNS = [
     # Patching it is morally equivalent to constructing a fake harness
     # stdout — same wire-boundary seam as ``beets_validate``.
     re.compile(r"^lib\.quality\.parse_import_result$"),
-    re.compile(r"^lib\.import_dispatch\.parse_import_result$"),
+    re.compile(r"^lib\.dispatch\.subprocess_runner\.parse_import_result$"),
 
     # Spectral / audio measurement wrappers. Each invokes sox / ffmpeg /
     # mp3val subprocesses and reads files on disk; equivalent to a
@@ -229,8 +229,11 @@ _LEAF_SEAM_PATTERNS = [
     # to a subprocess + DB-mutation seam. The replacement
     # (FakePipelineDB + temp-dir filesystem) is feasible but not always
     # worth the setup cost for tests that aren't testing cleanup itself.
-    re.compile(r"^lib\.import_dispatch\._cleanup_staged_dir$"),
-    re.compile(r"^lib\.import_dispatch\.cleanup_disambiguation_orphans$"),
+    # ``_cleanup_staged_dir`` has two call sites after the #139 split
+    # (core + outcome_actions); both bindings are allowlisted.
+    re.compile(r"^lib\.dispatch\.core\._cleanup_staged_dir$"),
+    re.compile(r"^lib\.dispatch\.outcome_actions\._cleanup_staged_dir$"),
+    re.compile(r"^lib\.dispatch\.core\.cleanup_disambiguation_orphans$"),
 
     # BeetsDB class itself — patching the class replaces the SQLite
     # boundary at the constructor. Specific methods whose bodies are
@@ -297,7 +300,7 @@ _LEAF_SEAM_PATTERNS = [
     # ``web.routes.pipeline.finalize_request`` above — route handlers
     # and CLI subcommands are dispatched without keyword args, so
     # module-attribute swap is the established DI shape in this codebase.
-    re.compile(r"^lib\.import_dispatch\.finalize_request$"),
+    re.compile(r"^lib\.dispatch\.outcome_actions\.finalize_request$"),
     re.compile(r"^harness\.import_one\.finalize_request$"),
     re.compile(r"^scripts\.pipeline_cli\.finalize_request$"),
     re.compile(r"^scripts\.repair\.finalize_request$"),

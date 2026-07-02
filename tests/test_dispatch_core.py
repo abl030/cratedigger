@@ -107,7 +107,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                   source_username=None, target_format=None,
                   verified_lossless_target="",
                   request_overrides=None):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
 
@@ -129,7 +129,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 result = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -203,7 +203,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertIn("baduser", denylisted)
 
     def test_persisted_candidate_evidence_rejects_before_mutating_import(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -299,7 +299,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_imports_via_evidence_action_file(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -355,7 +355,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             ir = make_import_result(decision="import", new_min_bitrate=245)
             decoded_payload: dict[str, QualityEvidenceActionPayload] = {}
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  _patch_beets_album(current_dir, min_bitrate=128):
                 def run_side_effect(cmd, *_args, **_kwargs):
                     idx = cmd.index("--quality-evidence-action-file")
@@ -401,7 +401,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_legacy_successful_lossy_import_clears_old_verified_lossless_proof(self):
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -460,7 +460,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertIsNone(loaded.verified_lossless_proof)
 
     def test_persisted_candidate_evidence_imports_when_no_current_album(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -496,7 +496,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             ir = make_import_result(decision="import", new_min_bitrate=245)
             decoded_payload: dict[str, QualityEvidenceActionPayload] = {}
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  _patch_beets_album(None):
                 def run_side_effect(cmd, *_args, **_kwargs):
                     idx = cmd.index("--quality-evidence-action-file")
@@ -533,7 +533,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_backfills_stale_current_before_decision(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -605,7 +605,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     candidate_import_job_id=job.id,
                 )
 
-            from lib.import_dispatch import DISPATCH_CODE_QUALITY_PIPELINE_REJECTED
+            from lib.dispatch import DISPATCH_CODE_QUALITY_PIPELINE_REJECTED
 
             self.assertFalse(result.success)
             self.assertIn("Rejected by persisted quality evidence", result.message)
@@ -622,7 +622,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_fails_when_current_album_has_no_files(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -683,7 +683,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_fails_closed_on_current_error(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -838,7 +838,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
     """Seam tests — assert subprocess argv construction."""
 
     def _get_cmd(self, **kwargs):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         ir = kwargs.pop("ir", make_import_result())
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -849,7 +849,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -893,7 +893,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
         self.assertEqual(cmd[idx + 1], "flac")
 
     def test_shared_import_one_command_supports_preview_without_request_id(self):
-        from lib.import_dispatch import build_import_one_command
+        from lib.dispatch import build_import_one_command
 
         cmd = build_import_one_command(
             path="/tmp/album",
@@ -908,7 +908,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
         self.assertNotIn("--request-id", cmd)
 
     def test_shared_import_one_command_does_not_accept_preview_result_file(self):
-        from lib.import_dispatch import build_import_one_command
+        from lib.dispatch import build_import_one_command
 
         cmd = build_import_one_command(
             path="/tmp/album",

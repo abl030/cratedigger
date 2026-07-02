@@ -1,7 +1,7 @@
 """Shared pre-import quality gates for auto-import, force-import, and manual-import.
 
 The auto-import path (lib.download_processing.process_completed_album), the force-import
-path (lib.import_dispatch.dispatch_import_from_db), and the manual-import path
+path (lib.dispatch.dispatch_import_from_db), and the manual-import path
 all MUST run the same quality gates: audio integrity and spectral transcode
 detection. The only gate that differs between paths is the beets *distance*
 check — that is what --force on import_one.py overrides. Every other gate is

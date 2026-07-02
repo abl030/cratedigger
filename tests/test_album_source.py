@@ -207,7 +207,7 @@ class TestDatabaseSource(unittest.TestCase):
         self.assertEqual(req["status"], "imported")
 
     # NOTE: the former ``test_mark_done_delegates_to_shared_helper`` was a
-    # wire-check that patched ``lib.import_dispatch._do_mark_done`` and
+    # wire-check that patched ``lib.dispatch._do_mark_done`` and
     # asserted the call args. It was redundant with
     # ``test_mark_done_redownload_stages`` above, which exercises the real
     # ``_do_mark_done`` and asserts the user-visible outcome (row status

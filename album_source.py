@@ -230,7 +230,7 @@ class DatabaseSource:
     def mark_done(self, album_record, bv_result, dest_path=None,
                   download_info=None):
         """Mark album as imported."""
-        from lib.import_dispatch import _do_mark_done
+        from lib.dispatch import _do_mark_done
         from lib.quality import DownloadInfo
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:

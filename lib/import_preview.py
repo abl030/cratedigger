@@ -15,7 +15,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
-from lib.import_dispatch import run_import_one
+from lib.dispatch import run_import_one
 from lib.measurement import (
     inspect_local_files,
     measure_preimport_state,

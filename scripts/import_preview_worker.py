@@ -20,7 +20,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.import_dispatch import _record_preview_measurement_failed
+from lib.dispatch import _record_preview_measurement_failed
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,

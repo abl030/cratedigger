@@ -92,7 +92,7 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
 class TestBuildDownloadInfo(unittest.TestCase):
 
     def test_basic(self):
-        from lib.import_dispatch import _build_download_info
+        from lib.dispatch import _build_download_info
         files = [make_download_file(bitRate=320, sampleRate=44100)]
         album = make_grab_list_entry(files=files)
         dl = _build_download_info(album)
@@ -102,14 +102,14 @@ class TestBuildDownloadInfo(unittest.TestCase):
         self.assertEqual(dl.sample_rate, 44100)
 
     def test_empty_files(self):
-        from lib.import_dispatch import _build_download_info
+        from lib.dispatch import _build_download_info
         album = make_grab_list_entry(files=[])
         dl = _build_download_info(album)
         self.assertIsNone(dl.username)
         self.assertIsNone(dl.filetype)
 
     def test_multi_user(self):
-        from lib.import_dispatch import _build_download_info
+        from lib.dispatch import _build_download_info
         files = [
             make_download_file(username="beta_user"),
             make_download_file(username="alpha_user"),
@@ -1325,7 +1325,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     ):
         """Auto-import summaries must survive for the importer queue result."""
         from lib.download_processing import process_completed_album
-        from lib.import_dispatch import DispatchOutcome
+        from lib.dispatch import DispatchOutcome
         import tempfile, os
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1367,7 +1367,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     ):
         """Validation rejections must fail the queue job, not look completed."""
         from lib.download_processing import process_completed_album
-        from lib.import_dispatch import DispatchOutcome
+        from lib.dispatch import DispatchOutcome
         from lib.quality import ValidationResult
         import tempfile
 

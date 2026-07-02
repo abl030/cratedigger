@@ -124,8 +124,11 @@ docs/solutions/   — Compounding lessons from past bugs (YAML frontmatter; grep
 ```
 
 Decision-critical modules: `quality.py` (pure decision functions + typed dataclasses),
-`measurement.py` (pure measurement, no decision logic), `import_dispatch.py`
-(`dispatch_import_from_db` + quality gate), `pipeline_db.py` (PostgreSQL CRUD +
+`measurement.py` (pure measurement, no decision logic), the `lib/dispatch/` package
+(`dispatch_import_from_db` + quality gate; split by concern in issue #139 —
+`core.py` orchestration, `evidence_gate.py`, `outcome_actions.py`, `quality_gate.py`,
+`entry_points.py`, `subprocess_runner.py`, `manifest_guard.py`, `helpers.py`, `types.py`),
+`pipeline_db.py` (PostgreSQL CRUD +
 advisory locks — see `docs/advisory-locks.md`). `config.py`/`context.py` hold the
 typed `CratediggerConfig` and the `CratediggerContext` that replaced module globals.
 
@@ -210,7 +213,7 @@ file. Wrong-match cleanup triage compares future candidates against
 this evidence to reject same-source duplicates.
 
 **Search narrowing companion.** When `lossless_source_locked` fires —
-in the importer (`lib/import_dispatch.py`) or wrong-match cleanup
+in the importer (`lib/dispatch/core.py`) or wrong-match cleanup
 triage (`lib/wrong_match_cleanup_service.py`) — the request's
 `search_filetype_override` is narrowed to `"lossless"` via
 `narrow_override_on_lossless_source_lock` (`lib/quality.py`). Future

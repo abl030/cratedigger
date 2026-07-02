@@ -18,7 +18,7 @@ class TestDoMarkDone(unittest.TestCase):
 
     def _call(self, dl_info=None,
               outcome_label: DownloadLogOutcome = "success", **kwargs):
-        from lib.import_dispatch import _do_mark_done
+        from lib.dispatch import _do_mark_done
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         if dl_info is None:
@@ -112,7 +112,7 @@ class TestRecordRejectionAndMaybeRequeue(unittest.TestCase):
               outcome_label: DownloadLogOutcome = "rejected",
               search_filetype_override=None, dl_info=None,
               validation_result=None, staged_path=None):
-        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+        from lib.dispatch import _record_rejection_and_maybe_requeue
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         if dl_info is None:

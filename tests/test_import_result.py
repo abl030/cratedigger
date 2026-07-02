@@ -1168,7 +1168,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     """Test the _populate_dl_info_from_import_result helper."""
 
     def setUp(self) -> None:
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         self.populate = _populate_dl_info_from_import_result
 
     def test_flac_conversion(self) -> None:

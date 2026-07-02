@@ -321,7 +321,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
             )
 
     # Model search_filetype_override after the full cycle.
-    # This mirrors _check_quality_gate() in import_dispatch.py:
+    # This mirrors _check_quality_gate_core() in lib/dispatch/quality_gate.py:
     # - accept → search_filetype_override=None (clears transient override)
     # - requeue_upgrade → search_filetype_override=upgrade tiers
     # - requeue_lossless → search_filetype_override="lossless"

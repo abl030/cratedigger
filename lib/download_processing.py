@@ -19,11 +19,11 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from lib.download_recovery import classify_processing_path
 from lib.grab_list import GrabListEntry
-from lib.import_dispatch import (DispatchOutcome, QualityGateFn,
-                                 _build_download_info,
-                                 _record_rejection_and_maybe_requeue,
-                                 _requeue_import_job_to_preview,
-                                 dispatch_import_core)
+from lib.dispatch import (DispatchOutcome, QualityGateFn,
+                          _build_download_info,
+                          _record_rejection_and_maybe_requeue,
+                          _requeue_import_job_to_preview,
+                          dispatch_import_core)
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,

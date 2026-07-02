@@ -1198,7 +1198,7 @@ class TestPreimportNestedGate(unittest.TestCase):
 
     Only the force/manual path rejects nested-audio layouts — the auto path
     always flattens before import_dispatch runs. This matches
-    ``lib.import_dispatch.dispatch_import_from_db``.
+    ``lib.dispatch.dispatch_import_from_db``.
     """
 
     # (desc, import_mode, has_nested_audio, expected)

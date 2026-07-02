@@ -445,7 +445,7 @@ constraint violations rather than silent corruption.
 | `unfindable_categorised_at` | `TIMESTAMPTZ NULL` | When the categoriser last ran for this request. Used by the detection job to pick the K oldest probes per run. |
 | `last_artist_probe_at` | `TIMESTAMPTZ NULL` | Most recent artist-only catalog probe against slskd. Per-request probe cadence target is ~7 days. |
 | `last_artist_probe_match_count` | `INTEGER NULL` | Result count from the last artist-only probe. Feeds the `artist_absent` vs `album_absent_artist_present` classifier branch. |
-| `rescued_at` | `TIMESTAMPTZ NULL` | Long-tail-rescue audit timestamp. Set by the importer success path (PR3 U14, `lib/import_dispatch.py` → `PipelineDB.mark_imported_with_rescue`) when a request that was carrying an `unfindable_category` transitions to `imported`. First-rescue-wins — immutable once set; Replace flows do not re-stamp it. (R21) |
+| `rescued_at` | `TIMESTAMPTZ NULL` | Long-tail-rescue audit timestamp. Set by the importer success path (PR3 U14, `lib/dispatch/` → `PipelineDB.mark_imported_with_rescue`) when a request that was carrying an `unfindable_category` transitions to `imported`. First-rescue-wins — immutable once set; Replace flows do not re-stamp it. (R21) |
 | `prior_unfindable_category` | `TEXT NULL` | The `unfindable_category` value cleared by the rescue (same enum + CHECK as `unfindable_category`). Lets `SELECT prior_unfindable_category, COUNT(*) FROM album_requests WHERE rescued_at IS NOT NULL` surface which cohorts the watch loop actually rescues over time. (R21) |
 
 R20 ("the system never stops searching") is enforced structurally: the
