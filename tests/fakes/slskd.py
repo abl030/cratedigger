@@ -65,7 +65,8 @@ class FakeSlskdTransfers:
             raise KeyError(f"No transfer {id!r} for {username!r}")
         return transfer
 
-    def cancel_download(self, username: str, id: str) -> bool:
+    def cancel_download(self, username: str, id: str,
+                        remove: bool = False) -> bool:
         self.cancel_download_calls.append(CancelDownloadCall(username, id))
         if self.cancel_download_error is not None:
             raise self.cancel_download_error

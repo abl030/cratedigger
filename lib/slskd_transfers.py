@@ -416,6 +416,53 @@ def _get_all_downloads_snapshot(
     return downloads
 
 
+def converge_slskd_orphans(ctx: CratediggerContext) -> int:
+    """Phase 0 convergence (#278): cancel live slskd transfers no
+    ``downloading`` row owns.
+
+    Operator actions that supersede a downloading request (Replace is the
+    canonical one — see CLAUDE.md invariant 7) deliberately leave its
+    in-flight slskd transfers running; this is the convergence that reaps
+    them. Runs once per cycle, before Phase 1/Phase 2 start, while nothing
+    is enqueuing — so a live transfer without an owner is genuinely
+    orphaned, not mid-write. The slskd snapshot is taken BEFORE the DB
+    read: a transfer enqueued after the snapshot can't appear in it, so
+    ordering alone rules out false orphans.
+
+    Best-effort: a snapshot failure skips the pass, a cancel failure is
+    logged and the remaining orphans are still attempted. Returns the
+    number of transfers successfully cancelled.
+    """
+    from lib.quality import find_slskd_orphans
+
+    downloads = _get_all_downloads_snapshot(
+        ctx.slskd, purpose="orphan-transfer convergence")
+    if downloads is None:
+        return 0
+    db = ctx.pipeline_db_source._get_db()
+    orphans = find_slskd_orphans(downloads, db.get_downloading())
+    cancelled = 0
+    for orphan in orphans:
+        try:
+            ctx.slskd.transfers.cancel_download(
+                orphan.username, orphan.transfer_id)
+            cancelled += 1
+            logger.warning(
+                "SLSKD ORPHAN: cancelled unowned transfer "
+                f"user={orphan.username!r} file={orphan.filename!r} "
+                f"state={orphan.state!r} id={orphan.transfer_id}")
+        except Exception:
+            logger.exception(
+                "SLSKD ORPHAN: failed to cancel unowned transfer "
+                f"user={orphan.username!r} file={orphan.filename!r} "
+                f"id={orphan.transfer_id} — will retry next cycle")
+    if orphans:
+        logger.info(
+            f"SLSKD ORPHAN: convergence cancelled {cancelled}/{len(orphans)} "
+            "unowned live transfer(s)")
+    return cancelled
+
+
 def rederive_transfer_ids(
     entry: GrabListEntry,
     slskd_client: Any,

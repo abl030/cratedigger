@@ -6,6 +6,7 @@ from lib.quality import (
     OrphanInfo,
     find_inconsistencies,
     find_orphaned_downloads,
+    find_slskd_orphans,
     suggest_repair,
 )
 
@@ -212,6 +213,113 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         action = suggest_repair(issue)
         self.assertEqual(action.action, "wait_for_automatic_recovery")
         self.assertIn("quarantine", action.detail)
+
+
+class TestFindSlskdOrphans(unittest.TestCase):
+    """Inverse orphan direction (#278): live slskd transfers no row owns."""
+
+    @staticmethod
+    def _snapshot(username="peer1", directory="Music\\Album",
+                  filename="Music\\Album\\01 - Track.flac",
+                  transfer_id="t-1", state="InProgress"):
+        return [{
+            "username": username,
+            "directories": [{
+                "directory": directory,
+                "files": [{"filename": filename, "id": transfer_id,
+                           "state": state}],
+            }],
+        }]
+
+    @staticmethod
+    def _owning_row(status="downloading", username="peer1",
+                    filename="Music\\Album\\01 - Track.flac", row_id=1):
+        return {"id": row_id, "status": status,
+                "active_download_state": {
+                    "filetype": "flac",
+                    "files": [{"username": username, "filename": filename}]}}
+
+    def test_live_unowned_transfer_is_orphan(self):
+        orphans = find_slskd_orphans(self._snapshot(), [])
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0].username, "peer1")
+        self.assertEqual(orphans[0].transfer_id, "t-1")
+        self.assertEqual(orphans[0].filename,
+                         "Music\\Album\\01 - Track.flac")
+        self.assertEqual(orphans[0].state, "InProgress")
+
+    def test_live_owned_transfer_is_not_orphan(self):
+        orphans = find_slskd_orphans(self._snapshot(), [self._owning_row()])
+        self.assertEqual(orphans, [])
+
+    def test_completed_unowned_transfer_is_not_orphan(self):
+        """Terminal transfers have nothing to cancel —
+        remove_completed_downloads() reaps their UI entries."""
+        orphans = find_slskd_orphans(
+            self._snapshot(state="Completed, Succeeded"), [])
+        self.assertEqual(orphans, [])
+
+    def test_non_downloading_row_does_not_own(self):
+        """A replaced row's frozen active_download_state must NOT shield
+        its stranded transfers — that's the exact case this converges."""
+        orphans = find_slskd_orphans(
+            self._snapshot(), [self._owning_row(status="replaced")])
+        self.assertEqual(len(orphans), 1)
+
+    def test_downloading_row_without_state_owns_nothing(self):
+        row = {"id": 1, "status": "downloading",
+               "active_download_state": None}
+        orphans = find_slskd_orphans(self._snapshot(), [row])
+        self.assertEqual(len(orphans), 1)
+
+    def test_processing_phase_row_still_shields_its_transfers(self):
+        """A downloading row mid-local-processing owns its files like any
+        other — ownership never branches on processing_started_at."""
+        row = self._owning_row()
+        row["active_download_state"]["processing_started_at"] = (
+            "2026-07-03T00:00:00+00:00")
+        orphans = find_slskd_orphans(self._snapshot(), [row])
+        self.assertEqual(orphans, [])
+
+    def test_username_must_match(self):
+        """Same filename from a different peer is a different transfer."""
+        orphans = find_slskd_orphans(
+            self._snapshot(username="peer2"), [self._owning_row()])
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0].username, "peer2")
+
+    def test_queued_state_is_live(self):
+        orphans = find_slskd_orphans(
+            self._snapshot(state="Queued, Remotely"), [])
+        self.assertEqual(len(orphans), 1)
+
+    def test_missing_state_treated_as_live(self):
+        snapshot = self._snapshot()
+        del snapshot[0]["directories"][0]["files"][0]["state"]
+        orphans = find_slskd_orphans(snapshot, [])
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0].state, "")
+
+    def test_file_without_filename_skipped(self):
+        snapshot = self._snapshot()
+        del snapshot[0]["directories"][0]["files"][0]["filename"]
+        orphans = find_slskd_orphans(snapshot, [])
+        self.assertEqual(orphans, [])
+
+    def test_mixed_snapshot_only_live_unowned_reported(self):
+        snapshot = (
+            self._snapshot()  # live, owned below
+            + self._snapshot(username="peer2", transfer_id="t-2",
+                             filename="Music\\Other\\02.flac")  # live, unowned
+            + self._snapshot(username="peer3", transfer_id="t-3",
+                             state="Completed, Errored")  # terminal
+        )
+        orphans = find_slskd_orphans(snapshot, [self._owning_row()])
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual(orphans[0].transfer_id, "t-2")
+
+    def test_empty_snapshot(self):
+        self.assertEqual(find_slskd_orphans([], [self._owning_row()]), [])
 
 
 class TestSuggestRepair(unittest.TestCase):

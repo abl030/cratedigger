@@ -1604,6 +1604,22 @@ def main():
             logger.exception(
                 "PLEX PIN: reconciliation failed; continuing with the cycle.")
 
+        # --- Phase 0: slskd orphan-transfer convergence (issue #278) ---
+        # Cancel live slskd transfers that no downloading row owns.
+        # Operator actions (Replace) deliberately leave in-flight
+        # transfers running instead of building per-action cancellation
+        # (CLAUDE.md invariant 7); this is the convergence that reaps
+        # them. Must run BEFORE Phase 1/Phase 2 start: the loop is
+        # quiescent here, so an unowned live transfer is genuinely
+        # orphaned rather than racing a mid-flight enqueue. Best-effort —
+        # never blocks the cycle.
+        try:
+            from lib.slskd_transfers import converge_slskd_orphans
+            converge_slskd_orphans(_module_ctx)
+        except Exception:
+            logger.exception(
+                "SLSKD ORPHAN: convergence failed; continuing with the cycle.")
+
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
             phase1_future = pool.submit(_run_phase1)

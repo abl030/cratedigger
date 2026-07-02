@@ -4863,6 +4863,73 @@ def find_orphaned_downloads(
     return issues
 
 
+@dataclass(frozen=True)
+class SlskdOrphanTransfer:
+    """A live slskd transfer that no downloading request owns (#278)."""
+    username: str
+    transfer_id: str
+    filename: str
+    state: str
+
+
+def find_slskd_orphans(
+    downloads: list[dict[str, Any]],
+    db_rows: list[dict[str, Any]],
+) -> list[SlskdOrphanTransfer]:
+    """Detect live slskd transfers no downloading row owns. Pure — no I/O.
+
+    The inverse direction of ``find_orphaned_downloads``: operator actions
+    (Replace being the canonical one) abandon a downloading request's
+    ``active_download_state`` without cancelling its in-flight slskd
+    transfers, leaving each transfer to complete into the slskd download
+    dir with no owner.
+
+    Args:
+        downloads: slskd ``transfers.get_all_downloads()`` snapshot
+            (username → directories → files groups).
+        db_rows: album_requests rows (must include status,
+            active_download_state).
+
+    Ownership is strictly ``status='downloading'`` rows — a replaced row's
+    frozen ``active_download_state`` must NOT shield its stranded
+    transfers, since reaping those is the point of this convergence.
+    Transfers in a terminal state (``Completed, *``) are skipped: there is
+    nothing to cancel, and ``remove_completed_downloads()`` already reaps
+    their UI entries at end of cycle. A missing state is treated as live
+    so an unowned transfer never dodges convergence by omitting it.
+    """
+    owned: set[tuple[str, str]] = set()
+    for row in db_rows:
+        if row["status"] != "downloading":
+            continue
+        state = row.get("active_download_state")
+        if not state:
+            continue
+        for f in state.get("files", []):
+            owned.add((f.get("username"), f.get("filename")))
+
+    orphans: list[SlskdOrphanTransfer] = []
+    for user_group in downloads:
+        username = user_group.get("username", "")
+        for directory in user_group.get("directories", []):
+            for transfer in directory.get("files", []):
+                transfer_state = str(transfer.get("state", ""))
+                if transfer_state.startswith("Completed"):
+                    continue
+                filename = transfer.get("filename")
+                if not filename:
+                    continue
+                if (username, filename) in owned:
+                    continue
+                orphans.append(SlskdOrphanTransfer(
+                    username=username,
+                    transfer_id=str(transfer.get("id", "")),
+                    filename=filename,
+                    state=transfer_state,
+                ))
+    return orphans
+
+
 def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:
     """Detect inconsistent rows in album_requests. Pure — no I/O.
 
