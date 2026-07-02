@@ -37,7 +37,7 @@ from lib.enqueue import (
     try_enqueue,
     try_multi_enqueue,
 )
-from lib.download import SlskdEnqueueOutcome
+from lib.slskd_transfers import SlskdEnqueueOutcome
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.grab_list import DownloadFile
 from lib.matching import MatchResult

@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import cratedigger
 from lib import enqueue as enqueue_module
 from lib.grab_list import DownloadFile
-from lib.download import (cancel_and_delete, slskd_download_status,
+from lib.slskd_transfers import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
 from lib.import_dispatch import _build_download_info
 from lib.context import CratediggerContext

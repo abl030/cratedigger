@@ -95,7 +95,7 @@ def _make_failed_import_source() -> tuple[str, str]:
 
 class TestAutomationEvidenceReuse(unittest.TestCase):
     def test_previewed_automation_job_skips_preimport_gates(self):
-        from lib.download import _process_beets_validation
+        from lib.download_processing import _process_beets_validation
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -153,7 +153,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 scenario="strong_match",
             )), \
                  patch(
-                     "lib.download._handle_valid_result",
+                     "lib.download_processing._handle_valid_result",
                      return_value=DispatchOutcome(True, "imported"),
                  ) as handle_valid:
                 result = _process_beets_validation(
@@ -169,7 +169,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         self.assertEqual(handle_valid.call_args.kwargs["import_job_id"], job.id)
 
     def test_stale_previewed_automation_evidence_fails_before_preimport(self):
-        from lib.download import _process_beets_validation
+        from lib.download_processing import _process_beets_validation
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -2193,7 +2193,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
-                "lib.download._materialize_processing_dir",
+                "lib.download_processing._materialize_processing_dir",
             ) as materialize:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
@@ -2484,7 +2484,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
     Test shape mirrors ``TestImporterWorker``: drive the production
     ``importer.process_claimed_job`` entry point with a ``FakePipelineDB``,
     seed a queued YT job, mark it importable so the importer can claim it,
-    and patch the leaf seam (``lib.download.process_completed_album``) so
+    and patch the leaf seam (``lib.download_processing.process_completed_album``) so
     we can assert dispatcher behaviour without exercising the full beets
     pipeline (which is covered by its own integration slices).
     """
@@ -2556,7 +2556,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             claimed = self._claim(db)
 
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 return_value=DispatchOutcome(True, "Imported by dispatch"),
             ) as proc:
                 updated = importer.process_claimed_job(
@@ -2671,7 +2671,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             claimed = self._claim(db)
 
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 return_value=True,
             ):
                 updated = importer.process_claimed_job(
@@ -2729,7 +2729,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                 return DispatchOutcome(True, "Imported")
 
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 side_effect=_run_real_finalize,
             ):
                 updated = importer.process_claimed_job(
@@ -2786,7 +2786,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                 return DispatchOutcome(True, "Imported from manual")
 
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 side_effect=_run_real_finalize,
             ):
                 updated = importer.process_claimed_job(
@@ -2827,7 +2827,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             # Simulate a wrong-matches reject from the pipeline.
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 return_value=DispatchOutcome(
                     False, "Rejected: high_distance"),
             ):
@@ -2864,7 +2864,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             claimed = self._claim(db)
 
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 return_value=DispatchOutcome(
                     False,
                     "Quality pipeline rejected",
@@ -2921,7 +2921,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             claimed = self._claim(db)
 
             with patch(
-                "lib.download.process_completed_album",
+                "lib.download_processing.process_completed_album",
                 return_value=DispatchOutcome(True, "ok"),
             ) as proc:
                 importer.process_claimed_job(

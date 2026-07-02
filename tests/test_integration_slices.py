@@ -122,7 +122,8 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
     """Cross-boundary slice for enqueue preclaim -> fresh poll recovery."""
 
     def test_preclaimed_missing_transfer_id_recovers_in_fresh_poll_context(self):
-        from lib.download import SlskdEnqueueOutcome, poll_active_downloads
+        from lib.download import poll_active_downloads
+        from lib.slskd_transfers import SlskdEnqueueOutcome
         from lib.download_ownership import DownloadOwnershipWriter
         from lib.enqueue import try_enqueue
         from lib.grab_list import DownloadFile
@@ -797,7 +798,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
     """Integration slice: measure_preimport_state updates spectral state.
 
     Exercises the pre-import measurement pipeline that both the auto-import
-    path (lib.download.process_completed_album) and the force/manual-import
+    path (lib.download_processing.process_completed_album) and the force/manual-import
     path (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves
     the measurement helper persists existing-album spectral state
     consistently regardless of caller. Quality decisions (and any denylist
@@ -2213,7 +2214,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 
     def test_contention_returns_deferred_without_staging(self):
-        from lib import download as dl_mod
+        from lib import download_processing as dp_mod
         from lib.grab_list import GrabListEntry
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
@@ -2250,11 +2251,11 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         # The staged move and dispatch MUST NOT run on contention.
         import_folder_fullpath = "/tmp/test-import-folder"
         dispatch_calls: list[dict] = []
-        with patch.object(dl_mod.StagedAlbum, "move_to") as mock_move:
-            outcome = dl_mod._handle_valid_result(
+        with patch.object(dp_mod.StagedAlbum, "move_to") as mock_move:
+            outcome = dp_mod._handle_valid_result(
                 entry,
                 bv_result,
-                dl_mod.StagedAlbum(
+                dp_mod.StagedAlbum(
                     current_path=import_folder_fullpath,
                     request_id=42,
                 ),
@@ -2277,7 +2278,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         harness, so no cross-process race applies. Pre-fix this was
         implicitly true; pinning it so a future refactor doesn't
         accidentally broaden the lock scope."""
-        from lib import download as dl_mod
+        from lib import download_processing as dp_mod
         from lib.grab_list import GrabListEntry
         from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE
         from lib.quality import ValidationResult
@@ -2304,12 +2305,12 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         bv_result = ValidationResult(
             valid=True, distance=0.05, scenario="strong_match")
 
-        with patch.object(dl_mod.StagedAlbum, "move_to",
+        with patch.object(dp_mod.StagedAlbum, "move_to",
                           return_value="/tmp/staged"):
-            dl_mod._handle_valid_result(
+            dp_mod._handle_valid_result(
                 entry,
                 bv_result,
-                dl_mod.StagedAlbum(current_path="/tmp/import", request_id=42),
+                dp_mod.StagedAlbum(current_path="/tmp/import", request_id=42),
                 ctx,
             )
 
@@ -2318,7 +2319,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
     def test_auto_path_persists_current_path_after_staging(self):
-        from lib import download as dl_mod
+        from lib import download_processing as dp_mod
         from lib.import_dispatch import DispatchOutcome
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
@@ -2353,7 +2354,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 beets_staging_dir=os.path.join(tmpdir, "beets-staging"),
             )
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            entry = dl_mod.GrabListEntry(
+            entry = dp_mod.GrabListEntry(
                 album_id=42,
                 artist="Test Artist",
                 title="Test Album",
@@ -2365,7 +2366,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 db_request_id=42,
                 import_folder=processing_dir,
             )
-            staged_album = dl_mod.StagedAlbum.from_entry(
+            staged_album = dp_mod.StagedAlbum.from_entry(
                 entry,
                 default_path=processing_dir,
             )
@@ -2395,14 +2396,14 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                     else:
                         yield acquired
 
-            original_move_to = dl_mod.StagedAlbum.move_to
+            original_move_to = dp_mod.StagedAlbum.move_to
 
             def checked_move_to(album, dest, db=None):
                 self.assertTrue(move_saw_release_lock)
                 return original_move_to(album, dest, db)
 
             with patch.object(
-                dl_mod,
+                dp_mod,
                 "dispatch_import_core",
                 return_value=DispatchOutcome(success=True, message="ok"),
             ) as mock_dispatch, patch.object(
@@ -2410,12 +2411,12 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 "advisory_lock",
                 side_effect=tracking_advisory_lock,
             ), patch.object(
-                dl_mod.StagedAlbum,
+                dp_mod.StagedAlbum,
                 "move_to",
                 autospec=True,
                 side_effect=checked_move_to,
             ):
-                outcome = dl_mod._handle_valid_result(
+                outcome = dp_mod._handle_valid_result(
                     entry,
                     bv_result,
                     staged_album,
@@ -2443,7 +2444,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""
-        from lib import download as dl_mod
+        from lib import download_processing as dp_mod
         from lib.import_dispatch import DispatchOutcome
         from lib.quality import ValidationResult
 
@@ -2477,7 +2478,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 slskd_download_dir=os.path.join(staging_root, "downloads"),
             )
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            entry = dl_mod.GrabListEntry(
+            entry = dp_mod.GrabListEntry(
                 album_id=42,
                 artist="Test Artist",
                 title="Test Album",
@@ -2489,7 +2490,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 db_request_id=42,
                 import_folder=processing_dir,
             )
-            staged_album = dl_mod.StagedAlbum.from_entry(
+            staged_album = dp_mod.StagedAlbum.from_entry(
                 entry,
                 default_path=processing_dir,
             )
@@ -2500,11 +2501,11 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             )
 
             with patch.object(
-                dl_mod,
+                dp_mod,
                 "dispatch_import_core",
                 return_value=DispatchOutcome(success=True, message="ok"),
             ) as mock_dispatch:
-                outcome = dl_mod._handle_valid_result(
+                outcome = dp_mod._handle_valid_result(
                     entry,
                     bv_result,
                     staged_album,
@@ -3878,7 +3879,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         Exercises ``_materialize_processing_dir`` (the actual fire site
         seen in production logs at ``lib/download.py:583``).
         """
-        from lib.download import _materialize_processing_dir
+        from lib.download_processing import _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3906,7 +3907,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         attempt, preserves leftover files under failed_imports, and
         resets the request for a clean redownload.
         """
-        from lib.download import _materialize_processing_dir
+        from lib.download_processing import _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5184,7 +5185,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 "lib.import_preview.measure_preimport_state",
                 side_effect=_sentinel_measure,
             ), patch(
-                "lib.download._materialize_processing_dir",
+                "lib.download_processing._materialize_processing_dir",
                 side_effect=_sentinel_materialize,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(

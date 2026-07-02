@@ -74,6 +74,7 @@ _ALIAS_TO_CANONICAL = {
     "cratedigger": "cratedigger",
     "enqueue_module": "lib.enqueue",
     "dl_mod": "lib.download",
+    "dp_mod": "lib.download_processing",
     "srv": "web.server",
     "server": "web.server",
 }

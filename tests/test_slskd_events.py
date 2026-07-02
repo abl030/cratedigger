@@ -223,6 +223,9 @@ class TestIngestStamping(SlskdEventIngestCase):
         self.seed_downloading()
         self.slskd.events.set_events([
             self.event(
+                id="ev-3", timestamp="2026-07-01T11:30:00.0000000Z",
+                data="{ not valid json"),  # DecodeError, not ValidationError
+            self.event(
                 id="ev-2", timestamp="2026-07-01T11:00:00.0000000Z",
                 data=json.dumps({"localFilename": 42})),  # type drift
             self.event(
@@ -412,6 +415,80 @@ class TestCursorPaging(SlskdEventIngestCase):
         cursor = self.db.get_slskd_event_cursor()
         assert cursor is not None
         self.assertEqual(cursor["last_event_id"], "ev-0")
+
+
+class TestRecentCompletionPaths(SlskdEventIngestCase):
+    def _dir_complete_data(
+        self,
+        *,
+        username: str,
+        remote_dir: str,
+        local_dir: str,
+    ) -> str:
+        return json.dumps({
+            "version": 0,
+            "localDirectoryName": local_dir,
+            "remoteDirectoryName": remote_dir,
+            "username": username,
+        })
+
+    def test_maps_file_and_directory_events(self):
+        from lib.slskd_events import recent_completion_paths
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-02T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Album\\01.flac",
+                    local_filename="/dl/Album/01.flac")),
+            self.event(
+                id="ev-2", timestamp="2026-07-02T10:00:00.0000000Z",
+                type="DownloadDirectoryComplete",
+                data=self._dir_complete_data(
+                    username="peer1",
+                    remote_dir="music\\Album",
+                    local_dir="/dl/Album")),
+        ])
+
+        recent = recent_completion_paths(self.slskd)
+
+        self.assertEqual(
+            recent.files[("peer1", "music\\Album\\01.flac")],
+            "/dl/Album/01.flac")
+        self.assertEqual(
+            recent.directories[("peer1", "music\\Album")], "/dl/Album")
+
+    def test_undecodable_payload_is_skipped_not_fatal(self):
+        from lib.slskd_events import recent_completion_paths
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-bad-schema", timestamp="2026-07-02T10:00:00.0000000Z",
+                data="{}"),
+            # Malformed (non-JSON) data raises msgspec.DecodeError, not
+            # ValidationError — must be skipped, not escape the pass.
+            self.event(
+                id="ev-bad-json", timestamp="2026-07-02T10:00:00.0000000Z",
+                data="{ not valid json"),
+            self.event(
+                id="ev-good", timestamp="2026-07-02T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Album\\01.flac",
+                    local_filename="/dl/Album/01.flac")),
+        ])
+
+        recent = recent_completion_paths(self.slskd)
+
+        self.assertEqual(len(recent.files), 1)
+
+    def test_feed_failure_returns_empty_maps(self):
+        from lib.slskd_events import recent_completion_paths
+        self.slskd.events.list_error = RuntimeError("events down")
+
+        recent = recent_completion_paths(self.slskd)
+
+        self.assertEqual(recent.files, {})
+        self.assertEqual(recent.directories, {})
 
 
 if __name__ == "__main__":

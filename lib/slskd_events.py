@@ -14,14 +14,16 @@ share. Newest event wins when the same file completed more than once
 (a re-download after retry): the feed is newest-first, so the first
 occurrence seen is kept.
 
-Phase 2 is active: ``process_completed_album`` moves files from the
-stamped ``local_path`` when it exists on disk and falls back to
-``resolve_slskd_local_path`` otherwise (grep key ``EVENT-PATH``,
-fallbacks log ``chosen=resolver`` at WARNING). Phase 3 deletes the
-resolver once fallbacks are down to the known-benign residue.
+Phase 3 is active: the stamped ``local_path`` is the ONLY source of
+file locations. ``process_completed_album`` hard-fails an unstamped
+file (grep key ``EVENT-PATH MISSING``); the poller retries within a
+grace window (benign completion-vs-event-write race) and self-heals to
+re-download past it.
 
 Failure isolation: the caller wraps ingestion in try/except — an events
-API outage degrades to resolver-only behaviour, never blocks polling.
+API outage stamps nothing that cycle and never blocks polling; affected
+completions ride the materialize grace window until the next successful
+ingest.
 """
 
 from __future__ import annotations
@@ -35,8 +37,10 @@ import msgspec
 
 from lib.quality import ActiveDownloadState
 from lib.slskd_client import (
+    DOWNLOAD_DIRECTORY_COMPLETE,
     DOWNLOAD_FILE_COMPLETE,
     SlskdRawEvent,
+    decode_download_directory_complete,
     decode_download_file_complete,
 )
 
@@ -47,7 +51,8 @@ EVENT_PAGE_LIMIT = 500
 # Bounds one cycle's catch-up scan at 10k events (~ a very heavy day on
 # doc2). If the cursor is not found within the cap the scan stops, the
 # cursor still advances to the newest event, and ``cursor_gap=True`` is
-# reported — older unprocessed completions fall back to the resolver.
+# reported — older unprocessed completions stay unstamped and ride the
+# materialize grace window (self-heal to re-download past it).
 MAX_EVENT_PAGES = 20
 
 
@@ -142,7 +147,9 @@ def _local_paths_from_events(
         file_events += 1
         try:
             payload = decode_download_file_complete(event)
-        except msgspec.ValidationError:
+        except msgspec.DecodeError:
+            # Parent of ValidationError — also catches malformed (non-JSON)
+            # ``data`` strings, which must skip one event, not kill the pass.
             logger.warning(
                 "SLSKD EVENTS: undecodable DownloadFileComplete payload "
                 "(event id=%s) — skipping", event.id, exc_info=True)
@@ -192,6 +199,58 @@ def _stamp_local_paths(
             requests_updated += 1
             files_stamped += row_stamped
     return files_stamped, requests_updated
+
+
+@dataclass(frozen=True)
+class RecentCompletionPaths:
+    """Authoritative local paths from one fresh events-page fetch.
+
+    ``files`` maps ``(username, remote filename)`` → local file path;
+    ``directories`` maps ``(username, remote directory)`` → local
+    directory. Consumed by ``cancel_and_delete`` to locate payloads that
+    completed after the cycle's ingest pass and therefore carry no
+    ``local_path`` stamp yet.
+    """
+
+    files: dict[tuple[str, str], str]
+    directories: dict[tuple[str, str], str]
+
+
+def recent_completion_paths(slskd: Any) -> RecentCompletionPaths:
+    """One page of the newest events, mapped to authoritative local paths.
+
+    Best-effort: any feed failure returns empty maps — callers degrade
+    to stamped-paths-only cleanup, never blocking a cancel.
+    """
+    empty = RecentCompletionPaths(files={}, directories={})
+    try:
+        page = slskd.events.list(limit=EVENT_PAGE_LIMIT, offset=0)
+    except Exception:
+        logger.warning(
+            "SLSKD EVENTS: fresh completion-path lookup failed — "
+            "cleanup degrades to stamped paths only", exc_info=True)
+        return empty
+    files: dict[tuple[str, str], str] = {}
+    directories: dict[tuple[str, str], str] = {}
+    for event in page.events:
+        try:
+            if event.type == DOWNLOAD_FILE_COMPLETE:
+                payload = decode_download_file_complete(event)
+                files.setdefault(
+                    (payload.transfer.username, payload.transfer.filename),
+                    payload.local_filename)
+            elif event.type == DOWNLOAD_DIRECTORY_COMPLETE:
+                dir_payload = decode_download_directory_complete(event)
+                directories.setdefault(
+                    (dir_payload.username, dir_payload.remote_directory_name),
+                    dir_payload.local_directory_name)
+        except msgspec.DecodeError:
+            # Parent of ValidationError — also catches malformed (non-JSON)
+            # ``data`` strings.
+            logger.warning(
+                "SLSKD EVENTS: undecodable %s payload (event id=%s) — "
+                "skipping", event.type, event.id, exc_info=True)
+    return RecentCompletionPaths(files=files, directories=directories)
 
 
 def ingest_download_file_events(
