@@ -449,35 +449,51 @@ def _safe_getsize(path: str) -> int | None:
         return None
 
 
-def _log_event_path_comparison(
+def _select_download_source_path(
     file: "DownloadFile",
     resolver_path: str | None,
-) -> None:
-    """Issue #146 phase 1 instrumentation: resolver vs event-stream path.
+    fallback_path: str,
+) -> str:
+    """Issue #146 phase 2: the event-stream local_path is authoritative.
 
-    The resolver's answer is still authoritative in phase 1; this log line
-    is the evidence base for the phase-2 switchover. Mismatches log at
-    WARNING so "a week of clean logs" is a grep for
-    ``EVENT-PATH COMPARE .* match=False`` returning nothing.
+    Preference order:
+    1. ``file.local_path`` when stamped AND still on disk — slskd's own
+       post-rename answer, collision suffix included.
+    2. ``resolver_path`` — the legacy reverse-engineered answer, kept as
+       a fallback for pre-bootstrap completions and missed events.
+    3. ``fallback_path`` (expected_folder/basename) — feeds the
+       already-moved resume check exactly as before.
+
+    Every fallback logs ``chosen=resolver`` / ``chosen=expected_fallback``
+    at WARNING with a reason — the phase-3 resolver-deletion gate reads
+    these. The gate is a RATE judgment, not a literal zero: known-benign
+    fallback sources are (a) pre-bootstrap completions (no event exists),
+    (b) the residual completion-vs-event-write race inside one snapshot
+    fetch, and (c) cursor_gap catch-up truncation on very heavy days.
+    Phase 3 goes ahead when fallbacks are down to that residue — i.e.
+    every ``chosen=resolver`` line has an explanation in this list.
+    Phase-1 evidence for the flip (2026-07-02): 174 match=True,
+    0 match=False.
     """
-    if file.local_path is None:
+    event_path = file.local_path
+    if event_path is not None and os.path.exists(event_path):
+        agrees = resolver_path == event_path
+        logger.log(
+            logging.INFO if agrees else logging.WARNING,
+            "EVENT-PATH: chosen=event path=%s resolver=%s resolver_agrees=%s",
+            event_path, resolver_path, agrees)
+        return event_path
+    if event_path is not None:
         logger.info(
-            "EVENT-PATH COMPARE: no event local_path for %s "
-            "(resolver=%s)", file.filename, resolver_path)
-        return
-    if resolver_path is None:
-        # Resolver came up empty while the event stream knows the path —
-        # evidence FOR the event stream, so keep it out of the
-        # ``match=False`` bucket the phase-2 switchover grep reads.
-        logger.warning(
-            "EVENT-PATH COMPARE: resolver_miss=True event=%s for %s",
-            file.local_path, file.filename)
-        return
-    match = resolver_path == file.local_path
-    logger.log(
-        logging.INFO if match else logging.WARNING,
-        "EVENT-PATH COMPARE: resolver=%s event=%s match=%s",
-        resolver_path, file.local_path, match)
+            "EVENT-PATH: stamped local_path missing on disk for %s "
+            "(event=%s) — falling back", file.filename, event_path)
+    chosen = resolver_path if resolver_path is not None else fallback_path
+    logger.warning(
+        "EVENT-PATH: chosen=%s reason=%s path=%s for %s",
+        "resolver" if resolver_path is not None else "expected_fallback",
+        "not_stamped" if event_path is None else "stale_stamp",
+        chosen, file.filename)
+    return chosen
 
 
 def _canonical_import_folder_path(
@@ -1151,9 +1167,11 @@ def _materialize_processing_dir(
         filename = filename_components[-1] if filename_components else file.filename
         expected_folder = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
         resolved_src = resolve_slskd_local_path(file, ctx.cfg.slskd_download_dir)
-        src_file = resolved_src if resolved_src is not None \
-            else os.path.join(expected_folder, filename)
-        _log_event_path_comparison(file, resolved_src)
+        src_file = _select_download_source_path(
+            file,
+            resolved_src,
+            os.path.join(expected_folder, filename),
+        )
         src_folder = os.path.dirname(src_file)
         if src_folder not in rm_dirs:
             rm_dirs.append(src_folder)
@@ -2453,7 +2471,19 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     db = ctx.pipeline_db_source._get_db()
     downloading = db.get_downloading()
 
-    # Issue #146 phase 1: stamp authoritative local paths from slskd's
+    # One bulk snapshot for the entire poll cycle — avoids per-file API
+    # calls. Fetched BEFORE event ingestion, deliberately: a transfer the
+    # snapshot shows Completed finished before the snapshot, and therefore
+    # before the ingest below — so its DownloadFileComplete event is in
+    # the feed and the file reaches processing stamped. The reverse order
+    # left a cycle-length race where same-cycle completions processed
+    # unstamped and tripped the phase-3 ``chosen=resolver`` gate.
+    cycle_snapshot = None
+    if downloading:
+        cycle_snapshot = _get_all_downloads_snapshot(
+            ctx.slskd, purpose="poll cycle snapshot")
+
+    # Issue #146 phase 2: stamp authoritative local paths from slskd's
     # DownloadFileComplete events before processing. Runs even with no
     # downloading rows so the cursor keeps tracking the feed. Any failure
     # degrades to resolver-only behaviour — never blocks polling.
@@ -2462,7 +2492,15 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
         ingest_result = ingest_download_file_events(db, ctx.slskd, downloading)
         logger.info(ingest_result.to_log_line())
         if ingest_result.files_stamped:
-            downloading = db.get_downloading()  # re-read stamped state
+            # Re-read ONLY the rows we already hold: a row that turned
+            # 'downloading' after the snapshot above (Phase 2 enqueues
+            # concurrently) must not be polled against a snapshot that
+            # predates its transfers.
+            known_ids = {row["id"] for row in downloading}
+            downloading = [
+                row for row in db.get_downloading()
+                if row["id"] in known_ids
+            ]
     except Exception:
         logger.exception(
             "SLSKD EVENTS: ingest failed — resolver covers this cycle")
@@ -2472,9 +2510,6 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
 
     logger.info(f"Polling {len(downloading)} active download(s)...")
 
-    # One bulk snapshot for the entire poll cycle — avoids per-file API calls
-    cycle_snapshot = _get_all_downloads_snapshot(
-        ctx.slskd, purpose="poll cycle snapshot")
     if cycle_snapshot is None:
         logger.warning("Failed to get download snapshot — skipping poll cycle")
         return

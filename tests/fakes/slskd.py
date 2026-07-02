@@ -46,6 +46,7 @@ class FakeSlskdTransfers:
 
     def get_all_downloads(self, includeRemoved: bool = False) -> list[dict[str, Any]]:
         self.get_all_downloads_calls.append(includeRemoved)
+        self._api.call_log.append("transfers.get_all_downloads")
         if self.get_all_downloads_error is not None:
             raise self.get_all_downloads_error
         return self._api._next_download_snapshot()
@@ -353,8 +354,9 @@ class FakeSlskdEvents:
     ``total_count_override`` for retention/pruning scenarios).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, api: "FakeSlskdAPI | None" = None) -> None:
         from lib.slskd_client import SlskdEventsPage, SlskdRawEvent
+        self._api = api
         self._page_cls = SlskdEventsPage
         self._event_cls = SlskdRawEvent
         self._events: list[Any] = []
@@ -374,6 +376,8 @@ class FakeSlskdEvents:
 
     def list(self, *, limit: int = 500, offset: int = 0) -> Any:
         self.list_calls.append((limit, offset))
+        if self._api is not None:
+            self._api.call_log.append("events.list")
         if self.list_error is not None:
             raise self.list_error
         total: int | None
@@ -401,7 +405,10 @@ class FakeSlskdAPI:
         self.transfers = FakeSlskdTransfers(self)
         self.users = FakeSlskdUsers()
         self.searches = FakeSlskdSearches()
-        self.events = FakeSlskdEvents()
+        self.events = FakeSlskdEvents(self)
+        # Cross-sub-API call ordering, for tests that pin sequencing
+        # (e.g. snapshot-before-ingest in poll_active_downloads).
+        self.call_log: list[str] = []
         self._downloads = copy.deepcopy(downloads or [])
         self._download_snapshots = [
             copy.deepcopy(snapshot) for snapshot in (download_snapshots or [])
