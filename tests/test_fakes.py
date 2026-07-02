@@ -5596,6 +5596,15 @@ class TestFakeSlskdEvents(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             api.events.list()
 
+    def test_call_log_records_cross_api_ordering(self):
+        api = self._api()
+
+        api.transfers.get_all_downloads()
+        api.events.list()
+
+        self.assertEqual(
+            api.call_log, ["transfers.get_all_downloads", "events.list"])
+
 
 if __name__ == "__main__":
     unittest.main()

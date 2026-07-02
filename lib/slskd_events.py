@@ -14,14 +14,14 @@ share. Newest event wins when the same file completed more than once
 (a re-download after retry): the feed is newest-first, so the first
 occurrence seen is kept.
 
-Phase 1 is instrumentation-only: ``process_completed_album`` still
-resolves paths with ``resolve_slskd_local_path`` and logs a side-by-side
-comparison (grep key ``EVENT-PATH COMPARE``). Phase 2 flips preference
-to ``local_path`` once a week of prod logs shows clean matches.
+Phase 2 is active: ``process_completed_album`` moves files from the
+stamped ``local_path`` when it exists on disk and falls back to
+``resolve_slskd_local_path`` otherwise (grep key ``EVENT-PATH``,
+fallbacks log ``chosen=resolver`` at WARNING). Phase 3 deletes the
+resolver once fallbacks are down to the known-benign residue.
 
 Failure isolation: the caller wraps ingestion in try/except — an events
-API outage degrades to phase-0 behaviour (resolver only), never blocks
-polling.
+API outage degrades to resolver-only behaviour, never blocks polling.
 """
 
 from __future__ import annotations

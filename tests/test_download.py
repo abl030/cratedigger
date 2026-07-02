@@ -2017,22 +2017,27 @@ class TestProcessCompletedAlbumCollisionSuffix(unittest.TestCase):
             self.assertEqual(moved, [fname])
 
 
-class TestEventPathComparisonLogging(unittest.TestCase):
-    """Issue #146 phase 1: side-by-side resolver-vs-event instrumentation.
+class TestEventPathSelection(unittest.TestCase):
+    """Issue #146 phase 2: the event-stream local_path is authoritative.
 
-    The resolver still wins in phase 1; these pin the log contract the
-    phase-2 switchover decision reads (grep key ``EVENT-PATH COMPARE``).
+    Preference order: stamped-and-on-disk event path → resolver →
+    expected-folder fallback. Falling back logs ``chosen=resolver`` /
+    ``chosen=expected_fallback`` at WARNING — the phase-3 deletion gate
+    is a grep for those lines returning nothing for new downloads.
     """
 
-    def _process(self, tmpdir, local_path=None):
+    FNAME = "04 How To Disappear Completely.mp3"
+
+    def _process(self, tmpdir, *, local_path=None, on_disk_at=None):
+        """Run process_completed_album with the file on disk at
+        ``on_disk_at`` (default: the resolver-visible leaf folder)."""
         from lib.download import process_completed_album
-        folder = os.path.join(tmpdir, "Kid A")
-        os.makedirs(folder, exist_ok=True)
-        fname = "04 How To Disappear Completely.mp3"
-        with open(os.path.join(folder, fname), "w") as fp:
+        src = on_disk_at or os.path.join(tmpdir, "Kid A", self.FNAME)
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        with open(src, "w") as fp:
             fp.write("fake audio")
         files = [make_download_file(
-            filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{fname}",
+            filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{self.FNAME}",
             file_dir="@@wcren\\Music\\Radiohead\\Kid A",
             size=len("fake audio"),
         )]
@@ -2047,60 +2052,143 @@ class TestEventPathComparisonLogging(unittest.TestCase):
         with self.assertLogs("cratedigger", level=logging.INFO) as captured:
             result = process_completed_album(album, [], ctx, import_job_id=1)
         self.assertTrue(result)
-        return [
-            line for line in captured.output
-            if "EVENT-PATH COMPARE" in line
+        return src, [
+            line for line in captured.output if "EVENT-PATH" in line
         ]
 
-    def test_matching_event_path_logs_match_true_at_info(self):
+    def _moved(self, tmpdir):
+        return os.listdir(os.path.join(tmpdir, "Radiohead - Kid A (2000)"))
+
+    def test_event_path_wins_and_agreement_logs_info(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolver_path = os.path.join(
-                tmpdir, "Kid A", "04 How To Disappear Completely.mp3")
-            lines = self._process(tmpdir, local_path=resolver_path)
+            event_path = os.path.join(tmpdir, "Kid A", self.FNAME)
+            src, lines = self._process(tmpdir, local_path=event_path)
+            self.assertFalse(os.path.exists(src))
+            self.assertEqual(self._moved(tmpdir), [self.FNAME])
         self.assertEqual(len(lines), 1)
-        self.assertIn("match=True", lines[0])
+        self.assertIn("chosen=event", lines[0])
+        self.assertIn("resolver_agrees=True", lines[0])
         self.assertTrue(lines[0].startswith("INFO"))
 
-    def test_mismatching_event_path_logs_match_false_at_warning(self):
+    def test_event_path_wins_where_resolver_cannot_find_the_file(self):
+        # The whole point of phase 2: slskd placed the file somewhere the
+        # path-derived resolver never searches (with a collision suffix
+        # for good measure). The event path must carry the move alone.
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            lines = self._process(tmpdir, local_path="/somewhere/else.mp3")
+            event_path = os.path.join(
+                tmpdir, "somewhere-unrelated",
+                "04 How To Disappear Completely_638827305447447018.mp3")
+            src, lines = self._process(
+                tmpdir, local_path=event_path, on_disk_at=event_path)
+            self.assertFalse(os.path.exists(src))
+            # Destination keeps the clean remote basename.
+            self.assertEqual(self._moved(tmpdir), [self.FNAME])
         self.assertEqual(len(lines), 1)
-        self.assertIn("match=False", lines[0])
+        self.assertIn("chosen=event", lines[0])
+        self.assertIn("resolver_agrees=False", lines[0])
         self.assertTrue(lines[0].startswith("WARNING"))
 
-    def test_missing_event_path_logs_no_local_path(self):
+    def test_unstamped_file_falls_back_to_resolver_at_warning(self):
+        # Pre-bootstrap completions have no event; the resolver fallback
+        # must still move them, loudly (phase-3 gate signal).
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            lines = self._process(tmpdir, local_path=None)
+            src, lines = self._process(tmpdir, local_path=None)
+            self.assertFalse(os.path.exists(src))
+            self.assertEqual(self._moved(tmpdir), [self.FNAME])
         self.assertEqual(len(lines), 1)
-        self.assertIn("no event local_path", lines[0])
+        self.assertIn("chosen=resolver", lines[0])
+        self.assertIn("reason=not_stamped", lines[0])
+        self.assertTrue(lines[0].startswith("WARNING"))
 
-    def test_resolver_miss_with_event_path_is_not_a_mismatch(self):
-        """Resolver=None + event-present is evidence FOR the event stream —
-        it must stay out of the ``match=False`` bucket the phase-2
-        switchover grep reads."""
-        from lib.download import _log_event_path_comparison
-        file = make_download_file(
-            filename="@@x\\Music\\A\\01.mp3", file_dir="@@x\\Music\\A")
-        file.local_path = "/dl/A/01.mp3"
-        with self.assertLogs("cratedigger", level=logging.WARNING) as captured:
-            _log_event_path_comparison(file, None)
-        self.assertEqual(len(captured.output), 1)
-        self.assertIn("resolver_miss=True", captured.output[0])
-        self.assertNotIn("match=False", captured.output[0])
-
-    def test_resolver_still_wins_on_mismatch(self):
-        # Phase 1 contract: the move uses the resolver's answer even when
-        # the event stream disagrees.
+    def test_stale_stamp_falls_back_to_resolver(self):
+        # Stamped path no longer on disk (e.g. re-download landed in the
+        # normal spot after the stamped copy was cleaned up) — resolver
+        # fallback covers it.
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            self._process(tmpdir, local_path="/somewhere/else.mp3")
-            import_folder = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
-            self.assertEqual(
-                os.listdir(import_folder),
-                ["04 How To Disappear Completely.mp3"])
+            src, lines = self._process(
+                tmpdir, local_path=os.path.join(tmpdir, "gone", "x.mp3"))
+            self.assertFalse(os.path.exists(src))
+            self.assertEqual(self._moved(tmpdir), [self.FNAME])
+        self.assertEqual(len(lines), 2)
+        self.assertIn("stamped local_path missing on disk", lines[0])
+        self.assertIn("chosen=resolver", lines[1])
+        self.assertIn("reason=stale_stamp", lines[1])
+
+    def test_mixed_stamped_album_rolls_back_each_file_to_its_own_source(self):
+        """Multi-file album, one file stamped at an event-only location and
+        one unstamped whose source is missing: the failed move must roll
+        the stamped file back to its EVENT path, not a resolver guess."""
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_src = os.path.join(
+                tmpdir, "somewhere-unrelated", "01 Track One.mp3")
+            os.makedirs(os.path.dirname(event_src))
+            with open(event_src, "w") as fp:
+                fp.write("fake audio")
+            # Second file exists nowhere — its move raises and triggers
+            # rollback of the first.
+            files = [
+                make_download_file(
+                    filename="@@w\\Music\\R\\Kid A\\01 Track One.mp3",
+                    file_dir="@@w\\Music\\R\\Kid A",
+                    size=len("fake audio"),
+                ),
+                make_download_file(
+                    filename="@@w\\Music\\R\\Kid A\\02 Track Two.mp3",
+                    file_dir="@@w\\Music\\R\\Kid A",
+                    size=10,
+                ),
+            ]
+            files[0].local_path = event_src
+            album = make_grab_list_entry(
+                files=files, mb_release_id="", artist="Radiohead",
+                title="Kid A", year="2000")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = tmpdir
+            cfg.beets_validation_enabled = False
+
+            result = process_completed_album(album, [], ctx, import_job_id=1)
+
+            self.assertFalse(result)
+            # Rollback restored the stamped file to its event location.
+            self.assertTrue(os.path.exists(event_src))
+            self.assertFalse(os.path.exists(
+                os.path.join(tmpdir, "Radiohead - Kid A (2000)")))
+
+    def test_already_moved_resume_still_skips(self):
+        # Crash-resume: dst exists, every source location is gone. The
+        # fallback path must feed the already-moved check unchanged.
+        from lib.download import process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dst_dir = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
+            os.makedirs(dst_dir)
+            with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
+                fp.write("fake audio")
+            files = [make_download_file(
+                filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{self.FNAME}",
+                file_dir="@@wcren\\Music\\Radiohead\\Kid A",
+                size=len("fake audio"),
+            )]
+            files[0].local_path = os.path.join(tmpdir, "Kid A", self.FNAME)
+            album = make_grab_list_entry(
+                files=files, mb_release_id="", artist="Radiohead",
+                title="Kid A", year="2000")
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = tmpdir
+            cfg.beets_validation_enabled = False
+
+            result = process_completed_album(album, [], ctx, import_job_id=1)
+
+            self.assertTrue(result)
+            self.assertEqual(self._moved(tmpdir), [self.FNAME])
 
 
 class TestPollActiveDownloads(unittest.TestCase):
@@ -2221,6 +2309,25 @@ class TestPollActiveDownloads(unittest.TestCase):
         cursor = fake_db.get_slskd_event_cursor()
         assert cursor is not None
         self.assertEqual(cursor["last_event_id"], "ev-1")
+
+    def test_poll_fetches_snapshot_before_ingesting_events(self):
+        """Ordering pin (#146 phase 2): the transfer snapshot is taken
+        BEFORE event ingestion, so any transfer the snapshot shows
+        Completed already has its DownloadFileComplete event in the feed
+        — closing the same-cycle race that made healthy completions
+        process unstamped."""
+        from lib.download import poll_active_downloads
+        row = self._make_downloading_row()
+        ctx, _ = self._make_poll_ctx(downloading_rows=[row])
+
+        poll_active_downloads(ctx)
+
+        call_log = cast(Any, ctx.slskd).call_log
+        self.assertIn("transfers.get_all_downloads", call_log)
+        self.assertIn("events.list", call_log)
+        self.assertLess(
+            call_log.index("transfers.get_all_downloads"),
+            call_log.index("events.list"))
 
     def test_poll_survives_events_api_failure(self):
         """Events API outage degrades to resolver-only — polling continues."""
