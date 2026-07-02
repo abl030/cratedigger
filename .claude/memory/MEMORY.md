@@ -1,5 +1,6 @@
 - [User profile](user_profile.md) — Senior dev running a curated music pipeline on NixOS; prefers TDD and incremental refactoring
 - [Full library backfill](project_full_library_backfill.md) — 2026-06-04: whole beets library ingested as wanted requests for upgrade; explains the ~4700 wanted cohort (21 lossless excluded)
+- [beets 2.12 migration](project_beets_2_12_migration.md) — 2026-06-29: beets bump broke ALL imports two ways (Library/import API + duplicate-resolution hook); harness tests mock beets so drift shipped undetected; real-beets contract test now guards it
 - [Use nix-shell](feedback_use_nix_shell.md) — All Python/test commands must run inside nix-shell, never bare python3
 - [TDD](feedback_tdd.md) — Strict TDD: tests first, then implementation, verify at each step
 - [Finish the job](feedback_finish_the_job.md) — Wire up new functionality end-to-end — don't leave infrastructure disconnected
@@ -33,3 +34,5 @@
 - [Issue #445 COMPLETE — dual-load killed](project_445_complete_dual_load_killed.md) — 2026-06-12 PR #451 deployed; gdb live-probe technique, AST audit > regex ratchet, script-mode sys.path[0] hazard
 - [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — Mirror deploys via Forgejo/fleet-update (its own CLAUDE.md is stale on GitHub); nspawn DB is at 10.20.0.13 (not .192.168.100.13), pw in /run/secrets/discogs-pgpass
 - [Pipeline DB direct psql writes](project_pipeline_db_direct_psql_writes.md) — For write SQL (pipeline-cli query is read-only) use psql on doc2 with DSN postgresql://cratedigger@10.20.0.11:5432/cratedigger; CLAUDE.md's 192.168.100.11 is stale
+- [#184 sidecar producer](project_184_sidecar_producer.md) — 2026-06-18: cratedigger.json verified-lossless sidecar producer+backfill shipped (3910 written); consumer half deferred; reusable doc2 one-shot recipe
+- [#146 slskd events rollout](project_146_slskd_events_rollout.md) — 2026-07-02: phase 1 in PR #464 (typed client, slskd-api dep gone, event ingestion, resolver still wins); phase 2 gated on a week of clean EVENT-PATH COMPARE logs
