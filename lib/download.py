@@ -232,20 +232,7 @@ def _run_post_rejection_wrong_match_cleanup(
 # poll cycle (issue #146). There is no on-disk path inference: a
 # completed file without a stamp is a hard failure.
 
-_REMOTE_PATH_SEPARATORS = re.compile(r"[\\/]+")
 _REQUEST_SCOPED_STAGE_SUFFIX = re.compile(r" \[request-\d+\]$")
-
-
-def _remote_path_components(path: str) -> list[str]:
-    """Split a Soulseek remote path into non-empty components."""
-    return [part for part in _REMOTE_PATH_SEPARATORS.split(path) if part]
-
-
-def slskd_local_folder(file_dir: str, slskd_download_dir: str) -> str:
-    """Return the on-disk folder slskd places this file_dir's downloads into."""
-    components = _remote_path_components(file_dir)
-    leaf = components[-1] if components else file_dir
-    return os.path.join(slskd_download_dir, leaf)
 
 
 def _is_request_scoped_auto_import_path(
@@ -292,7 +279,15 @@ class SlskdEnqueueOutcome:
     downloads: list[DownloadFile] | None = None
 
 def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
-    """Cancel downloads and remove their directories.
+    """Cancel downloads and delete their completed payloads.
+
+    Deletion targets come from slskd's own answers only (issue #146
+    phase 3): the ingested ``local_path`` stamp, topped up by a fresh
+    events-page lookup for files that completed after this cycle's
+    ingest pass. Files are removed individually and their directories
+    pruned only when empty — never a recursive delete of an inferred
+    folder, which nuked unrelated albums sharing a generic leaf name
+    (the ``CD1/`` hazard). In-flight partials are slskd's to clean up.
 
     Returns whether every requested transfer had an ID and cancel call
     completed. Callers that only need best-effort cleanup can ignore it.
@@ -312,10 +307,65 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
             ok = False
             logger.warning(f"Failed to cancel download {file.filename} for {file.username}",
                            exc_info=True)
-        delete_dir = slskd_local_folder(file.file_dir, ctx.cfg.slskd_download_dir)
-        if os.path.isdir(delete_dir):
-            shutil.rmtree(delete_dir)
+    _delete_completed_payloads(files, ctx)
     return ok
+
+
+def _delete_completed_payloads(
+    files: list[Any],
+    ctx: CratediggerContext,
+) -> None:
+    """Remove completed files at their authoritative local paths."""
+    from lib.slskd_events import recent_completion_paths
+
+    root = ctx.cfg.slskd_download_dir
+    needs_lookup = any(not getattr(file, "local_path", None) for file in files)
+    recent = (
+        recent_completion_paths(ctx.slskd)
+        if needs_lookup
+        else None
+    )
+
+    prune_dirs: list[str] = []
+    for file in files:
+        local_path = file.local_path or (
+            recent.files.get((file.username, file.filename))
+            if recent is not None
+            else None
+        )
+        if not local_path:
+            continue
+        if not path_is_within_root(local_path, root):
+            logger.warning(
+                "Refusing to delete %s for %s — outside the slskd "
+                "download root", local_path, file.filename)
+            continue
+        try:
+            os.remove(local_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Failed to delete %s", local_path, exc_info=True)
+            continue
+        parent = os.path.dirname(local_path)
+        if parent not in prune_dirs:
+            prune_dirs.append(parent)
+
+    if recent is not None:
+        for file in files:
+            local_dir = recent.directories.get((file.username, file.file_dir))
+            if local_dir and local_dir not in prune_dirs:
+                prune_dirs.append(local_dir)
+
+    for prune_dir in prune_dirs:
+        if not path_is_within_root(prune_dir, root):
+            continue
+        if os.path.realpath(prune_dir) == os.path.realpath(root):
+            continue
+        try:
+            os.rmdir(prune_dir)
+        except OSError:
+            pass  # Non-empty (shared with another album) or already gone.
 
 
 def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,

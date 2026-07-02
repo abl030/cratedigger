@@ -409,40 +409,169 @@ class TestDownloadsAllDone(unittest.TestCase):
 
 
 class TestCancelAndDelete(unittest.TestCase):
-    """cancel_and_delete uses ctx.slskd and ctx.cfg."""
+    """cancel_and_delete deletes completed payloads at their authoritative
+    (event-derived) local paths — never at inferred folder locations
+    (issue #146 phase 3; kills the shared-``CD1/`` rmtree hazard)."""
 
-    def test_cancels_and_removes_dir(self):
-        from lib.download import cancel_and_delete
-        slskd = FakeSlskdAPI()
+    def _ctx(self, slskd=None):
+        slskd = slskd or FakeSlskdAPI()
         ctx = _make_ctx(slskd=slskd)
+        tmpdir = tempfile.mkdtemp(prefix="cratedigger-cancel-test-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        cast(Any, ctx.cfg).slskd_download_dir = tmpdir
+        return ctx, slskd, tmpdir
+
+    def _file_event(self, slskd, *, id, username, filename, local_filename):
+        import json as _json
+        return slskd.events.make_event(
+            id=id, timestamp="2026-07-02T10:00:00.0000000Z",
+            type="DownloadFileComplete",
+            data=_json.dumps({
+                "version": 0,
+                "localFilename": local_filename,
+                "remoteFilename": filename,
+                "transfer": {
+                    "id": f"tid-{id}", "username": username,
+                    "filename": filename, "size": 10,
+                },
+            }))
+
+    def _dir_event(self, slskd, *, id, username, remote_dir, local_dir):
+        import json as _json
+        return slskd.events.make_event(
+            id=id, timestamp="2026-07-02T10:00:00.0000000Z",
+            type="DownloadDirectoryComplete",
+            data=_json.dumps({
+                "version": 0,
+                "localDirectoryName": local_dir,
+                "remoteDirectoryName": remote_dir,
+                "username": username,
+            }))
+
+    def test_cancels_and_deletes_stamped_file_pruning_empty_dir(self):
+        from lib.download import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_dir = os.path.join(tmpdir, "Album Folder")
+        os.makedirs(local_dir)
+        local_path = os.path.join(local_dir, "01 - Track.mp3")
+        with open(local_path, "w") as fp:
+            fp.write("x")
         f = make_download_file(file_dir="someuser\\Album Folder")
-        with patch("os.path.isdir", return_value=True), \
-             patch("shutil.rmtree") as mock_rm:
-            cancel_and_delete([f], ctx)
+        f.local_path = local_path
+
+        ok = cancel_and_delete([f], ctx)
+
+        self.assertTrue(ok)
         self.assertEqual(
             [(call.username, call.id)
              for call in slskd.transfers.cancel_download_calls],
             [("user1", "file-id-1")],
         )
-        mock_rm.assert_called_once_with(
-            os.path.join("/tmp/test_downloads", "Album Folder"))
+        self.assertFalse(os.path.exists(local_path))
+        self.assertFalse(os.path.isdir(local_dir))
+
+    def test_shared_dir_survives_when_other_files_remain(self):
+        """The CD1 regression: deleting one request's file must not take
+        an unrelated sibling in the same on-disk folder with it."""
+        from lib.download import cancel_and_delete
+        ctx, _, tmpdir = self._ctx()
+        local_dir = os.path.join(tmpdir, "CD1")
+        os.makedirs(local_dir)
+        mine = os.path.join(local_dir, "01 - Mine.mp3")
+        theirs = os.path.join(local_dir, "01 - Theirs.mp3")
+        for path in (mine, theirs):
+            with open(path, "w") as fp:
+                fp.write("x")
+        f = make_download_file(file_dir="someuser\\CD1")
+        f.local_path = mine
+
+        cancel_and_delete([f], ctx)
+
+        self.assertFalse(os.path.exists(mine))
+        self.assertTrue(os.path.exists(theirs))
+        self.assertTrue(os.path.isdir(local_dir))
+
+    def test_unstamped_file_resolved_via_fresh_events(self):
+        """A file that completed after the cycle's ingest pass has no
+        stamp yet — a fresh events-page lookup still finds its payload."""
+        from lib.download import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_dir = os.path.join(tmpdir, "Album Folder")
+        os.makedirs(local_dir)
+        local_path = os.path.join(local_dir, "01 - Track.mp3")
+        with open(local_path, "w") as fp:
+            fp.write("x")
+        f = make_download_file(
+            filename="someuser\\Music\\Album Folder\\01 - Track.mp3",
+            file_dir="someuser\\Music\\Album Folder")
+        slskd.events.set_events([self._file_event(
+            slskd, id="ev-1", username=f.username, filename=f.filename,
+            local_filename=local_path)])
+
+        cancel_and_delete([f], ctx)
+
+        self.assertFalse(os.path.exists(local_path))
+        self.assertFalse(os.path.isdir(local_dir))
+
+    def test_directory_event_prunes_empty_authoritative_dir(self):
+        from lib.download import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_dir = os.path.join(tmpdir, "Album Folder")
+        os.makedirs(local_dir)  # already emptied by an earlier cleanup
+        f = make_download_file(
+            filename="someuser\\Music\\Album Folder\\01 - Track.mp3",
+            file_dir="someuser\\Music\\Album Folder")
+        slskd.events.set_events([self._dir_event(
+            slskd, id="ev-1", username=f.username,
+            remote_dir=f.file_dir, local_dir=local_dir)])
+
+        cancel_and_delete([f], ctx)
+
+        self.assertFalse(os.path.isdir(local_dir))
+
+    def test_never_deletes_outside_download_root(self):
+        from lib.download import cancel_and_delete
+        ctx, _, _ = self._ctx()
+        outside = tempfile.mkdtemp(prefix="cratedigger-outside-")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        stray = os.path.join(outside, "01 - Track.mp3")
+        with open(stray, "w") as fp:
+            fp.write("x")
+        f = make_download_file()
+        f.local_path = stray
+
+        cancel_and_delete([f], ctx)
+
+        self.assertTrue(os.path.exists(stray))
 
     def test_cancel_failure_continues(self):
         """Should not raise if cancel_download throws."""
         from lib.download import cancel_and_delete
         slskd = FakeSlskdAPI()
         slskd.transfers.cancel_download_error = Exception("network error")
-        ctx = _make_ctx(slskd=slskd)
+        ctx, slskd, _ = self._ctx(slskd)
         f = make_download_file()
-        with self.assertLogs("cratedigger", level="WARNING") as logs, \
-             patch("os.path.isdir", return_value=False):
-            cancel_and_delete([f], ctx)  # should not raise
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            ok = cancel_and_delete([f], ctx)  # should not raise
+        self.assertFalse(ok)
         self.assertIn("Failed to cancel download", "\n".join(logs.output))
         self.assertEqual(
             [(call.username, call.id)
              for call in slskd.transfers.cancel_download_calls],
             [("user1", "file-id-1")],
         )
+
+    def test_events_lookup_failure_never_blocks_cancel(self):
+        from lib.download import cancel_and_delete
+        slskd = FakeSlskdAPI()
+        slskd.events.list_error = RuntimeError("events down")
+        ctx, slskd, _ = self._ctx(slskd)
+        f = make_download_file()  # unstamped → triggers the events lookup
+
+        ok = cancel_and_delete([f], ctx)  # must not raise
+
+        self.assertTrue(ok)
+        self.assertEqual(len(slskd.transfers.cancel_download_calls), 1)
 
 
 class TestSlskdDownloadStatus(unittest.TestCase):
