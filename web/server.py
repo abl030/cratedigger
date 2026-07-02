@@ -330,6 +330,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # Browser icon assets (#161). Allowlist keyed by URL path — no
+    # filesystem-derived names, so no traversal surface.
+    _STATIC_ASSETS = {
+        "/favicon.ico": ("favicon.ico", "image/x-icon"),
+        "/favicon-16x16.png": ("favicon-16x16.png", "image/png"),
+        "/favicon-32x32.png": ("favicon-32x32.png", "image/png"),
+        "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+    }
+
+    def _static_asset(self, url_path):
+        """Serve an allowlisted icon asset from web/assets/."""
+        filename, content_type = self._STATIC_ASSETS[url_path]
+        asset_path = os.path.join(os.path.dirname(__file__), "assets", filename)
+        with open(asset_path, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _static_js(self, path):
         """Serve a JS file from the web/js/ directory."""
         js_path = os.path.join(os.path.dirname(__file__), "js", os.path.basename(path))
@@ -374,6 +396,11 @@ class Handler(BaseHTTPRequestHandler):
             # Serve static JS modules
             if path.startswith("/js/") and path.endswith(".js"):
                 self._static_js(path[4:])
+                return
+
+            # Browser icon assets
+            if path in self._STATIC_ASSETS:
+                self._static_asset(path)
                 return
 
             # Check local method (index)
