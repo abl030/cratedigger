@@ -7,6 +7,7 @@ call shapes.
 
 import unittest
 
+from lib.pipeline_db import DownloadLogOutcome
 from lib.quality import DownloadInfo, SpectralMeasurement
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
@@ -15,7 +16,8 @@ from tests.helpers import make_request_row
 class TestDoMarkDone(unittest.TestCase):
     """_do_mark_done must transition to imported, log download, handle spectral state."""
 
-    def _call(self, dl_info=None, outcome_label="success", **kwargs):
+    def _call(self, dl_info=None,
+              outcome_label: DownloadLogOutcome = "success", **kwargs):
         from lib.import_dispatch import _do_mark_done
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -106,7 +108,8 @@ class TestDoMarkDone(unittest.TestCase):
 class TestRecordRejectionAndMaybeRequeue(unittest.TestCase):
     """Rejection recording must log failure and optionally requeue."""
 
-    def _call(self, requeue=True, outcome_label="rejected",
+    def _call(self, requeue=True,
+              outcome_label: DownloadLogOutcome = "rejected",
               search_filetype_override=None, dl_info=None,
               validation_result=None, staged_path=None):
         from lib.import_dispatch import _record_rejection_and_maybe_requeue

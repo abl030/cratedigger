@@ -21,6 +21,7 @@ import psycopg2
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 from tests.helpers import make_album_quality_evidence
+from lib.pipeline_db import DownloadLogOutcome  # noqa: E402
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -3860,7 +3861,9 @@ class TestUserCooldowns(unittest.TestCase):
 
     def test_check_and_apply_cooldown_mixed_no_trigger(self):
         """3 timeouts + 2 successes → no cooldown."""
-        for outcome in ["timeout", "timeout", "success", "timeout", "success"]:
+        outcomes: list[DownloadLogOutcome] = [
+            "timeout", "timeout", "success", "timeout", "success"]
+        for outcome in outcomes:
             self.db.log_download(request_id=self.req1, soulseek_username="mixeduser",
                                  outcome=outcome)
         result = self.db.check_and_apply_cooldown("mixeduser")

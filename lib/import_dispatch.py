@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.grab_list import GrabListEntry
     from lib.sidecar_service import SidecarDB, SidecarWriteResult
-    from lib.pipeline_db import PipelineDB
+    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 logger = logging.getLogger("cratedigger")
@@ -1066,7 +1066,7 @@ def _do_mark_done(
     distance: float,
     scenario: str | None,
     dest_path: str | None,
-    outcome_label: str = "success",
+    outcome_label: DownloadLogOutcome = "success",
     detail: str | None = None,
     imported_path: str | None = None,
     clear_stale_v0_probe: bool = True,
@@ -1275,7 +1275,7 @@ def _record_rejection_and_maybe_requeue(
     error: str | None,
     *,
     requeue: bool = True,
-    outcome_label: str = "rejected",
+    outcome_label: DownloadLogOutcome = "rejected",
     search_filetype_override: str | None = None,
     validation_result: str | None = None,
     staged_path: str | None = None,
@@ -1690,7 +1690,7 @@ def dispatch_import_core(
     scenario: str = "auto_import",
     files: Sequence[object] | None = None,
     cfg: "CratediggerConfig | None" = None,
-    outcome_label: str = "success",
+    outcome_label: DownloadLogOutcome = "success",
     requeue_on_failure: bool = True,
     cooled_down_users: set[str] | None = None,
     source_dirs: list[str] | None = None,
@@ -2414,7 +2414,7 @@ def dispatch_import_from_db(
     failed_path: str,
     *,
     force: bool = False,
-    outcome_label: str = "force_import",
+    outcome_label: DownloadLogOutcome = "force_import",
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
     import_job_id: int | None = None,
@@ -2492,7 +2492,7 @@ def _dispatch_import_from_db_locked(
     failed_path: str,
     *,
     force: bool,
-    outcome_label: str,
+    outcome_label: DownloadLogOutcome,
     source_username: str | None,
     source_dirs: list[str] | None,
     import_job_id: int | None,

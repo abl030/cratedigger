@@ -5,7 +5,11 @@ previously top-level name, and ``import lib.pipeline_db`` exposes the
 composed ``PipelineDB`` class.
 """
 from lib.pipeline_db._db import PipelineDB
-from lib.pipeline_db.download_log import DownloadLogCounts
+from lib.pipeline_db.download_log import (
+    DOWNLOAD_LOG_OUTCOMES,
+    DownloadLogCounts,
+    DownloadLogOutcome,
+)
 from lib.pipeline_db._shared import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
@@ -105,7 +109,9 @@ __all__ = [
     "DASHBOARD_WANTED_TREND_WINDOWS",
     "DASHBOARD_WINDOWS",
     "DEFAULT_DSN",
+    "DOWNLOAD_LOG_OUTCOMES",
     "DownloadLogCounts",
+    "DownloadLogOutcome",
     "DryRunPlanClassification",
     "MbidCollisionError",
     "NonConsumingAttemptInput",

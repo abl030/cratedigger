@@ -2,7 +2,7 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal, get_args
 import msgspec
 import psycopg2
 import psycopg2.extras
@@ -11,6 +11,21 @@ from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
 )
+
+# Canonical ``download_log.outcome`` taxonomy — the Python mirror of the
+# ``download_log_outcome_check`` CHECK constraint (latest definition:
+# migrations/042). Two sync points only: this Literal and the migration
+# SQL; ``tests/test_migrator.py`` pins them together. Writers get pyright
+# enforcement at the call site instead of a CheckViolation in production
+# (the failure mode that shipped twice on 2026-07-02: 'error' from the
+# #146 grace escape and the latent 'user_offline' from lib/enqueue.py).
+DownloadLogOutcome = Literal[
+    "success", "rejected", "failed", "timeout",
+    "force_import", "manual_import", "curator_ban",
+    "measurement_failed", "user_offline",
+    "youtube_running", "youtube_success", "youtube_failed",
+]
+DOWNLOAD_LOG_OUTCOMES: frozenset[str] = frozenset(get_args(DownloadLogOutcome))
 
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.validation_envelope import (
@@ -117,7 +132,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                      beets_scenario: str | None = None,
                      beets_detail: str | None = None,
                      valid: bool | None = None,
-                     outcome: str | None = None,
+                     outcome: DownloadLogOutcome | None = None,
                      staged_path: str | None = None,
                      error_message: str | None = None,
                      bitrate: int | None = None,

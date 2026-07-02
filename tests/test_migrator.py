@@ -5,6 +5,7 @@ the ephemeral PostgreSQL fixture from ``conftest.py``.
 """
 
 import os
+import pathlib
 import sys
 import tempfile
 import unittest
@@ -3156,6 +3157,35 @@ class TestActiveYoutubeImportRequestSchema(unittest.TestCase):
         finally:
             self._exec("DELETE FROM import_jobs WHERE request_id = %s", (rid,))
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+
+class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
+    """Pin lib.pipeline_db.DOWNLOAD_LOG_OUTCOMES to the migration SQL.
+
+    The CHECK constraint and the Python Literal are the only two sync
+    points for the download_log outcome taxonomy; this test fails when a
+    migration widens the constraint without the Literal (or vice versa).
+    """
+
+    def test_literal_matches_latest_migration_check(self):
+        import re
+        from lib.migrator import DEFAULT_MIGRATIONS_DIR
+        from lib.pipeline_db import DOWNLOAD_LOG_OUTCOMES
+
+        pattern = re.compile(
+            r"ADD CONSTRAINT download_log_outcome_check\s*"
+            r"CHECK \(outcome IN \(([^;]+)\)\)",
+            re.DOTALL,
+        )
+        latest_values = None
+        for path in sorted(pathlib.Path(DEFAULT_MIGRATIONS_DIR).glob("*.sql")):
+            match = pattern.search(path.read_text())
+            if match:
+                latest_values = frozenset(
+                    re.findall(r"'([a-z_]+)'", match.group(1)))
+        assert latest_values is not None, (
+            "no migration defines download_log_outcome_check")
+        self.assertEqual(DOWNLOAD_LOG_OUTCOMES, latest_values)
 
 
 if __name__ == "__main__":

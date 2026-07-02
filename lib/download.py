@@ -56,6 +56,7 @@ from lib.staged_album import StagedAlbum
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
+    from lib.pipeline_db import DownloadLogOutcome
 
 logger = logging.getLogger("cratedigger")
 
@@ -95,7 +96,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         *,
         soulseek_username: str | None = None,
         filetype: str | None = None,
-        outcome: str | None = None,
+        outcome: DownloadLogOutcome | None = None,
         error_message: str | None = None,
     ) -> int: ...
 
