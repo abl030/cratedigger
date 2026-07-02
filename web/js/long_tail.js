@@ -22,9 +22,10 @@
  *      (reuses `renderForensicBlock`; a few rows with a "show all" toggle).
  *   3. Recent rescues  ← `GET /api/pipeline/<id>` `history` rows where
  *      `source==='youtube'` ("rescue running" / "last rescue failed: …").
- *   4. Sibling pressings ← `GET /api/release-group/<rg>` (rg taken from the
- *      pipeline-detail `request.mb_release_group_id`; skipped for rows
- *      without one, e.g. Discogs-sourced).
+ *   4. Sibling pressings ← `GET /api/release-group/<rg>` (rg read straight
+ *      off the cohort row's `mb_release_group_id` — projected by
+ *      `_LONG_TAIL_SELECT`, #398; skipped for rows without one, e.g.
+ *      Discogs-sourced).
  *   5. YouTube matrix  ← the four-state shell. Defaults to `never_run`
  *      with a "Check YouTube" button (U5 wires the actual resolver call —
  *      U4 must NOT auto-call the slow, side-effectful resolver GET).
@@ -83,7 +84,9 @@
  * the acted-on row (`refetchLongTailRow`, the U5 helper) and patches it in —
  * no optimistic band moves, no polling. Set-imported / Delete remove just
  * the acted-on row's DOM nodes (it leaves the cohort); the confirmed Replace
- * closes the console and full-cohort refetches.
+ * closes the console and full-cohort refetches. Open consoles survive every
+ * list re-render: `state.longTail.open` tracks expanded rows and
+ * `restoreLongTailConsoles` re-opens them after the DOM wipe (#398).
  *
  * Pure / DOM-free helpers (band ordering, tab derivation, in-band search
  * filtering, cross-band match count, YouTube state classifier, console
@@ -507,6 +510,15 @@ export async function loadLongTail() {
     if (token !== longTailRequestToken) return;
     const rows = Array.isArray(data.results) ? data.results : [];
     state.longTail.rows = rows;
+    // Prune console-open marks (and cached resolver results) for rows that
+    // left the wanted cohort — imported out-of-band, replaced, deleted.
+    const cohortIds = new Set(rows.map((r) => r && r.id));
+    for (const openId of [...state.longTail.open]) {
+      if (!cohortIds.has(openId)) {
+        state.longTail.open.delete(openId);
+        youtubeResolveResults.delete(openId);
+      }
+    }
     const tabs = deriveBandTabs(rows);
     // Pick a default band when none selected or the prior selection is
     // gone from the new cohort.
@@ -579,6 +591,8 @@ export function onLongTailSearchInput(value) {
     // Re-render only the list body; the tabs + input stay put so the
     // search box keeps focus and the caret position.
     listEl.innerHTML = renderListBody(rows, state.longTail.band, state.longTail.query);
+    // The body wipe destroyed any expanded console DOM — restore (#398).
+    restoreLongTailConsoles();
   };
   if (typeof setTimeout === 'function') {
     longTailSearchTimer = /** @type {any} */ (
@@ -1054,9 +1068,12 @@ function renderSpectralFragment(row) {
  * on-disk rows lead with the band-vs-intent header. Pure.
  *
  * @param {Object} row  The worklist row (carries band, source, intent).
+ * @param {Object|null} [ytResult]  The row's cached resolver result (from
+ *   a prior Check YouTube this session), so a console restore after a list
+ *   re-render doesn't wipe a resolved matrix back to `never_run` (#398).
  * @returns {string}
  */
-function renderConsoleShell(row) {
+function renderConsoleShell(row, ytResult) {
   const id = row.id;
   const emphasis = consoleEmphasis(row);
   const leadUnfindable = emphasis.lead === 'unfindable';
@@ -1083,10 +1100,12 @@ function renderConsoleShell(row) {
     'rescues', id, 'Recent rescue attempts', renderPanelLoading('rescues'), false);
   const siblingsPanel = renderPanel(
     'siblings', id, 'Sibling pressings', renderPanelLoading('siblings'), false);
-  // The YouTube panel opens in `never_run` immediately — no fetch (U4 must
-  // not auto-call the side-effectful resolver GET).
+  // The YouTube panel opens in `never_run` — no fetch (U4 must not
+  // auto-call the side-effectful resolver GET) — unless this row already
+  // resolved this session, in which case the cached result renders so a
+  // console restore doesn't discard the operator's matrix.
   const youtubePanel = renderPanel(
-    'youtube', id, 'YouTube Music', renderYoutubeBody(null, id), false);
+    'youtube', id, 'YouTube Music', renderYoutubeBody(ytResult || null, id), false);
   // Order: lead panel first. For Missing/unfindable, why-unfindable leads;
   // for on-disk rows, the band-vs-intent header leads, then why-unfindable.
   const ordered = leadUnfindable
@@ -1094,11 +1113,10 @@ function renderConsoleShell(row) {
     : [bandVsIntent, unfindablePanel, peersPanel, rescuesPanel, siblingsPanel, youtubePanel];
   // The action bar (U6) renders FIRST so the operator's secondary actions
   // (accept-sibling / set-intent / re-search) stay reachable without
-  // scrolling past the evidence panels. Accept-sibling needs the request's
-  // `mb_release_group_id`, which the console shell doesn't have yet (the
-  // cohort row doesn't carry it — `loadPipelinePanels` resolves it off the
-  // pipeline detail). So it renders disabled at open and `patchActionsBar`
-  // re-renders once the rg is known.
+  // scrolling past the evidence panels. The cohort row carries
+  // `mb_release_group_id` (#398 — projected by `_LONG_TAIL_SELECT`), so the
+  // accept-sibling control renders in its final enabled/disabled state at
+  // open — no detail-fetch stamp, no post-hoc re-render.
   const actionsBar = renderActionsBar(row);
   return `<div class="lt-console">${actionsBar}${ordered.join('')}</div>`;
 }
@@ -1115,37 +1133,23 @@ function renderConsoleShell(row) {
  *   * Delete request — remove the request entirely via the existing
  *     `POST /api/pipeline/delete` surface (danger-styled).
  *
- * The release-group id is read from the row's `mb_release_group_id`, which
- * is absent at shell-render time (the cohort row doesn't carry it) and
- * stamped onto the row by `loadPipelinePanels` once the pipeline detail
- * resolves — at which point `patchActionsBar` re-renders this bar.
+ * The release-group id is read from the row's `mb_release_group_id`,
+ * projected straight off the cohort row by `_LONG_TAIL_SELECT` (#398) — so
+ * the bar renders in its final state at console open (no detail-fetch
+ * stamp, no post-hoc patch).
  *
  * @param {Object} row  The worklist row (band, source, intent, rg).
  * @returns {string}
  */
-/**
- * Render the accept-a-sibling-pressing control (active button, or disabled
- * button + reason). Split out so `patchActionsBar` can refresh ONLY this
- * group after the detail fetch stamps the release group — without clobbering
- * the other action groups. Pure.
- *
- * @param {Object} row
- * @returns {string}
- */
-function renderAcceptGroup(row) {
+function renderActionsBar(row) {
   const id = row.id;
   const rg = row.mb_release_group_id || null;
   // Discogs / no-rg disable reason (KTD7 — no MB↔Discogs adapter).
   const acceptReason = acceptDisabledReason(row, rg);
-  return canAcceptSibling(row, rg)
+  const acceptBtn = canAcceptSibling(row, rg)
     ? `<button class="lt-act-btn lt-act-accept" type="button" onclick="event.stopPropagation(); window.longTailAcceptSibling(${id})">Accept a sibling pressing…</button>`
     : `<button class="lt-act-btn lt-act-accept" type="button" disabled title="${esc(acceptReason)}">Accept a sibling pressing…</button>
        <span class="lt-act-note">${esc(acceptReason)}</span>`;
-}
-
-function renderActionsBar(row) {
-  const id = row.id;
-  const acceptBtn = renderAcceptGroup(row);
 
   const intent = overrideToIntent(row.target_format);
   const intentLabel = intent === 'lossless' ? 'lossless' : 'default';
@@ -1169,7 +1173,7 @@ function renderActionsBar(row) {
 
   return `<div class="lt-actions" id="lt-actions-${id}">
     <div class="lt-act-group">${importBtn}</div>
-    <div class="lt-act-group" id="lt-act-accept-${id}">${acceptBtn}</div>
+    <div class="lt-act-group">${acceptBtn}</div>
     <div class="lt-act-group">${intentCtl}</div>
     <div class="lt-act-group">${deleteBtn}</div>
   </div>`;
@@ -1214,11 +1218,10 @@ async function loadUnfindablePanel(id, token) {
 }
 
 /**
- * Load the peers + rescues panels from one `GET /api/pipeline/<id>` fetch,
- * and kick off the (independent) sibling-pressings fetch using the
- * release-group id off the detail payload. Peers + rescues are patched
- * from this fetch; siblings is fired separately so a slow release-group
- * (the 15s MB-mirror timeout) blocks only its own panel.
+ * Load the peers + rescues panels from one `GET /api/pipeline/<id>` fetch.
+ * The sibling-pressings panel is fired independently by the console-open
+ * path off the cohort row's own `mb_release_group_id` (#398 — the row
+ * carries it now; no detail-fetch stamp).
  *
  * @param {number} id
  * @param {number} token
@@ -1226,66 +1229,16 @@ async function loadUnfindablePanel(id, token) {
  * @returns {Promise<void>}
  */
 async function loadPipelinePanels(id, token, inFlightFlag) {
-  let rgId = null;
   try {
     const r = await fetch(`${API}/api/pipeline/${id}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     patchPanel(id, 'peers', token, renderPeersBody(data.last_search, id));
     patchPanel(id, 'rescues', token, renderRescuesBody(data.history, inFlightFlag));
-    const req = data.request || {};
-    rgId = req.mb_release_group_id || null;
-    // KTD7 reuse: stamp the resolved release-group id onto the cohort row
-    // so the U6 accept-sibling button (rendered disabled at console open,
-    // before the detail fetch) can enable for MB rows that actually have a
-    // release group. Re-render the action bar in place once known — no
-    // extra fetch (we already have the detail payload here).
-    stampRowReleaseGroup(id, rgId);
-    patchActionsBar(id, token);
   } catch (_e) {
     patchPanel(id, 'peers', token, renderPanelError('peers'));
     patchPanel(id, 'rescues', token, renderPanelError('rescue history'));
   }
-  // Siblings is dependent on the rg id but loads independently: if the
-  // detail fetch failed (rgId null) we render the "no rg" state; otherwise
-  // we fire the release-group fetch on its own so its latency is isolated.
-  loadSiblingsPanel(id, token, rgId);
-}
-
-/**
- * Stamp the resolved `mb_release_group_id` onto the cached cohort row so
- * the U6 accept-sibling control can read it. Pure-ish: mutates
- * `state.longTail.rows`. No-op when the cohort isn't loaded or the id is
- * gone.
- *
- * @param {number} id
- * @param {string|null} rgId
- * @returns {void}
- */
-function stampRowReleaseGroup(id, rgId) {
-  const row = consoleRow(id);
-  if (row) row.mb_release_group_id = rgId || null;
-}
-
-/**
- * Re-render the console's action bar in place, guarded by the row's console
- * token so a stale detail fetch (operator moved on) doesn't repaint a
- * collapsed/replaced console. DOM-side.
- *
- * @param {number} id
- * @param {number} token  The console token captured when the console opened.
- * @returns {void}
- */
-function patchActionsBar(id, token) {
-  if (typeof document === 'undefined') return;
-  if (consoleTokens.get(id) !== token) return;  // stale console — discard.
-  // Only the accept-sibling group depends on the release group that the
-  // detail fetch stamps. Patch JUST that group so the other action groups
-  // (Set imported / intent / Delete) keep any transient in-flight state.
-  const group = document.getElementById(`lt-act-accept-${id}`);
-  if (!group) return;
-  const row = consoleRow(id) || { id };
-  group.innerHTML = renderAcceptGroup(row);
 }
 
 /**
@@ -1337,6 +1290,11 @@ function consoleRow(id) {
  * per-row token stamps the fetch so a stale console (operator clicked
  * another row, or re-collapsed this one) is discarded before it paints.
  *
+ * The open/closed state is tracked in `state.longTail.open` so a list
+ * re-render (post-action single-row patch, band switch, search repaint)
+ * can restore expanded consoles via {@link restoreLongTailConsoles}
+ * instead of collapsing them (#398 / KTD8 fidelity).
+ *
  * @param {number} id  album_requests.id
  * @returns {void}
  */
@@ -1350,22 +1308,64 @@ export function toggleLongTailDetail(id) {
   clearActionGuards(id);
   if (el.classList.contains('open')) {
     el.classList.remove('open');
+    state.longTail.open.delete(id);
     // Bump the token so any in-flight panel fetch is discarded on resolve.
     consoleTokens.set(id, (consoleTokens.get(id) || 0) + 1);
     return;
   }
+  openConsole(id, el);
+}
+
+/**
+ * Open one row's console: render the shell, mark it open in
+ * `state.longTail.open`, and fire the independent panel loads. Shared by
+ * the row-click toggle and the post-re-render restore path. DOM-side.
+ *
+ * @param {number} id  album_requests.id
+ * @param {HTMLElement} el  The row's `.lt-detail` container.
+ * @returns {void}
+ */
+function openConsole(id, el) {
   const token = (consoleTokens.get(id) || 0) + 1;
   consoleTokens.set(id, token);
+  state.longTail.open.add(id);
   const row = consoleRow(id) || { id };
-  el.innerHTML = renderConsoleShell(row);
+  el.innerHTML = renderConsoleShell(row, youtubeResolveResults.get(id) || null);
   el.classList.add('open');
   const inFlightFlag = !!row.in_flight_rescue;
   // Independent panel loads — no Promise.all, no shared await. One panel's
   // rejection can't reject another's promise (each loader try/catches and
   // patches its own error affordance). The YouTube panel is already in its
-  // never_run state from the shell (no fetch in U4).
+  // never_run state from the shell (no fetch in U4). Siblings reads the rg
+  // straight off the cohort row (#398 — `_LONG_TAIL_SELECT` projects it).
   loadUnfindablePanel(id, token);
   loadPipelinePanels(id, token, inFlightFlag);
+  loadSiblingsPanel(id, token, row.mb_release_group_id || null);
+}
+
+/**
+ * Re-open every console the operator had expanded after a list re-render
+ * wiped the DOM (#398 / KTD8 fidelity — the post-action single-row patch,
+ * a band switch, or a search repaint must not collapse an open console).
+ * Rows not currently rendered (filtered out by band/search) are left in
+ * the set — switching back to their band restores them. Ids whose rows
+ * leave the cohort for good are pruned by `removeRowFromCohort` (surgical
+ * removes) and by `loadLongTail`'s fresh-cohort intersect (full refetch).
+ * Re-opening re-fires the panel loads: the old DOM (and any fetched panel
+ * state) was destroyed with the innerHTML wipe, and the per-row token
+ * bump discards any in-flight fetch stamped against the old console.
+ * In-flight action guards are deliberately NOT cleared — an outstanding
+ * operation keeps its double-fire protection across the re-render.
+ *
+ * @returns {void}
+ */
+export function restoreLongTailConsoles() {
+  if (typeof document === 'undefined') return;
+  for (const id of state.longTail.open) {
+    const el = document.getElementById(`lt-detail-${id}`);
+    if (!el || el.classList.contains('open')) continue;
+    openConsole(id, el);
+  }
 }
 
 // --- Console rescue flow (U5) ----------------------------------------
@@ -1478,6 +1478,17 @@ export function rescueOutcomeCopy(result) {
 const resolveInFlight = new Set();
 
 /**
+ * Last resolver result per request id, kept for the session so a console
+ * restore after a list re-render re-renders the YouTube panel from the
+ * already-fetched result instead of resetting it to `never_run` (#398).
+ * Pruned with the row (`removeRowFromCohort`). Superseded in place by the
+ * next Check YouTube / Re-check.
+ *
+ * @type {Map<number, Object>}
+ */
+const youtubeResolveResults = new Map();
+
+/**
  * Request ids with an outstanding rescue-submit POST. Guards the confirm →
  * submit step against double-fire.
  *
@@ -1555,12 +1566,16 @@ function patchYoutubePanel(id, token, result) {
  * Guards:
  *   * Double-fire — a module-scoped `resolveInFlight` Set keyed by request
  *     id; a second click while outstanding returns immediately.
- *   * Stale result — the result is only painted if the row's console token
- *     still matches the one captured when the fetch fired (operator may
- *     have collapsed the console or clicked another row meanwhile).
  *   * Disabled button — the live "Check YouTube" / "Retry" button is
  *     disabled + relabelled while outstanding so the operator sees progress
  *     and can't re-click it.
+ *
+ * The settled result is cached in `youtubeResolveResults` and painted
+ * against the row's CURRENT console token (not the one captured at fire
+ * time): the panel container is per-row, so the only console it can paint
+ * into is this row's — including one re-created by a #398 restore while
+ * the fetch was outstanding. A collapsed console's hidden DOM may be
+ * touched; harmless, since reopening re-renders the shell (from the cache).
  *
  * The resolver identifier is the request's `mb_release_id` (an MB release
  * MBID or a Discogs release id) — the same id the resolver's
@@ -1574,9 +1589,12 @@ export async function checkYoutube(id) {
   if (!canStartInFlight(resolveInFlight, id)) return;  // double-fire guard.
   const row = consoleRow(id);
   const identifier = row && row.mb_release_id ? String(row.mb_release_id) : '';
-  const token = consoleTokens.get(id) || 0;
+  // Paint against the row's CURRENT token, re-read at paint time: the
+  // youtube panel container is per-row, so any console this can reach is
+  // this row's — including one re-created by a #398 restore mid-fetch.
+  const currentToken = () => consoleTokens.get(id) || 0;
   if (!identifier) {
-    patchYoutubePanel(id, token, /** @type {any} */ (
+    patchYoutubePanel(id, currentToken(), /** @type {any} */ (
       { outcome: 'transient', error_message: 'No release identifier on this request.' }));
     return;
   }
@@ -1595,9 +1613,10 @@ export async function checkYoutube(id) {
     } catch (_e) {
       result = { outcome: 'transient', error_message: `HTTP ${r.status}` };
     }
-    patchYoutubePanel(id, token, result);
+    youtubeResolveResults.set(id, result);
+    patchYoutubePanel(id, currentToken(), result);
   } catch (_e) {
-    patchYoutubePanel(id, token, /** @type {any} */ (
+    patchYoutubePanel(id, currentToken(), /** @type {any} */ (
       { outcome: 'transient', error_message: 'Could not reach the resolver. Retry.' }));
   } finally {
     resolveInFlight.delete(id);
@@ -1776,6 +1795,11 @@ async function submitYoutubeRescue(id, browseId) {
  * in-flight mark from {@link markRowInFlight} already gives the operator a
  * signal; the next Refresh reconciles.
  *
+ * The re-render does NOT collapse the acted-on row's console (or any
+ * other): `renderPipeline`'s long-tail paint ends with
+ * {@link restoreLongTailConsoles}, which re-opens every console in
+ * `state.longTail.open` against the fresh DOM (#398).
+ *
  * @param {number} id
  * @returns {Promise<void>}
  */
@@ -1824,6 +1848,10 @@ function patchRowInCohort(id, fresh) {
  * @returns {void}
  */
 function removeRowFromCohort(id) {
+  // The row is gone for good — prune its console-open mark and cached
+  // resolver result so a later re-render doesn't resurrect either.
+  state.longTail.open.delete(id);
+  youtubeResolveResults.delete(id);
   const rows = Array.isArray(state.longTail.rows) ? state.longTail.rows : null;
   if (!rows) return;
   const idx = rows.findIndex((r) => r && r.id === id);
@@ -2029,6 +2057,7 @@ function closeConsole(id) {
   if (typeof document === 'undefined') return;
   const el = document.getElementById(`lt-detail-${id}`);
   if (el) el.classList.remove('open');
+  state.longTail.open.delete(id);
   consoleTokens.set(id, (consoleTokens.get(id) || 0) + 1);
 }
 

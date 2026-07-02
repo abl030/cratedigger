@@ -4,7 +4,7 @@ import { esc, awstDate, qualityLabel, externalReleaseUrl, sourceLabel, manualRea
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
-import { loadLongTail, renderLongTailBody } from './long_tail.js';
+import { loadLongTail, renderLongTailBody, restoreLongTailConsoles } from './long_tail.js';
 import { renderPipelineDashboard as renderDashboardCards } from './pipeline_dashboard.js';
 
 /**
@@ -167,6 +167,10 @@ export function renderPipeline() {
   }
   if (state.pipelineView === 'long-tail') {
     el.innerHTML = `${renderPipelineNav()}${renderLongTailBody()}`;
+    // The full-body wipe destroyed any expanded console DOM — restore the
+    // operator's open consoles (#398 / KTD8 fidelity: the post-action
+    // single-row patch and band switches must not collapse them).
+    restoreLongTailConsoles();
     return;
   }
   if (state.pipelineView === 'search-plan-detail') {
