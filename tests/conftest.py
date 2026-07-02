@@ -43,26 +43,8 @@ if TEST_DSN:
             _pg = None
         raise
 
-# Try to start ephemeral slskd if docker + creds available
-_slskd = None
-CREDS_FILE = os.path.join(os.path.dirname(__file__), ".slskd-creds.json")
-
-if not os.environ.get("SLSKD_TEST_HOST") and os.path.exists(CREDS_FILE) and shutil.which("docker"):
-    try:
-        from ephemeral_slskd import EphemeralSlskd
-        _slskd = EphemeralSlskd(CREDS_FILE)
-        _slskd.start()
-        if _slskd.host_url is not None:
-            os.environ["SLSKD_TEST_HOST"] = _slskd.host_url
-        if _slskd.api_key is not None:
-            os.environ["SLSKD_TEST_API_KEY"] = _slskd.api_key
-        if _slskd.download_dir is not None:
-            os.environ["SLSKD_TEST_DOWNLOAD_DIR"] = _slskd.download_dir
-        # Wait for Soulseek connection (needed for search tests)
-        if _slskd.wait_for_soulseek(timeout=60):
-            print(f"[INFO] Ephemeral slskd connected to Soulseek on port {_slskd.port}", file=sys.stderr)
-        else:
-            print(f"[WARN] Ephemeral slskd API up but not connected to Soulseek", file=sys.stderr)
-    except Exception as e:
-        print(f"[WARN] Could not start ephemeral slskd: {e}", file=sys.stderr)
-        _slskd = None
+# NOTE: the ephemeral-slskd docker bootstrap that used to live here was
+# deleted 2026-07-02 — it exported SLSKD_TEST_HOST/_API_KEY/_DOWNLOAD_DIR
+# that no test has read since the 2026-05-20 skip-audit purge removed the
+# slskd-gated tests. tests/ephemeral_slskd.py survives solely as the
+# optional no---host fallback for scripts/bench_parallel_search.py.
