@@ -14,6 +14,7 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
+from lib.pipeline_db import DownloadLogOutcome
 from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -100,7 +101,8 @@ def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
 class TestDispatchCoreOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 
-    def _dispatch(self, ir=None, force=False, outcome_label="success",
+    def _dispatch(self, ir=None, force=False,
+                  outcome_label: DownloadLogOutcome = "success",
                   requeue_on_failure=True, override_min_bitrate=None,
                   source_username=None, target_format=None,
                   verified_lossless_target="",

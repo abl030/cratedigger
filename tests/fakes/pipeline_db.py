@@ -33,6 +33,7 @@ from lib.import_queue import (
     validate_status,
 )
 from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
+                             DOWNLOAD_LOG_OUTCOMES,
                              BACKOFF_MAX_MINUTES, BadAudioHashInput,
                              BadAudioHashRow, ConsumedAttemptInput,
                              ConsumedAttemptResult, CURSOR_UPDATE_ADVANCED,
@@ -77,17 +78,6 @@ from tests.fakes.rows import (
     SearchLogRow,
     UserCooldownRow,
 )
-
-# Mirror of download_log_outcome_check (migrations/042). Keep in sync when
-# a migration widens the constraint — the fake must reject exactly what
-# production rejects (test-fidelity Rule A/B).
-DOWNLOAD_LOG_OUTCOMES = frozenset({
-    "success", "rejected", "failed", "timeout",
-    "force_import", "manual_import", "curator_ban",
-    "measurement_failed", "user_offline",
-    "youtube_running", "youtube_success", "youtube_failed",
-})
-
 
 @dataclass
 class _FakeSearchPlanRow:
