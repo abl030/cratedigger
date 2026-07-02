@@ -36,7 +36,7 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          decide_download_action,
                          extract_usernames)
 from lib import transitions
-from lib.import_dispatch import DispatchOutcome, _build_download_info
+from lib.dispatch import DispatchOutcome, _build_download_info
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     ImportJob,

@@ -2177,7 +2177,7 @@ def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
 def preimport_nested_gate(import_mode: str, has_nested_audio: bool) -> str:
     """Decide the outcome of the preimport nested-folder gate.
 
-    Mirrors ``lib.import_dispatch.dispatch_import_from_db``'s fail-fast
+    Mirrors ``lib.dispatch.dispatch_import_from_db``'s fail-fast
     rejection of nested force/manual imports: the preimport gates recurse,
     but the downstream ``harness/import_one.py`` still uses ``os.listdir``
     for bitrate measurement and conversion. A nested force/manual import
@@ -3004,7 +3004,7 @@ def narrow_override_on_lossless_source_lock(
         ``None`` when the override is already ``"lossless"`` (no-op).
 
     Called from both the importer rejection branch
-    (``lib.import_dispatch``) and the wrong-match cleanup triage
+    (``lib.dispatch``) and the wrong-match cleanup triage
     (``lib.wrong_match_cleanup_service``).
     """
     if current == QUALITY_LOSSLESS:
@@ -3856,7 +3856,7 @@ def full_pipeline_decision(
     }
 
     # --- Preimport gates (issue #91) ---
-    # Ordering mirrors the live flow: lib.import_dispatch.dispatch_import_from_db
+    # Ordering mirrors the live flow: lib.dispatch.dispatch_import_from_db
     # checks inspection.has_nested_audio *before* calling
     # measure_preimport_state, so a force/manual import of a nested corrupt
     # folder is rejected as nested_layout (not audio_corrupt). The nested

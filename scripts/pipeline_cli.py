@@ -51,7 +51,7 @@ if REPO_ROOT not in sys.path:
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
-# ``lib.import_dispatch.finalize_request`` for the rationale.
+# ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
 
 from lib.import_queue import (
@@ -1241,7 +1241,7 @@ def cmd_quality(db, args):
     # Audio and nested-layout gates short-circuit before any FLAC/MP3 stage
     # runs. These let operators see the rejection paths that live in
     # lib.measurement.measure_preimport_state and
-    # lib.import_dispatch.dispatch_import_from_db.
+    # lib.dispatch.dispatch_import_from_db.
     #
     # `audio_check_mode` is read from the active runtime config and
     # applied to every scenario — on deployments with
@@ -1484,7 +1484,7 @@ def cmd_repair_spectral(db, args):
     current_spectral_bitrate still holds a stale transcode estimate,
     causing the quality gate to requeue indefinitely (issue #18).
     """
-    from lib.import_dispatch import load_quality_gate_state
+    from lib.dispatch import load_quality_gate_state
     from lib.quality import quality_gate_decision
 
     rank_cfg = _load_runtime_rank_config()

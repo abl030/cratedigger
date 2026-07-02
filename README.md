@@ -462,7 +462,7 @@ services.cratedigger.notifiers = {
 };
 ```
 
-The module renders the `[Meelo]` / `[Plex]` / `[Jellyfin]` sections of `config.ini` from these options at boot, sed-substituting credentials read from each `*File` path. The typed fields + `from_config` wiring live in [`lib/config.py`](lib/config.py); the HTTP calls themselves are `trigger_meelo_scan()` / `trigger_plex_scan()` / `trigger_jellyfin_scan()` in [`lib/util.py`](lib/util.py), dispatched from `lib/import_dispatch.py` under the `trigger_notifiers` flag on `DispatchAction`. Jellyfin's `library_id` is optional — leave it unset to trigger a full refresh.
+The module renders the `[Meelo]` / `[Plex]` / `[Jellyfin]` sections of `config.ini` from these options at boot, sed-substituting credentials read from each `*File` path. The typed fields + `from_config` wiring live in [`lib/config.py`](lib/config.py); the HTTP calls themselves are `trigger_meelo_scan()` / `trigger_plex_scan()` / `trigger_jellyfin_scan()` in [`lib/util.py`](lib/util.py), dispatched from `lib/dispatch/` under the `trigger_notifiers` flag on `DispatchAction`. Jellyfin's `library_id` is optional — leave it unset to trigger a full refresh.
 
 ## Running tests
 

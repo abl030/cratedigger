@@ -49,7 +49,7 @@ Production callsites (`grep "sp\\.run\\|sp\\.Popen" -- lib/ harness/`):
   op wrapper.
 - `harness/import_one.py` — spawns the harness and then spawns
   `beet move` for sibling canonicalization, all in the beets env.
-- `lib/import_dispatch.py` — spawns `import_one.py` (itself running
+- `lib/dispatch/` — spawns `import_one.py` (itself running
   in the beets env).
 
 Five entry points, three wrappers around them, two env-setup

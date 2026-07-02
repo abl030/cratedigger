@@ -28,10 +28,12 @@ hair-splitting; the branches were folded into
   `AlbumQualityEvidence`, marks the job `evidence_ready` or
   `measurement_failed`. Never emits a verdict. Never decides accept/reject.
   Never writes the denylist.
-- **Importer worker** (`lib/import_dispatch.py::dispatch_import_from_db`):
+- **Importer worker** (`lib/dispatch/entry_points.py::dispatch_import_from_db`
+  → `lib/dispatch/core.py::dispatch_import_core`):
   reads persisted evidence, decides via `full_pipeline_decision_from_evidence`.
   All rejects route through one helper
-  (`_reject_import_from_evidence_decision`) with one denylist policy. The
+  (`_reject_import_from_evidence_decision` in `lib/dispatch/outcome_actions.py`)
+  with one denylist policy. The
   four folder/audio-integrity reject reasons are listed in
   `_PREIMPORT_FACT_REJECT_DECISIONS`; that frozenset gives them the
   "always self-heal back to wanted" invariant (force/manual paths normally

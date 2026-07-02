@@ -414,7 +414,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
 
     def _run_dispatch(self, ir, beets_info, request_overrides=None, cfg=None):
         """Dispatch an import and return the FakePipelineDB state."""
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -614,7 +614,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         GOOD (171), and only under MEDIAN does it reach TRANSPARENT (245)
         and pass the default EXCELLENT gate.
 
-        If load_quality_gate_state (lib/import_dispatch.py) drops the
+        If load_quality_gate_state (lib/dispatch/) drops the
         median field when constructing the AudioQualityMeasurement, or if
         the rank cfg fails to thread through, this test fails because the
         gate falls back to AVG=171 (GOOD < EXCELLENT) and requeues. This
@@ -731,7 +731,7 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
 
     def test_verified_lossless_low_bitrate_accepts(self):
         """207kbps V0 from verified FLAC → accepted via final_format='mp3 v0'."""
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -764,7 +764,7 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
 
     def test_suspect_spectral_triggers_requeue(self):
         """Container 320kbps but spectral says 128kbps → requeue for upgrade."""
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -799,7 +799,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
 
     Exercises the pre-import measurement pipeline that both the auto-import
     path (lib.download_processing.process_completed_album) and the force/manual-import
-    path (lib.import_dispatch.dispatch_import_from_db) delegate to. Proves
+    path (lib.dispatch.dispatch_import_from_db) delegate to. Proves
     the measurement helper persists existing-album spectral state
     consistently regardless of caller. Quality decisions (and any denylist
     side effects) live in the importer's evidence pipeline.
@@ -1144,7 +1144,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
     """
 
     def test_lossy_candidate_locked_records_rejection_and_requeues(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.quality import V0ProbeEvidence, V0_PROBE_LOSSLESS_SOURCE
 
         existing_probe = V0ProbeEvidence(
@@ -1223,7 +1223,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
     def test_no_json_marks_failed_and_requeues(self):
         """No __IMPORT_RESULT__ in stdout → scenario=no_json_result, requeue."""
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -1264,7 +1264,7 @@ class TestForceImportSlice(unittest.TestCase):
 
     def test_force_import_success(self):
         """Force-import → imported, download_log outcome=force_import."""
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
@@ -1359,7 +1359,7 @@ class TestForceImportSlice(unittest.TestCase):
         TestDispatchThroughQualityGate.test_imported_path_reflects_beets_destination
         which covers the auto path.
         """
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_payload
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
@@ -1675,7 +1675,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
     def _run_dispatch(self, ir, beets_info, request_overrides=None):
         """Inline copy of TestDispatchThroughQualityGate._run_dispatch so
         this class is self-contained and doesn't inherit unrelated tests."""
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1956,7 +1956,7 @@ class TestReleaseLockContention(unittest.TestCase):
         - **no download_log row** — contention is a deferred retry,
           not a failure.
         """
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
 
@@ -2034,7 +2034,7 @@ class TestReleaseLockContention(unittest.TestCase):
         the status-reset branch is gated on scenario NOT in
         FORCE_MANUAL_SCENARIOS, so force/manual leave the row alone.
         """
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
 
@@ -2084,7 +2084,7 @@ class TestReleaseLockContention(unittest.TestCase):
                       outcome.message)
 
     def test_happy_path_acquires_lock_keyed_on_mbid_and_runs_import(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
 
@@ -2142,7 +2142,7 @@ class TestReleaseLockContention(unittest.TestCase):
         serialise every empty-mbid import. The code skips the lock
         entirely and logs a warning.
         """
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE
 
         db = self._make_db()
@@ -2320,7 +2320,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
     def test_auto_path_persists_current_path_after_staging(self):
         from lib import download_processing as dp_mod
-        from lib.import_dispatch import DispatchOutcome
+        from lib.dispatch import DispatchOutcome
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
         from lib.quality import ValidationResult
@@ -2445,7 +2445,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""
         from lib import download_processing as dp_mod
-        from lib.import_dispatch import DispatchOutcome
+        from lib.dispatch import DispatchOutcome
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -2636,7 +2636,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
     def test_dispatch_outcome_does_not_drive_fallback_transition(self):
         """Dispatch summaries are queue results, not fallback bool outcomes."""
         from lib import download as dl_mod
-        from lib.import_dispatch import DispatchOutcome
+        from lib.dispatch import DispatchOutcome
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -3590,7 +3590,7 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
     """
 
     def test_flag_set_before_subprocess_launch_on_auto_import(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.quality import ActiveDownloadState
 
         db = FakePipelineDB()
@@ -3682,7 +3682,7 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
         eventually owns ``active_download_state`` for the same MBID
         must not be polluted by an unrelated force-import.
         """
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from lib.quality import ActiveDownloadState
 
         db = FakePipelineDB()
@@ -5216,7 +5216,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
     """
 
     def test_force_import_missing_evidence_routes_through_preview(self):
-        from lib.import_dispatch import (
+        from lib.dispatch import (
             DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
             dispatch_import_from_db,
         )
@@ -5337,7 +5337,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
     """
 
     def test_measurement_failed_happy_path_fires_all_four_side_effects(self):
-        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.dispatch import _record_preview_measurement_failed
         from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
         from lib.quality import MeasurementFailure
 
@@ -5408,7 +5408,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         None where production raised NotNullViolation; test-fidelity
         Rule A). The helper raises an explicit ValueError instead, and
         neither finalize_request, the log write, nor the denylist fire."""
-        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.dispatch import _record_preview_measurement_failed
         from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
         from lib.quality import MeasurementFailure
 
@@ -5428,7 +5428,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         )
 
         # Spy on finalize_request to prove it is NOT called.
-        with patch("lib.import_dispatch.finalize_request") as mock_finalize:
+        with patch("lib.dispatch.outcome_actions.finalize_request") as mock_finalize:
             with self.assertRaises(ValueError):
                 _record_preview_measurement_failed(
                     cast(Any, db),
@@ -5446,7 +5446,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
     def test_source_vanished_no_denylist_when_username_unknown(self):
         """source_vanished + no source_username → no denylist write.
         Request and job still finalize normally."""
-        from lib.import_dispatch import _record_preview_measurement_failed
+        from lib.dispatch import _record_preview_measurement_failed
         from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
         from lib.quality import MeasurementFailure
 
@@ -5489,7 +5489,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         existing DownloadInfo-based entry point continues to write a
         download_log row, transition the request to wanted, and record an
         attempt — same as before U4."""
-        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+        from lib.dispatch import _record_rejection_and_maybe_requeue
         from lib.quality import DownloadInfo
 
         db = FakePipelineDB()
@@ -5941,7 +5941,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         db.set_request_current_evidence(request_id, persisted.id)
 
     def _drive_dispatch(self, db, *, request_id, tmpdir, import_job_id, cfg):
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
 
         # album_path=None makes the current-evidence guard trust the
         # seeded REQUEST_CURRENT row without an audio-snapshot probe.
@@ -6633,7 +6633,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             # Now drive the importer side: dispatch_import_from_db should
             # read the persisted evidence, call preimport_decide, see the
             # suspect@96 vs existing min 192 case, and reject.
-            from lib.import_dispatch import dispatch_import_from_db
+            from lib.dispatch import dispatch_import_from_db
             beets_info_no_path = AlbumInfo(
                 album_id=1, track_count=10, min_bitrate_kbps=192,
                 avg_bitrate_kbps=192, format="MP3", is_cbr=False,
@@ -6812,7 +6812,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             self.assertTrue(persisted.audio_corrupt)
 
             # Drive the importer and assert reject + self-heal.
-            from lib.import_dispatch import dispatch_import_from_db
+            from lib.dispatch import dispatch_import_from_db
             beets_info_no_path = AlbumInfo(
                 album_id=1, track_count=10, min_bitrate_kbps=192,
                 avg_bitrate_kbps=192, format="MP3", is_cbr=False,
@@ -7222,7 +7222,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         point) so the library evidence row reflects production policy.
         Returns the resulting library evidence row.
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
 
         candidate = self._build_transcoded_source_evidence(
             source_dir, mb_release_id=mb_release_id,
@@ -7647,7 +7647,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         ``snapshot_fingerprint`` differs (filenames changed),
         ``source_path`` points at the library, ``audio_corrupt`` is False.
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import (
             AlbumQualityV0Metric,
             VerifiedLosslessProof,
@@ -7799,7 +7799,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         also carry forward (unchanged). Bitrate/format reflect the V0
         output from ``album_info``.
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import (
             AlbumQualityV0Metric,
             VerifiedLosslessProof,
@@ -7946,7 +7946,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         ``test_transcoded_flac_to_v0_propagates_source_evidence``; the m4a
         container that carries a lossless-source V0 probe is the only difference.
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import AlbumQualityV0Metric
 
         db = FakePipelineDB()
@@ -8073,7 +8073,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         proves the fix admits ALAC-m4a without widening the gate to admit every
         ``.m4a`` (which would re-import AAC junk as a lossless anchor).
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import AlbumQualityV0Metric
 
         db = FakePipelineDB()
@@ -8191,7 +8191,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         the regression guard for the lossless-source gate in
         ``propagate_candidate_evidence_to_current`` (rescoped 2026-05-17).
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import AlbumQualityV0Metric
 
         db = FakePipelineDB()
@@ -8315,7 +8315,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         row — U5 propagation policy must land first.
         """
         from datetime import datetime, timezone
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import (
             AlbumQualityEvidence,
             AlbumQualityV0Metric,
@@ -8528,7 +8528,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         — same bitrate/format from ``album_info``, same
         ``verified_lossless_proof`` carried from the import_result.
         """
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality_evidence import backfill_current_evidence_from_album_info
 
         db_via_helper = FakePipelineDB()
@@ -8622,7 +8622,7 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
 
     def test_refresh_passes_library_root_to_beets_db(self) -> None:
         import inspect
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
 
         sig = inspect.signature(_refresh_current_evidence_after_import)
         self.assertIn(
@@ -8634,7 +8634,7 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
         )
 
     def test_refresh_constructs_beets_db_with_library_root_kwarg(self) -> None:
-        from lib.import_dispatch import _refresh_current_evidence_after_import
+        from lib.dispatch import _refresh_current_evidence_after_import
 
         captured_library_root: list[str] = []
 
@@ -8679,7 +8679,7 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
         # is wired to beets_library_root. Static check is sufficient and
         # avoids a full dispatch-import-core orchestration test.
         import inspect
-        from lib import import_dispatch
+        from lib.dispatch import core as import_dispatch
 
         src = inspect.getsource(import_dispatch.dispatch_import_core)
         # The call must include the beets_library_root kwarg sourced

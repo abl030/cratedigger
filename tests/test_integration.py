@@ -28,7 +28,7 @@ from lib import enqueue as enqueue_module
 from lib.grab_list import DownloadFile
 from lib.slskd_transfers import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
-from lib.import_dispatch import _build_download_info
+from lib.dispatch import _build_download_info
 from lib.context import CratediggerContext
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (

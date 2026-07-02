@@ -115,7 +115,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         decision logic (downgrade prevention, quality gate, denylist,
         cleanup).
         """
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
 
         db = FakePipelineDB()
         req_kwargs = {
@@ -193,7 +193,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
             mock_gate = RecordingQualityGate()
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -324,7 +324,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         )
 
     def test_force_import_with_valid_candidate_evidence_skips_preimport_measurement(self):
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -376,7 +376,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3 128",
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -401,7 +401,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_manual_import_with_valid_candidate_evidence_skips_preimport_measurement(self):
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -454,7 +454,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 storage_format="mp3 128",
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db_for_dispatch()), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -483,7 +483,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
     def test_force_import_with_stale_candidate_evidence_requeues_to_preview(self):
         """U2: stale candidate evidence requeues the import_job for preview
         rather than hard-failing."""
-        from lib.import_dispatch import (
+        from lib.dispatch import (
             DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
             dispatch_import_from_db,
         )
@@ -566,7 +566,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
 
     def test_force_import_with_missing_candidate_evidence_requeues_to_preview(self):
         """U2: missing candidate evidence requeues to preview instead of failing."""
-        from lib.import_dispatch import (
+        from lib.dispatch import (
             DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
             dispatch_import_from_db,
         )
@@ -630,7 +630,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         """U2: if the requeue UPDATE itself raises, dispatch returns
         DISPATCH_CODE_REQUEUE_FAILED so the importer keeps the row in
         `running` for startup recovery."""
-        from lib.import_dispatch import (
+        from lib.dispatch import (
             DISPATCH_CODE_REQUEUE_FAILED,
             dispatch_import_from_db,
         )
@@ -705,7 +705,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
         Dispatch returns DISPATCH_CODE_REQUEUE_FAILED so the importer
         marks the job failed.
         """
-        from lib.import_dispatch import (
+        from lib.dispatch import (
             DISPATCH_CODE_REQUEUE_FAILED,
             dispatch_import_from_db,
         )
@@ -733,7 +733,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             with patch.object(
                 db, "requeue_import_job_for_preview", return_value=None,
             ), patch_dispatch_externals() as ext, patch(
-                "lib.import_dispatch.ensure_candidate_evidence_for_action",
+                "lib.dispatch.entry_points.ensure_candidate_evidence_for_action",
                 return_value=CandidateEvidenceActionResult(
                     evidence=None,
                     provenance=ActionEvidenceProvenance(
@@ -859,7 +859,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         return db
 
     def _dispatch(self, db: "FakePipelineDB"):
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
         ir = make_import_result(decision="import", new_min_bitrate=320)
         tmpdir = tempfile.mkdtemp()
         try:
@@ -869,7 +869,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                 payload=manual_import_payload(failed_path=tmpdir),
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
                            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -922,14 +922,14 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         db.set_advisory_lock_result(False)
         tmpdir = tempfile.mkdtemp()
         try:
-            from lib.import_dispatch import dispatch_import_from_db
+            from lib.dispatch import dispatch_import_from_db
             job = db.enqueue_import_job(
                 IMPORT_JOB_MANUAL,
                 request_id=42,
                 payload=manual_import_payload(failed_path=tmpdir),
             )
             with patch(
-                "lib.import_dispatch.ensure_candidate_evidence_for_action"
+                "lib.dispatch.entry_points.ensure_candidate_evidence_for_action"
             ) as mock_ensure, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -950,7 +950,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
 
 class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
     def test_dispatch_import_from_db_uses_shared_runtime_config_reader(self):
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -992,7 +992,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                 storage_format="mp3 320",
             )
             with patch_dispatch_externals(), \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir), \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config", return_value=cfg) as mock_read:
                 dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
@@ -1022,7 +1022,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
     """
 
     def test_missing_both_ids_returns_bad_request(self):
-        from lib.import_dispatch import (
+        from lib.dispatch import (
             DISPATCH_CODE_BAD_REQUEST,
             dispatch_import_from_db,
         )
@@ -1039,7 +1039,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
         try:
             with patch_dispatch_externals() as ext, \
                  patch(
-                     "lib.import_dispatch.ensure_candidate_evidence_for_action"
+                     "lib.dispatch.entry_points.ensure_candidate_evidence_for_action"
                  ) as mock_ensure, \
                  patch("lib.config.read_runtime_config",
                        return_value=CratediggerConfig(
@@ -1084,12 +1084,12 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
 
     def test_helper_returns_none_marks_current_missing(self):
         """Beets has no album → current_status='missing', not fail-closed."""
-        from lib.import_dispatch import _load_evidence_import_gate
+        from lib.dispatch import _load_evidence_import_gate
 
         db = FakePipelineDB()
         candidate_result = self._candidate_result()
         with patch(
-            "lib.import_dispatch.load_current_evidence_for_action",
+            "lib.dispatch.evidence_gate.load_current_evidence_for_action",
             return_value=None,
         ) as mock_helper:
             gate = _load_evidence_import_gate(
@@ -1114,7 +1114,7 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
     def test_helper_fail_closed_propagates_to_gate(self):
         """Helper fail-closed result → gate current_fail_closed=True."""
         from lib.import_evidence import CurrentEvidenceActionResult
-        from lib.import_dispatch import _load_evidence_import_gate
+        from lib.dispatch import _load_evidence_import_gate
 
         db = FakePipelineDB()
         candidate_result = self._candidate_result()
@@ -1128,7 +1128,7 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
             evidence=None, provenance=fail_provenance
         )
         with patch(
-            "lib.import_dispatch.load_current_evidence_for_action",
+            "lib.dispatch.evidence_gate.load_current_evidence_for_action",
             return_value=fail_result,
         ):
             gate = _load_evidence_import_gate(

@@ -55,7 +55,7 @@ from lib.util import beets_subprocess_env
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
-# ``lib.import_dispatch.finalize_request`` for the rationale.
+# ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DuplicateRemoveCandidate,
@@ -89,7 +89,7 @@ _import_total_start: float | None = None
 # Rank config for BeetsDB.get_album_info() mixed-format reduction + (commit 5)
 # quality_rank() / compare_quality() / quality_gate_decision(). main() replaces
 # this with the deserialized --quality-rank-config argv blob passed by
-# lib.import_dispatch.dispatch_import_core. Missing or malformed argv falls
+# lib.dispatch.core.dispatch_import_core. Missing or malformed argv falls
 # back to the hardcoded defaults.
 _rank_cfg: QualityRankConfig = QualityRankConfig.defaults()
 
@@ -1531,7 +1531,7 @@ def main():
                         help="Desired format on disk (e.g. 'flac' to skip conversion)")
     parser.add_argument("--quality-rank-config", default=None,
                         help="Serialized QualityRankConfig (JSON). Provided by "
-                             "lib.import_dispatch.dispatch_import_core so the "
+                             "lib.dispatch.core.dispatch_import_core so the "
                              "harness's rank classification matches the caller's "
                              "runtime config. Missing/empty falls back to defaults.")
     parser.add_argument("--quality-evidence-action-file", default=None,

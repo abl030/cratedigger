@@ -90,7 +90,7 @@ def beets_subprocess_env() -> dict[str, str]:
 
     Every subprocess that runs beets must use this env:
       - lib/beets.py::beets_validate (harness for validation)
-      - lib/import_dispatch.py (launches import_one.py)
+      - lib/dispatch/ (launches import_one.py)
       - harness/import_one.py (launches the harness + `beet move`)
       - web/routes/pipeline.py (ban-source `beet remove`)
 

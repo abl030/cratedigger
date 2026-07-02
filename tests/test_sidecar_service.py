@@ -150,7 +150,7 @@ class TestImportDispatchSidecarHook(_SidecarServiceCase):
     """The importer success hook writes the sidecar via the shared service."""
 
     def test_hook_writes_sidecar_via_beets_factory(self):
-        from lib.import_dispatch import _write_album_sidecar_after_import
+        from lib.dispatch import _write_album_sidecar_after_import
 
         self._seed_current_evidence(self._verified_lossless_evidence())
         self.db.log_download(
@@ -175,7 +175,7 @@ class TestImportDispatchSidecarHook(_SidecarServiceCase):
         self.assertEqual(sidecar.source_username, "peer")
 
     def test_hook_skips_non_verified_lossless(self):
-        from lib.import_dispatch import _write_album_sidecar_after_import
+        from lib.dispatch import _write_album_sidecar_after_import
 
         self._seed_current_evidence(
             make_album_quality_evidence(mb_release_id=MBID)

@@ -18,7 +18,7 @@ if REPO_ROOT not in sys.path:
 
 import msgspec
 
-from lib.import_dispatch import (
+from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
@@ -166,7 +166,7 @@ def execute_import_job(
         )
 
     if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
-        from lib.import_dispatch import dispatch_import_from_db
+        from lib.dispatch import dispatch_import_from_db
 
         payload = job.payload
         failed_path = str(payload.get("failed_path") or "")

@@ -1,7 +1,7 @@
 """Orchestration for the verified-lossless album sidecar (issue #184).
 
 ``write_sidecar_for_request`` is the single entry point both the importer
-success hook (``lib/import_dispatch.py``) and the one-shot backfill call — no
+success hook (``lib/dispatch/``) and the one-shot backfill call — no
 parallel code paths. It loads the request's current (library-side) evidence,
 gates on verified-lossless, resolves the on-disk album folder via beets, and
 atomically writes ``cratedigger.json``.

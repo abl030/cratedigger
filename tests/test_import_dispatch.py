@@ -1,4 +1,4 @@
-"""Tests for lib/import_dispatch.py — auto-import decision tree.
+"""Tests for lib/dispatch/ — auto-import decision tree.
 
 Orchestration tests (TestDispatchImport, TestQualityGate*) use FakePipelineDB
 and assert domain state. Seam tests (TestOverrideMinBitrate, TestOpus*,
@@ -130,7 +130,7 @@ def _dispatch_valid_result_cmd(
 
         with patch("lib.download_processing.log_validation_result"), \
              patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
             _handle_valid_result(
                 album_data,
                 bv_result,
@@ -147,7 +147,7 @@ def _dispatch_valid_result_cmd(
 class TestPopulateDlInfoFromImportResult(unittest.TestCase):
 
     def test_converted_flac_to_v0(self):
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="flac")
         ir = make_import_result(was_converted=True, original_filetype="flac",
                                 target_filetype="mp3", new_min_bitrate=245)
@@ -162,7 +162,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         self.assertEqual(dl.download_spectral.grade, "genuine")
 
     def test_no_conversion(self):
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="mp3")
         ir = make_import_result(was_converted=False, new_min_bitrate=320)
         _populate_dl_info_from_import_result(dl, ir)
@@ -179,7 +179,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
         Live reproducer: request 1055, rows 3628/3631 both have NULL column
         despite JSONB carrying 119 and 162.
         """
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="mp3")
         ir = make_import_result(was_converted=False, new_min_bitrate=119)
         _populate_dl_info_from_import_result(dl, ir)
@@ -188,7 +188,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     def test_populates_actual_min_bitrate_for_flac_conversion(self):
         """Same guarantee for the FLAC→V0 conversion path — the V0 min bitrate
         is the point-in-time value and must land on the column."""
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="flac")
         ir = make_import_result(was_converted=True, original_filetype="flac",
                                 target_filetype="mp3", new_min_bitrate=245)
@@ -198,14 +198,14 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
     def test_leaves_actual_min_bitrate_none_when_measurement_missing(self):
         """If there's no new_measurement in the ImportResult, we don't
         fabricate a value — NULL is the honest signal for consumers."""
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="mp3")
         ir = ImportResult(decision="import_failed", new_measurement=None)
         _populate_dl_info_from_import_result(dl, ir)
         self.assertIsNone(dl.actual_min_bitrate)
 
     def test_populates_v0_probe_evidence(self):
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="flac")
         probe = V0ProbeEvidence(
             kind=V0_PROBE_LOSSLESS_SOURCE,
@@ -236,7 +236,7 @@ class TestPopulateDlInfoFromImportResult(unittest.TestCase):
 class TestCleanupStagedDir(unittest.TestCase):
 
     def test_removes_dir_and_empty_parent(self):
-        from lib.import_dispatch import _cleanup_staged_dir
+        from lib.dispatch import _cleanup_staged_dir
         tmpdir = tempfile.mkdtemp()
         try:
             parent = os.path.join(tmpdir, "Artist")
@@ -250,7 +250,7 @@ class TestCleanupStagedDir(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_preserves_nonempty_parent(self):
-        from lib.import_dispatch import _cleanup_staged_dir
+        from lib.dispatch import _cleanup_staged_dir
         tmpdir = tempfile.mkdtemp()
         try:
             parent = os.path.join(tmpdir, "Artist")
@@ -268,12 +268,12 @@ class TestCleanupStagedDir(unittest.TestCase):
 class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
     """Seam tests for the shared rejection finalizer."""
 
-    @patch("lib.import_dispatch.finalize_request")
+    @patch("lib.dispatch.outcome_actions.finalize_request")
     def test_requeue_defers_from_status_lookup_to_finalize_request(
         self,
         mock_finalize,
     ) -> None:
-        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+        from lib.dispatch import _record_rejection_and_maybe_requeue
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="manual"))
@@ -297,7 +297,7 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         self.assertEqual(db.request(42)["validation_attempts"], 1)
 
     def test_requeue_only_forwards_fields_persisted_by_wanted_transition(self) -> None:
-        from lib.import_dispatch import _record_rejection_and_maybe_requeue
+        from lib.dispatch import _record_rejection_and_maybe_requeue
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -337,7 +337,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
     """
 
     def test_evidence_rejection_populates_download_log_columns(self) -> None:
-        from lib.import_dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch import _reject_import_from_evidence_decision
         from lib.quality import AudioQualityMeasurement, ImportResult
 
         db = FakePipelineDB()
@@ -413,7 +413,7 @@ class TestRejectImportFromEvidenceDecisionForcedRequeue(unittest.TestCase):
     FOUR_FACT_DECISIONS = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
 
     def _reject(self, *, decision: str, requeue_on_failure: bool):
-        from lib.import_dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch import _reject_import_from_evidence_decision
         from lib.quality import AudioQualityMeasurement, ImportResult
 
         db = FakePipelineDB()
@@ -485,7 +485,7 @@ class TestDispatchImport(unittest.TestCase):
     _SENTINEL = object()
 
     def _dispatch(self, ir=_SENTINEL, request_overrides=None):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         if ir is self._SENTINEL:
             ir = make_import_result(decision="import")
 
@@ -504,7 +504,7 @@ class TestDispatchImport(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -802,7 +802,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
 
     def test_duplicate_remove_guard_failure_denylists_and_quarantines(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
 
         staging_root = tempfile.mkdtemp()
         source = os.path.join(staging_root, "auto-import", "Artist", "Album")
@@ -847,7 +847,7 @@ class TestDispatchImport(unittest.TestCase):
         )
         try:
             with patch_dispatch_externals() as ext, \
-                 patch("lib.import_dispatch.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
                 dispatch_import_core(
                     path=source,
                     mb_release_id="test-mbid",
@@ -889,11 +889,11 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(r["db"].download_logs[0].outcome, "failed")
 
     def test_timeout(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
 
-        with patch("lib.import_dispatch.sp.run",
+        with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
@@ -907,11 +907,11 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(db.download_logs[0].outcome, "failed")
 
     def test_exception(self):
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
 
-        with patch("lib.import_dispatch.sp.run",
+        with patch("lib.dispatch.subprocess_runner.sp.run",
                    side_effect=RuntimeError("boom")):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
@@ -946,7 +946,7 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
     def _dispatch_with_unfindable(self, *, prior_category, rescued_at=None,
                                   prior_rescue_category=None):
         """Drive a successful import on a previously-unfindable request."""
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         from datetime import datetime, timezone
 
         ir = make_import_result(decision="import")
@@ -973,7 +973,7 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             with patch_dispatch_externals(), \
-                 patch("lib.import_dispatch.parse_import_result",
+                 patch("lib.dispatch.subprocess_runner.parse_import_result",
                        return_value=ir):
                 dispatch_import_core(
                     path=tmpdir,
@@ -1098,13 +1098,13 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
 
     def _run_dispatch_capture_cmd(self, cfg_obj):
         """Call dispatch_import_core with cfg_obj, return captured argv."""
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         ir = make_import_result(decision="import")
 
         with patch_dispatch_externals() as ext, \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="mbid-1",
                 request_id=42, label="Test Artist - Test Album",
@@ -1192,7 +1192,7 @@ class TestLoadQualityGateState(unittest.TestCase):
     def test_uses_full_request_row_to_apply_final_format(self):
         """The shared adapter must honor persisted final_format labels."""
         from lib.beets_db import AlbumInfo
-        from lib.import_dispatch import load_quality_gate_state
+        from lib.dispatch import load_quality_gate_state
         from lib.quality import QualityRankConfig
 
         db = FakePipelineDB()
@@ -1252,7 +1252,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
     def _run_quality_gate(self, *, info, **extra_req_fields):
         """Drive ``_check_quality_gate_core`` with a real ``AlbumInfo`` and the
         real ``quality_gate_decision`` (no patch on the pure decision)."""
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         db = FakePipelineDB()
         merged = {"status": "imported", "current_spectral_bitrate": None,
                   "verified_lossless": False}
@@ -1305,7 +1305,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
     def test_no_mb_id_returns_early(self):
         """Empty mb_id should return without doing anything."""
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="imported"))
         _check_quality_gate_core(
@@ -1348,7 +1348,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         '< 210kbps' regardless of cfg.gate_min_rank. After the fix the reason
         carries the rank name + the configured gate threshold.
         """
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.quality import QualityRankConfig
         from lib.beets_db import AlbumInfo
 
@@ -1396,7 +1396,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         Verifies the reason text actually threads cfg through to the
         denylist entry, not just the decision.
         """
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.quality import QualityRankConfig, QualityRank
         from lib.beets_db import AlbumInfo
 
@@ -1447,7 +1447,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         Reading current_* (None) leaves the rank at EXCELLENT → accept,
         and the request row stays ``imported``.
         """
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1483,7 +1483,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
     def test_genuine_v0_replacing_transcode_accepted(self):
         """Genuine V0 replacing a transcode should be accepted, not requeued."""
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
 
         db = FakePipelineDB()
@@ -1529,7 +1529,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         GOOD, which is < EXCELLENT (gate_min) → requeue_upgrade. Without
         the clamp the status would stay ``imported``.
         """
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
 
         db = FakePipelineDB()
@@ -1570,7 +1570,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         container bitrate for non-transcode grades, so the gate sees a
         clean EXCELLENT rank and the request stays imported.
         """
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
 
         db = FakePipelineDB()
@@ -1601,14 +1601,14 @@ class TestQualityGateUsesIntent(unittest.TestCase):
 
     def test_dispatch_requeue_uses_intent(self):
         """Transcode-upgrade requeue path uses quality constants."""
-        from lib.import_dispatch import dispatch_import_core
+        from lib.dispatch import dispatch_import_core
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         ir = make_import_result(decision="transcode_upgrade",
                                 new_min_bitrate=227)
 
         with patch_dispatch_externals(), \
-             patch("lib.import_dispatch.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
@@ -1629,7 +1629,7 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
 
     def _run_quality_gate_accept(self, target_format="flac"):
         """Drive a real accept via FLAC verified-lossless input — no decision stub."""
-        from lib.import_dispatch import _check_quality_gate_core
+        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
 
         db = FakePipelineDB()
@@ -1695,7 +1695,7 @@ class TestOpusConversionDispatch(unittest.TestCase):
         self.assertNotIn("--verified-lossless-target", cmd)
 
     def test_opus_import_result_populates_dl_info(self):
-        from lib.import_dispatch import _populate_dl_info_from_import_result
+        from lib.dispatch import _populate_dl_info_from_import_result
         dl = DownloadInfo(filetype="flac")
         ir = ImportResult(
             decision="import",

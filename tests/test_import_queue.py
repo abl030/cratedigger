@@ -12,7 +12,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
-from lib.import_dispatch import (
+from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DispatchOutcome,
 )
@@ -399,7 +399,7 @@ class TestImporterWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "lib.import_dispatch.dispatch_import_from_db",
+            "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported"),
         ) as dispatch:
             updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -440,7 +440,7 @@ class TestImporterWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "lib.import_dispatch.dispatch_import_from_db",
+            "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported"),
         ) as dispatch:
             importer.process_claimed_job(cast(Any, db), claimed)
@@ -487,7 +487,7 @@ class TestImporterWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "lib.import_dispatch.dispatch_import_from_db",
+            "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported"),
         ) as dispatch:
             importer.process_claimed_job(cast(Any, db), claimed)
@@ -533,7 +533,7 @@ class TestImporterWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "lib.import_dispatch.dispatch_import_from_db",
+            "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported"),
         ) as dispatch:
             importer.process_claimed_job(cast(Any, db), claimed)
@@ -560,7 +560,7 @@ class TestImporterWorker(unittest.TestCase):
         assert claimed is not None
 
         with patch(
-            "lib.import_dispatch.dispatch_import_from_db",
+            "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(False, "quality gate rejected"),
         ):
             updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -594,7 +594,7 @@ class TestImporterWorker(unittest.TestCase):
             assert claimed is not None
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(
                     False,
                     "Rejected by persisted quality evidence: downgrade",
@@ -666,7 +666,7 @@ class TestImporterWorker(unittest.TestCase):
             assert claimed is not None
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "beets failed"),
             ), patch(
                 "lib.wrong_match_cleanup_service.cleanup_wrong_match",
@@ -827,7 +827,7 @@ class TestImporterWorker(unittest.TestCase):
         flipped the row back to queued/waiting; the importer just logs and
         yields."""
         from scripts import importer
-        from lib.import_dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
+        from lib.dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
 
         db = FakePipelineDB()
         root, source = _make_failed_import_source()
@@ -863,7 +863,7 @@ class TestImporterWorker(unittest.TestCase):
                 )
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 side_effect=fake_dispatch,
             ), patch(
                 "lib.wrong_match_cleanup_service.cleanup_wrong_match",
@@ -899,7 +899,7 @@ class TestImporterWorker(unittest.TestCase):
         problem is resolved.
         """
         from scripts import importer
-        from lib.import_dispatch import DISPATCH_CODE_REQUEUE_FAILED
+        from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED
 
         db = FakePipelineDB()
         root, source = _make_failed_import_source()
@@ -922,7 +922,7 @@ class TestImporterWorker(unittest.TestCase):
             assert claimed is not None
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(
                     False,
                     "requeue UPDATE failed: boom",
@@ -985,7 +985,7 @@ class TestImporterWorker(unittest.TestCase):
                 )
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 side_effect=reject_again,
             ):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1027,7 +1027,7 @@ class TestImporterWorker(unittest.TestCase):
             )
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(
                     False,
                     "Rejected by persisted quality evidence: downgrade",
@@ -1064,7 +1064,7 @@ class TestImporterWorker(unittest.TestCase):
             assert claimed is not None
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(False, "manual import failed"),
             ):
                 updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1098,7 +1098,7 @@ class TestImporterWorker(unittest.TestCase):
             assert claimed is not None
 
             with patch(
-                "lib.import_dispatch.dispatch_import_from_db",
+                "lib.dispatch.dispatch_import_from_db",
                 return_value=DispatchOutcome(
                     False,
                     "Another import is already in progress",
@@ -1137,7 +1137,7 @@ class TestImporterWorker(unittest.TestCase):
         self.assertIsNone(recovered[0].heartbeat_at)
 
         with patch(
-            "lib.import_dispatch.dispatch_import_from_db",
+            "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported on retry"),
         ):
             updated = importer.run_once(cast(Any, db), worker_id="new-worker")
