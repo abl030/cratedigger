@@ -223,6 +223,9 @@ class TestIngestStamping(SlskdEventIngestCase):
         self.seed_downloading()
         self.slskd.events.set_events([
             self.event(
+                id="ev-3", timestamp="2026-07-01T11:30:00.0000000Z",
+                data="{ not valid json"),  # DecodeError, not ValidationError
+            self.event(
                 id="ev-2", timestamp="2026-07-01T11:00:00.0000000Z",
                 data=json.dumps({"localFilename": 42})),  # type drift
             self.event(
@@ -459,8 +462,13 @@ class TestRecentCompletionPaths(SlskdEventIngestCase):
         from lib.slskd_events import recent_completion_paths
         self.slskd.events.set_events([
             self.event(
-                id="ev-bad", timestamp="2026-07-02T10:00:00.0000000Z",
+                id="ev-bad-schema", timestamp="2026-07-02T10:00:00.0000000Z",
                 data="{}"),
+            # Malformed (non-JSON) data raises msgspec.DecodeError, not
+            # ValidationError — must be skipped, not escape the pass.
+            self.event(
+                id="ev-bad-json", timestamp="2026-07-02T10:00:00.0000000Z",
+                data="{ not valid json"),
             self.event(
                 id="ev-good", timestamp="2026-07-02T10:00:00.0000000Z",
                 data=_file_complete_data(

@@ -147,7 +147,9 @@ def _local_paths_from_events(
         file_events += 1
         try:
             payload = decode_download_file_complete(event)
-        except msgspec.ValidationError:
+        except msgspec.DecodeError:
+            # Parent of ValidationError — also catches malformed (non-JSON)
+            # ``data`` strings, which must skip one event, not kill the pass.
             logger.warning(
                 "SLSKD EVENTS: undecodable DownloadFileComplete payload "
                 "(event id=%s) — skipping", event.id, exc_info=True)
@@ -242,7 +244,9 @@ def recent_completion_paths(slskd: Any) -> RecentCompletionPaths:
                 directories.setdefault(
                     (dir_payload.username, dir_payload.remote_directory_name),
                     dir_payload.local_directory_name)
-        except msgspec.ValidationError:
+        except msgspec.DecodeError:
+            # Parent of ValidationError — also catches malformed (non-JSON)
+            # ``data`` strings.
             logger.warning(
                 "SLSKD EVENTS: undecodable %s payload (event id=%s) — "
                 "skipping", event.type, event.id, exc_info=True)

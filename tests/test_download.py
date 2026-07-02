@@ -2093,6 +2093,34 @@ class TestEventPathMaterialization(unittest.TestCase):
             self.assertEqual(self._moved(tmpdir), [self.FNAME])
 
 
+class TestMaterializeFailureAction(unittest.TestCase):
+    """Pure decision table for the poller's materialize-failure escape."""
+
+    NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+    OLD = (NOW - timedelta(hours=2)).isoformat()
+    FRESH = (NOW - timedelta(minutes=5)).isoformat()
+
+    CASES = [
+        ("none_fresh_leaves", None, FRESH, "leave"),
+        ("none_old_leaves_manual_recovery_alone", None, OLD, "leave"),
+        ("false_fresh_retries", False, FRESH, "retry"),
+        ("false_old_resets", False, OLD, "reset"),
+        ("false_no_start_retries", False, None, "retry"),
+        ("false_unparseable_start_retries", False, "not-a-date", "retry"),
+        ("naive_timestamp_treated_utc", False,
+         (NOW - timedelta(hours=2)).replace(tzinfo=None).isoformat(), "reset"),
+    ]
+
+    def test_decision_table(self):
+        from lib.download import materialize_failure_action
+        for desc, materialized, started, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    materialize_failure_action(
+                        materialized, started, self.NOW),
+                    expected)
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 

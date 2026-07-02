@@ -1,6 +1,6 @@
 """Shared pre-import quality gates for auto-import, force-import, and manual-import.
 
-The auto-import path (lib.download.process_completed_album), the force-import
+The auto-import path (lib.download_processing.process_completed_album), the force-import
 path (lib.import_dispatch.dispatch_import_from_db), and the manual-import path
 all MUST run the same quality gates: audio integrity and spectral transcode
 detection. The only gate that differs between paths is the beets *distance*
@@ -49,7 +49,7 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
 
     Callers inside lib.measurement must use this proxy so patches on
     ``lib.measurement.spectral_analyze`` take effect.
-"""
+    """
     from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
 

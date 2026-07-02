@@ -470,18 +470,36 @@ def _active_import_job_for_request(
     return db.get_active_import_job_for_request(request_id)
 
 
-def _materialize_grace_expired(state: ActiveDownloadState) -> bool:
-    """True once processing has been failing longer than the grace window."""
-    if state.processing_started_at is None:
-        return False
+def materialize_failure_action(
+    materialized: bool | None,
+    processing_started_at: str | None,
+    now: datetime,
+    *,
+    grace_seconds: int = PROCESSING_MATERIALIZE_GRACE_S,
+) -> str:
+    """Decide what the poller does with a non-True materialize outcome.
+
+    - ``"leave"`` — ``None`` marks guarded paths needing manual recovery;
+      NEVER auto-reset those, regardless of age.
+    - ``"retry"`` — ``False`` within the grace window retries next cycle
+      (covers the benign completion-vs-event-write race, which resolves
+      on the next ingest).
+    - ``"reset"`` — ``False`` past the grace window self-heals the
+      request back to 'wanted' for re-download.
+    """
+    if materialized is not False:
+        return "leave"
+    if processing_started_at is None:
+        return "retry"
     try:
-        started = datetime.fromisoformat(state.processing_started_at)
+        started = datetime.fromisoformat(processing_started_at)
     except ValueError:
-        return False
+        return "retry"
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
-    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-    return elapsed > PROCESSING_MATERIALIZE_GRACE_S
+    if (now - started).total_seconds() > grace_seconds:
+        return "reset"
+    return "retry"
 
 
 def _enqueue_completed_processing(
@@ -514,12 +532,12 @@ def _enqueue_completed_processing(
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
     if materialized is not True:
-        # ``None`` marks guarded paths needing manual recovery — never
-        # auto-reset those. ``False`` failures retry cycle-to-cycle until
-        # the grace window closes, then self-heal via re-download: the
-        # request row is the source of truth and a fresh download arrives
-        # with a fresh event stamp.
-        if materialized is False and _materialize_grace_expired(state):
+        action = materialize_failure_action(
+            materialized,
+            state.processing_started_at,
+            datetime.now(timezone.utc),
+        )
+        if action == "reset":
             detail = (
                 "Completed download could not be materialized within "
                 f"{PROCESSING_MATERIALIZE_GRACE_S}s of processing start; "
