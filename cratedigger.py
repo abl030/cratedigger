@@ -1356,9 +1356,9 @@ def _search_and_queue_parallel(albums, ctx):
     return grab_list, failed_search, failed_grab
 
 
-from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
-                          slskd_do_enqueue as _slskd_do_enqueue_impl,
-                          grab_most_wanted as _grab_most_wanted_impl)
+from lib.download import grab_most_wanted as _grab_most_wanted_impl
+from lib.slskd_transfers import (cancel_and_delete as _cancel_and_delete_impl,
+                                 slskd_do_enqueue as _slskd_do_enqueue_impl)
 
 
 def _make_ctx():

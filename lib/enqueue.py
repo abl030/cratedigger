@@ -9,9 +9,9 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence, cast
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
-from lib.download import (
+from lib.download import build_active_download_state
+from lib.slskd_transfers import (
     SlskdEnqueueOutcome,
-    build_active_download_state,
     cancel_and_delete,
     rederive_transfer_ids,
     slskd_do_enqueue,

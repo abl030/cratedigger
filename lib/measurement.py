@@ -47,11 +47,9 @@ logger = logging.getLogger("cratedigger")
 def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     """Proxy to spectral_check.analyze_album (lazy import).
 
-    Mirrors lib.download.spectral_analyze so tests can patch one or the other
-    depending on which module is under test. Callers inside lib.measurement must
-    use this proxy (not the one in lib.download) so patches on
+    Callers inside lib.measurement must use this proxy so patches on
     ``lib.measurement.spectral_analyze`` take effect.
-    """
+"""
     from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
 

@@ -117,10 +117,8 @@ def derive_canonical_import_folder(
     to skip measurement.
     """
     from lib.config import read_runtime_config
-    from lib.download import (
-        _canonical_import_folder_path,
-        reconstruct_grab_list_entry,
-    )
+    from lib.download import reconstruct_grab_list_entry
+    from lib.download_processing import _canonical_import_folder_path
 
     cfg = read_runtime_config()
     entry = reconstruct_grab_list_entry(row, state)
@@ -137,10 +135,8 @@ def _materialize_automation_preview_path(
 ) -> str:
     """Ensure automation preview has the same stable folder importer uses."""
     from lib.config import read_runtime_config
-    from lib.download import (
-        _materialize_processing_dir,
-        reconstruct_grab_list_entry,
-    )
+    from lib.download import reconstruct_grab_list_entry
+    from lib.download_processing import _materialize_processing_dir
     from lib.staged_album import StagedAlbum
 
     cfg = read_runtime_config()
