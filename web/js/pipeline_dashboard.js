@@ -31,6 +31,7 @@ export function renderPipelineDashboard(navHtml) {
     <div class="dashboard-grid">
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverageWithRates)}
+      ${renderDiskCoverageCard(data.disk_coverage)}
       ${renderWantedTrendCard(coverageWithRates.wanted_trend || {})}
       ${renderPeersCard(peers)}
       ${renderSearchCard(searches)}
@@ -174,6 +175,39 @@ function renderRedisCard(redis) {
         <div class="metric-row"><span>Expires</span><strong>${formatCount(redis.expires_count)}</strong></div>
         <div class="metric-row"><span>Avg TTL</span><strong>${formatHoursFromMs(redis.avg_ttl_ms)}</strong></div>
         <div class="metric-row"><span>Frag</span><strong>${formatDecimal(redis.fragmentation_ratio)}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDiskCoverageCard(dc) {
+  if (!dc) {
+    return `
+    <div class="dashboard-card">
+      <div class="dashboard-card-title">Disk Coverage</div>
+      <div class="metric-list">
+        <div class="metric-row"><span>Beets DB</span><strong class="metric-muted">unavailable</strong></div>
+      </div>
+    </div>
+  `;
+  }
+  const c = dc.counts || {};
+  const drift = Array.isArray(dc.drift_rows) ? dc.drift_rows : [];
+  const wantedOffDisk = (c.off_disk_by_status || {}).wanted || 0;
+  const driftClass = drift.length > 0 ? 'metric-bad' : 'metric-good';
+  const driftRowsHtml = drift.map(r => `
+        <div class="metric-row">
+          <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
+          <strong class="metric-bad">${esc(r.status)}</strong>
+        </div>`).join('');
+  return `
+    <div class="dashboard-card">
+      <div class="dashboard-card-title">Disk Coverage</div>
+      <div class="metric-list">
+        <div class="metric-row"><span>On disk</span><strong>${formatCount(c.on_disk_total)} / ${formatCount(c.active_total)}</strong></div>
+        <div class="metric-row"><span>Wanted (not yet acquired)</span><strong class="metric-muted">${formatCount(wantedOffDisk)}</strong></div>
+        <div class="metric-row"><span>Drift (imported, missing from beets)</span><strong class="${driftClass}">${formatCount(drift.length)}</strong></div>
+        ${driftRowsHtml}
       </div>
     </div>
   `;
