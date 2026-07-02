@@ -78,6 +78,17 @@ from tests.fakes.rows import (
     UserCooldownRow,
 )
 
+# Mirror of download_log_outcome_check (migrations/042). Keep in sync when
+# a migration widens the constraint — the fake must reject exactly what
+# production rejects (test-fidelity Rule A/B).
+DOWNLOAD_LOG_OUTCOMES = frozenset({
+    "success", "rejected", "failed", "timeout",
+    "force_import", "manual_import", "curator_ban",
+    "measurement_failed", "user_offline",
+    "youtube_running", "youtube_success", "youtube_failed",
+})
+
+
 @dataclass
 class _FakeSearchPlanRow:
     """In-memory mirror of a search_plans row."""
@@ -1251,6 +1262,16 @@ class FakePipelineDB:
             raise psycopg2.errors.NotNullViolation(
                 'null value in column "request_id" of relation '
                 '"download_log" violates not-null constraint'
+            )
+        if outcome is not None and outcome not in DOWNLOAD_LOG_OUTCOMES:
+            # Mirror download_log_outcome_check (migration 037) — a fake
+            # that accepts any string shipped an outcome production
+            # rejects (#146 phase-3 grace escape, 2026-07-02).
+            import psycopg2.errors
+
+            raise psycopg2.errors.CheckViolation(
+                'new row for relation "download_log" violates check '
+                f'constraint "download_log_outcome_check" (outcome={outcome!r})'
             )
         new_log_id = self._mint_download_log_id()
         auxiliary: dict[str, Any] = {

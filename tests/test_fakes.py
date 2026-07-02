@@ -555,6 +555,16 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.plex_added_at_pins[0]["status"], "done")
         self.assertEqual(db.plex_added_at_pins[0]["reconciled_at"], now)
 
+    def test_log_download_rejects_non_canonical_outcome(self):
+        """Mirror of download_log_outcome_check — the fake must reject
+        exactly what production rejects (test-fidelity Rule A/B; the
+        #146 grace escape shipped outcome='error' past a permissive
+        fake and crashed on the real CHECK constraint)."""
+        import psycopg2.errors
+        db = FakePipelineDB()
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.log_download(42, outcome="error")
+
     def test_assert_log_passes(self):
         db = FakePipelineDB()
         log_id = db.log_download(42, outcome="success", soulseek_username="user1")
@@ -3687,7 +3697,7 @@ class TestFakeRecentSuccessfulUploader(unittest.TestCase):
     def test_returns_none_when_no_successful_log(self):
         db = FakePipelineDB()
         db.log_download(42, soulseek_username="bob", outcome="rejected")
-        db.log_download(42, soulseek_username="alice", outcome="error")
+        db.log_download(42, soulseek_username="alice", outcome="failed")
         self.assertIsNone(db.get_recent_successful_uploader(42))
 
     def test_returns_most_recent_success(self):
