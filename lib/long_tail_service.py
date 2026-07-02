@@ -71,6 +71,12 @@ class LongTailRow(msgspec.Struct, frozen=True):
     denormalised on-disk spectral measurement, NULL when unknown
     (pre-2026-05-17 imports or lossy-source transcodes) — the expanded
     view surfaces them only when present ("if known").
+
+    ``mb_release_group_id`` backs the console's accept-sibling control
+    and siblings panel directly off the worklist row (#398) — no
+    client-side stamp from the pipeline-detail fetch, so the single-row
+    refetch-and-patch (KTD8) can never drop it. NULL for Discogs-sourced
+    requests and legacy MB rows that predate the column.
     """
 
     id: int
@@ -80,6 +86,7 @@ class LongTailRow(msgspec.Struct, frozen=True):
     status: str
     source: Optional[str]
     mb_release_id: Optional[str]
+    mb_release_group_id: Optional[str]
     discogs_release_id: Optional[str]
     target_format: Optional[str]
     min_bitrate: Optional[int]
@@ -203,6 +210,7 @@ def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
         status=str(row.get("status") or ""),
         source=row.get("source"),
         mb_release_id=row.get("mb_release_id"),
+        mb_release_group_id=row.get("mb_release_group_id"),
         discogs_release_id=row.get("discogs_release_id"),
         target_format=row.get("target_format"),
         min_bitrate=_int_or_none(row.get("min_bitrate")),

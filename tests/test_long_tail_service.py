@@ -146,6 +146,21 @@ class TestListLongTailBanding(unittest.TestCase):
         self.assertIsNone(rows[2].current_spectral_grade)
         self.assertIsNone(rows[2].current_spectral_bitrate)
 
+    def test_mb_release_group_id_projects_onto_row(self) -> None:
+        """The cohort row carries ``mb_release_group_id`` so the console's
+        accept-sibling control + siblings panel read it straight off the
+        worklist row — no client-side stamp from the pipeline-detail fetch,
+        and the single-row refetch-and-patch (KTD8) can't drop it (#398)."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            mb_release_group_id="rg-1"))
+        db.seed_request(make_request_row(
+            id=2, status="wanted", mb_release_id="rel-2"))
+        rows = {r.id: r for r in list_long_tail(db, _fixed_band_fn({})).rows}
+        self.assertEqual(rows[1].mb_release_group_id, "rg-1")
+        self.assertIsNone(rows[2].mb_release_group_id)
+
     def test_discogs_sourced_row_bands_via_dual_key_lookup(self) -> None:
         """A Discogs-sourced wanted request bands correctly — the
         mb_release_id carries the Discogs numeric, banded the same way
@@ -277,9 +292,11 @@ class TestLongTailCohortRoundTrip(unittest.TestCase):
 
     def test_cohort_query_stamps_in_flight_rescue_and_projects_columns(self):
         rel_uuid = str(uuid.uuid4())
+        rg_uuid = str(uuid.uuid4())
         rid_plain = self.db.add_request(
             artist_name="Vanishing Artist", album_title="Lost Pressing",
-            source="request", mb_release_id=rel_uuid, year=1972,
+            source="request", mb_release_id=rel_uuid,
+            mb_release_group_id=rg_uuid, year=1972,
             status="wanted")
         # Tracks (counted into track_count) + denormalised on-disk spectral.
         self.db.set_tracks(rid_plain, [
@@ -317,6 +334,9 @@ class TestLongTailCohortRoundTrip(unittest.TestCase):
         self.assertEqual(plain["year"], 1972)
         self.assertEqual(plain["status"], "wanted")
         self.assertEqual(plain["mb_release_id"], rel_uuid)
+        # The rg id backs the accept-sibling control + siblings panel (#398).
+        self.assertEqual(plain["mb_release_group_id"], rg_uuid)
+        self.assertIsNone(by_id[rid_rescue]["mb_release_group_id"])
         self.assertIn("target_format", plain)
         self.assertIn("min_bitrate", plain)
         self.assertIn("search_filetype_override", plain)
