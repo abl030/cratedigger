@@ -18,8 +18,11 @@
   cfg = config.services.cratedigger;
   src = cfg.src;
 
-  # Same python env the dev shell uses — single source of truth.
-  cratedigger = pkgs.callPackage ./package.nix {};
+  # Same python env the dev shell uses — single source of truth. Built from
+  # cfg.packageSet (the flake export pins it to cratedigger's own flake.lock,
+  # tier-2 plan U2/R1) so the runtime closure matches what the test suite ran
+  # against, not whatever nixpkgs the consumer happens to be on.
+  cratedigger = cfg.packageSet.callPackage ./package.nix {};
   pythonEnv = cratedigger.pythonEnv;
 
   pyRunner = "${pythonEnv}/bin/python";
@@ -317,6 +320,22 @@ in {
       default = ../.;
       defaultText = lib.literalExpression "../.";
       description = "Path to the cratedigger source tree. Defaults to this flake's repo root.";
+    };
+
+    packageSet = mkOption {
+      type = types.pkgs;
+      default = pkgs;
+      defaultText = lib.literalExpression "pkgs";
+      description = ''
+        Package set used to build cratedigger's runtime closure (the python
+        env, and from it the pinned beets). When this module is imported via
+        the flake's `nixosModules.default`, this is pinned to the nixpkgs
+        from cratedigger's own flake.lock — the rev the test suite and the
+        real-beets contract test ran against. Setting it explicitly is the
+        deliberate escape hatch for consumers who refuse the second nixpkgs
+        evaluation; doing so forfeits the tested-closure guarantee (your
+        beets/python may drift from what cratedigger's suite verified).
+      '';
     };
 
     user = mkOption {
@@ -942,7 +961,7 @@ in {
       requires = ["cratedigger-db-migrate.service"];
       restartIfChanged = false;
       # Deliberately exclude pythonEnv: it ships a `beet` binary (because
-      # `pkgs.beets` is in pythonEnv for the dev shell + tests), and putting
+      # the packageSet's beets is in pythonEnv for the dev shell + tests), and putting
       # it on PATH shadows whatever `beet` the consumer has provisioned for
       # the harness wrapper to find. The python interpreter is invoked via
       # absolute path inside cratediggerPkg / pipelineCli, so it doesn't need

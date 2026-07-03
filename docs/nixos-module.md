@@ -2,6 +2,8 @@
 
 The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosModules.default` in `flake.nix`. It is generic and homelab-agnostic: every secret is a `*File` path, the DB is a `dsn` string, no sops/nspawn/reverse-proxy assumptions.
 
+The flake export is a wrapper that pins the module's package set to **cratedigger's own flake.lock**: the runtime python env (and beets) is built from the nixpkgs rev cratedigger's test suite ran against, not the consumer's nixpkgs. This costs a second nixpkgs evaluation on the consumer host. The escape hatch is `services.cratedigger.packageSet = pkgs;` (or any package set) — setting it forfeits the tested-closure guarantee: your beets/python may then drift from what the suite and the real-beets contract test verified, which is exactly the dev/prod skew that shipped the 2026-06-29 beets 2.12 import breakage.
+
 `~/nixosconfig/modules/nixos/services/cratedigger.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
 - sops-nix per-key secret materialization (`cratedigger-secrets-split` oneshot — see below)
 - the nspawn PostgreSQL container for the pipeline DB
@@ -15,6 +17,7 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosMo
 | `enable` | `false` | Master switch |
 | `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. |
 | `src` | `../.` | Path to cratedigger source tree. Defaults to this flake's repo root. |
+| `packageSet` | cratedigger's own locked nixpkgs (via the flake export) | Package set for the runtime closure. Override = escape hatch, forfeits the tested-closure guarantee. |
 | `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
@@ -99,9 +102,10 @@ If you don't use sops or have one key per encrypted file, skip the splitter and 
 
 ```
 github:abl030/cratedigger
-├── nixosModules.default              ← upstream NixOS module
-├── devShells.<system>.default         ← test/dev environment
-└── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
+├── nixosModules.default              ← upstream NixOS module (pins packageSet to this flake's lock)
+├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
+├── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
+└── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
 ```
 
 ## Validating before deploy

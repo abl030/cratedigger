@@ -31,6 +31,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
+FLAKE_NIX = REPO_ROOT / "flake.nix"
 
 
 class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
@@ -138,6 +139,41 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('requires = ["cratedigger-db-migrate.service"]', text)
         self.assertIn('ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker"', text)
         self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
+
+
+class TestPinnedPackageSetContract(unittest.TestCase):
+    """The runtime closure builds from cratedigger's own flake.lock, not the
+    consumer's nixpkgs (tier-2 plan U2, R1 / KTD1).
+
+    ``nix/module.nix`` must build its python env from ``cfg.packageSet``
+    (defaulting to the ambient ``pkgs`` so the file stays importable
+    standalone), and ``flake.nix`` must export ``nixosModules.default`` as a
+    wrapper that pins ``packageSet`` to the flake's own locked nixpkgs. A
+    consumer setting ``packageSet`` explicitly is the deliberate escape
+    hatch — it forfeits the tested-closure guarantee.
+    """
+
+    def test_module_builds_package_from_packageSet(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("packageSet = mkOption", text)
+        self.assertIn("cratedigger = cfg.packageSet.callPackage ./package.nix {};", text)
+        self.assertNotIn("pkgs.callPackage ./package.nix", text)
+
+    def test_flake_export_pins_packageSet_to_own_lock(self) -> None:
+        text = FLAKE_NIX.read_text(encoding="utf-8")
+        self.assertIn("nixosModules.default", text)
+        self.assertIn("imports = [ ./nix/module.nix ];", text)
+        self.assertIn(
+            "services.cratedigger.packageSet = lib.mkDefault", text,
+            "flake.nix must pin packageSet via mkDefault so a consumer's "
+            "explicit packageSet (the escape hatch) still wins",
+        )
+        self.assertIn("pkgs.stdenv.hostPlatform.system", text)
+
+    def test_moduleVm_consumes_the_wrapped_export(self) -> None:
+        """The VM gate must exercise what consumers actually import."""
+        text = FLAKE_NIX.read_text(encoding="utf-8")
+        self.assertIn("cratediggerModule = self.nixosModules.default;", text)
 
 
 class TestOwnedRedisContract(unittest.TestCase):
