@@ -214,6 +214,65 @@ class TestOwnedBeetsContract(unittest.TestCase):
         self.assertIn("--replace-fail", beets_nix)
 
 
+class TestRenderedBeetsConfigContract(unittest.TestCase):
+    """The module owns beets config.yaml (tier-2 plan U4, R5).
+
+    Rendered into ``${stateDir}/beets/config.yaml`` by the preStart script
+    (atomic mv, same as config.ini). The data-loss invariant
+    ``import.duplicate_keys.album: [mb_albumid, discogs_albumid]`` is a
+    hard-coded literal — no option may expose it (Palo Santo guard moved to
+    first line of defense). The plugin list is fixed, not operator-blankable
+    (the zero-candidates guard: ``musicbrainz`` must be present).
+    """
+
+    PRODUCTION_PLUGINS = (
+        "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
+        "info missing duplicates edit fromfilename ftintitle the inline"
+    )
+
+    def test_duplicate_keys_is_a_literal_under_import(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('duplicate_keys = {', text)
+        self.assertIn('album = ["mb_albumid" "discogs_albumid"];', text)
+        self.assertIn('item = ["artist" "title"];', text)
+        # No option surface for it — the literal lives in the render
+        # attrset, not in an mkOption default someone can override.
+        self.assertNotIn("duplicateKeys", text)
+
+    def test_plugin_list_is_fixed_and_contains_musicbrainz(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn(f'plugins = "{self.PRODUCTION_PLUGINS}";', text)
+
+    def test_config_yaml_rendered_atomically_into_beetsdir(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('mktemp "$beets_dir/.config.yaml.XXXXXX"', text)
+        self.assertIn('mv -f "$tmp_yaml" "$beets_dir/config.yaml"', text)
+
+    def test_discogs_token_file_pattern(self) -> None:
+        """Real token via issue #117 *File include; placeholder otherwise."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("discogsTokenFile", text)
+        # secrets.yaml materialized 0400 from the *File — the token itself
+        # never lands in the world-readable config.yaml.
+        self.assertIn('chmod 0400 "$tmp_secrets"', text)
+        self.assertIn('mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"', text)
+        # Fail-loud on unreadable/empty token: a bare assignment trips
+        # set -e on cat failure, and an empty token is rejected (an empty
+        # user_token re-enables the discogs interactive OAuth at load).
+        self.assertIn('discogs_token="$(', text)
+        self.assertIn('if [ -z "$discogs_token" ]; then', text)
+        # Tokenless default: non-empty placeholder suppresses the discogs
+        # plugin's interactive OAuth at load (R7).
+        self.assertIn("cratedigger-placeholder-token", text)
+
+    def test_musicbrainz_defaults_are_public(self) -> None:
+        """Stranger default = public MB (functional-but-slow, R13/U4 leg)."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('default = "musicbrainz.org";', text)
+        # ratelimit 1 for public MB; the mirror override arrives via U6.
+        self.assertIn("ratelimit", text)
+
+
 class TestOwnedRedisContract(unittest.TestCase):
     def test_cratedigger_owns_local_redis_server_by_default(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")

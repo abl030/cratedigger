@@ -20,6 +20,10 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `packageSet` | cratedigger's own locked nixpkgs (via the flake export) | Package set for the runtime closure. Override = escape hatch, forfeits the tested-closure guarantee. |
 | `beets.discogsMirrorUrl` | `null` | When set, build-time-patches the beets discogs plugin to hit this mirror instead of api.discogs.com. |
 | `beets.lrclibUrl` | `null` | When set, build-time-patches the beets lyrics plugin's LRCLIB base to this URL. |
+| `beets.discogsTokenFile` | `null` | `*File` secret (issue #117): materialized into `${stateDir}/beets/secrets.yaml` (0400) + `include:` in the rendered config. Null = placeholder token (plugins load cleanly; public-Discogs lookups are token-required). |
+| `beetsConfig.{directory,library}` | production values | Rendered into the module-owned `config.yaml`. `beetsDirectory` (config.ini) follows `beetsConfig.directory` by default. |
+| `beetsConfig.fetchart.{maxwidth,minwidth}` | `500` / `300` | Load-bearing: library size (embedded art × every track) and the Meelo black-box floor. |
+| `beetsConfig.musicbrainz.{host,https,ratelimit}` | `musicbrainz.org` / `true` / `1` | Public-MB stranger default (functional but slow); the operator points these at the local mirror. |
 | `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
@@ -58,6 +62,7 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard) from the pinned `packageSet`. The beets in that env is the cratedigger-owned derivation (`nix/beets.nix`) — one store path serving the python library (`lib/beets_distance.py`), the `cratedigger-beet` wrapper (which pins `BEETSDIR` at `${stateDir}/beets`), and — from U5 — the harness.
 2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH.
 3. Renders `/var/lib/cratedigger/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path. App units render through an atomic temp-file-and-rename step because importer, preview, web, and timer-driven services can start concurrently after migrations.
+3b. Renders the beets `config.yaml` into `${stateDir}/beets/` (BEETSDIR) the same way. `import.duplicate_keys.album: [mb_albumid, discogs_albumid]` (the Palo Santo data-loss invariant), the plugin list, and the path templates are fixed literals — NOT options. Only `beetsConfig.*` (directory, library, fetchart widths, musicbrainz host/https/ratelimit) is operator-tunable. With `beets.discogsTokenFile` set, `secrets.yaml` (0400) is materialized next to it and included.
 4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
 5. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
 
