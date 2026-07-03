@@ -196,5 +196,31 @@ pkgs.testers.nixosTest {
     # and not respawn. The systemd unit holds the lock; this invocation
     # fails to acquire and returns 0 immediately.
     machine.succeed("cratedigger-youtube-ingest --once")
+
+    # U3 (tier-2): cratedigger owns the beet runtime. cratedigger-beet is
+    # on PATH, resolves BEETSDIR at the module's beets config dir, and the
+    # pinned derivation carries the dependency closure for the FULL
+    # production plugin set — including a tokenless discogs (placeholder
+    # token = no interactive OAuth, no network at load). The config.yaml
+    # written here is a stand-in until U4 renders the real one.
+    machine.succeed("command -v cratedigger-beet")
+    machine.succeed("test -d /var/lib/cratedigger/beets")
+    machine.succeed(
+        "printf 'plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline\\ndiscogs:\\n  user_token: cratedigger-placeholder-token\\n'"
+        + " > /var/lib/cratedigger/beets/config.yaml"
+    )
+    version_out = machine.succeed("cratedigger-beet version")
+    plugins_line = next(
+        line for line in version_out.splitlines() if line.startswith("plugins:")
+    )
+    loaded = {p.strip() for p in plugins_line.split(":", 1)[1].split(",")}
+    for plugin in (
+        "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
+        "info missing duplicates edit fromfilename ftintitle the inline"
+    ).split():
+        assert plugin in loaded, f"plugin {plugin} not loaded: {version_out}"
+    # Tokenless/stranger posture: config loads without crash or prompt.
+    machine.succeed("cratedigger-beet config > /dev/null")
+    machine.succeed("rm /var/lib/cratedigger/beets/config.yaml")
   '';
 }

@@ -18,12 +18,35 @@
   cfg = config.services.cratedigger;
   src = cfg.src;
 
+  # The one beets (tier-2 plan U3, R4): pinned package + full built-in
+  # plugin closure, with the mirror patches applied only when the operator
+  # sets the knobs. This same derivation is the python library in pythonEnv
+  # (lib/beets_distance.py) and the bin/beet behind cratedigger-beet; the
+  # harness interpreter joins in U5.
+  beetsEnv = import ./beets.nix {
+    pkgs = cfg.packageSet;
+    discogsMirrorUrl = cfg.beets.discogsMirrorUrl;
+    lrclibUrl = cfg.beets.lrclibUrl;
+  };
+
+  # Config dir every beets consumer resolves via BEETSDIR (beets' native
+  # config-dir override). U4 renders config.yaml into it.
+  beetsConfigDir = "${cfg.stateDir}/beets";
+
   # Same python env the dev shell uses — single source of truth. Built from
   # cfg.packageSet (the flake export pins it to cratedigger's own flake.lock,
   # tier-2 plan U2/R1) so the runtime closure matches what the test suite ran
   # against, not whatever nixpkgs the consumer happens to be on.
-  cratedigger = cfg.packageSet.callPackage ./package.nix {};
+  cratedigger = cfg.packageSet.callPackage ./package.nix { beetsPackage = beetsEnv; };
   pythonEnv = cratedigger.pythonEnv;
+
+  # Canonical manual-ops beet for the library cratedigger manages. Pins
+  # BEETSDIR so operator invocations and pipeline subprocesses read the
+  # SAME module-rendered config — never a per-user ~/.config/beets.
+  cratediggerBeet = pkgs.writeShellScriptBin "cratedigger-beet" ''
+    export BEETSDIR="${beetsConfigDir}"
+    exec ${pythonEnv}/bin/beet "$@"
+  '';
 
   pyRunner = "${pythonEnv}/bin/python";
 
@@ -556,6 +579,31 @@ in {
       };
     };
 
+    beets = {
+      discogsMirrorUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "https://discogs.ablz.au";
+        description = ''
+          When set, the beets discogs plugin's client is patched
+          (substituteInPlace at build time) to use this base URL instead of
+          public api.discogs.com. Null = stock plugin behaviour (public
+          Discogs, token required for lookups — see the discogs token
+          handling in the rendered beets config).
+        '';
+      };
+      lrclibUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://192.168.1.35:3300/api";
+        description = ''
+          When set, the beets lyrics plugin's LRCLIB base URL is patched
+          (substituteInPlace at build time) to this value instead of public
+          lrclib.net. Null = stock plugin behaviour.
+        '';
+      };
+    };
+
     beetsDirectory = mkOption {
       type = types.str;
       default = "";
@@ -901,7 +949,7 @@ in {
       }
     ];
 
-    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg pkgs.postgresql];
+    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg cratediggerBeet pkgs.postgresql];
 
     users.users = mkIf (cfg.user != "root") {
       ${cfg.user} = {
@@ -920,7 +968,13 @@ in {
     # / notifiers.*.{username,password,token}File) and retain their own
     # restrictive modes from whatever provisioned them (sops-nix, agenix, etc).
     systemd.tmpfiles.rules =
-      [ "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -" ]
+      [
+        "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -"
+        # BEETSDIR for every beets consumer (cratedigger-beet, harness).
+        # U4 renders config.yaml into it; the dir must exist regardless so
+        # the wrapper works on a fresh boot.
+        "d ${beetsConfigDir} 0755 ${cfg.user} ${cfg.group} -"
+      ]
       ++ optional cfg.youtubeIngest.enable
         "d ${cfg.youtubeIngest.tempDir} 0755 ${cfg.user} ${cfg.group} -";
 
