@@ -265,6 +265,22 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         # plugin's interactive OAuth at load (R7).
         self.assertIn("cratedigger-placeholder-token", text)
 
+    def test_beets_runtime_keys_rendered_into_config_ini(self) -> None:
+        """[Beets] config_dir / beet_binary / python — the U5 seam values
+        every beets subprocess resolves (BEETSDIR + pinned interpreter)."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("config_dir = ${beetsConfigDir}", text)
+        self.assertIn("beet_binary = ${pythonEnv}/bin/beet", text)
+        self.assertIn("python = ${pythonEnv}/bin/python", text)
+
+    def test_web_wrapper_exports_beetsdir(self) -> None:
+        """cratedigger-web imports beets in-process (beets_distance) —
+        BEETSDIR must point it at the module-rendered config."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        web_start = text.index('writeShellScriptBin "cratedigger-web"')
+        web_block = text[web_start:web_start + 1200]
+        self.assertIn('export BEETSDIR="${beetsConfigDir}"', web_block)
+
     def test_musicbrainz_defaults_are_public(self) -> None:
         """Stranger default = public MB (functional-but-slow, R13/U4 leg)."""
         text = MODULE_NIX.read_text(encoding="utf-8")

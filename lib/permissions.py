@@ -3,7 +3,8 @@
 Issue #84: beets creates directories via `os.mkdir()` with no explicit mode,
 which means the resulting mode is `0o777 & ~umask`. Even though the systemd
 service runs with `UMask=0000`, something in the subprocess chain
-(import_one.py → run_beets_harness.sh → .beet-wrapped → beets) intermittently
+(import_one.py → run_beets_harness.sh → beets; the HM-era wrapper
+chain at the time) intermittently
 resets the umask, producing `0o755` artist/album directories that block any
 other user (abl030) from running beets commands against the library.
 

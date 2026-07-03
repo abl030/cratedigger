@@ -603,7 +603,12 @@ class TestComputeBeetsDistanceWithItemsOverride(unittest.TestCase):
         self.assertLess(r.distance, 0.5)
         self.assertIsNotNone(r.components)
         assert r.components is not None
-        self.assertGreater(len(r.components), 0)
+        # components may be EMPTY here: with stock beets defaults a perfect
+        # synthetic match accrues no penalties. The old assertGreater(len)
+        # only held because the test process inherited the operator's
+        # ~/.config/beets (match.preferred penalties) before tier-2 U5
+        # pinned BEETSDIR — the per-component contract lives in
+        # test_per_component_breakdown_penalises_wrong_title.
         # Override path means no download_log was consulted.
         self.assertIsNone(r.download_log_id)
         self.assertIsNone(r.request_id)

@@ -55,38 +55,54 @@ def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
 
 
 def beet_bin() -> str:
-    """Locate the ``beet`` executable, preferring PATH.
+    """Locate the ``beet`` executable.
 
     Single source of truth for "where does ``beet`` live" across every
     subprocess callsite (release_cleanup remove, force-import, diagnostics,
-    etc). Before this helper, ``release_cleanup``
-    used the literal ``"beet"`` and relied on parent PATH resolution
-    while ``harness/import_one.py`` had its own ``shutil.which("beet")
-    or <hardcoded path>`` fallback — Codex (PR #131 round 1 P3) flagged
-    the inconsistency after the pre-flight removal path started
-    routing through ``release_cleanup`` from the harness, where the
-    systemd-narrowed PATH (coreutils/findutils/grep/sed only) does not
-    include ``/etc/profiles/per-user/abl030/bin``.
+    etc). Precedence:
 
-    Resolved at CALL time (not import time) so tests that patch
-    ``shutil.which`` see the patched value.
+      1. ``[Beets] beet_binary`` from the runtime config.ini — rendered by
+         the NixOS module with the pinned env's ``beet`` (nix/beets.nix),
+         so production always runs the beets the test suite verified.
+      2. ``beet`` on PATH (dev shells; the pinned dev shell provides the
+         same derivation).
+
+    There is deliberately NO per-user-profile fallback (tier-2 plan R6):
+    a missing beet is an actionable configuration error, never a silent
+    revert to whatever Home Manager profile happens to exist on the host.
+
+    Resolved at CALL time (not import time) so tests that patch config or
+    ``shutil.which`` see the patched values.
     """
-    return (shutil.which("beet")
-            or "/etc/profiles/per-user/abl030/bin/beet")
+    from lib.config import read_runtime_config
+    configured = read_runtime_config().beet_binary
+    if configured:
+        return configured
+    found = shutil.which("beet")
+    if found:
+        return found
+    raise RuntimeError(
+        "beet binary not found: set [Beets] beet_binary in config.ini "
+        "(services.cratedigger renders it from the pinned beets env) or "
+        "put `beet` on PATH. There is no Home Manager fallback."
+    )
 
 
 def beets_subprocess_env() -> dict[str, str]:
     """Env for subprocesses that invoke beets (directly or via the harness
-    and import_one.py). Single source of truth for the HOME override.
+    and import_one.py). Single source of truth for how a beets subprocess
+    finds its config and interpreter.
 
-    Beets resolves its config from `$HOME/.config/beets/config.yaml`. The
-    cratedigger systemd service runs as root with HOME=/root; the Nix Home
-    Manager beets config (including the Discogs plugin token and the patched
-    base URL for the local Discogs mirror) lives at /home/abl030/.config/.
-    Without the override, the Discogs plugin silently returns 0 candidates
-    for every --search-id <numeric_id> → scenario=mbid_not_found on every
-    Discogs validation. This hit every Blueline Medic - Apology Wars
-    attempt (download_log 3604–3616) post-PR #100.
+    Sets ``BEETSDIR`` (beets' native config-dir override) at the
+    module-rendered config dir from ``[Beets] config_dir`` in the runtime
+    config.ini, and ``CRATEDIGGER_BEETS_PYTHON`` (the pinned interpreter the
+    harness wrapper execs) from ``[Beets] python``. Pre-set environment
+    values act as the dev/test fallback when the runtime config doesn't
+    carry the keys. The Home-Manager-era ``HOME=/home/<user>`` impersonation
+    is gone (tier-2 plan R6): an unset config dir raises an actionable
+    error instead of silently letting beets fall back to the invoking
+    user's ~/.config/beets — the misconfig class behind the 2026-06-29
+    breakage and the Blueline Medic 0-candidates incident.
 
     Every subprocess that runs beets must use this env:
       - lib/beets.py::beets_validate (harness for validation)
@@ -94,10 +110,26 @@ def beets_subprocess_env() -> dict[str, str]:
       - harness/import_one.py (launches the harness + `beet move`)
       - web/routes/pipeline.py (ban-source `beet remove`)
 
-    os.environ is snapshotted at CALL time, not import time, so tests that
-    patch the environment see the patched values.
+    os.environ and the runtime config are read at CALL time, not import
+    time, so tests that patch either see the patched values.
     """
-    return {**os.environ, "HOME": "/home/abl030"}
+    from lib.config import read_runtime_config
+    cfg = read_runtime_config()
+    env = {**os.environ}
+    beetsdir = cfg.beets_config_dir or env.get("BEETSDIR", "")
+    if not beetsdir:
+        raise RuntimeError(
+            "beets config dir is not set: set [Beets] config_dir in "
+            "config.ini (services.cratedigger renders it at "
+            "<stateDir>/beets) or export BEETSDIR. Refusing to launch a "
+            "beets subprocess that would silently fall back to the "
+            "invoking user's ~/.config/beets."
+        )
+    env["BEETSDIR"] = beetsdir
+    beets_python = cfg.beets_python or env.get("CRATEDIGGER_BEETS_PYTHON", "")
+    if beets_python:
+        env["CRATEDIGGER_BEETS_PYTHON"] = beets_python
+    return env
 
 
 # === Filesystem utilities ===

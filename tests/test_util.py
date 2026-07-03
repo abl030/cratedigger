@@ -1098,44 +1098,131 @@ class TestPlexAddedAtPinClient(unittest.TestCase):
 class TestBeetsSubprocessEnv(unittest.TestCase):
     """beets_subprocess_env() is the single source of truth for the env dict
     used by every subprocess that invokes beets (directly or via the harness
-    / import_one.py). Beets reads `~/.config/beets/config.yaml`; when cratedigger
-    runs as the systemd service (root, HOME=/root), the Nix Home Manager
-    beets config isn't there and the Discogs plugin returns 0 candidates for
-    every --search-id. See live failures in download_log for Blueline Medic.
+    / import_one.py). It resolves BEETSDIR (beets' config-dir override) from
+    the runtime config's [Beets] config_dir — the module-rendered config —
+    with a pre-set env BEETSDIR as the dev/test fallback. The Home-Manager
+    HOME impersonation is gone (tier-2 plan R6): unset config dir raises an
+    actionable error instead of silently reading ~/.config/beets.
     """
 
-    def test_helper_exists_and_returns_dict(self) -> None:
-        from lib.util import beets_subprocess_env
-        env = beets_subprocess_env()
-        self.assertIsInstance(env, dict)
+    def _with_runtime_config(self, ini_text: str):
+        """Context: a temp runtime config.ini as the active config."""
+        import contextlib
+        import tempfile
 
-    def test_home_overridden_to_home_manager_profile(self) -> None:
-        """HOME must point to the user profile where beets config lives,
-        regardless of what HOME is in the caller's environment."""
+        @contextlib.contextmanager
+        def cm():
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "config.ini")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(ini_text)
+                with patch.dict(os.environ,
+                                {"CRATEDIGGER_RUNTIME_CONFIG": path},
+                                clear=False):
+                    yield
+        return cm()
+
+    def test_beetsdir_comes_from_runtime_config(self) -> None:
         from lib.util import beets_subprocess_env
-        with patch.dict(os.environ, {"HOME": "/root"}, clear=False):
+        with self._with_runtime_config(
+            "[Beets]\nconfig_dir = /var/lib/cratedigger/beets\n"
+        ):
             env = beets_subprocess_env()
-        self.assertEqual(env["HOME"], "/home/abl030")
+        self.assertEqual(env["BEETSDIR"], "/var/lib/cratedigger/beets")
+
+    def test_config_wins_over_preset_env(self) -> None:
+        from lib.util import beets_subprocess_env
+        with self._with_runtime_config(
+            "[Beets]\nconfig_dir = /from/config\n"
+        ), patch.dict(os.environ, {"BEETSDIR": "/from/env"}, clear=False):
+            env = beets_subprocess_env()
+        self.assertEqual(env["BEETSDIR"], "/from/config")
+
+    def test_env_beetsdir_is_the_dev_fallback(self) -> None:
+        from lib.util import beets_subprocess_env
+        with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"), \
+                patch.dict(os.environ, {"BEETSDIR": "/from/env"}, clear=False):
+            env = beets_subprocess_env()
+        self.assertEqual(env["BEETSDIR"], "/from/env")
+
+    def test_unset_config_dir_raises_actionable_error(self) -> None:
+        """No silent fallback to the invoking user's ~/.config/beets."""
+        from lib.util import beets_subprocess_env
+        with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"):
+            no_beetsdir = {k: v for k, v in os.environ.items()
+                           if k != "BEETSDIR"}
+            with patch.dict(os.environ, no_beetsdir, clear=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    beets_subprocess_env()
+        self.assertIn("[Beets] config_dir", str(ctx.exception))
+
+    def test_no_home_override_remains(self) -> None:
+        """The HOME=/home/<user> impersonation is deleted, not supplemented."""
+        from lib.util import beets_subprocess_env
+        with self._with_runtime_config(
+            "[Beets]\nconfig_dir = /cfg\n"
+        ), patch.dict(os.environ, {"HOME": "/root"}, clear=False):
+            env = beets_subprocess_env()
+        self.assertEqual(env["HOME"], "/root")
+
+    def test_beets_python_exported_from_config(self) -> None:
+        from lib.util import beets_subprocess_env
+        with self._with_runtime_config(
+            "[Beets]\nconfig_dir = /cfg\npython = /nix/store/x/bin/python\n"
+        ):
+            env = beets_subprocess_env()
+        self.assertEqual(env["CRATEDIGGER_BEETS_PYTHON"], "/nix/store/x/bin/python")
 
     def test_inherits_other_env_vars(self) -> None:
-        """Non-HOME vars pass through unchanged — PATH, PYTHONPATH etc. must
-        still reach the subprocess."""
         from lib.util import beets_subprocess_env
         sentinel = "CRATEDIGGER_TEST_SENTINEL_VAR_XYZ"
-        with patch.dict(os.environ, {sentinel: "present"}, clear=False):
+        with self._with_runtime_config(
+            "[Beets]\nconfig_dir = /cfg\n"
+        ), patch.dict(os.environ, {sentinel: "present"}, clear=False):
             env = beets_subprocess_env()
         self.assertEqual(env.get(sentinel), "present")
 
-    def test_picks_up_environ_at_call_time(self) -> None:
-        """Not a frozen module-level snapshot — os.environ is read fresh
-        each call so test-time patching works and any late-set var shows up."""
-        from lib.util import beets_subprocess_env
-        with patch.dict(os.environ, {"LATE_BOUND_VAR": "first"}, clear=False):
-            env1 = beets_subprocess_env()
-        with patch.dict(os.environ, {"LATE_BOUND_VAR": "second"}, clear=False):
-            env2 = beets_subprocess_env()
-        self.assertEqual(env1["LATE_BOUND_VAR"], "first")
-        self.assertEqual(env2["LATE_BOUND_VAR"], "second")
+
+class TestBeetBin(unittest.TestCase):
+    """beet_bin(): configured [Beets] beet_binary wins; PATH is the dev
+    fallback; there is NO per-user-profile fallback (tier-2 plan R6)."""
+
+    def _with_runtime_config(self, ini_text: str):
+        import contextlib
+        import tempfile
+
+        @contextlib.contextmanager
+        def cm():
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "config.ini")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(ini_text)
+                with patch.dict(os.environ,
+                                {"CRATEDIGGER_RUNTIME_CONFIG": path},
+                                clear=False):
+                    yield
+        return cm()
+
+    def test_configured_binary_wins(self) -> None:
+        from lib.util import beet_bin
+        with self._with_runtime_config(
+            "[Beets]\nbeet_binary = /nix/store/x/bin/beet\n"
+        ), patch("shutil.which", return_value="/usr/bin/beet"):
+            self.assertEqual(beet_bin(), "/nix/store/x/bin/beet")
+
+    def test_path_fallback(self) -> None:
+        from lib.util import beet_bin
+        with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"), \
+                patch("shutil.which", return_value="/dev-shell/bin/beet"):
+            self.assertEqual(beet_bin(), "/dev-shell/bin/beet")
+
+    def test_missing_everywhere_raises_actionable_error(self) -> None:
+        from lib.util import beet_bin
+        with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"), \
+                patch("shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                beet_bin()
+        self.assertIn("beet_binary", str(ctx.exception))
 
 
 if __name__ == "__main__":

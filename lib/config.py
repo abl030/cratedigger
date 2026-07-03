@@ -136,6 +136,15 @@ class CratediggerConfig:
     # See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md.
     beets_directory: str = ""
 
+    # Module-rendered beets runtime (tier-2 plan U5, R6). The NixOS module
+    # renders these into config.ini so every beets subprocess resolves the
+    # SAME pinned interpreter/binary and the SAME rendered config dir
+    # (BEETSDIR) — no Home-Manager per-user profile involved anywhere.
+    # Empty string -> unset (dev shells / tests provide env fallbacks).
+    beets_config_dir: str = ""
+    beet_binary: str = ""
+    beets_python: str = ""
+
     # --- Quality Ranks (codec-aware comparison model, issue #60) ---
     quality_ranks: QualityRankConfig = field(default_factory=QualityRankConfig.defaults)
 
@@ -316,6 +325,9 @@ class CratediggerConfig:
             # Top-level `[Beets]` section (separate from `[Beets Validation]`
             # which exists for legacy reasons). Empty string → unset.
             beets_directory=get("Beets", "directory", ""),
+            beets_config_dir=get("Beets", "config_dir", ""),
+            beet_binary=get("Beets", "beet_binary", ""),
+            beets_python=get("Beets", "python", ""),
             # Quality Ranks — codec-aware comparison policy. Missing section
             # yields the default QualityRankConfig (see lib/quality.py).
             quality_ranks=QualityRankConfig.from_ini(config),
@@ -375,7 +387,7 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
     is a deployment bug — usually config.ini's mode is too restrictive for
     the calling user. Silently returning empty config previously masked
     issue #117 (force-import via pipeline-cli failed with cryptic
-    "/home/abl030/import_one.py not found" because beets_harness_path was
+    "import_one.py not found" (bad user-home path) because beets_harness_path was
     empty). Surfacing the real cause beats the silent path-resolution
     fallout downstream.
     """
