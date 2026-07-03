@@ -41,7 +41,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `notifiers.jellyfin.{enable,url,tokenFile}` | disabled | Jellyfin notifier. |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
-| `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See README § "Tuning the quality rank model". |
+| `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See docs/quality-ranks.md § "Tuning reference (Nix options)". |
 | `timer.{enable,onBootSec,onUnitInactiveSec}` | 1s after exit | Cycle frequency. |
 | `importer.enable` | `true` | Long-lived serial importer that drains queued import work. |
 | `importer.preview.enable` | `false` | Enable the async preview gate. When disabled, new import jobs are marked importable immediately for backward-compatible draining. |
