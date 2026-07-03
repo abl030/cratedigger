@@ -112,13 +112,16 @@ If you don't use sops or have one key per encrypted file, skip the splitter and 
 
 ```
 github:abl030/cratedigger
+├── packages.<system>.default          ← operator CLI bundle (pipeline-cli, pipeline-migrate) — `nix run .#pipeline-cli`
+├── apps.<system>.pipeline-cli         ← `nix run github:abl030/cratedigger#pipeline-cli -- --help`
 ├── nixosModules.default              ← upstream NixOS module (pins packageSet to this flake's lock)
 ├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
 ├── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
 ├── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
 ├── checks.<system>.moduleAssertions   ← eval guard: friendly required-option messages; doc2 + stranger shapes clean
 ├── checks.<system>.apiBaseDerivation  ← eval guard: beets musicbrainz block derives from musicbrainz.apiBase
-└── checks.<system>.beetsMirrorPatches ← beets mirror knobs patch/don't-patch as configured
+├── checks.<system>.beetsMirrorPatches ← beets mirror knobs patch/don't-patch as configured
+└── checks.<system>.packageDefault     ← the CLI bundle builds (`nix run` stays green)
 ```
 
 ## Validating before deploy
