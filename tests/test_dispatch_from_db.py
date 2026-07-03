@@ -1006,7 +1006,12 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        mock_read.assert_called_once_with()
+        # Dispatch consumes the shared reader (not a bespoke parser). Since
+        # tier-2 U5, beets_subprocess_env() also reads the runtime config
+        # (BEETSDIR / [Beets] keys), so "called at least once, always
+        # zero-arg" is the seam contract — not exactly-once.
+        self.assertGreaterEqual(mock_read.call_count, 1)
+        mock_read.assert_called_with()
 
 
 class TestDispatchFromDbPrecondition(unittest.TestCase):

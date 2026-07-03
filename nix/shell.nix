@@ -65,5 +65,12 @@ pkgs.mkShell {
     # the next shell entry. Same pattern as .pyright-venv.
     nix-store --realise ${pkgs.path} --indirect --add-root "$PWD/.nixpkgs-src" >/dev/null 2>&1 \
       || ln -sfn ${pkgs.path} "$PWD/.nixpkgs-src"
+
+    # The harness wrapper (harness/run_beets_harness.sh) execs this
+    # interpreter. In production the NixOS module renders [Beets] python
+    # into config.ini and beets_subprocess_env() exports it; in the dev
+    # shell the test env's python IS the pinned beets env, so export it
+    # directly. No Home Manager fallback exists (tier-2 plan R6).
+    export CRATEDIGGER_BEETS_PYTHON="${testPythonEnv}/bin/python3"
   '';
 }

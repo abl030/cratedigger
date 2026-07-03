@@ -170,7 +170,19 @@ def _run_beet_op(
     # the per-call cost is a dict lookup.
     from lib.util import beet_bin, beets_subprocess_env
 
-    argv: list[str] = [beet_bin(), verb, "-a"]
+    try:
+        # Config-resolution (tier-2 U5): both helpers raise an actionable
+        # RuntimeError when the beets runtime keys are unset. Fold that
+        # into the typed failure so this function's "never raises"
+        # contract holds for callers built around BeetsOpFailure.
+        beet = beet_bin()
+        beets_env = beets_subprocess_env()
+    except RuntimeError as exc:
+        msg = str(exc)
+        log.warning("beets_album_op: beet %s %s %s", verb, selector, msg)
+        return BeetsOpFailure(reason="exception", detail=msg, selector=selector)
+
+    argv: list[str] = [beet, verb, "-a"]
     if verb == "remove" and delete_files:
         argv.append("-d")
     argv.append(selector)
@@ -185,7 +197,7 @@ def _run_beet_op(
         proc = sp.run(
             argv,
             capture_output=True, text=True, errors="replace", timeout=timeout,
-            env=beets_subprocess_env(),
+            env=beets_env,
             input="y\n",
         )
     except sp.TimeoutExpired as exc:

@@ -219,6 +219,11 @@
 
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
+    # cratedigger-web imports beets IN-PROCESS (lib/beets_distance.py);
+    # BEETSDIR points that import at the module-rendered config so
+    # Replace-picker distances use the same match config the importer
+    # sees (previously it silently read the invoking user's defaults).
+    export BEETSDIR="${beetsConfigDir}"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/web/server.py \
       --port ${toString cfg.web.port} \
@@ -329,6 +334,9 @@
 
     [Beets]
     directory = ${cfg.beetsDirectory}
+    config_dir = ${beetsConfigDir}
+    beet_binary = ${pythonEnv}/bin/beet
+    python = ${pythonEnv}/bin/python
 
     [Beets Validation]
     enabled = ${if cfg.beetsValidation.enable then "True" else "False"}
@@ -1247,14 +1255,12 @@ in {
       wants = redisServiceUnits;
       requires = ["cratedigger-db-migrate.service"];
       restartIfChanged = false;
-      # Deliberately exclude pythonEnv: it ships a `beet` binary (because
-      # the packageSet's beets is in pythonEnv for the dev shell + tests), and putting
-      # it on PATH shadows whatever `beet` the consumer has provisioned for
-      # the harness wrapper to find. The python interpreter is invoked via
-      # absolute path inside cratediggerPkg / pipelineCli, so it doesn't need
-      # to be on PATH. The harness wrapper at harness/run_beets_harness.sh
-      # uses `command -v beet` to find a beets installation that already
-      # has the consumer's plugins/config (e.g. home-manager).
+      # Deliberately exclude pythonEnv from PATH: the python interpreter is
+      # invoked via absolute path inside the wrappers, and every beets
+      # consumer resolves the pinned interpreter/binary from the rendered
+      # [Beets] config keys (config_dir / beet_binary / python) rather than
+      # PATH lookup — keeping PATH lean avoids ever re-introducing an
+      # ambient-beet dependency (tier-2 plan R6).
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = {
         Type = "oneshot";

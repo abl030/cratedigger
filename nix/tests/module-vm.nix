@@ -174,6 +174,11 @@ pkgs.testers.nixosTest {
     assert mode == "644", f"config.ini should be 0644, got {mode}"
     machine.succeed("grep -q 'enabled = False' /var/lib/cratedigger/config.ini")  # beets disabled
     machine.succeed("grep -q '\\[Quality Ranks\\]' /var/lib/cratedigger/config.ini")
+    # U5 (tier-2): the module renders the beets runtime keys so every
+    # beets subprocess resolves the pinned interpreter + rendered config.
+    machine.succeed("grep -q 'config_dir = /var/lib/cratedigger/beets' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q 'beet_binary = /nix/store/' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q 'python = /nix/store/' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q '\\[Peer Cache\\]' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q 'redis_host = 127.0.0.1' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q 'ttl_seconds = 604800' /var/lib/cratedigger/config.ini")

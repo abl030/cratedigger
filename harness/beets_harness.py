@@ -30,13 +30,20 @@ if TYPE_CHECKING:
     from beets.importer.tasks import ImportTask
 
 
-# Append-only JSONL log of every beets album mutation the harness drives.
-# Captures MBID swaps that bypass cratedigger's pipeline DB — e.g. the
-# tagging-workspace fix_reissues/fix_undated scripts that drive this harness
-# with --search-id to intentionally retag existing albums. Without this log,
-# those mutations are invisible to cratedigger's audit trail (see the 04-14
-# Lucksmiths case). Located next to the library so it survives host rebuilds.
-MUTATIONS_LOG_PATH = "/mnt/virtio/Music/.harness-mutations.jsonl"
+def _mutations_log_path() -> str:
+    """Append-only JSONL log of every beets album mutation the harness drives.
+
+    Captures MBID swaps that bypass cratedigger's pipeline DB — e.g. the
+    tagging-workspace fix_reissues/fix_undated scripts that drive this
+    harness with --search-id to intentionally retag existing albums.
+    Without this log, those mutations are invisible to cratedigger's audit
+    trail (see the 04-14 Lucksmiths case). Derived from the configured
+    library path (next to it, so it survives host rebuilds and follows
+    whatever library the module-rendered BEETSDIR config points at —
+    tier-2 plan U5, no hardcoded operator paths).
+    """
+    lib_path = config["library"].as_filename()
+    return os.path.join(os.path.dirname(lib_path), ".harness-mutations.jsonl")
 
 
 # Redirect beets logging to stderr so stdout stays clean for JSON protocol
@@ -211,10 +218,12 @@ def _mbid_swap_event(task, candidate) -> dict | None:
     }
 
 
-def _append_mutation_log(event: dict, log_path: str = MUTATIONS_LOG_PATH) -> None:
+def _append_mutation_log(event: dict, log_path: str | None = None) -> None:
     """Append one JSONL event. Never raises — the audit log must not break
     the import itself. Failures are logged to stderr for operator visibility."""
     try:
+        if log_path is None:
+            log_path = _mutations_log_path()
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event) + "\n")
     except OSError as e:
