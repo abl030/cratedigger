@@ -1766,6 +1766,9 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         "band", "in_flight_rescue",
         # Card meta (year · MB/Discogs · N tracks) + on-disk spectral strip.
         "track_count", "current_spectral_grade", "current_spectral_bitrate",
+        # The accept-sibling control + siblings panel read the rg straight
+        # off the row — the single-row refetch must not drop it (#398).
+        "mb_release_group_id",
     }
     ENVELOPE_REQUIRED_FIELDS = {"results", "band", "count"}
 

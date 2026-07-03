@@ -1146,6 +1146,7 @@ class _RequestsMixin(_PipelineDBBase):
             ar.status,
             ar.source,
             ar.mb_release_id,
+            ar.mb_release_group_id,
             ar.discogs_release_id,
             ar.target_format,
             ar.min_bitrate,

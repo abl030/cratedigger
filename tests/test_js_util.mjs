@@ -1222,14 +1222,14 @@ console.log('long_tail.js __test__');
   // --- renderLongTailBody: the three list states (DOM-free string paint) ---
   const { renderLongTailBody } = longTailTest;
   // Empty cohort -> empty-cohort affordance, never blank.
-  state.longTail = { rows: [], band: null, query: '' };
+  state.longTail = { rows: [], band: null, query: '', open: new Set() };
   const emptyCohort = renderLongTailBody();
   assert(
     emptyCohort.includes('No wanted releases in the long tail'),
     'renderLongTailBody empty cohort shows the empty-cohort affordance',
   );
   // Populated cohort -> tab strip + rows for the default (Missing) band.
-  state.longTail = { rows: cohort, band: null, query: '' };
+  state.longTail = { rows: cohort, band: null, query: '', open: new Set() };
   const populated = renderLongTailBody();
   assert(
     populated.includes('lt-band-tabs') && populated.includes('lt-search-input'),
@@ -1246,7 +1246,7 @@ console.log('long_tail.js __test__');
   );
   // Empty-band -> a search filters the selected band to zero; the
   // affordance + cross-band hint show, never a blank area.
-  state.longTail = { rows: cohort, band: 'missing', query: 'hecker' };
+  state.longTail = { rows: cohort, band: 'missing', query: 'hecker', open: new Set() };
   const emptyBand = renderLongTailBody();
   assert(
     emptyBand.includes('No Missing releases match'),
@@ -1257,7 +1257,7 @@ console.log('long_tail.js __test__');
     'renderLongTailBody empty-band surfaces the cross-band match hint',
   );
   // Reset shared state so later tests are not affected.
-  state.longTail = { rows: null, band: null, query: '' };
+  state.longTail = { rows: null, band: null, query: '', open: new Set() };
 }
 
 // --- long_tail.js action console pure helpers (U4) ---
@@ -1464,6 +1464,26 @@ console.log('long_tail.js __test__ (U4 console)');
   // The YouTube panel opens in never_run (no auto-resolve) — Check button present.
   assert(missingShell.includes('window.checkYoutube(11)'),
     'renderConsoleShell opens the YouTube panel in never_run (Check-YouTube stub, no auto-resolve)');
+  // #398: the cohort row carries mb_release_group_id, so accept-sibling is
+  // in its final ENABLED state at shell render — no detail-fetch stamp, no
+  // post-hoc action-bar patch.
+  const rgShell = renderConsoleShell({
+    id: 11, band: 'missing', source: 'request',
+    target_format: 'lossless', mb_release_group_id: 'rg-11' });
+  assert(rgShell.includes('window.longTailAcceptSibling(11)'),
+    'renderConsoleShell wires accept-sibling at open when the row carries an rg (#398)');
+  assert(/lt-act-accept[^>]*disabled/.test(missingShell),
+    'renderConsoleShell disables accept-sibling at open when the row has no rg');
+  // #398: a cached resolver result renders the matrix at shell time, so a
+  // console restore after a list re-render doesn't reset a resolved
+  // YouTube panel back to never_run.
+  const cachedYtShell = renderConsoleShell(
+    { id: 11, band: 'missing', source: 'request' },
+    { outcome: 'ok', youtube_releases: [
+      { yt_browse_id: 'MPREb_x', track_count: 10, tracks: [], distances: [] }] });
+  assert(cachedYtShell.includes('Rescue from this')
+    && cachedYtShell.includes('MPREb_x'),
+    'renderConsoleShell renders a cached resolver matrix instead of never_run (#398)');
   // On-disk row → band-vs-intent leads (R8), why-unfindable does not.
   const onDiskShell = renderConsoleShell({ id: 12, band: 'poor', source: 'mb', target_format: 'lossless' });
   assert(onDiskShell.includes('Quality vs intent') && onDiskShell.includes('lt-band-intent'),
@@ -1754,6 +1774,22 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     id: 14, source: 'request', mb_release_group_id: null, target_format: null });
   assert(/lt-act-accept[^>]*disabled/.test(noRgBar),
     'renderActionsBar: MB row with no release group disables accept-sibling');
+}
+
+// --- long_tail.js #398 console-persistence state ---
+console.log('long_tail.js console persistence (#398)');
+{
+  // The open-console set must be initialised on the shared state — the
+  // restore path (and the toggle bookkeeping) read it unconditionally.
+  assert(state.longTail.open instanceof Set,
+    'state.longTail.open is a Set (open-console ids persist across re-renders)');
+  // The DOM-side entry points are no-ops outside a browser — must not throw
+  // when the module is imported into the Node test runner.
+  const { restoreLongTailConsoles, toggleLongTailDetail } = await import('../web/js/long_tail.js');
+  restoreLongTailConsoles();
+  toggleLongTailDetail(1);
+  assert(state.longTail.open.size === 0,
+    'DOM-side no-ops leave the open-console set untouched in Node');
 }
 
 // --- Summary ---
