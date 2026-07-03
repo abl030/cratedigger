@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Git pre-push hook: run `nix flake check` before anything leaves the
+# machine (tier-2 plan U9, R9 — tags are verifiably green without CI;
+# cratedigger's CI is GitGuardian-only by design).
+#
+# Install: ln -sf ../../scripts/pre-push .git/hooks/pre-push
+#
+# Cost: the FIRST run per machine builds the moduleVm (a full NixOS VM
+# boot — several minutes) plus the eval checks and the CLI bundle.
+# Subsequent runs are Nix cache hits unless the relevant inputs changed;
+# a source change re-runs the VM (cratediggerSrc = ./.), which is the
+# point — the tree you push is the tree that booted.
+#
+# Deliberate escape hatch: `git push --no-verify`.
+set -euo pipefail
+
+echo "pre-push: nix flake check (moduleVm + eval guards + CLI bundle)..." >&2
+nix flake check
+echo "pre-push: flake check OK" >&2

@@ -297,6 +297,12 @@ Why: we hit this on 2026-05-20. The suite was reporting `OK (skipped=56)` for mo
 
 Install with: `ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`. Runs pyright on staged `.py` files.
 
+### Pre-push hook
+
+Install with: `ln -sf ../../scripts/pre-push .git/hooks/pre-push`. Runs `nix flake check` (moduleVm boot gate + eval guards + CLI bundle) before every push — tags are verifiably green without CI (CI stays GitGuardian-only). First run per machine builds the VM (~minutes); later runs are cache hits. Escape hatch: `git push --no-verify`.
+
+**Tag convention:** known-good deployed states are tagged `vYYYY.MM.DD` (suffix `-N` for same-day). Tagging happens AFTER live verification on doc2 — the hook gates the push, the tag records the verified state.
+
 ### Claude Code commands
 
 - `/deploy` — full push → flake update → rebuild → verify sequence
