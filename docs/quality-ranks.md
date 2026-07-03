@@ -345,3 +345,87 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
 - Issue #60 (this PR)
 - Issue #31 — original quality pipeline bugs that drove this rewrite
 - `docs/opus-encoding.md` — Opus 128 rationale and listening test references
+
+## Tuning reference (Nix options)
+
+> Relocated from the README (tier-2 doc run, 2026-07-04) — this is the operational tuning reference; the sections above are the model rationale.
+
+Every threshold, enum, and per-codec band in the rank model is tunable via Nix options on the deployment side. The runtime parses them from `[Quality Ranks]` in `/var/lib/cratedigger/config.ini`, which is regenerated on every `nixos-rebuild switch` from the Nix module. Full rationale and per-band justification lives in [`docs/quality-ranks.md`](docs/quality-ranks.md); this section is the tuning reference.
+
+### Where to tune
+
+All options live under `services.cratedigger.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. The `[Quality Ranks]` section of `config.ini` is regenerated from these options on every `nixos-rebuild switch`; Cratedigger picks up the new values on its next 5-min timer fire.
+
+**Source of truth**: `QualityRankConfig.defaults()` in `lib/quality.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `cratedigger.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at cratedigger test time: bump a default in either repo, the pin test fails and reminds you to update the other.
+
+### Nix-exposed options
+
+**Policy scalars:**
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `gateMinRank` | enum (`unknown`, `poor`, `acceptable`, `good`, `excellent`, `transparent`, `lossless`) | `"excellent"` | Minimum rank an imported album must reach before the quality gate accepts it. Below this → re-queue for upgrade. Raise to tighten (reject more albums); lower to accept lower-quality sources. |
+| `bitrateMetric` | enum (`min`, `avg`, `median`) | `"avg"` | Which per-album bitrate statistic feeds rank classification. `avg` is robust to VBR per-track variance. `median` is outlier-resistant -- prefer when albums commonly have quiet intros/hidden tracks/skits that skew `avg`. `min` is legacy and penalizes legitimately-encoded lo-fi VBR. See `docs/quality-ranks.md` "When to prefer median". |
+| `withinRankToleranceKbps` | int | `5` | Same-rank equivalence window in kbps. Two bare-codec measurements in the same rank tier within this tolerance are "equivalent"; outside it, one is "better"/"worse". |
+
+**Per-codec band tables** (`bands.<codec>.{transparent,excellent,good,acceptable}`, all in kbps, used when the format hint is a bare codec string like `"MP3"` rather than an explicit label like `"mp3 v0"`):
+
+| Codec | transparent | excellent | good | acceptable | Notes |
+|---|---|---|---|---|---|
+| `bands.opus`   | 112 | 88  | 64  | 48  | Unconstrained Opus VBR averages 120-135 kbps typical / 95-150 kbps per track. 112 leaves headroom for sparse material; 88 matches Opus 96 hydrogenaudio quality. |
+| `bands.mp3Vbr` | 245 | 210 | 170 | 130 | `excellent=210` preserves the legacy `QUALITY_MIN_BITRATE_KBPS=210` gate threshold. V0 typically averages 220-260; V2 ~190 → `good=170`. **`excellent` also feeds `transcode_detection()` as the spectral-fallback threshold** (#66) so lowering it implicitly lowers what counts as "credible V0" when spectral is unavailable. |
+| `bands.mp3Cbr` | 320 | 256 | 192 | 128 | Unverifiable CBR is only `transparent` at 320 because we can't prove a CBR file came from lossless source. Below that → requeue for a FLAC source to re-verify. |
+| `bands.aac`    | 192 | 144 | 112 | 80  | Hydrogenaudio consensus places the "no meaningful quality gain above here" ceiling for music at 192 kbps. |
+
+Leaving every option at its default produces exactly `QualityRankConfig.defaults()` -- the defaults above are the shipping values.
+
+### Collection fields (NOT exposed via Nix -- edit `lib/quality.py` directly)
+
+Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `nix/module.nix` to render them is a trivial follow-up if you find yourself retuning them often.
+
+- **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is an **explicit label contract** -- when a download advertises `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3Vbr` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT: the V0 label beats the 210 threshold.
+
+  **Default ladder**: `V0=TRANSPARENT, V1-V2=EXCELLENT, V3-V4=GOOD, V5-V9=ACCEPTABLE`
+
+  **When to retune**: tighten if you don't trust LAME's claim that V2 is transparent (move V1/V2 to EXCELLENT → GOOD). Loosen if you encode at V4 locally and want your own rips to pass the gate (move V4 up to EXCELLENT).
+
+- **`lossless_codecs`** -- set of codec identity strings that **short-circuit to LOSSLESS** regardless of measured bitrate. Checked against the first whitespace-separated token of the format hint during rank classification. If the format hint starts with any of these, the rank model skips bitrate-based classification entirely and returns LOSSLESS.
+
+  **Default**: `{"flac", "lossless", "alac", "wav"}`
+
+  **When to retune**: add `"ape"`, `"dsf"`, or `"wavpack"` if your library carries them. Remove nothing -- removing entries is a footgun that would reclassify genuine lossless files as UNKNOWN.
+
+- **`mixed_format_precedence`** -- ordered tuple used by `_reduce_album_format()` when an album on disk has tracks in multiple codecs (rare -- usually a manually-merged album). Walked in order; the first codec that appears on the album becomes the album's canonical codec for rank classification. Order matters.
+
+  **Default**: `("mp3", "aac", "opus", "flac")` -- worst codec wins, so a mixed FLAC+MP3 album classifies as MP3 (conservative).
+
+  **When to retune**: reverse to `("flac", "opus", "aac", "mp3")` if you'd rather have mixed-format albums classified by the *best* codec on disk (less conservative -- you'll accept more as "good enough"). The default is the conservative choice for a curated library.
+
+### How to tune and deploy
+
+The exact deploy flow depends on where you set the options. For a host config that imports `cratedigger.nixosModules.default` directly:
+
+```bash
+$EDITOR hosts/<your-host>/configuration.nix   # tweak services.cratedigger.qualityRanks.*
+git commit -am "cratedigger: retune <what>" && git push
+sudo nixos-rebuild switch --flake .
+```
+
+For the abl030 homelab (this project's reference deployment):
+
+```bash
+# On doc1 — has git push credentials for nixosconfig
+cd ~/nixosconfig
+$EDITOR hosts/doc2/configuration.nix          # tweak services.cratedigger.qualityRanks.*
+git commit -am "cratedigger: retune <what>" && git push
+ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+```
+
+### How to verify the new config is live
+
+1. **Read the generated file** -- `ssh doc2 'sudo cat /var/lib/cratedigger/config.ini | grep -A 30 "\[Quality Ranks\]"'`. The section should show the exact values from your Nix edit.
+
+2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `gate_min_rank`, `bitrate_metric`, and thresholds the simulator is using. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
+
+3. **Visual confirmation** -- open the [Decisions tab at music.ablz.au](https://music.ablz.au). The top of the tab renders three pills (**Gate min rank** / **Bitrate metric** / **Within-rank tolerance**) pulled from the same `_runtime_rank_config()` snapshot. If your tuning is live, the pills show the new values (#68). The transcode stage rule threshold also reflects `bands.mp3Vbr.excellent` live, since `get_decision_tree()` threads `cfg` through (#75).
+
