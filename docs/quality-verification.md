@@ -253,3 +253,55 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 - [ ] Skip spectral check for albums that already passed V0 conversion (≥ `cfg.mp3_vbr.excellent`, default 210 kbps)
 - [ ] Test `spectro` pip package as second-opinion validation
 - [ ] Performance: 16 sox calls per track x 30s trim ≈ 8s/track, ~100s per 12-track album
+
+
+## Evidence addressing, propagation, and ownership
+
+> Relocated from CLAUDE.md (2026-07-04 doc simplification) — this is canonical policy, not narrative.
+
+**Evidence is content-addressed.** `album_quality_evidence` rows are keyed
+by `(mb_release_id, snapshot_fingerprint)`; addressing entities reference
+them via `import_jobs.candidate_evidence_id`,
+`download_log.candidate_evidence_id`, and
+`album_requests.current_evidence_id`. Triage walks the FK chain (direct →
+cross-walk via `request_id` → measure as last resort). Evidence is never
+deleted unless the files actually change.
+
+**Evidence survives the candidate → library transition (lossless-source
+gated).** After a successful import, `propagate_candidate_evidence_to_current`
+(U10) inherits the candidate's measurement payload onto the library
+evidence row. `verified_lossless_proof`, `verified_lossless`, and
+`was_converted_from` propagate in **all** cases. `spectral_grade`,
+`spectral_bitrate_kbps`, `v0_metric`, and `matched_bad_audio_hash_*`
+propagate when the import is renamed-only OR when the candidate source
+codec is lossless (FLAC / ALAC / WAV) — `LOSSLESS_CODECS` in `lib/quality.py`
+is the canonical set. Non-lossless transcoded imports (MP3 → Opus etc.)
+strip those fields onto NULL because a lossy source's spectral / V0
+lineage is not meaningfully comparable against future candidates and
+storing it on the library row would mislead triage.
+
+For lossless-source-transcoded library rows, the propagated fields
+describe the upstream source audio at import time, not the on-disk
+file. Wrong-match cleanup triage compares future candidates against
+this evidence to reject same-source duplicates.
+
+**Search narrowing companion.** When `lossless_source_locked` fires —
+in the importer (`lib/dispatch/core.py`) or wrong-match cleanup
+triage (`lib/wrong_match_cleanup_service.py`) — the request's
+`search_filetype_override` is narrowed to `"lossless"` via
+`narrow_override_on_lossless_source_lock` (`lib/quality.py`). Future
+search cycles only ask Soulseek for lossless tiers, so the lock
+doesn't fire repeatedly against new peers serving the same lossy
+file. No plan-generator change is needed — `generate_search_plan`
+produces query strategies, and the filetype filter is applied
+downstream in `enqueue.py::effective_search_tiers` from the request's
+override column.
+
+Known wart: library rows imported before this policy landed (2026-05-17)
+have NULL spectral / V0 / bad-hash fields and may have lossy
+`search_filetype_override` values. They keep the old behaviour —
+wrong-match triage cannot reject same-source duplicates against them
+and the search-narrowing only fires on new `lossless_source_locked`
+events — until each row is re-imported or force-imported. Forward-only
+by design; no backfill. See
+`docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.
