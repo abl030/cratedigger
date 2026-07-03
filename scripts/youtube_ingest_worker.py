@@ -616,6 +616,12 @@ def run_loop(
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    # This worker's track-count gate resolves releases via web.mb (and
+    # Discogs-sourced requests via web.discogs) — wire the mirror origins
+    # from the runtime config like every headless consumer (tier-2 U6).
+    from web.api_bases import configure_api_bases_from_runtime_config
+    configure_api_bases_from_runtime_config()
+
     parser = argparse.ArgumentParser(
         description="Drain the YouTube-rescue ingest queue",
     )

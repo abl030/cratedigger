@@ -23,7 +23,9 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `beets.discogsTokenFile` | `null` | `*File` secret (issue #117): materialized into `${stateDir}/beets/secrets.yaml` (0400) + `include:` in the rendered config. Null = placeholder token (plugins load cleanly; public-Discogs lookups are token-required). |
 | `beetsConfig.{directory,library}` | production values | Rendered into the module-owned `config.yaml`. `beetsDirectory` (config.ini) follows `beetsConfig.directory` by default. |
 | `beetsConfig.fetchart.{maxwidth,minwidth}` | `500` / `300` | Load-bearing: library size (embedded art × every track) and the Meelo black-box floor. |
-| `beetsConfig.musicbrainz.{host,https,ratelimit}` | `musicbrainz.org` / `true` / `1` | Public-MB stranger default (functional but slow); the operator points these at the local mirror. |
+| `beetsConfig.musicbrainz.{host,https,ratelimit}` | derived from `musicbrainz.apiBase` | mkDefault-derived (mirror ⇒ host:port/http/ratelimit 100; public ⇒ musicbrainz.org/https/1); override to pin explicitly. |
+| `musicbrainz.apiBase` | `https://musicbrainz.org` | ONE MB origin for web/mb.py (`--mb-api`), pipeline-cli lookups, and the rendered beets musicbrainz block (KTD6). Public default is functional but ~1 req/s. |
+| `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
 | `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |

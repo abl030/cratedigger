@@ -230,7 +230,9 @@
       --dsn "${cfg.pipelineDb.dsn}" \
       --beets-db "${cfg.web.beetsDb}" \
       --redis-host "${cfg.web.redis.host}" \
-      --redis-port ${toString cfg.web.redis.port} "$@"
+      --redis-port ${toString cfg.web.redis.port} \
+      --mb-api "${cfg.musicbrainz.apiBase}/ws/2" \
+      ${optionalString (cfg.discogs.apiBase != null) ''--discogs-api "${cfg.discogs.apiBase}" ''}"$@"
   '';
 
   # YouTube-rescue ingest drainer — see scripts/youtube_ingest_worker.py.
@@ -345,6 +347,12 @@
     staging_dir = ${cfg.beetsValidation.stagingDir}
     tracking_file = ${cfg.beetsValidation.trackingFile}
     verified_lossless_target = ${cfg.beetsValidation.verifiedLosslessTarget}
+
+    [MusicBrainz]
+    api_base = ${cfg.musicbrainz.apiBase}
+
+    [Discogs]
+    api_base = ${if cfg.discogs.apiBase != null then cfg.discogs.apiBase else ""}
 
     ${qualityRanksSection}
     [Pipeline DB]
@@ -770,6 +778,39 @@ in {
           interactive OAuth flow — public-Discogs lookups then fail
           per-use until a real token is provided (documented
           token-required).
+        '';
+      };
+    };
+
+    musicbrainz = {
+      apiBase = mkOption {
+        type = types.str;
+        default = "https://musicbrainz.org";
+        example = "http://192.168.1.35:5200";
+        description = ''
+          MusicBrainz API origin (scheme://host[:port], no path) — ONE value
+          threaded to all three consumers (tier-2 plan U6/KTD6): web/mb.py
+          (via cratedigger-web --mb-api), pipeline-cli release lookups, and
+          the rendered beets musicbrainz.{host,https,ratelimit}. Public MB
+          default is functional but rate-limited (~1 req/s); point at a
+          local mirror for production-speed matching.
+        '';
+      };
+    };
+
+    discogs = {
+      apiBase = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "https://discogs.ablz.au";
+        description = ''
+          Discogs mirror origin. Mirror-REQUIRED (R13): web/discogs.py
+          speaks the Rust mirror's endpoint shape, which public
+          api.discogs.com does not serve — there is no public fallback.
+          Null = Discogs browse off (clear 503 mirror-required message);
+          MusicBrainz browse is unaffected. The beets discogs plugin's own
+          public-Discogs path (used by imports) is separate — see
+          beets.discogsMirrorUrl for its mirror knob.
         '';
       };
     };
@@ -1221,6 +1262,20 @@ in {
     # One concept, one value: the config.ini [Beets] directory follows the
     # rendered beets config.yaml `directory:` unless explicitly overridden.
     services.cratedigger.beetsDirectory = lib.mkDefault cfg.beetsConfig.directory;
+
+    # One MB value, three consumers (U6/KTD6): the rendered beets
+    # musicbrainz block derives from musicbrainz.apiBase — mirror =>
+    # host:port / plain http / ratelimit 100 (the harness --upstream
+    # block's inverse); public => musicbrainz.org / https / ratelimit 1.
+    # mkDefault so an operator can still pin the beets block explicitly.
+    services.cratedigger.beetsConfig.musicbrainz = let
+      mbHost = lib.removePrefix "https://" (lib.removePrefix "http://" cfg.musicbrainz.apiBase);
+      mbPublic = mbHost == "musicbrainz.org";
+    in {
+      host = lib.mkDefault mbHost;
+      https = lib.mkDefault (lib.hasPrefix "https://" cfg.musicbrainz.apiBase);
+      ratelimit = lib.mkDefault (if mbPublic then 1 else 100);
+    };
 
     services.redis.servers.cratedigger = {
       enable = cfg.redis.enable;

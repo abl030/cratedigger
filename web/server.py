@@ -51,6 +51,7 @@ if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
 from web import cache as cache
+from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
 from lib.beets_db import BeetsDB
@@ -428,6 +429,11 @@ class Handler(BaseHTTPRequestHandler):
             # body-write attempt to a dead socket.
             log.warning("Client disconnect on GET %s: %s", path, type(e).__name__)
             self.close_connection = True
+        except _discogs.DiscogsMirrorNotConfigured as e:
+            # Deliberate config posture, not a crash: no Discogs mirror ->
+            # Discogs browse is off (tier-2 plan R13). 503 with the
+            # actionable message, no DB reconnect churn.
+            self._error(str(e), 503)
         except Exception as e:
             log.exception("GET %s failed", path)
             _try_reconnect_db()
@@ -478,6 +484,10 @@ class Handler(BaseHTTPRequestHandler):
             # handled here.
             log.warning("Client disconnect on POST %s: %s", path, type(e).__name__)
             self.close_connection = True
+        except _discogs.DiscogsMirrorNotConfigured as e:
+            # Deliberate config posture (no Discogs mirror) — clean 503,
+            # no DB reconnect churn (R13).
+            self._error(str(e), 503)
         except Exception as e:
             log.exception("POST %s failed", path)
             _try_reconnect_db()
@@ -518,7 +528,9 @@ def main():
     parser.add_argument("--port", type=int, default=8085)
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
     parser.add_argument("--beets-db", default="/mnt/virtio/Music/beets-library.db")
-    parser.add_argument("--mb-api", default=None, help="MusicBrainz API base URL")
+    parser.add_argument("--mb-api", default=None, help="MusicBrainz API base URL (full base incl. /ws/2)")
+    parser.add_argument("--discogs-api", default=None,
+                        help="Discogs mirror base URL (mirror-required; unset = Discogs browse off)")
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
@@ -536,8 +548,17 @@ def main():
         # prefix in the helper or flush `meta:*` manually during deploy.
         cache.invalidate_pattern("web:*")
 
+    # API bases: runtime config first (shared startup wiring — the same
+    # call pipeline-cli and the youtube worker make), explicit flags win.
+    # Config carries ORIGINS; the flag carries the full MB base incl.
+    # /ws/2 (KTD6). Discogs stays unset without a mirror — web/discogs.py
+    # then serves a clear 503 mirror-required (R13).
+    from web.api_bases import configure_api_bases_from_runtime_config
+    configure_api_bases_from_runtime_config()
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api
+    if args.discogs_api:
+        _discogs.DISCOGS_API_BASE = args.discogs_api
 
     global _db_dsn
     _db_dsn = args.dsn

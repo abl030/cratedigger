@@ -11,6 +11,21 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import web.discogs
+
+
+def setUpModule() -> None:
+    # These tests exercise the REAL web/discogs.py with urlopen patched.
+    # Since tier-2 U6 the module ships with NO default base (Discogs is
+    # mirror-required, R13) — give the suite a synthetic mirror origin so
+    # URL construction proceeds; assertions check paths, not the origin.
+    web.discogs.DISCOGS_API_BASE = "https://discogs-mirror.test"
+
+
+def tearDownModule() -> None:
+    web.discogs.DISCOGS_API_BASE = None
+
+
 from web.discogs import (
     _parse_duration,
     _parse_position,

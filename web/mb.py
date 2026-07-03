@@ -1,6 +1,6 @@
 """MusicBrainz API helpers — shared between pipeline_cli and web server.
 
-All queries hit the local MB mirror at MB_API_BASE. The pure-metadata
+All queries hit the MusicBrainz API at MB_API_BASE (public MB by default; the local mirror in production). The pure-metadata
 responses are memoized via `cache.memoize_meta()` at 24h TTL so the
 web UI can render multiple cards per page without hammering the mirror.
 
@@ -21,7 +21,11 @@ import urllib.error
 # separate from the pipeline's peer-cache implementation.
 from web import cache as _cache
 
-MB_API_BASE = "http://192.168.1.35:5200/ws/2"
+# Default: public MusicBrainz (functional but rate-limited ~1 req/s).
+# Production points this at the local mirror via the module's
+# services.cratedigger.musicbrainz.apiBase -> `cratedigger-web --mb-api`
+# (tier-2 plan U6, R13/KTD6). The value includes the /ws/2 prefix.
+MB_API_BASE = "https://musicbrainz.org/ws/2"
 USER_AGENT = "cratedigger-web/1.0"
 
 # Canonical Various Artists MBID. Used by the resolver and the browse-tab

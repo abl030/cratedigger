@@ -100,6 +100,13 @@ class _MirrorContractCase(unittest.TestCase):
         set_p.start()
         self.addCleanup(get_p.stop)
         self.addCleanup(set_p.stop)
+        # Discogs is mirror-required since tier-2 U6 (no default base).
+        # These contract tests patch urlopen — only the exception contract
+        # is under test, so any synthetic origin works.
+        base_p = patch.object(discogs, "DISCOGS_API_BASE",
+                              "https://discogs-mirror.test")
+        base_p.start()
+        self.addCleanup(base_p.stop)
 
 
 class TestMBAdapterContract(_MirrorContractCase):
