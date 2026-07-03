@@ -17,10 +17,10 @@ When Cratedigger downloads an album and it passes validation, beets is what actu
 
 ## Version & Installation
 
-- **Installed via**: Nix Home Manager on the host that runs cratedigger — currently **doc2** (`192.168.1.35`). Beets is colocated with cratedigger so the harness can invoke `beet import` locally without SSH.
-- **Nix module**: `/home/abl030/nixosconfig/modules/home-manager/services/beets.nix`
-- **Binary**: `/etc/profiles/per-user/abl030/bin/beet`
-- **Package override**: Custom `overrideAttrs` patches the lyrics plugin to point at local LRCLIB (`http://192.168.1.35:3300/api`) instead of public `lrclib.net`
+- **Owned by cratedigger** (tier-2 packaging): the beets package, plugin closure, config, binary and library are all provisioned by cratedigger's own NixOS module from cratedigger's own flake.lock. There is no Home Manager beets anymore.
+- **Package**: `nix/beets.nix` — the pinned `python3Packages.beets` with the full built-in plugin closure. Mirror patches (Discogs mirror, local LRCLIB) are opt-in module knobs (`services.cratedigger.beets.discogsMirrorUrl` / `beets.lrclibUrl`), applied via `substituteInPlace` with `--replace-fail` as the drift alarm.
+- **Binary**: `cratedigger-beet` on the system PATH — the canonical manual-ops beet for the library cratedigger manages. It pins `BEETSDIR` at the module-rendered config, so operator invocations and pipeline subprocesses always read the SAME config.
+- **One store path everywhere**: the python library (`lib/beets_distance.py` in cratedigger-web), the dev shell, the harness interpreter, and `cratedigger-beet` all reference the same beets derivation. The real-beets contract test (`tests/test_harness_beets2_contract.py`) runs against exactly the beets production runs.
 
 ### IMPORTANT: `musicbrainz` is a Plugin
 
@@ -28,13 +28,13 @@ In modern beets (2.x), `musicbrainz` is a **plugin** that must be explicitly lis
 
 ## Configuration
 
-**Generated config**: `~/.config/beets/config.yaml` (managed by Nix — do NOT edit directly)
-**Secrets**: `~/.config/beets/secrets.yaml` (Discogs token, included via beets `include:` directive)
+**Rendered config**: `/var/lib/cratedigger/beets/config.yaml` (BEETSDIR; rendered by the module's preStart — do NOT edit, it is overwritten on every service start)
+**Secrets**: `/var/lib/cratedigger/beets/secrets.yaml` (0400; materialized from `services.cratedigger.beets.discogsTokenFile`, included via beets `include:`)
 
 To change the config:
-1. Edit the Nix module: `/home/abl030/nixosconfig/modules/home-manager/services/beets.nix`
-2. Rebuild: `cd /home/abl030/nixosconfig && nix fmt && sudo nixos-rebuild switch --flake .#proxmox-vm`
-3. Verify: `cat ~/.config/beets/config.yaml` — confirm changes landed
+1. Tunables (`beetsConfig.{directory,library}`, fetchart widths, `musicbrainz.*` via `musicbrainz.apiBase`) are module options — set them in the nixosconfig wrapper. Everything else (path templates, `duplicate_keys`, the plugin list) is a fixed literal in cratedigger's `nix/module.nix` `beetsSettings` — change it there, in this repo, with the U12-style rendered-config diff in mind.
+2. Deploy via the normal flake flow (`.claude/rules/deploy.md`).
+3. Verify: `ssh doc2 'cat /var/lib/cratedigger/beets/config.yaml'` after the next service start.
 
 ### Current Config (Key Settings)
 
@@ -53,9 +53,10 @@ import:
 
 # Path templates
 paths:
-  default: $albumartist/$year - $album%aunique{}/$track $title
-  comp: Compilations/$album%aunique{}/$track $title
+  default: $albumartist/$year - $album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title
+  comp: Compilations/$album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title
   singleton: Non-Album/$artist/$title
+# (short_mbid comes from the inline plugin's item_fields/album_fields)
 
 # MusicBrainz — local mirror on doc2
 musicbrainz:
@@ -73,7 +74,7 @@ match:
     original_year: true
 
 # Active plugins
-plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the
+plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline
 ```
 
 ### Active Plugins
@@ -174,11 +175,13 @@ The harness (`harness/beets_harness.py`) is a custom `ImportSession` subclass th
 ./harness/run_beets_harness.sh [options] /path/to/album
 ```
 
-The wrapper:
-1. Finds the Nix-managed `beet` binary
-2. Follows the wrapper chain to find `.beet-wrapped`
-3. Extracts the Python interpreter and PYTHONPATH from the Nix environment
-4. Runs `beets_harness.py` with the correct Python + site-packages
+The wrapper execs `$CRATEDIGGER_BEETS_PYTHON` (the pinned beets env's
+interpreter) on `beets_harness.py`. In production that env var — and
+`BEETSDIR` — come from `lib/util.py::beets_subprocess_env()`, which reads
+the module-rendered `[Beets]` keys in config.ini; in the dev shell the
+shellHook exports it. A missing interpreter is an actionable error — there
+is no Home-Manager fallback (tier-2 R6; the old `.beet-wrapped` scraping
+is gone).
 
 ### Harness Options
 
@@ -520,37 +523,22 @@ Currently NOT enabled. The `check_on_import` option triggers interactive prompts
 
 ## Deploying Beets Config Changes
 
-Beets config is Nix-managed. The cycle:
+Beets config is module-rendered from THIS repo. The cycle is the normal
+cratedigger deploy (`.claude/rules/deploy.md` / the `/deploy` command):
+change `nix/module.nix` (fixed literals) or the wrapper's option values
+(tunables), push, flake-bump nixosconfig, `fleet-update` on doc2.
 
 ```bash
-# 1. Edit the module
-vim /home/abl030/nixosconfig/modules/home-manager/services/beets.nix
-
-# 2. Format and rebuild
-cd /home/abl030/nixosconfig
-nix fmt
-sudo nixos-rebuild switch --flake .#proxmox-vm
-
-# 3. Verify
-cat ~/.config/beets/config.yaml     # Check changes landed
-beet config                          # Beets' own config dump
-beet ls -a | head -5                 # Quick smoke test
+# Verify after deploy
+ssh doc2 'cat /var/lib/cratedigger/beets/config.yaml'   # rendered config
+ssh doc2 'cratedigger-beet config >/dev/null && echo OK' # loads cleanly
+ssh doc2 'cratedigger-beet version'                      # pinned beets + all 15 plugins
 ```
 
-**IMPORTANT**: Never edit `~/.config/beets/config.yaml` directly — Home Manager will fail with "would be clobbered" on the next rebuild.
-
-## Deploying beets config changes
-
-Beets is installed on doc2 alongside cratedigger via Nix Home Manager. The harness shell wrapper (`run_beets_harness.sh`) invokes `beet` locally on doc2 — no SSH back to doc1.
-
-**NEVER cross-build from doc1** (`--target-host doc2` is slow). Always:
-```bash
-# Push nixosconfig to GitHub first (from doc1, which holds the push credentials)
-ssh doc1 'cd ~/nixosconfig && git push'
-
-# Then build locally on doc2
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
-```
+**IMPORTANT**: Never edit the rendered `config.yaml` directly — the next
+service start overwrites it (atomic mv in preStart). The moduleVm check
+asserts the load-bearing invariants (duplicate_keys nesting, plugin list)
+on every `nix flake check`.
 
 ## Troubleshooting
 
