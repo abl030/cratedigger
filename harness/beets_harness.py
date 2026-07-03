@@ -251,9 +251,11 @@ def _assert_duplicate_keys_include_mb_albumid(cfg) -> None:
             "cross-MBID sibling destruction via find_duplicates — the "
             "2026-04-20 Palo Santo bug. Extra mutable keys like albumartist or "
             "album make same-release upgrades miss Beets' duplicate callback, "
-            "so replacement would not be atomic. Fix the `duplicate_keys` "
-            "block under `import:` in ~/.config/beets/config.yaml (or the "
-            "equivalent Nix module)."
+            "so replacement would not be atomic. The config is rendered by "
+            "the cratedigger NixOS module into ${stateDir}/beets/config.yaml "
+            "(BEETSDIR) — duplicate_keys is a hard-coded literal there "
+            "(nix/module.nix, tier-2 plan R5), so if this fires the rendered "
+            "file was bypassed or hand-edited."
         )
         print(msg, file=sys.stderr)
         sys.exit(1)

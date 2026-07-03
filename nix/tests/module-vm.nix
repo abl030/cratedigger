@@ -15,6 +15,45 @@
 # heavyweight fixtures that belong in the python test suite.
 { pkgs, system, cratediggerModule, cratediggerSrc }:
 
+let
+  # Parses the module-rendered beets config and asserts the invariants that
+  # have bitten in production: duplicate_keys nesting (Palo Santo guard),
+  # the fixed plugin list with musicbrainz present (zero-candidates guard),
+  # public-MB stranger defaults, and the tokenless placeholder (no OAuth).
+  pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+  checkRenderedBeetsConfig = pkgs.writeText "check-rendered-beets-config.py" ''
+    import yaml
+
+    with open("/var/lib/cratedigger/beets/config.yaml") as f:
+        cfg = yaml.safe_load(f)
+
+    dk = cfg["import"]["duplicate_keys"]
+    assert dk["album"] == ["mb_albumid", "discogs_albumid"], dk
+    assert dk["item"] == ["artist", "title"], dk
+
+    plugins = cfg["plugins"].split()
+    expected = (
+        "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
+        "info missing duplicates edit fromfilename ftintitle the inline"
+    ).split()
+    assert plugins == expected, plugins
+
+    mb = cfg["musicbrainz"]
+    assert mb["host"] == "musicbrainz.org", mb
+    assert mb["https"] is True, mb
+    assert mb["ratelimit"] == 1, mb
+
+    # Tokenless stranger posture: placeholder token, no secrets include.
+    assert cfg["discogs"]["user_token"] == "cratedigger-placeholder-token"
+    assert "include" not in cfg, cfg.get("include")
+
+    # Path-affecting keys present and production-shaped.
+    assert cfg["asciify_paths"] is True
+    assert "short_mbid" in cfg["paths"]["default"], cfg["paths"]
+
+    print("BEETS_CONFIG_OK")
+  '';
+in
 pkgs.testers.nixosTest {
   name = "cratedigger-module-vm";
 
@@ -61,6 +100,14 @@ pkgs.testers.nixosTest {
         enable = false;
         stagingDir = "/var/lib/cratedigger-staging";
         trackingFile = "/var/lib/cratedigger-staging/tracking.jsonl";
+      };
+      # Stranger-set beets paths (VM-local). The library's PARENT dir must
+      # exist or `beet` prompts "Create it (Y/n)?" interactively — which
+      # blocks forever under the test driver's backdoor shell. stateDir
+      # exists by tmpfiles, so the library parent is guaranteed.
+      beetsConfig = {
+        directory = "/var/lib/cratedigger-music";
+        library = "/var/lib/cratedigger/beets-library.db";
       };
       web = {
         enable = true;
@@ -197,18 +244,23 @@ pkgs.testers.nixosTest {
     # fails to acquire and returns 0 immediately.
     machine.succeed("cratedigger-youtube-ingest --once")
 
-    # U3 (tier-2): cratedigger owns the beet runtime. cratedigger-beet is
-    # on PATH, resolves BEETSDIR at the module's beets config dir, and the
-    # pinned derivation carries the dependency closure for the FULL
-    # production plugin set — including a tokenless discogs (placeholder
-    # token = no interactive OAuth, no network at load). The config.yaml
-    # written here is a stand-in until U4 renders the real one.
+    # U3+U4 (tier-2): cratedigger owns the beet runtime AND its config.
+    # The module rendered config.yaml into BEETSDIR during ExecStartPre
+    # (the `systemctl start cratedigger.service` above); cratedigger-beet
+    # resolves it and loads the FULL production plugin set — including a
+    # tokenless discogs (placeholder token = no interactive OAuth, no
+    # network at load).
     machine.succeed("command -v cratedigger-beet")
-    machine.succeed("test -d /var/lib/cratedigger/beets")
-    machine.succeed(
-        "printf 'plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline\\ndiscogs:\\n  user_token: cratedigger-placeholder-token\\n'"
-        + " > /var/lib/cratedigger/beets/config.yaml"
-    )
+    machine.succeed("test -f /var/lib/cratedigger/beets/config.yaml")
+    mode = machine.succeed("stat -c %a /var/lib/cratedigger/beets/config.yaml").strip()
+    assert mode == "644", f"config.yaml should be 0644, got {mode}"
+    # No token file configured -> no secrets.yaml materialized.
+    machine.fail("test -e /var/lib/cratedigger/beets/secrets.yaml")
+
+    # Semantic assertions on the rendered YAML (duplicate_keys nesting,
+    # plugin list, public-MB defaults, placeholder token).
+    machine.succeed("${pyWithYaml}/bin/python3 ${checkRenderedBeetsConfig}")
+
     version_out = machine.succeed("cratedigger-beet version")
     plugins_line = next(
         line for line in version_out.splitlines() if line.startswith("plugins:")
@@ -221,6 +273,5 @@ pkgs.testers.nixosTest {
         assert plugin in loaded, f"plugin {plugin} not loaded: {version_out}"
     # Tokenless/stranger posture: config loads without crash or prompt.
     machine.succeed("cratedigger-beet config > /dev/null")
-    machine.succeed("rm /var/lib/cratedigger/beets/config.yaml")
   '';
 }

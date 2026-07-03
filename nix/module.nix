@@ -30,8 +30,116 @@
   };
 
   # Config dir every beets consumer resolves via BEETSDIR (beets' native
-  # config-dir override). U4 renders config.yaml into it.
+  # config-dir override). preStart renders config.yaml (and, when a token
+  # file is configured, secrets.yaml) into it.
   beetsConfigDir = "${cfg.stateDir}/beets";
+
+  # The module owns beets config.yaml (tier-2 plan U4, R5). The attrset
+  # mirrors the production config exactly (source of truth: the operator's
+  # live HM-rendered ~/.config/beets/config.yaml, 2026-07-03); the U12
+  # cutover gate diffs the rendered file against it, so change values here
+  # only in lockstep with production intent.
+  #
+  # HARD-CODED, not options:
+  #   - import.duplicate_keys.album = [mb_albumid discogs_albumid] — the
+  #     Palo Santo data-loss invariant. Beets reads it strictly from
+  #     config["import"]["duplicate_keys"]; a top-level duplicate_keys is
+  #     silently ignored and re-enables cross-MBID sibling destruction.
+  #     NEVER expose this as an option.
+  #   - plugins — fixed production list; musicbrainz must be present or
+  #     beets returns 0 candidates for everything.
+  #   - paths / asciify_paths — path-affecting keys; drift here plus the
+  #     importer's post-import `beet move` reproduces the 2026-05-18
+  #     asciify mass-split (1,178 albums).
+  beetsSettings = let
+    bc = cfg.beetsConfig;
+  in {
+    directory = bc.directory;
+    library = bc.library;
+    asciify_paths = true;
+    clutter = ["Thumbs.DB" "Thumbs.db" ".DS_Store" "*.jpg" "*.png" "AlbumArt*" "Folder.*" "desktop.ini"];
+    import = {
+      copy = false;
+      write = true;
+      move = true;
+      timid = false;
+      incremental = true;
+      incremental_skip_later = true;
+      log = "${dirOf bc.library}/beets-import.log";
+      languages = ["en"];
+      duplicate_keys = {
+        album = ["mb_albumid" "discogs_albumid"];
+        item = ["artist" "title"];
+      };
+    };
+    paths = {
+      default = "$albumartist/$year - $album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title";
+      singleton = "Non-Album/$artist/$title";
+      comp = "Compilations/$album%aunique{albumartist album,albumtype year label catalognum albumdisambig releasegroupdisambig short_mbid}/$track $title";
+    };
+    item_fields.short_mbid = "mb_albumid[:8] if mb_albumid else ''";
+    album_fields.short_mbid = "mb_albumid[:8] if mb_albumid else ''";
+    musicbrainz = {
+      host = bc.musicbrainz.host;
+      https = bc.musicbrainz.https;
+      ratelimit = bc.musicbrainz.ratelimit;
+    };
+    match = {
+      ignore_video_tracks = false;
+      strong_rec_thresh = 0.10;
+      medium_rec_thresh = 0.25;
+      preferred = {
+        countries = ["AU" "US" "GB|UK"];
+        media = ["Digital Media|File" "CD"];
+        original_year = true;
+      };
+    };
+    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline";
+    chroma.auto = false;
+    fetchart = {
+      auto = true;
+      minwidth = bc.fetchart.minwidth;
+      maxwidth = bc.fetchart.maxwidth;
+      quality = 75;
+      high_resolution = false;
+      sources = ["coverart" "itunes" "amazon" "albumart" "cover_art_url" "filesystem"];
+    };
+    embedart.auto = true;
+    scrub.auto = true;
+    lyrics = {
+      auto = true;
+      synced = true;
+      sources = ["lrclib"];
+    };
+    lastgenre = {
+      auto = true;
+      count = 3;
+      source = "album";
+      canonical = true;
+      separator = ", ";
+      force = false;
+    };
+    the = {
+      a = true;
+      the = true;
+    };
+  } // (
+    if cfg.beets.discogsTokenFile != null then {
+      # Real token: issue #117 *File pattern — preStart materializes
+      # secrets.yaml (0400) next to config.yaml; the world-readable
+      # config.yaml carries only the include.
+      include = ["secrets.yaml"];
+    } else {
+      # Tokenless stranger default (R7): any non-empty user_token makes
+      # the discogs plugin skip its interactive OAuth flow at load, so
+      # every plugin loads cleanly offline. Public-Discogs lookups with
+      # this placeholder are documented token-required (they 401 per-use;
+      # beets logs and falls back to MB candidates).
+      discogs.user_token = "cratedigger-placeholder-token";
+    }
+  );
+
+  beetsConfigTemplate = (pkgs.formats.yaml {}).generate "cratedigger-beets-config.yaml" beetsSettings;
 
   # Same python env the dev shell uses — single source of truth. Built from
   # cfg.packageSet (the flake export pins it to cratedigger's own flake.lock,
@@ -280,6 +388,45 @@
     ${pkgs.coreutils}/bin/mv -f "$tmp" "$config_dir/config.ini"
     trap - EXIT
     rm -f "$config_dir/.cratedigger.lock"
+
+    # Beets config (tier-2 plan U4): atomic render into BEETSDIR, same
+    # temp-file-and-rename dance as config.ini because the importer,
+    # preview worker and timer-driven oneshot can start concurrently.
+    beets_dir="${beetsConfigDir}"
+    mkdir -p "$beets_dir"
+    tmp_yaml="$(${pkgs.coreutils}/bin/mktemp "$beets_dir/.config.yaml.XXXXXX")"
+    trap '${pkgs.coreutils}/bin/rm -f "$tmp_yaml"' EXIT
+    ${pkgs.coreutils}/bin/cp ${beetsConfigTemplate} "$tmp_yaml"
+    ${pkgs.coreutils}/bin/chmod 0644 "$tmp_yaml"
+    ${pkgs.coreutils}/bin/mv -f "$tmp_yaml" "$beets_dir/config.yaml"
+    trap - EXIT
+    ${optionalString (cfg.beets.discogsTokenFile != null) ''
+      # Discogs token: *File pattern (issue #117) — the token lands only
+      # in a 0400 secrets.yaml owned by the service user, never in the
+      # world-readable config.yaml. Bare assignment so a failed cat
+      # (unreadable secret) fails the unit under set -e instead of being
+      # swallowed inside a printf argument.
+      discogs_token="$(${pkgs.coreutils}/bin/cat "${cfg.beets.discogsTokenFile}")"
+      if [ -z "$discogs_token" ]; then
+        # An empty user_token re-enables the discogs plugin's interactive
+        # OAuth flow at load — the exact hazard the placeholder/token
+        # design exists to kill. Fail loud instead of deploying green
+        # with a broken beets.
+        echo "cratedigger: beets.discogsTokenFile (${cfg.beets.discogsTokenFile}) is empty — refusing to render an empty discogs user_token" >&2
+        exit 1
+      fi
+      # YAML single-quoted scalar; embedded single quotes doubled.
+      discogs_token="''${discogs_token//\'/\'\'}"
+      tmp_secrets="$(${pkgs.coreutils}/bin/mktemp "$beets_dir/.secrets.yaml.XXXXXX")"
+      trap '${pkgs.coreutils}/bin/rm -f "$tmp_secrets"' EXIT
+      {
+        echo 'discogs:'
+        echo "  user_token: '$discogs_token'"
+      } > "$tmp_secrets"
+      ${pkgs.coreutils}/bin/chmod 0400 "$tmp_secrets"
+      ${pkgs.coreutils}/bin/mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"
+      trap - EXIT
+    ''}
   '';
 
   # Optional health check for a stuck slskd reconnect loop. Generic — the
@@ -601,6 +748,89 @@ in {
           (substituteInPlace at build time) to this value instead of public
           lrclib.net. Null = stock plugin behaviour.
         '';
+      };
+      discogsTokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Path to a file containing a Discogs user token (raw, one line).
+          Same contract as slskd.apiKeyFile (issue #117): must be readable
+          by services.cratedigger.user. When set, preStart materializes it
+          into ''${stateDir}/beets/secrets.yaml (mode 0400) and the rendered
+          config.yaml includes it. When null, a non-empty placeholder token
+          is rendered instead so the discogs plugin loads without its
+          interactive OAuth flow — public-Discogs lookups then fail
+          per-use until a real token is provided (documented
+          token-required).
+        '';
+      };
+    };
+
+    # Operator-tunable subset of the rendered beets config.yaml. Everything
+    # NOT listed here (path templates, duplicate_keys, plugin list, match
+    # weights, ...) is rendered as a fixed production-parity literal — see
+    # beetsSettings above for why.
+    beetsConfig = {
+      directory = mkOption {
+        type = types.str;
+        default = "/mnt/virtio/Music/Beets";
+        description = ''
+          Beets library root (config.yaml `directory:`). Production-matching
+          default (tier-2 plan R5); strangers point this at their music
+          root.
+        '';
+      };
+      library = mkOption {
+        type = types.str;
+        default = "/mnt/virtio/Music/beets-library.db";
+        description = ''
+          Beets library SQLite DB (config.yaml `library:`). The import log
+          renders next to it as beets-import.log. The parent directory must
+          exist at runtime: `beet` prompts interactively ("Create it
+          (Y/n)?") when it's missing, which blocks any non-interactive
+          invocation.
+        '';
+      };
+      fetchart = {
+        maxwidth = mkOption {
+          type = types.int;
+          default = 500;
+          description = ''
+            fetchart maxwidth. Load-bearing: embedded art is duplicated in
+            every track, so width drives library size (500px ≈ 71KB vs
+            1138KB unresized across ~83K tracks = ~85GB saved).
+          '';
+        };
+        minwidth = mkOption {
+          type = types.int;
+          default = 300;
+          description = ''
+            fetchart minwidth. Load-bearing: art under ~2KB renders as
+            black boxes in Meelo — 300px is the observed floor.
+          '';
+        };
+      };
+      musicbrainz = {
+        host = mkOption {
+          type = types.str;
+          default = "musicbrainz.org";
+          description = ''
+            MusicBrainz host for beets (config.yaml `musicbrainz.host`).
+            Default is public MB — functional but rate-limited (~1 req/s).
+            Point at a local mirror (host:port) for production-speed
+            matching; https and ratelimit below must be set coherently.
+          '';
+        };
+        https = mkOption {
+          type = types.bool;
+          default = true;
+          description = "Whether beets talks TLS to musicbrainz.host (true for public MB, typically false for a LAN mirror).";
+        };
+        ratelimit = mkOption {
+          type = types.int;
+          default = 1;
+          description = "beets musicbrainz ratelimit (req/s). 1 for public MB; 100 against a local mirror.";
+        };
       };
     };
 
@@ -980,6 +1210,9 @@ in {
 
     services.cratedigger.web.redis.host = lib.mkDefault cfg.redis.host;
     services.cratedigger.web.redis.port = lib.mkDefault cfg.redis.port;
+    # One concept, one value: the config.ini [Beets] directory follows the
+    # rendered beets config.yaml `directory:` unless explicitly overridden.
+    services.cratedigger.beetsDirectory = lib.mkDefault cfg.beetsConfig.directory;
 
     services.redis.servers.cratedigger = {
       enable = cfg.redis.enable;
