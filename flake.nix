@@ -18,9 +18,30 @@
         inherit system;
         pkgs = import nixpkgs { inherit system; };
       });
+      version = "0-unstable-"
+        + (builtins.substring 0 8 (self.lastModifiedDate or "19700101"))
+        + (if self ? shortRev then "-${self.shortRev}" else "-dirty");
     in {
       devShells = forAllSystems ({ pkgs, ... }: {
         default = import ./nix/shell.nix { inherit pkgs; };
+      });
+
+      # Tag-based versions are not readable in pure flake eval, so the
+      # version above is date+rev (sortable, unique per commit); release
+      # tags (vYYYY.MM.DD, U9) record verified states in git itself.
+      packages = forAllSystems ({ pkgs, ... }: rec {
+        default = import ./nix/wrappers.nix {
+          inherit pkgs version;
+          src = ./.;
+        };
+        cratedigger = default;
+      });
+
+      apps = forAllSystems ({ system, ... }: {
+        pipeline-cli = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/pipeline-cli";
+        };
       });
 
       # The module is exported as a wrapper that pins its package set to
@@ -42,6 +63,10 @@
         # ephemeral postgres + a stubbed slskd. Verifies: migrator runs,
         # config.ini is rendered correctly, cratedigger-web responds.
         # Consumes the wrapped export — the same thing consumers import.
+        # `nix flake check` must build the CLI bundle (U8): a stranger's
+        # `nix run .#pipeline-cli` is only as green as this check.
+        packageDefault = self.packages.${system}.default;
+
         moduleVm = import ./nix/tests/module-vm.nix {
           inherit pkgs system;
           cratediggerModule = self.nixosModules.default;
