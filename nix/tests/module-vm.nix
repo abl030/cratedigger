@@ -1,18 +1,21 @@
-# NixOS VM test for the upstream cratedigger module.
+# NixOS VM test for the upstream cratedigger module — the STRANGER-BOOT
+# gate (tier-2 plan U10, R12): a competent NixOS stranger's first boot,
+# every `nix flake check`.
 #
-# Boots a single VM that runs:
-#   - PostgreSQL with a `cratedigger` user/db (the module's expected backend)
-#   - The cratedigger module enabled with web ON, no slskd, fake API key file
+# Posture: pipelineDb.createLocally = true (module-provisioned postgres,
+# peer auth, no hand-rolled DB block), beetsValidation ON, VM-local beets
+# paths, NO mirror knobs (public-MB defaults), no secrets beyond the
+# stubbed slskd key.
 #
-# Verifies:
-#   - cratedigger-db-migrate.service runs to active (exited)
-#   - schema_migrations table is populated
-#   - /var/lib/cratedigger/config.ini exists with the API key substituted
-#   - pipeline-cli is on PATH and connects to the DB
-#   - cratedigger-web responds on its port
+# Verifies: migrate green behind module-owned postgres ordering; rendered
+# config.ini (api keys as *File paths, [Beets] runtime keys, api_base
+# defaults, socket DSN with no credentials) AND rendered beets config.yaml
+# (duplicate_keys nesting, fixed plugin list, public-MB, placeholder
+# token); cratedigger-beet loads the full plugin set; web serves;
+# youtube-ingest + unfindable units structurally sound.
 #
-# Does NOT exercise: slskd interaction, real downloads, beets — those need
-# heavyweight fixtures that belong in the python test suite.
+# Does NOT exercise: slskd interaction, real downloads, real imports —
+# those need heavyweight fixtures that belong in the python suite.
 { pkgs, system, cratediggerModule, cratediggerSrc }:
 
 let
@@ -84,8 +87,11 @@ pkgs.testers.nixosTest {
       # peer auth, DSN defaulted to the socket. No hand-rolled postgres
       # block, no manual unit ordering, no password material anywhere.
       pipelineDb.createLocally = true;
+      # Stranger posture (U10/R12): beets validation ON — the full
+      # rendered-config surface (config.ini beets keys + config.yaml) is
+      # what a real first boot produces.
       beetsValidation = {
-        enable = false;
+        enable = true;
         stagingDir = "/var/lib/cratedigger-staging";
         trackingFile = "/var/lib/cratedigger-staging/tracking.jsonl";
       };
@@ -153,7 +159,7 @@ pkgs.testers.nixosTest {
     # config.ini is now world-readable since it contains no secrets.
     mode = machine.succeed("stat -c %a /var/lib/cratedigger/config.ini").strip()
     assert mode == "644", f"config.ini should be 0644, got {mode}"
-    machine.succeed("grep -q 'enabled = False' /var/lib/cratedigger/config.ini")  # beets disabled
+    machine.succeed("grep -q 'enabled = True' /var/lib/cratedigger/config.ini")  # beets validation ON (stranger posture)
     machine.succeed("grep -q '\\[Quality Ranks\\]' /var/lib/cratedigger/config.ini")
     # U5 (tier-2): the module renders the beets runtime keys so every
     # beets subprocess resolves the pinned interpreter + rendered config.
@@ -181,6 +187,12 @@ pkgs.testers.nixosTest {
         "systemctl show cratedigger-db-migrate -p Environment"
         " | grep -q 'PIPELINE_DB_DSN=postgresql:///root?host=/run/postgresql'"
     )
+
+    # Module-owned first-boot ordering (U7/U10): migrate is serialised
+    # behind PostgreSQL; every app unit requires migrate — the stranger's
+    # first boot cannot race the database.
+    machine.succeed("systemctl show -p After cratedigger-db-migrate.service | grep -q postgresql.service")
+    machine.succeed("systemctl show -p Requires cratedigger-db-migrate.service | grep -q postgresql.service")
 
     # pipeline-cli on PATH and connects (over the peer-auth socket)
     machine.succeed("pipeline-cli list wanted")
