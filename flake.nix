@@ -71,6 +71,41 @@
           assert pinned.path == expected.path;
           assert (overridden.cratediggerEscapeHatchMarker or "") == "consumer-pkgs";
           pkgs.runCommand "cratedigger-packageset-pin-ok" { } "touch $out";
+
+        # nix/beets.nix mirror knobs: with the knobs set, the built plugin
+        # files carry the mirror URLs; with them unset, stock upstream URLs.
+        # `--replace-fail` inside beets.nix is the primary drift alarm (the
+        # patched build fails if a future beets drops the target strings);
+        # this check additionally pins the unpatched default to stock
+        # behaviour so the knobs can never become always-on.
+        beetsMirrorPatches = let
+          patched = import ./nix/beets.nix {
+            inherit pkgs;
+            discogsMirrorUrl = "https://discogs-mirror.example.test";
+            lrclibUrl = "http://lrclib.example.test/api";
+          };
+          unpatched = import ./nix/beets.nix { inherit pkgs; };
+          # Compose the patched variant into a withPackages env the same way
+          # pythonEnv does in production — the standalone build alone would
+          # leave the real deploy shape (patched beets inside the env) as
+          # the first-ever composition.
+          patchedEnv = pkgs.python3.withPackages (ps: [ patched ]);
+        in pkgs.runCommand "cratedigger-beets-mirror-patches-ok" { } ''
+          set -euo pipefail
+          p_lyrics=$(echo ${patched}/lib/python*/site-packages/beetsplug/lyrics.py)
+          p_discogs=$(echo ${patched}/lib/python*/site-packages/beetsplug/discogs/__init__.py)
+          u_lyrics=$(echo ${unpatched}/lib/python*/site-packages/beetsplug/lyrics.py)
+          u_discogs=$(echo ${unpatched}/lib/python*/site-packages/beetsplug/discogs/__init__.py)
+          grep -q 'BASE_URL = "http://lrclib.example.test/api"' "$p_lyrics"
+          grep -q '_base_url = "https://discogs-mirror.example.test"' "$p_discogs"
+          # Positive stock-URL/stock-line assertions: if the knob defaults
+          # ever became non-null (always-on mirrors), these lines change and
+          # the grep fails — a negated grep would not survive set -e anyway.
+          grep -q 'BASE_URL = "https://lrclib.net/api"' "$u_lyrics"
+          grep -q 'self.discogs_client = Client(USER_AGENT, user_token=user_token)$' "$u_discogs"
+          test -x ${patchedEnv}/bin/beet
+          touch $out
+        '';
       });
     };
 }

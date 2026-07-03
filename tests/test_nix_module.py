@@ -156,7 +156,7 @@ class TestPinnedPackageSetContract(unittest.TestCase):
     def test_module_builds_package_from_packageSet(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn("packageSet = mkOption", text)
-        self.assertIn("cratedigger = cfg.packageSet.callPackage ./package.nix {};", text)
+        self.assertIn("cratedigger = cfg.packageSet.callPackage ./package.nix", text)
         self.assertNotIn("pkgs.callPackage ./package.nix", text)
 
     def test_flake_export_pins_packageSet_to_own_lock(self) -> None:
@@ -174,6 +174,44 @@ class TestPinnedPackageSetContract(unittest.TestCase):
         """The VM gate must exercise what consumers actually import."""
         text = FLAKE_NIX.read_text(encoding="utf-8")
         self.assertIn("cratediggerModule = self.nixosModules.default;", text)
+
+
+class TestOwnedBeetsContract(unittest.TestCase):
+    """Cratedigger owns the beet runtime (tier-2 plan U3, R4 / KTD3).
+
+    One pinned beets derivation (nix/beets.nix, from cfg.packageSet, mirror
+    patches as opt-in knobs) serves pythonEnv, the dev shell, the harness,
+    and the cratedigger-beet wrapper. The wrapper pins BEETSDIR at the
+    module's beets config dir so every consumer reads the same rendered
+    config.
+    """
+
+    def test_module_threads_beets_env_from_packageSet(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("beetsEnv = import ./beets.nix {", text)
+        self.assertIn("pkgs = cfg.packageSet;", text)
+        self.assertIn("discogsMirrorUrl = cfg.beets.discogsMirrorUrl;", text)
+        self.assertIn("lrclibUrl = cfg.beets.lrclibUrl;", text)
+        self.assertIn(
+            "cratedigger = cfg.packageSet.callPackage ./package.nix { beetsPackage = beetsEnv; };",
+            text,
+        )
+
+    def test_cratedigger_beet_wrapper_pins_beetsdir(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('pkgs.writeShellScriptBin "cratedigger-beet"', text)
+        self.assertIn('beetsConfigDir = "${cfg.stateDir}/beets";', text)
+        self.assertIn('export BEETSDIR="${beetsConfigDir}"', text)
+        self.assertIn("exec ${pythonEnv}/bin/beet", text)
+        # On systemPackages as the canonical manual-ops binary.
+        self.assertIn("cratediggerBeet pkgs.postgresql", text)
+
+    def test_mirror_knobs_default_off(self) -> None:
+        """Strangers get stock plugin behaviour — knobs are opt-in."""
+        beets_nix = (REPO_ROOT / "nix" / "beets.nix").read_text(encoding="utf-8")
+        self.assertIn("discogsMirrorUrl ? null", beets_nix)
+        self.assertIn("lrclibUrl ? null", beets_nix)
+        self.assertIn("--replace-fail", beets_nix)
 
 
 class TestOwnedRedisContract(unittest.TestCase):

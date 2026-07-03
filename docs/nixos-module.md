@@ -18,6 +18,8 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. |
 | `src` | `../.` | Path to cratedigger source tree. Defaults to this flake's repo root. |
 | `packageSet` | cratedigger's own locked nixpkgs (via the flake export) | Package set for the runtime closure. Override = escape hatch, forfeits the tested-closure guarantee. |
+| `beets.discogsMirrorUrl` | `null` | When set, build-time-patches the beets discogs plugin to hit this mirror instead of api.discogs.com. |
+| `beets.lrclibUrl` | `null` | When set, build-time-patches the beets lyrics plugin's LRCLIB base to this URL. |
 | `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
@@ -53,7 +55,7 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 
 ## What the module does
 
-1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard).
+1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard) from the pinned `packageSet`. The beets in that env is the cratedigger-owned derivation (`nix/beets.nix`) — one store path serving the python library (`lib/beets_distance.py`), the `cratedigger-beet` wrapper (which pins `BEETSDIR` at `${stateDir}/beets`), and — from U5 — the harness.
 2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH.
 3. Renders `/var/lib/cratedigger/config.ini` at boot from option values, sed-substituting credentials read from each `*File` path. App units render through an atomic temp-file-and-rename step because importer, preview, web, and timer-driven services can start concurrently after migrations.
 4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
@@ -105,7 +107,8 @@ github:abl030/cratedigger
 ├── nixosModules.default              ← upstream NixOS module (pins packageSet to this flake's lock)
 ├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
 ├── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
-└── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
+├── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
+└── checks.<system>.beetsMirrorPatches ← beets mirror knobs patch/don't-patch as configured
 ```
 
 ## Validating before deploy
