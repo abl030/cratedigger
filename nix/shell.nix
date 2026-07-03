@@ -1,4 +1,21 @@
-{ pkgs ? import <nixpkgs> {} }:
+# Plain `nix-shell` resolves the flake-locked nixpkgs, NOT the host's
+# <nixpkgs> channel. One pinned rev everywhere (dev shell, flake checks,
+# module) is the tier-2 packaging invariant: the real-beets contract test
+# only guards drift if it runs against the beets production will run.
+# `nix develop` gets the same pin via flake.nix; this shim covers the
+# `nix-shell --run "..."` path every rule and script uses. The fetched
+# tarball is GC-rooted from the shellHook (.nixpkgs-src) so
+# nix-collect-garbage doesn't force a re-download.
+{ pkgs ? import (
+    let
+      lock = builtins.fromJSON (builtins.readFile ../flake.lock);
+      node = lock.nodes.${lock.nodes.${lock.root}.inputs.nixpkgs}.locked;
+    in
+    builtins.fetchTarball {
+      url = "https://github.com/${node.owner}/${node.repo}/archive/${node.rev}.tar.gz";
+      sha256 = node.narHash;
+    }
+  ) {} }:
 
 let
   cratedigger = import ./package.nix { inherit pkgs; };
@@ -42,5 +59,11 @@ pkgs.mkShell {
     nix-store --realise "$_cd_pyenv" --indirect --add-root "$PWD/.pyright-venv" >/dev/null 2>&1 \
       || ln -sfn "$_cd_pyenv" "$PWD/.pyright-venv"
     unset _cd_pyenv
+
+    # GC-root the pinned nixpkgs source tree (fetched by the flake.lock
+    # shim above) so nix-collect-garbage doesn't force a re-download on
+    # the next shell entry. Same pattern as .pyright-venv.
+    nix-store --realise ${pkgs.path} --indirect --add-root "$PWD/.nixpkgs-src" >/dev/null 2>&1 \
+      || ln -sfn ${pkgs.path} "$PWD/.nixpkgs-src"
   '';
 }

@@ -1,4 +1,5 @@
 # Back-compat shim — delegates to nix/shell.nix so there's one definition.
-# Prefer `nix develop` (uses the flake-pinned nixpkgs); `nix-shell` still works
-# but uses whatever <nixpkgs> resolves to in your channel.
-import ./nix/shell.nix { pkgs = import <nixpkgs> {}; }
+# No explicit pkgs: nix/shell.nix's default resolves the flake-locked
+# nixpkgs (via a flake.lock-reading fetchTarball), so plain `nix-shell`
+# and `nix develop` consume the same pinned rev — never the host channel.
+import ./nix/shell.nix {}
