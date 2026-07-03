@@ -72,6 +72,28 @@
           assert (overridden.cratediggerEscapeHatchMarker or "") == "consumer-pkgs";
           pkgs.runCommand "cratedigger-packageset-pin-ok" { } "touch $out";
 
+        # KTD6 derivation, asserted on rendered VALUES (not source text):
+        # the beets musicbrainz block flips host/https/ratelimit for a
+        # mirror origin vs the public default. Eval-only.
+        apiBaseDerivation = let
+          evalMb = apiBase: (nixpkgs.lib.nixosSystem {
+            modules = [ self.nixosModules.default {
+              nixpkgs.pkgs = import nixpkgs { inherit system; };
+              services.cratedigger.enable = true;
+              services.cratedigger.musicbrainz.apiBase = apiBase;
+            } ];
+          }).config.services.cratedigger.beetsConfig.musicbrainz;
+          mirror = evalMb "http://192.168.1.35:5200";
+          public = evalMb "https://musicbrainz.org";
+        in
+          assert mirror.host == "192.168.1.35:5200";
+          assert mirror.https == false;
+          assert mirror.ratelimit == 100;
+          assert public.host == "musicbrainz.org";
+          assert public.https == true;
+          assert public.ratelimit == 1;
+          pkgs.runCommand "cratedigger-api-base-derivation-ok" { } "touch $out";
+
         # nix/beets.nix mirror knobs: with the knobs set, the built plugin
         # files carry the mirror URLs; with them unset, stock upstream URLs.
         # `--replace-fail` inside beets.nix is the primary drift alarm (the

@@ -55,6 +55,33 @@ def make_db():
     return db
 
 
+class TestMbApiBase(unittest.TestCase):
+    """KTD6: pipeline-cli's MB lookups read [MusicBrainz] api_base from the
+    runtime config instead of carrying a second hardcoded mirror URL."""
+
+    def test_mb_api_reads_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("[MusicBrainz]\napi_base = http://mb-mirror.test:5200\n")
+            with patch.dict(os.environ,
+                            {"CRATEDIGGER_RUNTIME_CONFIG": path},
+                            clear=False):
+                self.assertEqual(pipeline_cli._mb_api(),
+                                 "http://mb-mirror.test:5200/ws/2")
+
+    def test_mb_api_defaults_to_public(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("[Slskd]\nhost_url = http://x\n")
+            with patch.dict(os.environ,
+                            {"CRATEDIGGER_RUNTIME_CONFIG": path},
+                            clear=False):
+                self.assertEqual(pipeline_cli._mb_api(),
+                                 "https://musicbrainz.org/ws/2")
+
+
 class TestCmdAdd(unittest.TestCase):
     def setUp(self):
         self.db = make_db()

@@ -9044,6 +9044,14 @@ class TestFieldResolverSlice(unittest.TestCase):
             resolve_release_group_year,
         )
         from tests.fakes import FakePipelineDB
+        import web.discogs
+
+        # Mirror-required since tier-2 U6; urlopen is patched below, so a
+        # synthetic origin suffices for the real-client round trip.
+        base_p = patch.object(web.discogs, "DISCOGS_API_BASE",
+                              "https://discogs-mirror.test")
+        base_p.start()
+        self.addCleanup(base_p.stop)
 
         # Captured shape from the Discogs mirror's
         # /api/masters/<id> endpoint.

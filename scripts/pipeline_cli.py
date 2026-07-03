@@ -86,7 +86,16 @@ from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
 
-MB_API = "http://192.168.1.35:5200/ws/2"
+def _mb_api() -> str:
+    """MusicBrainz WS/2 base — one config value, three consumers (KTD6).
+
+    Reads [MusicBrainz] api_base from the runtime config (rendered by the
+    NixOS module; public musicbrainz.org default) instead of a second
+    hardcoded mirror URL drifting from web/mb.py's.
+    """
+    from lib.config import read_runtime_config
+    from web.api_bases import mb_ws2_base
+    return mb_ws2_base(read_runtime_config().musicbrainz_api_base)
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
 
 
@@ -154,7 +163,7 @@ def fetch_mb_release(mb_release_id):
     even though MB has the data.
     """
     url = (
-        f"{MB_API}/release/{mb_release_id}"
+        f"{_mb_api()}/release/{mb_release_id}"
         f"?inc=recordings+artist-credits+media+release-groups+labels&fmt=json"
     )
     req = urllib.request.Request(url)
@@ -3714,6 +3723,13 @@ def cmd_routes(db, args) -> int:
 
 
 def main():
+    # Mirror origins for every web.mb / web.discogs consumer in this
+    # process (add --discogs, youtube-album, distance, Replace, field
+    # resolution). Without this, the CLI silently runs against public MB
+    # and an unset Discogs base (tier-2 U6 wiring).
+    from web.api_bases import configure_api_bases_from_runtime_config
+    configure_api_bases_from_runtime_config()
+
     parser, p_sp, p_triage_op = _build_parser()
     args = parser.parse_args()
     if not args.command:

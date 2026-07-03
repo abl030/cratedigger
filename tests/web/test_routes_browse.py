@@ -649,6 +649,22 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         "artist_id", "artist_name", "release_groups",
     }
 
+    def test_discogs_routes_return_503_mirror_required_when_base_unset(self):
+        """R13: no mirror configured -> a clear mirror-required 503 from the
+        REAL web/discogs.py (raised at URL construction, before any network),
+        not a broken upstream fetch. Discogs browse is mirror-required; MB
+        browse is unaffected."""
+        for path in ("/api/discogs/search?q=test",
+                     "/api/discogs/artist/3840",
+                     "/api/discogs/master/21491",
+                     "/api/discogs/release/21491",
+                     "/api/discogs/label/search?q=warp",
+                     "/api/discogs/label/757"):
+            with self.subTest(path=path):
+                status, data = self._get(path)
+                self.assertEqual(status, 503, data)
+                self.assertIn("mirror", data["error"].lower())
+
     def test_discogs_search_release_contract(self):
         with patch("web.routes.browse.discogs_api") as mock_dg:
             mock_dg.search_releases.return_value = [

@@ -289,6 +289,35 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertIn("ratelimit", text)
 
 
+class TestApiBaseThreading(unittest.TestCase):
+    """One MB value, three consumers (tier-2 plan U6 / KTD6); Discogs is
+    mirror-required with no public default (R13)."""
+
+    def test_config_ini_renders_api_bases(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("[MusicBrainz]", text)
+        self.assertIn("api_base = ${cfg.musicbrainz.apiBase}", text)
+        self.assertIn("[Discogs]", text)
+
+    def test_mb_default_is_public_and_discogs_has_none(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('default = "https://musicbrainz.org";', text)
+        # discogs.apiBase: nullOr with null default — mirror-required.
+        idx = text.index("discogs = {")
+        self.assertIn("default = null;", text[idx:idx + 800])
+
+    def test_web_wrapper_passes_both_bases(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('--mb-api "${cfg.musicbrainz.apiBase}/ws/2"', text)
+        self.assertIn('--discogs-api "${cfg.discogs.apiBase}"', text)
+
+    def test_beets_musicbrainz_derives_from_the_one_value(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("services.cratedigger.beetsConfig.musicbrainz = let", text)
+        self.assertIn('mbHost = lib.removePrefix "https://" (lib.removePrefix "http://" cfg.musicbrainz.apiBase);', text)
+        self.assertIn("ratelimit = lib.mkDefault (if mbPublic then 1 else 100);", text)
+
+
 class TestOwnedRedisContract(unittest.TestCase):
     def test_cratedigger_owns_local_redis_server_by_default(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
