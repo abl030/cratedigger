@@ -30,7 +30,8 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
-| `pipelineDb.dsn` | (required) | PostgreSQL DSN. |
+| `pipelineDb.dsn` | `null` | PostgreSQL DSN. Required unless `createLocally`. |
+| `pipelineDb.createLocally` | `false` | Provision local PostgreSQL: role + database named after `cfg.user`, unix-socket peer auth (no password material anywhere), socket DSN default, migrate unit ordered after postgresql.service. doc2 keeps `false` + its nspawn DSN. |
 | `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beetsValidation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
@@ -115,6 +116,8 @@ github:abl030/cratedigger
 ├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
 ├── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
 ├── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
+├── checks.<system>.moduleAssertions   ← eval guard: friendly required-option messages; doc2 + stranger shapes clean
+├── checks.<system>.apiBaseDerivation  ← eval guard: beets musicbrainz block derives from musicbrainz.apiBase
 └── checks.<system>.beetsMirrorPatches ← beets mirror knobs patch/don't-patch as configured
 ```
 

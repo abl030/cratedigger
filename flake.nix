@@ -72,6 +72,57 @@
           assert (overridden.cratediggerEscapeHatchMarker or "") == "consumer-pkgs";
           pkgs.runCommand "cratedigger-packageset-pin-ok" { } "touch $out";
 
+        # U7/R11: required options fail with actionable messages naming the
+        # option — verified on MESSAGE CONTENT (tryEval would lose it).
+        # Also pins both DB postures: bare enable trips the dsn-or-
+        # createLocally assertion; a fully-set external-DSN config (the
+        # doc2 shape) and a createLocally config both eval with zero
+        # failing assertions.
+        moduleAssertions = let
+          evalAssertions = extra: (nixpkgs.lib.nixosSystem {
+            modules = [ self.nixosModules.default {
+              nixpkgs.pkgs = import nixpkgs { inherit system; };
+              services.cratedigger.enable = true;
+            } extra ];
+          }).config.assertions;
+          # Scope to our own assertions — a minimal nixosSystem also fails
+          # NixOS's fileSystems/bootloader assertions, which aren't ours.
+          failingMsgs = extra: builtins.filter
+            (m: nixpkgs.lib.hasPrefix "services.cratedigger" m)
+            (map (a: a.message)
+              (builtins.filter (a: !a.assertion) (evalAssertions extra)));
+          bare = failingMsgs { };
+          hasMsg = needle: builtins.any (m: nixpkgs.lib.hasInfix needle m) bare;
+          doc2Shape = failingMsgs {
+            services.cratedigger = {
+              slskd.apiKeyFile = "/run/secrets/slskd-key";
+              slskd.downloadDir = "/mnt/music/slskd";
+              pipelineDb.dsn = "postgresql://cratedigger@10.20.0.11:5432/cratedigger";
+              beetsValidation = {
+                stagingDir = "/mnt/music/incoming";
+                trackingFile = "/mnt/music/incoming/tracking.jsonl";
+              };
+            };
+          };
+          strangerShape = failingMsgs {
+            services.cratedigger = {
+              slskd.apiKeyFile = "/etc/slskd-key";
+              slskd.downloadDir = "/srv/slskd";
+              pipelineDb.createLocally = true;
+              beetsValidation = {
+                stagingDir = "/srv/incoming";
+                trackingFile = "/srv/incoming/tracking.jsonl";
+              };
+            };
+          };
+        in
+          assert hasMsg "slskd.apiKeyFile";
+          assert hasMsg "slskd.downloadDir";
+          assert hasMsg "pipelineDb.createLocally = true";
+          assert doc2Shape == [ ];
+          assert strangerShape == [ ];
+          pkgs.runCommand "cratedigger-module-assertions-ok" { } "touch $out";
+
         # KTD6 derivation, asserted on rendered VALUES (not source text):
         # the beets musicbrainz block flips host/https/ratelimit for a
         # mirror origin vs the public default. Eval-only.
