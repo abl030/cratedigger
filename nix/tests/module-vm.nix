@@ -60,22 +60,6 @@ pkgs.testers.nixosTest {
   nodes.machine = { config, lib, pkgs, ... }: {
     imports = [ cratediggerModule ];
 
-    services.postgresql = {
-      enable = true;
-      ensureDatabases = [ "cratedigger" ];
-      ensureUsers = [
-        {
-          name = "cratedigger";
-          ensureDBOwnership = true;
-        }
-      ];
-      authentication = lib.mkOverride 10 ''
-        local all all              trust
-        host  all all 127.0.0.1/32 trust
-        host  all all ::1/128      trust
-      '';
-    };
-
     # Fake slskd API key — never actually called because healthCheck is off.
     environment.etc."cratedigger/slskd-api-key" = {
       text = "test-api-key-do-not-use\n";
@@ -95,7 +79,11 @@ pkgs.testers.nixosTest {
         apiKeyFile = "/etc/cratedigger/slskd-api-key";
         downloadDir = "/var/lib/cratedigger-downloads";
       };
-      pipelineDb.dsn = "postgresql://cratedigger@localhost/cratedigger";
+      # Stranger posture (U7/R10): the module provisions PostgreSQL —
+      # role + database named after cfg.user (root here), unix-socket
+      # peer auth, DSN defaulted to the socket. No hand-rolled postgres
+      # block, no manual unit ordering, no password material anywhere.
+      pipelineDb.createLocally = true;
       beetsValidation = {
         enable = false;
         stagingDir = "/var/lib/cratedigger-staging";
@@ -127,17 +115,10 @@ pkgs.testers.nixosTest {
       healthCheck.enable = false;
     };
 
-    # Order our migrate unit after postgres comes up.
-    systemd.services.cratedigger-db-migrate = {
-      after = [ "postgresql.service" ];
-      requires = [ "postgresql.service" ];
-    };
-    systemd.services.cratedigger.after = [ "postgresql.service" ];
-    systemd.services.cratedigger.wants = [ "postgresql.service" ];
-    systemd.services.cratedigger-web.after = [ "postgresql.service" ];
-    systemd.services.cratedigger-web.wants = [ "postgresql.service" ];
-    systemd.services.cratedigger-youtube-ingest.after = [ "postgresql.service" ];
-    systemd.services.cratedigger-youtube-ingest.wants = [ "postgresql.service" ];
+    # NO manual postgres ordering: the module owns
+    # cratedigger-db-migrate's after/requires on postgresql.service when
+    # createLocally is set, and every app unit requires the migrate unit —
+    # transitively serialising first boot behind PostgreSQL.
 
     # Speed up the VM
     virtualisation.memorySize = 2048;
@@ -155,7 +136,7 @@ pkgs.testers.nixosTest {
     assert state == "active", f"migrator unit not active: {state}"
 
     # Migrations recorded
-    out = machine.succeed("sudo -u postgres psql cratedigger -At -c 'SELECT version FROM schema_migrations ORDER BY version'")
+    out = machine.succeed("sudo -u postgres psql root -At -c 'SELECT version FROM schema_migrations ORDER BY version'")
     versions = [v.strip() for v in out.strip().split() if v.strip()]
     assert "1" in versions, f"baseline migration missing, got {versions}"
     assert "2" in versions, f"002 migration missing, got {versions}"
@@ -190,7 +171,18 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl show -p After cratedigger-web.service | grep -q redis-cratedigger.service")
     machine.succeed("systemctl show -p Wants cratedigger-web.service | grep -q redis-cratedigger.service")
 
-    # pipeline-cli on PATH and connects
+    # Peer auth by construction (KTD5): the socket DSN carries no
+    # password, and none exists in the rendered config or unit files.
+    machine.succeed("grep -q 'dsn = postgresql:///root?host=/run/postgresql' /var/lib/cratedigger/config.ini")
+    # (password_file *keys* are fine — they are the #117 *File pattern;
+    # what must not exist is an actual credential value.)
+    machine.fail("grep -Eqi 'password *= *[^ ]|pgpassword' /var/lib/cratedigger/config.ini")
+    machine.succeed(
+        "systemctl show cratedigger-db-migrate -p Environment"
+        " | grep -q 'PIPELINE_DB_DSN=postgresql:///root?host=/run/postgresql'"
+    )
+
+    # pipeline-cli on PATH and connects (over the peer-auth socket)
     machine.succeed("pipeline-cli list wanted")
 
     # Web UI listens

@@ -84,7 +84,7 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('after = ["cratedigger-db-migrate.service"]', text)
         self.assertIn('requires = ["cratedigger-db-migrate.service"]', text)
         self.assertIn('ExecStart = "${importerPkg}/bin/cratedigger-importer"', text)
-        self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
+        self.assertIn('Environment = "PIPELINE_DB_DSN=${pipelineDsn}"', text)
         self.assertIn("WorkingDirectory = cfg.stateDir", text)
 
     def test_importer_service_restarts_on_switch(self) -> None:
@@ -138,7 +138,7 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn('after = ["cratedigger-db-migrate.service"]', text)
         self.assertIn('requires = ["cratedigger-db-migrate.service"]', text)
         self.assertIn('ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker"', text)
-        self.assertIn('Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}"', text)
+        self.assertIn('Environment = "PIPELINE_DB_DSN=${pipelineDsn}"', text)
 
 
 class TestPinnedPackageSetContract(unittest.TestCase):
@@ -287,6 +287,32 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertIn('default = "musicbrainz.org";', text)
         # ratelimit 1 for public MB; the mirror override arrives via U6.
         self.assertIn("ratelimit", text)
+
+
+class TestCreateLocallyContract(unittest.TestCase):
+    """pipelineDb.createLocally (tier-2 plan U7, R10/KTD5): local postgres
+    with peer auth by construction — role + database named after cfg.user,
+    socket DSN default, migrate unit ordered after postgresql.service."""
+
+    def test_provisioning_block(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("services.postgresql = mkIf cfg.pipelineDb.createLocally", text)
+        self.assertIn("ensureDatabases = [ cfg.user ];", text)
+        self.assertIn("name = cfg.user;", text)
+        self.assertIn("ensureDBOwnership = true;", text)
+        self.assertIn('lib.mkDefault "postgresql:///${cfg.user}?host=/run/postgresql"', text)
+
+    def test_migrate_ordered_after_local_postgres(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('after = optional cfg.pipelineDb.createLocally "postgresql.service";', text)
+        self.assertIn('requires = optional cfg.pipelineDb.createLocally "postgresql.service";', text)
+
+    def test_dsn_guard_gives_actionable_error(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("pipelineDsn =", text)
+        self.assertIn("pipelineDb.createLocally = true", text)
+        # No unit interpolates the raw nullable option.
+        self.assertNotIn("${cfg.pipelineDb.dsn}", text)
 
 
 class TestApiBaseThreading(unittest.TestCase):

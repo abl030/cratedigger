@@ -18,6 +18,15 @@
   cfg = config.services.cratedigger;
   src = cfg.src;
 
+  # Every unit/wrapper interpolates the DSN; guard it so a missing value
+  # yields the actionable message even if string coercion is forced before
+  # the module assertions run. createLocally mkDefaults this option to the
+  # local unix socket (peer auth as cfg.user — no password material, KTD5).
+  pipelineDsn =
+    if cfg.pipelineDb.dsn != null
+    then cfg.pipelineDb.dsn
+    else throw "services.cratedigger.pipelineDb.dsn is not set: either set it to your PostgreSQL connection string, or set services.cratedigger.pipelineDb.createLocally = true to provision a local database.";
+
   # The one beets (tier-2 plan U3, R4): pinned package + full built-in
   # plugin closure, with the mirror patches applied only when the operator
   # sets the knobs. This same derivation is the python library in pythonEnv
@@ -192,13 +201,13 @@
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli.py \
-      --dsn "${cfg.pipelineDb.dsn}" "$@"
+      --dsn "${pipelineDsn}" "$@"
   '';
 
   pipelineMigrate = pkgs.writeShellScriptBin "pipeline-migrate" ''
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python ${src}/scripts/migrate_db.py \
-      --dsn "${cfg.pipelineDb.dsn}" \
+      --dsn "${pipelineDsn}" \
       --migrations-dir "${src}/migrations" "$@"
   '';
 
@@ -206,14 +215,14 @@
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/importer.py \
-      --dsn "${cfg.pipelineDb.dsn}" "$@"
+      --dsn "${pipelineDsn}" "$@"
   '';
 
   previewWorkerPkg = pkgs.writeShellScriptBin "cratedigger-import-preview-worker" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/import_preview_worker.py \
-      --dsn "${cfg.pipelineDb.dsn}" \
+      --dsn "${pipelineDsn}" \
       --workers ${toString cfg.importer.previewWorkers} "$@"
   '';
 
@@ -227,7 +236,7 @@
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/web/server.py \
       --port ${toString cfg.web.port} \
-      --dsn "${cfg.pipelineDb.dsn}" \
+      --dsn "${pipelineDsn}" \
       --beets-db "${cfg.web.beetsDb}" \
       --redis-host "${cfg.web.redis.host}" \
       --redis-port ${toString cfg.web.redis.port} \
@@ -246,9 +255,9 @@
     export PATH="${pkgs.yt-dlp}/bin:${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/youtube_ingest_worker.py \
-      --dsn "${cfg.pipelineDb.dsn}" \
+      --dsn "${pipelineDsn}" \
       --temp-dir "${cfg.youtubeIngest.tempDir}" \
-      --staging-dir "${cfg.beetsValidation.stagingDir}" \
+      --staging-dir "${toString cfg.beetsValidation.stagingDir}" \
       --poll-interval ${toString cfg.youtubeIngest.pollIntervalSeconds} \
       ${optionalString (cfg.youtubeIngest.sourceAddress != "") ''--source-address "${cfg.youtubeIngest.sourceAddress}" ''}"$@"
   '';
@@ -261,7 +270,7 @@
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/run_unfindable_detection.py \
-      --dsn "${cfg.pipelineDb.dsn}" "$@"
+      --dsn "${pipelineDsn}" "$@"
   '';
 
   # [Quality Ranks] section — declarative mirror of QualityRankConfig.defaults().
@@ -293,10 +302,10 @@
   # world-readable (see absence of chmod/chgrp in preStartScript).
   configTemplate = pkgs.writeText "cratedigger-config.ini" ''
     [Slskd]
-    api_key_file = ${cfg.slskd.apiKeyFile}
+    api_key_file = ${toString cfg.slskd.apiKeyFile}
     host_url = ${cfg.slskd.hostUrl}
     url_base = ${cfg.slskd.urlBase}
-    download_dir = ${cfg.slskd.downloadDir}
+    download_dir = ${toString cfg.slskd.downloadDir}
     delete_searches = ${if cfg.slskd.deleteSearches then "True" else "False"}
     stalled_timeout = ${toString cfg.slskd.stalledTimeout}
     remote_queue_timeout = ${toString cfg.slskd.remoteQueueTimeout}
@@ -344,8 +353,8 @@
     enabled = ${if cfg.beetsValidation.enable then "True" else "False"}
     harness_path = ${cfg.beetsValidation.harnessPath}
     distance_threshold = ${toString cfg.beetsValidation.distanceThreshold}
-    staging_dir = ${cfg.beetsValidation.stagingDir}
-    tracking_file = ${cfg.beetsValidation.trackingFile}
+    staging_dir = ${toString cfg.beetsValidation.stagingDir}
+    tracking_file = ${toString cfg.beetsValidation.trackingFile}
     verified_lossless_target = ${cfg.beetsValidation.verifiedLosslessTarget}
 
     [MusicBrainz]
@@ -357,7 +366,7 @@
     ${qualityRanksSection}
     [Pipeline DB]
     enabled = ${if cfg.pipelineDb.enable then "True" else "False"}
-    dsn = ${cfg.pipelineDb.dsn}
+    dsn = ${pipelineDsn}
 
     [Peer Cache]
     redis_host = ${cfg.redis.host}
@@ -449,7 +458,7 @@
   # restart command is configurable so non-systemd slskd setups still work.
   slskdHealthCheck = pkgs.writeShellScript "cratedigger-slskd-healthcheck" ''
     set -euo pipefail
-    api_key=$(${pkgs.coreutils}/bin/cat "${cfg.slskd.apiKeyFile}")
+    api_key=$(${pkgs.coreutils}/bin/cat "${toString cfg.slskd.apiKeyFile}")
     status=$(${pkgs.curl}/bin/curl -sf -H "X-API-Key: $api_key" "${cfg.slskd.hostUrl}/api/v0/server" 2>/dev/null || echo '{}')
     connected=$(echo "$status" | ${pkgs.jq}/bin/jq -r '.isConnected // false')
     logged_in=$(echo "$status" | ${pkgs.jq}/bin/jq -r '.isLoggedIn // false')
@@ -640,7 +649,8 @@ in {
 
     slskd = {
       apiKeyFile = mkOption {
-        type = types.path;
+        type = types.nullOr types.path;
+        default = null;
         description = ''
           Path to a file containing the slskd API key (raw, no envvar prefix).
           Must be readable by services.cratedigger.user. Use sops/agenix or any
@@ -665,7 +675,8 @@ in {
         description = "slskd URL prefix when behind a reverse proxy.";
       };
       downloadDir = mkOption {
-        type = types.str;
+        type = types.nullOr types.str;
+        default = null;
         description = "Directory slskd downloads land in.";
       };
       deleteSearches = mkOption {
@@ -690,10 +701,29 @@ in {
         default = true;
         description = "Use the pipeline DB as album source (currently the only supported mode).";
       };
+      createLocally = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Provision PostgreSQL on this host (services.postgresql +
+          ensureDatabases/ensureUsers). The ensure-role and database are
+          named after services.cratedigger.user, so unix-socket PEER
+          authentication works by construction — no password material
+          anywhere (KTD5). The DSN defaults to the local socket and
+          cratedigger-db-migrate is ordered after postgresql.service so
+          first boot cannot race the database. The operator's external-DB
+          setup (createLocally = false + an explicit dsn) is unchanged.
+        '';
+      };
       dsn = mkOption {
-        type = types.str;
+        type = types.nullOr types.str;
+        default = null;
         example = "postgresql://cratedigger@localhost/cratedigger";
-        description = "PostgreSQL connection string for the pipeline DB.";
+        description = ''
+          PostgreSQL connection string for the pipeline DB. Required
+          unless pipelineDb.createLocally = true (which defaults it to
+          the local unix socket).
+        '';
       };
     };
 
@@ -919,12 +949,14 @@ in {
         description = "Maximum beets match distance to accept (0.0 = perfect, 1.0 = no match).";
       };
       stagingDir = mkOption {
-        type = types.str;
-        description = "Directory to stage validated albums for beets import.";
+        type = types.nullOr types.str;
+        default = null;
+        description = "Directory to stage validated albums for beets import. Required when beetsValidation.enable.";
       };
       trackingFile = mkOption {
-        type = types.str;
-        description = "JSONL file tracking beets validation results.";
+        type = types.nullOr types.str;
+        default = null;
+        description = "JSONL file tracking beets validation results. Required when beetsValidation.enable.";
       };
       verifiedLosslessTarget = mkOption {
         type = types.str;
@@ -1211,6 +1243,37 @@ in {
   config = mkIf cfg.enable {
     assertions = [
       {
+        assertion = cfg.slskd.apiKeyFile != null;
+        message = "services.cratedigger.slskd.apiKeyFile is not set: point it at a file containing your slskd API key (readable by services.cratedigger.user).";
+      }
+      {
+        assertion = cfg.slskd.downloadDir != null;
+        message = "services.cratedigger.slskd.downloadDir is not set: point it at the directory slskd downloads land in (slskd's directories.downloads).";
+      }
+      {
+        assertion = cfg.pipelineDb.createLocally || cfg.pipelineDb.dsn != null;
+        message = "services.cratedigger.pipelineDb: set either pipelineDb.dsn (external PostgreSQL) or pipelineDb.createLocally = true (provision a local database with peer auth).";
+      }
+      {
+        assertion = !cfg.beetsValidation.enable || (cfg.beetsValidation.stagingDir != null && cfg.beetsValidation.trackingFile != null);
+        message = "services.cratedigger.beetsValidation: enable requires stagingDir (where validated albums stage for import) and trackingFile (JSONL validation log).";
+      }
+      {
+        # The rescue worker stages into the same beets Incoming root; an
+        # unset stagingDir would silently render --staging-dir "" and
+        # strand rescues under the state dir.
+        assertion = !cfg.youtubeIngest.enable || cfg.beetsValidation.stagingDir != null;
+        message = "services.cratedigger.youtubeIngest: enable requires beetsValidation.stagingDir (rescues stage under its auto-import/ child).";
+      }
+      {
+        assertion = lib.hasPrefix "http://" cfg.musicbrainz.apiBase || lib.hasPrefix "https://" cfg.musicbrainz.apiBase;
+        message = "services.cratedigger.musicbrainz.apiBase must be an origin URL (scheme://host[:port], no path), e.g. https://musicbrainz.org or http://192.168.1.35:5200.";
+      }
+      {
+        assertion = cfg.discogs.apiBase == null || lib.hasPrefix "http://" cfg.discogs.apiBase || lib.hasPrefix "https://" cfg.discogs.apiBase;
+        message = "services.cratedigger.discogs.apiBase must be an origin URL (scheme://host[:port]) when set, e.g. https://discogs.ablz.au.";
+      }
+      {
         assertion = !cfg.notifiers.meelo.enable || (cfg.notifiers.meelo.usernameFile != null && cfg.notifiers.meelo.passwordFile != null && cfg.notifiers.meelo.url != "");
         message = "services.cratedigger.notifiers.meelo: enable requires url, usernameFile, and passwordFile";
       }
@@ -1257,6 +1320,25 @@ in {
       ++ optional cfg.youtubeIngest.enable
         "d ${cfg.youtubeIngest.tempDir} 0755 ${cfg.user} ${cfg.group} -";
 
+    # Local PostgreSQL (stranger ergonomics, KTD5): role + database named
+    # after cfg.user so unix-socket peer auth works with zero credentials
+    # (ensureDBOwnership requires database name == role name). The DSN
+    # defaults to the socket; nothing for the *File secret pattern to
+    # carry, no pg_hba loosening.
+    services.postgresql = mkIf cfg.pipelineDb.createLocally {
+      enable = true;
+      ensureDatabases = [ cfg.user ];
+      ensureUsers = [
+        {
+          name = cfg.user;
+          ensureDBOwnership = true;
+        }
+      ];
+    };
+    services.cratedigger.pipelineDb.dsn = mkIf cfg.pipelineDb.createLocally (
+      lib.mkDefault "postgresql:///${cfg.user}?host=/run/postgresql"
+    );
+
     services.cratedigger.web.redis.host = lib.mkDefault cfg.redis.host;
     services.cratedigger.web.redis.port = lib.mkDefault cfg.redis.port;
     # One concept, one value: the config.ini [Beets] directory follows the
@@ -1293,13 +1375,18 @@ in {
     systemd.services.cratedigger-db-migrate = {
       description = "Apply Cratedigger pipeline DB schema migrations";
       wantedBy = ["multi-user.target"];
+      # With a locally-provisioned DB, first boot must not race PostgreSQL
+      # (this ordering used to live only in the VM test's hand-rolled
+      # node — now the module owns it, U7/R10).
+      after = optional cfg.pipelineDb.createLocally "postgresql.service";
+      requires = optional cfg.pipelineDb.createLocally "postgresql.service";
       restartIfChanged = true;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
         User = cfg.user;
         Group = cfg.group;
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${pipelineMigrate}/bin/pipeline-migrate";
       };
     };
@@ -1323,7 +1410,7 @@ in {
         Group = cfg.group;
         UMask = "0000";
         ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
         # Defense-in-depth (issue #212 R13): if anything escapes the
@@ -1380,7 +1467,7 @@ in {
         # outage should fail the unit fast rather than write
         # garbage probe-failed rows for every cohort member.
         ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;
         # Generous cap: a 100-row batch over a slow slskd is roughly
@@ -1427,7 +1514,7 @@ in {
         Group = cfg.group;
         UMask = "0000";
         ExecStartPre = [preStartScript];
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${importerPkg}/bin/cratedigger-importer";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
@@ -1452,7 +1539,7 @@ in {
         Group = cfg.group;
         UMask = "0000";
         ExecStartPre = [preStartScript];
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
@@ -1496,7 +1583,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${youtubeIngestWorkerPkg}/bin/cratedigger-youtube-ingest";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
@@ -1517,7 +1604,7 @@ in {
         ExecStart = "${webPkg}/bin/cratedigger-web";
         Restart = "on-failure";
         RestartSec = 5;
-        Environment = "PIPELINE_DB_DSN=${cfg.pipelineDb.dsn}";
+        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
       };
     };
   };
