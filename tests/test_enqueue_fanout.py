@@ -23,7 +23,7 @@ import configparser
 import json
 import unittest
 from dataclasses import replace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import TrackRecord
@@ -656,18 +656,18 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             candidates=[],
         )
 
+        # Capture the row as observed at the moment slskd is called. Assertions
+        # must NOT live inside this closure: production wraps the enqueue call
+        # in a broad try/except (lib/enqueue.py::_leave_claim_for_poll_recovery)
+        # that swallows any exception once the claim has landed, so an
+        # AssertionError raised here would be masked and the test would pass
+        # regardless. Assert in the test body instead.
+        observed: dict[str, Any] = {}
+
         def fake_enqueue(*, username, files, file_dir, ctx):
             row = db.request(1)
-            self.assertEqual(row["status"], "downloading")
-            state = json.loads(row["active_download_state"])
-            self.assertEqual(state["filetype"], "flac")
-            self.assertEqual(state["files"][0]["username"], "u00")
-            self.assertEqual(
-                state["files"][0]["filename"],
-                "Music\\u00\\Album\\01.flac",
-            )
-            self.assertIn("current_path", state)
-            self.assertIsNone(state["current_path"])
+            observed["status"] = row["status"]
+            observed["state"] = json.loads(row["active_download_state"])
             return SlskdEnqueueOutcome(status="accepted", downloads=[
                 DownloadFile(
                     filename=files[0]["filename"],
@@ -687,6 +687,19 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         self.assertTrue(attempt.matched)
         self.assertEqual(db.status_history, [(1, "downloading")])
         self.assertEqual(db.request(1)["status"], "downloading")
+        # The claim landed BEFORE slskd was called: fake_enqueue saw the row
+        # already downloading with the planned state.
+        self.assertEqual(observed["status"], "downloading")
+        self.assertEqual(observed["state"]["filetype"], "flac")
+        self.assertEqual(observed["state"]["files"][0]["username"], "u00")
+        self.assertEqual(
+            observed["state"]["files"][0]["filename"],
+            "Music\\u00\\Album\\01.flac",
+        )
+        # current_path is unset at claim time (before slskd returns transfer
+        # IDs). The msgspec encoder omits it when None (issue #467), so read it
+        # via .get() as production does.
+        self.assertIsNone(observed["state"].get("current_path"))
 
     def test_process_death_after_claim_leaves_planned_state_owned(self):
         cfg = _make_cfg(browse_top_k=20)

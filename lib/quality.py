@@ -538,9 +538,18 @@ class SpectralMeasurement:
 # Download info — typed replacement for the untyped dl_info dict
 # ---------------------------------------------------------------------------
 
-@dataclass
-class ActiveDownloadFileState:
-    """Per-file state persisted for active downloads."""
+class ActiveDownloadFileState(msgspec.Struct, omit_defaults=True):
+    """Per-file state persisted for active downloads.
+
+    Wire boundary: the ``album_requests.active_download_state`` JSONB column
+    (nested under ``ActiveDownloadState.files``). ``omit_defaults=True``
+    reproduces the pre-refactor "absent key when None" shape for the optional
+    fields (``disk_no``, ``disk_count``, ``last_state``, ``local_path``). The
+    hand-rolled encoder additionally always emitted ``retry_count`` and
+    ``bytes_transferred`` even at ``0``; those are now omitted at ``0`` and
+    the strict decoder restores the ``0`` default — lossless both ways.
+    See issue #467.
+    """
     username: str
     filename: str           # Full soulseek path (backslashes)
     file_dir: str           # Download directory on source user's system
@@ -556,52 +565,20 @@ class ActiveDownloadFileState:
     # each event is consumed exactly once.
     local_path: str | None = None
 
-    def to_dict(self) -> dict[str, object]:
-        d: dict[str, object] = {
-            "username": self.username,
-            "filename": self.filename,
-            "file_dir": self.file_dir,
-            "size": self.size,
-            "retry_count": self.retry_count,
-            "bytes_transferred": self.bytes_transferred,
-        }
-        if self.disk_no is not None:
-            d["disk_no"] = self.disk_no
-        if self.disk_count is not None:
-            d["disk_count"] = self.disk_count
-        if self.last_state is not None:
-            d["last_state"] = self.last_state
-        if self.local_path is not None:
-            d["local_path"] = self.local_path
-        return d
 
-    @staticmethod
-    def from_dict(d: dict[str, object]) -> "ActiveDownloadFileState":
-        return ActiveDownloadFileState(
-            username=str(d["username"]),
-            filename=str(d["filename"]),
-            file_dir=str(d["file_dir"]),
-            size=int(d["size"]),  # type: ignore[arg-type]
-            disk_no=int(d["disk_no"]) if d.get("disk_no") is not None else None,  # type: ignore[arg-type]
-            disk_count=int(d["disk_count"]) if d.get("disk_count") is not None else None,  # type: ignore[arg-type]
-            retry_count=int(d.get("retry_count", 0)),  # type: ignore[arg-type]
-            bytes_transferred=int(d.get("bytes_transferred", 0)),  # type: ignore[arg-type]
-            last_state=(
-                str(d["last_state"])
-                if d.get("last_state") is not None
-                else None
-            ),
-            local_path=(
-                str(d["local_path"])
-                if d.get("local_path") is not None
-                else None
-            ),
-        )
+class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
+    """State persisted to DB for an album being actively downloaded.
 
-
-@dataclass
-class ActiveDownloadState:
-    """State persisted to DB for an album being actively downloaded."""
+    Wire boundary: the ``album_requests.active_download_state`` JSONB column.
+    Decode happens at exactly one site — ``from_dict`` / ``from_json``
+    (``msgspec.convert`` / ``msgspec.json.decode``) — which strict-validates
+    field types, so int-vs-str drift raises ``msgspec.ValidationError``
+    instead of being silently coerced (as the old ``int(d["size"])`` decoder
+    did). ``omit_defaults=True`` reproduces the old "absent key when None"
+    shape for the optional timestamp fields; ``current_path`` is now omitted
+    when ``None`` (the hand-rolled encoder emitted it as ``null``) — the
+    strict decoder restores ``None`` either way. See issue #467.
+    """
     filetype: str                         # "flac", "mp3 v0", etc.
     enqueued_at: str                      # ISO8601 UTC timestamp
     files: list[ActiveDownloadFileState]
@@ -617,55 +594,15 @@ class ActiveDownloadState:
     current_path: str | None = None
 
     def to_json(self) -> str:
-        data: dict[str, object] = {
-            "filetype": self.filetype,
-            "enqueued_at": self.enqueued_at,
-            "files": [f.to_dict() for f in self.files],
-        }
-        if self.last_progress_at is not None:
-            data["last_progress_at"] = self.last_progress_at
-        if self.processing_started_at is not None:
-            data["processing_started_at"] = self.processing_started_at
-        if self.import_subprocess_started_at is not None:
-            data["import_subprocess_started_at"] = (
-                self.import_subprocess_started_at
-            )
-        data["current_path"] = self.current_path
-        return json.dumps(data)
+        return msgspec.json.encode(self).decode()
 
     @staticmethod
     def from_dict(d: dict[str, object]) -> "ActiveDownloadState":
-        files_raw = d.get("files")
-        assert isinstance(files_raw, list)
-        return ActiveDownloadState(
-            filetype=str(d["filetype"]),
-            enqueued_at=str(d["enqueued_at"]),
-            files=[ActiveDownloadFileState.from_dict(f) for f in files_raw],
-            last_progress_at=(
-                str(d["last_progress_at"])
-                if d.get("last_progress_at") is not None
-                else None
-            ),
-            processing_started_at=(
-                str(d["processing_started_at"])
-                if d.get("processing_started_at") is not None
-                else None
-            ),
-            import_subprocess_started_at=(
-                str(d["import_subprocess_started_at"])
-                if d.get("import_subprocess_started_at") is not None
-                else None
-            ),
-            current_path=(
-                str(d["current_path"])
-                if d.get("current_path") is not None
-                else None
-            ),
-        )
+        return msgspec.convert(d, type=ActiveDownloadState)
 
     @staticmethod
     def from_json(s: str) -> "ActiveDownloadState":
-        return ActiveDownloadState.from_dict(json.loads(s))
+        return msgspec.json.decode(s, type=ActiveDownloadState)
 
 
 @dataclass
