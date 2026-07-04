@@ -8374,5 +8374,238 @@ class TestSlskdEventCursorRoundTrip(unittest.TestCase):
         self.assertEqual(strip(real), strip(mirrored))
 
 
+@requires_postgres
+class TestReadProjectionParity(unittest.TestCase):
+    """#481 item 2 — fake<->production READ-projection parity gate.
+
+    ``FakePipelineDB`` hand-mirrors production SELECT projections as
+    literal key tuples (``_long_tail_projection`` and the
+    ``list_triage_page`` projection in ``tests/fakes/pipeline_db.py``)
+    across dozens of ``get_*`` methods. Nothing failed if the two
+    drifted — PR #480 had to update the SQL projection and the fake's
+    key tuple in lockstep by hand. This is the read-side mirror of
+    ``.claude/rules/test-fidelity.md`` Rule A (write round-trips):
+    seed an IDENTICAL row through the real ``PipelineDB`` and
+    ``FakePipelineDB``, call the same ``get_*`` method on both, and
+    assert KEY-SET EQUALITY of the returned rows (not value equality —
+    ids and timestamps are backend-assigned/time-anchored and
+    deliberately not compared). A key-set drift means the fake returns
+    a column production doesn't (or vice versa) — exactly the seam
+    that keeps fake-driven contract tests green while the live route
+    500s or renders nulls.
+
+    **The audit table.** Each ``test_*`` method below is one entry;
+    growing coverage means adding another method here, seeding both
+    backends identically, and calling ``_assert_keyset_parity``. Not
+    yet covered — see the PR body / final report Suggestions for the
+    rest of the ~51 ``get_*`` methods FakePipelineDB mirrors.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        from tests.fakes import FakePipelineDB
+        self.fake = FakePipelineDB()
+
+    def tearDown(self):
+        self.db.close()
+
+    @staticmethod
+    def _assert_keyset_parity(
+        test: unittest.TestCase,
+        real_rows: "list[dict[str, Any]]",
+        fake_rows: "list[dict[str, Any]]",
+        label: str,
+    ) -> None:
+        """Assert real PG and FakePipelineDB return identically-keyed rows.
+
+        Compares row count, then per-row key sets — NOT values (some
+        columns are backend-assigned like ``id`` or time-anchored).
+        On drift, the failure names the exact column(s) that differ,
+        matching the DX of the Rule A round-trip tests.
+        """
+        test.assertEqual(
+            len(real_rows), len(fake_rows),
+            f"{label}: real PG returned {len(real_rows)} row(s), "
+            f"FakePipelineDB returned {len(fake_rows)} row(s) — seeding "
+            f"drifted between the two backends",
+        )
+        for i, (real_row, fake_row) in enumerate(zip(real_rows, fake_rows)):
+            real_keys = set(real_row.keys())
+            fake_keys = set(fake_row.keys())
+            if real_keys == fake_keys:
+                continue
+            only_real = sorted(real_keys - fake_keys)
+            only_fake = sorted(fake_keys - real_keys)
+            test.fail(
+                f"{label} row {i}: projection key-set drifted between "
+                f"real PG and FakePipelineDB — columns only in real PG: "
+                f"{only_real}; columns only in FakePipelineDB: {only_fake}. "
+                f"Fix the fake's projection to mirror production (or the "
+                f"reverse if the SQL change is the point of the PR)."
+            )
+
+    # --- get_long_tail_cohort / get_long_tail_request ----------------------
+
+    def _seed_long_tail_request(
+        self, db: Any, *, mb_release_id: str, with_tracks: bool,
+        with_rescue: bool,
+    ) -> int:
+        rid = db.add_request(
+            "Long Tail Artist", "Long Tail Album", "request",
+            mb_release_id=mb_release_id,
+        )
+        if with_tracks:
+            db.set_tracks(rid, [
+                {"disc_number": 1, "track_number": 1, "title": "One",
+                 "length_seconds": 100},
+                {"disc_number": 1, "track_number": 2, "title": "Two",
+                 "length_seconds": 200},
+            ])
+        if with_rescue:
+            db.insert_youtube_running(
+                request_id=rid, browse_id="MPREb_parity",
+                audio_playlist_id=None,
+                yt_url="https://example.invalid/parity",
+                expected_track_count=2,
+            )
+        return rid
+
+    def test_get_long_tail_cohort_keyset_parity(self):
+        for db in (self.db, self.fake):
+            self._seed_long_tail_request(
+                db, mb_release_id="lt-parity-plain", with_tracks=False,
+                with_rescue=False)
+            self._seed_long_tail_request(
+                db, mb_release_id="lt-parity-full", with_tracks=True,
+                with_rescue=True)
+
+        real_rows = self.db.get_long_tail_cohort()
+        fake_rows = self.fake.get_long_tail_cohort()
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "get_long_tail_cohort")
+
+    def test_get_long_tail_request_keyset_parity(self):
+        real_id = self._seed_long_tail_request(
+            self.db, mb_release_id="lt-single-parity", with_tracks=True,
+            with_rescue=True)
+        fake_id = self._seed_long_tail_request(
+            self.fake, mb_release_id="lt-single-parity", with_tracks=True,
+            with_rescue=True)
+
+        real_row = self.db.get_long_tail_request(real_id)
+        fake_row = self.fake.get_long_tail_request(fake_id)
+        assert real_row is not None and fake_row is not None
+        self._assert_keyset_parity(
+            self, [real_row], [fake_row], "get_long_tail_request (hit)")
+
+    def test_get_long_tail_request_none_branch_parity(self):
+        # Non-existent id — both sides must agree on None. There's
+        # nothing to key-compare when both sides are None; the
+        # assertion IS the parity check here.
+        self.assertIsNone(self.db.get_long_tail_request(999_999_999))
+        self.assertIsNone(self.fake.get_long_tail_request(999_999_999))
+
+    # --- list_triage_page ----------------------------------------------------
+
+    def _seed_triage_request(self, db: Any, *, mb_release_id: str) -> int:
+        return db.add_request(
+            "Triage Artist", "Triage Album", "request",
+            mb_release_id=mb_release_id,
+        )
+
+    def test_list_triage_page_all_keyset_parity(self):
+        from lib.triage_service import ParsedTriageFilter
+
+        for db in (self.db, self.fake):
+            self._seed_triage_request(db, mb_release_id="triage-all-1")
+
+        filter_spec = ParsedTriageFilter(kind="all", raw="all")
+        real_rows = self.db.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        fake_rows = self.fake.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "list_triage_page(all)")
+
+    def test_list_triage_page_unfindable_keyset_parity(self):
+        from lib.triage_service import ParsedTriageFilter
+        from lib.unfindable_detection_service import CATEGORY_ARTIST_ABSENT
+
+        now = datetime.now(timezone.utc)
+        for db in (self.db, self.fake):
+            rid = self._seed_triage_request(
+                db, mb_release_id="triage-unfindable-1")
+            db.set_unfindable_category(
+                rid, category=CATEGORY_ARTIST_ABSENT, categorised_at=now)
+
+        filter_spec = ParsedTriageFilter(
+            kind="unfindable", unfindable_category=CATEGORY_ARTIST_ABSENT,
+            raw=f"unfindable:{CATEGORY_ARTIST_ABSENT}")
+        real_rows = self.db.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        fake_rows = self.fake.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "list_triage_page(unfindable)")
+
+    def test_list_triage_page_data_quality_keyset_parity(self):
+        from lib.triage_service import ParsedTriageFilter
+
+        for db in (self.db, self.fake):
+            rid = self._seed_triage_request(
+                db, mb_release_id="triage-dataq-1")
+            db.record_field_resolution(
+                rid, "release_group_year", "unresolved_mirror_unavailable",
+                "URLError")
+
+        filter_spec = ParsedTriageFilter(
+            kind="data_quality", raw="data_quality")
+        real_rows = self.db.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        fake_rows = self.fake.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "list_triage_page(data_quality)")
+
+    def test_list_triage_page_search_not_converting_keyset_parity(self):
+        from lib.triage_service import ParsedTriageFilter
+
+        for db in (self.db, self.fake):
+            rid = self._seed_triage_request(
+                db, mb_release_id="triage-search-1")
+            db.log_search(rid, query="q", outcome="no_match", elapsed_s=1.0)
+
+        filter_spec = ParsedTriageFilter(
+            kind="search_not_converting", raw="search_not_converting")
+        real_rows = self.db.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        fake_rows = self.fake.list_triage_page(
+            filter_spec=filter_spec, page_size=50, after_request_id=None)
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows,
+            "list_triage_page(search_not_converting)")
+
+    # --- get_field_resolutions_for_requests ----------------------------------
+
+    def test_get_field_resolutions_for_requests_keyset_parity(self):
+        ids: dict[int, int] = {}
+        for db in (self.db, self.fake):
+            rid = self._seed_triage_request(
+                db, mb_release_id="fieldres-parity-1")
+            db.record_field_resolution(
+                rid, "catalog_number", "unresolved_404", "http_404")
+            ids[id(db)] = rid
+
+        real_map = self.db.get_field_resolutions_for_requests(
+            [ids[id(self.db)]])
+        fake_map = self.fake.get_field_resolutions_for_requests(
+            [ids[id(self.fake)]])
+        real_rows = real_map.get(ids[id(self.db)], [])
+        fake_rows = fake_map.get(ids[id(self.fake)], [])
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows,
+            "get_field_resolutions_for_requests")
+
+
 if __name__ == "__main__":
     unittest.main()
