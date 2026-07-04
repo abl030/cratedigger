@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Tests for scripts/cleanup_ghost_imported.py."""
 
+import io
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.beets_db import BeetsDB
+from scripts import cleanup_ghost_imported
 from scripts.cleanup_ghost_imported import classify_imported_rows
 
 
@@ -101,6 +105,21 @@ class TestCleanupGhostImported(unittest.TestCase):
 
         self.assertEqual(ghosts, [])
         self.assertEqual([row["id"] for row in manual_review], [7])
+
+
+class TestDefaultDsnFailsLoud(unittest.TestCase):
+    """#479 item 2: no hardcoded fallback — fail loud instead."""
+
+    @patch.object(cleanup_ghost_imported, "DEFAULT_DSN", None)
+    def test_main_fails_loud_when_dsn_is_not_configured(self) -> None:
+        with patch.object(sys, "argv", ["cleanup_ghost_imported.py"]):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as cm:
+                    cleanup_ghost_imported.main()
+
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("PIPELINE_DB_DSN", stderr.getvalue())
 
 
 if __name__ == "__main__":

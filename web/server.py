@@ -4,7 +4,7 @@
 Browse MusicBrainz, add releases to the pipeline DB, view status.
 
 Usage:
-    python3 web/server.py --port 8085 --dsn postgresql://cratedigger@192.168.100.11/cratedigger
+    python3 web/server.py --port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
 """
 
 import os

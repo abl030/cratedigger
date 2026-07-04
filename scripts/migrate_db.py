@@ -24,10 +24,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.migrator import DEFAULT_MIGRATIONS_DIR, apply_migrations
 
-DEFAULT_DSN = os.environ.get(
-    "PIPELINE_DB_DSN",
-    "postgresql://cratedigger@192.168.100.11:5432/cratedigger",
-)
+# No hardcoded fallback (#479): the nspawn DB has moved before (last time
+# to 10.20.0.11) and a baked-in IP silently dials a dead host forever
+# after the next move. Fail loud in main() instead of guessing.
+DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN")
 
 
 def main() -> int:
@@ -35,7 +35,7 @@ def main() -> int:
     parser.add_argument(
         "--dsn",
         default=DEFAULT_DSN,
-        help="PostgreSQL DSN (default from PIPELINE_DB_DSN env or prod URL)",
+        help="PostgreSQL DSN (default from PIPELINE_DB_DSN env)",
     )
     parser.add_argument(
         "--migrations-dir",
@@ -43,6 +43,11 @@ def main() -> int:
         help=f"Directory containing NNN_name.sql files (default: {DEFAULT_MIGRATIONS_DIR})",
     )
     args = parser.parse_args()
+    if not args.dsn:
+        parser.error(
+            "no DSN: set PIPELINE_DB_DSN or pass --dsn "
+            "(no hardcoded fallback — issue #479)"
+        )
 
     logging.basicConfig(
         level=logging.INFO,

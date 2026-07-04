@@ -20,10 +20,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.beets_db import BeetsDB
 from lib.pipeline_db import PipelineDB
 
-DEFAULT_DSN = os.environ.get(
-    "PIPELINE_DB_DSN",
-    "postgresql://cratedigger@192.168.100.11:5432/cratedigger",
-)
+# No hardcoded fallback (#479): the nspawn DB has moved before (last time
+# to 10.20.0.11) and a baked-in IP silently dials a dead host forever
+# after the next move. Fail loud in main() instead of guessing.
+DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN")
 
 
 def _row_release_id(row: dict[str, Any]) -> str:
@@ -93,6 +93,11 @@ def main() -> int:
     mode.add_argument("--apply", action="store_true",
                       help="Delete matching ghost imported rows")
     args = parser.parse_args()
+    if not args.dsn:
+        parser.error(
+            "no DSN: set PIPELINE_DB_DSN or pass --dsn "
+            "(no hardcoded fallback — issue #479)"
+        )
 
     db = PipelineDB(args.dsn)
     try:

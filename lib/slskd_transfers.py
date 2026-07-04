@@ -397,15 +397,22 @@ def _get_all_downloads_snapshot(
     slskd_client: Any,
     *,
     purpose: str,
+    include_removed: bool = True,
 ) -> list[dict[str, Any]] | None:
     """Fetch the full slskd download snapshot via the bulk endpoint.
 
     The username-scoped endpoint is unreliable for some valid peer names
     containing spaces/punctuation, so monitoring code uses the bulk list and
     matches locally instead.
+
+    ``include_removed`` defaults to True because most callers (poll,
+    re-derivation) need terminal transfers as evidence. The #278 orphan
+    convergence only reasons about live transfers (it skips ``Completed*``
+    states itself), so it passes False to trim the payload.
     """
     try:
-        downloads = slskd_client.transfers.get_all_downloads(includeRemoved=True)
+        downloads = slskd_client.transfers.get_all_downloads(
+            includeRemoved=include_removed)
     except Exception:
         logger.warning(f"Failed to get all downloads for {purpose}", exc_info=True)
         return None
@@ -438,7 +445,8 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
     from lib.quality import find_slskd_orphans
 
     downloads = _get_all_downloads_snapshot(
-        ctx.slskd, purpose="orphan-transfer convergence")
+        ctx.slskd, purpose="orphan-transfer convergence",
+        include_removed=False)
     if downloads is None:
         return 0
     db = ctx.pipeline_db_source._get_db()
