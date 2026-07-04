@@ -102,6 +102,100 @@ class TestAddRequestRoundTrip(unittest.TestCase):
 
 
 @requires_postgres
+class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
+    """Rule A round-trip for supersede_request_mbid (U1 — Discogs-pathway
+    Replace). Every field the supersede INSERT writes onto the new row must
+    read back unchanged through real PG, and the old row must flip to the
+    frozen 'replaced' audit state. Before U1 there was NO real-PG round-trip
+    for supersede at all, so the new discogs_release_id column had no guard
+    against being dropped at the SQL seam — exactly the album_title class
+    Rule A targets."""
+
+    def _seed_old(self, db) -> int:
+        return db.add_request(
+            artist_name="Pendulum",
+            album_title="Hold Your Colour (old pressing)",
+            source="request",
+            mb_release_id="old-mbid",
+            mb_release_group_id="rg-old",
+            mb_artist_id="art-old",
+            year=2005,
+            country="AU",
+            status="wanted",
+        )
+
+    def test_supersede_round_trip_with_discogs_id(self):
+        db = make_db()
+        old_id = self._seed_old(db)
+        new_id = db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-new",
+            new_mb_artist_id="art-new",
+            new_artist_name="Pendulum",
+            new_album_title="Hold Your Colour (target pressing)",
+            new_year=2007,
+            new_country="JP",
+            new_discogs_release_id="12345",
+            new_tracks=[
+                {"disc_number": 1, "track_number": 1, "title": "Prelude"},
+                {"disc_number": 1, "track_number": 2, "title": "Slam"},
+            ],
+        )
+        expected = {
+            "mb_release_id": "new-mbid",
+            "mb_release_group_id": "rg-new",
+            "mb_artist_id": "art-new",
+            "artist_name": "Pendulum",
+            "album_title": "Hold Your Colour (target pressing)",
+            "year": 2007,
+            "country": "JP",
+            "discogs_release_id": "12345",
+            "replaces_request_id": old_id,
+            "status": "wanted",
+            "source": "request",  # inherited from the old row
+        }
+        new = db.get_request(new_id)
+        self.assertIsNotNone(new)
+        assert new is not None
+        for col, val in expected.items():
+            self.assertEqual(
+                new[col], val,
+                f"supersede field {col!r} did not round-trip through PG")
+        # The old row is the frozen 'replaced' audit row.
+        old = db.get_request(old_id)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+
+    def test_supersede_round_trip_mb_path_discogs_id_null(self):
+        # MB Replace passes new_discogs_release_id=None — the column must be
+        # NULL, everything else unchanged.
+        db = make_db()
+        old_id = self._seed_old(db)
+        new_id = db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="new-mbid-mb",
+            new_mb_release_group_id="rg-new",
+            new_mb_artist_id="art-new",
+            new_artist_name="Pendulum",
+            new_album_title="Hold Your Colour",
+            new_year=2007,
+            new_country="JP",
+            new_discogs_release_id=None,
+            new_tracks=[],
+        )
+        new = db.get_request(new_id)
+        assert new is not None
+        self.assertIsNone(new["discogs_release_id"])
+        self.assertEqual(new["mb_release_id"], "new-mbid-mb")
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], old_id)
+        old = db.get_request(old_id)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+
+
+@requires_postgres
 class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
     """Rule A round-trip for the Plex addedAt pin store (migration 040).
     Every field the writer persists must read back unchanged through real PG —

@@ -2404,6 +2404,7 @@ class FakePipelineDB:
         new_year: int | None,
         new_country: str | None,
         new_tracks: list[dict[str, Any]],
+        new_discogs_release_id: str | None = None,
     ) -> int:
         """In-memory mirror of ``PipelineDB.supersede_request_mbid``.
 
@@ -2449,6 +2450,7 @@ class FakePipelineDB:
             mb_release_id=new_mb_release_id,
             mb_release_group_id=new_mb_release_group_id,
             mb_artist_id=new_mb_artist_id,
+            discogs_release_id=new_discogs_release_id,
             year=new_year,
             country=new_country,
             status="wanted",

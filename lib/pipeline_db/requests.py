@@ -244,6 +244,7 @@ class _RequestsMixin(_PipelineDBBase):
         new_year: int | None,
         new_country: str | None,
         new_tracks: list[dict[str, Any]],
+        new_discogs_release_id: str | None = None,
     ) -> int:
         """Atomically supersede ``old_request_id`` with a new row.
 
@@ -257,6 +258,9 @@ class _RequestsMixin(_PipelineDBBase):
         3. ``INSERT`` a new ``album_requests`` row with the target MBID,
            ``status='wanted'``, ``replaces_request_id=old_request_id``,
            and the source inherited from the old row.
+           ``new_discogs_release_id`` is dual-written for the Discogs-pathway
+           Replace (the new row carries both the MB and Discogs identity, as
+           the add flow writes them); MB callers pass ``None``.
         4. ``INSERT`` the new row's ``album_tracks`` rows.
 
         Returns the new request_id.
@@ -309,10 +313,11 @@ class _RequestsMixin(_PipelineDBBase):
                         INSERT INTO album_requests (
                             mb_release_id, mb_release_group_id, mb_artist_id,
                             artist_name, album_title, year, country,
+                            discogs_release_id,
                             source, status, replaces_request_id,
                             created_at, updated_at
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             'wanted', %s, %s, %s
                         )
                         RETURNING id
@@ -325,6 +330,7 @@ class _RequestsMixin(_PipelineDBBase):
                             new_album_title,
                             new_year,
                             new_country,
+                            new_discogs_release_id,
                             old_source,
                             old_request_id,
                             now,

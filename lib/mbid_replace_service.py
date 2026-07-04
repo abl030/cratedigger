@@ -102,6 +102,7 @@ class MbidReplaceDB(
         new_year: int | None,
         new_country: str | None,
         new_tracks: list[dict[str, Any]],
+        new_discogs_release_id: str | None = None,
     ) -> int: ...
 
 
