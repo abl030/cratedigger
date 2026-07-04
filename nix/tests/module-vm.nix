@@ -3,7 +3,7 @@
 # every `nix flake check`.
 #
 # Posture: pipelineDb.createLocally = true (module-provisioned postgres,
-# peer auth, no hand-rolled DB block), beetsValidation ON, VM-local beets
+# peer auth, no hand-rolled DB block), beets.validation ON, VM-local beets
 # paths, NO mirror knobs (public-MB defaults), no secrets beyond the
 # stubbed slskd key.
 #
@@ -90,7 +90,7 @@ pkgs.testers.nixosTest {
       # Stranger posture (U10/R12): beets validation ON — the full
       # rendered-config surface (config.ini beets keys + config.yaml) is
       # what a real first boot produces.
-      beetsValidation = {
+      beets.validation = {
         enable = true;
         stagingDir = "/var/lib/cratedigger-staging";
         trackingFile = "/var/lib/cratedigger-staging/tracking.jsonl";
@@ -99,7 +99,7 @@ pkgs.testers.nixosTest {
       # exist or `beet` prompts "Create it (Y/n)?" interactively — which
       # blocks forever under the test driver's backdoor shell. stateDir
       # exists by tmpfiles, so the library parent is guaranteed.
-      beetsConfig = {
+      beets.config = {
         directory = "/var/lib/cratedigger-music";
         library = "/var/lib/cratedigger/beets-library.db";
       };

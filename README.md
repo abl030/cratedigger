@@ -74,11 +74,11 @@ You need: **NixOS**, **slskd** (`services.slskd` is in nixpkgs), and disk for mu
               downloadDir = "/srv/music/slskd-downloads";
             };
             pipelineDb.createLocally = true;   # local postgres, peer auth, no passwords
-            beetsConfig = {
+            beets.config = {
               directory = "/srv/music/library";
               library = "/srv/music/beets-library.db";
             };
-            beetsValidation = {
+            beets.validation = {
               stagingDir = "/srv/music/incoming";
               trackingFile = "/srv/music/beets-validated.jsonl";
             };
@@ -109,8 +109,8 @@ Out of the box, MusicBrainz matching uses **public musicbrainz.org** (works, rat
 | Mirror | Without it | Option | Sample |
 |---|---|---|---|
 | MusicBrainz | Functional but ~1 req/s | `musicbrainz.apiBase` | [`examples/musicbrainz-mirror.nix`](examples/musicbrainz-mirror.nix) |
-| Discogs | Discogs browse off; MB browse unaffected | `discogs.apiBase` + `beets.discogsMirrorUrl` | [`examples/discogs-mirror.nix`](examples/discogs-mirror.nix) |
-| LRCLIB (lyrics) | Public lrclib.net | `beets.lrclibUrl` | — |
+| Discogs | Discogs browse off; MB browse unaffected | `discogs.apiBase` + `beets.package.discogsMirrorUrl` | [`examples/discogs-mirror.nix`](examples/discogs-mirror.nix) |
+| LRCLIB (lyrics) | Public lrclib.net | `beets.package.lrclibUrl` | — |
 
 The full account (sizes, replication tokens, degraded-mode math) is in [`docs/mirrors.md`](docs/mirrors.md).
 

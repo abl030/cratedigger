@@ -18,7 +18,7 @@ When Cratedigger downloads an album and it passes validation, beets is what actu
 ## Version & Installation
 
 - **Owned by cratedigger** (tier-2 packaging): the beets package, plugin closure, config, binary and library are all provisioned by cratedigger's own NixOS module from cratedigger's own flake.lock. There is no Home Manager beets anymore.
-- **Package**: `nix/beets.nix` — the pinned `python3Packages.beets` with the full built-in plugin closure. Mirror patches (Discogs mirror, local LRCLIB) are opt-in module knobs (`services.cratedigger.beets.discogsMirrorUrl` / `beets.lrclibUrl`), applied via `substituteInPlace` with `--replace-fail` as the drift alarm.
+- **Package**: `nix/beets.nix` — the pinned `python3Packages.beets` with the full built-in plugin closure. Mirror patches (Discogs mirror, local LRCLIB) are opt-in module knobs (`services.cratedigger.beets.package.discogsMirrorUrl` / `beets.package.lrclibUrl`), applied via `substituteInPlace` with `--replace-fail` as the drift alarm.
 - **Binary**: `cratedigger-beet` on the system PATH — the canonical manual-ops beet for the library cratedigger manages. It pins `BEETSDIR` at the module-rendered config, so operator invocations and pipeline subprocesses always read the SAME config.
 - **One store path everywhere**: the python library (`lib/beets_distance.py` in cratedigger-web), the dev shell, the harness interpreter, and `cratedigger-beet` all reference the same beets derivation. The real-beets contract test (`tests/test_harness_beets2_contract.py`) runs against exactly the beets production runs.
 
@@ -29,10 +29,10 @@ In modern beets (2.x), `musicbrainz` is a **plugin** that must be explicitly lis
 ## Configuration
 
 **Rendered config**: `/var/lib/cratedigger/beets/config.yaml` (BEETSDIR; rendered by the module's preStart — do NOT edit, it is overwritten on every service start)
-**Secrets**: `/var/lib/cratedigger/beets/secrets.yaml` (0400; materialized from `services.cratedigger.beets.discogsTokenFile`, included via beets `include:`)
+**Secrets**: `/var/lib/cratedigger/beets/secrets.yaml` (0400; materialized from `services.cratedigger.beets.package.discogsTokenFile`, included via beets `include:`)
 
 To change the config:
-1. Tunables (`beetsConfig.{directory,library}`, fetchart widths, `musicbrainz.*` via `musicbrainz.apiBase`) are module options — set them in the nixosconfig wrapper. Everything else (path templates, `duplicate_keys`, the plugin list) is a fixed literal in cratedigger's `nix/module.nix` `beetsSettings` — change it there, in this repo, with the U12-style rendered-config diff in mind.
+1. Tunables (`beets.config.{directory,library}`, fetchart widths, `musicbrainz.*` via `musicbrainz.apiBase`) are module options — set them in the nixosconfig wrapper. Everything else (path templates, `duplicate_keys`, the plugin list) is a fixed literal in cratedigger's `nix/module.nix` `beetsSettings` — change it there, in this repo, with the U12-style rendered-config diff in mind.
 2. Deploy via the normal flake flow (`.claude/rules/deploy.md`).
 3. Verify: `ssh doc2 'cat /var/lib/cratedigger/beets/config.yaml'` after the next service start.
 

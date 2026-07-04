@@ -123,7 +123,7 @@
               slskd.apiKeyFile = "/run/secrets/slskd-key";
               slskd.downloadDir = "/mnt/music/slskd";
               pipelineDb.dsn = "postgresql://cratedigger@10.20.0.11:5432/cratedigger";
-              beetsValidation = {
+              beets.validation = {
                 stagingDir = "/mnt/music/incoming";
                 trackingFile = "/mnt/music/incoming/tracking.jsonl";
               };
@@ -134,7 +134,7 @@
               slskd.apiKeyFile = "/etc/slskd-key";
               slskd.downloadDir = "/srv/slskd";
               pipelineDb.createLocally = true;
-              beetsValidation = {
+              beets.validation = {
                 stagingDir = "/srv/incoming";
                 trackingFile = "/srv/incoming/tracking.jsonl";
               };
@@ -158,7 +158,7 @@
               services.cratedigger.enable = true;
               services.cratedigger.musicbrainz.apiBase = apiBase;
             } ];
-          }).config.services.cratedigger.beetsConfig.musicbrainz;
+          }).config.services.cratedigger.beets.config.musicbrainz;
           mirror = evalMb "http://192.168.1.35:5200";
           public = evalMb "https://musicbrainz.org";
         in

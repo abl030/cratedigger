@@ -115,7 +115,7 @@ The path-shape concerns are configurable; nothing is hardcoded:
 | Nothing configured | (warning logged) | Plex receives a relative path and silently no-ops |
 
 Via the Nix module, the equivalent options are
-`services.cratedigger.beetsDirectory` and
+`services.cratedigger.beets.directory` and
 `services.cratedigger.notifiers.plex.pathMap`.
 
 ## API Access

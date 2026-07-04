@@ -13,7 +13,7 @@
 #
 # Wire cratedigger at it with:
 #   services.cratedigger.discogs.apiBase = "http://localhost:8086";
-#   services.cratedigger.beets.discogsMirrorUrl = "http://localhost:8086";
+#   services.cratedigger.beets.package.discogsMirrorUrl = "http://localhost:8086";
 #
 # Two units:
 #   discogs-import.service/.timer — monthly oneshot: download the latest

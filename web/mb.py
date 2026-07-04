@@ -23,8 +23,12 @@ from web import cache as _cache
 
 # Default: public MusicBrainz (functional but rate-limited ~1 req/s).
 # Production points this at the local mirror via the module's
-# services.cratedigger.musicbrainz.apiBase -> `cratedigger-web --mb-api`
-# (tier-2 plan U6, R13/KTD6). The value includes the /ws/2 prefix.
+# services.cratedigger.musicbrainz.apiBase -> config.ini [MusicBrainz]
+# api_base -> configure_api_bases_from_runtime_config() at cratedigger-web
+# startup (tier-2 plan U6, R13/KTD6; issue #497 dropped the module's
+# --mb-api flag in favor of config.ini as the one production source — the
+# flag itself survives as a dev-only override). The value includes the
+# /ws/2 prefix.
 MB_API_BASE = "https://musicbrainz.org/ws/2"
 USER_AGENT = "cratedigger-web/1.0"
 
