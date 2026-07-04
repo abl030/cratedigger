@@ -3517,12 +3517,13 @@ def _build_parser() -> tuple[
     # replace
     p_replace = sub.add_parser(
         "replace",
-        help="Supersede a request with a new row at a different MBID "
-             "in the same release group")
+        help="Supersede a request with a new row at a different release id "
+             "in the same release group/master (same pathway as the source)")
     p_replace.add_argument("id", type=int, help="Source request ID")
     p_replace.add_argument(
         "--to", dest="target_mb_release_id", required=True,
-        help="Target MB release ID (must share the source's release group)")
+        help="Target release id — MB UUID or Discogs numeric id; must "
+             "share the source's pathway and release group/master")
     p_replace.add_argument("--json", action="store_true",
                            help="Print structured JSON instead of text")
 

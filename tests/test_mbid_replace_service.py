@@ -40,9 +40,10 @@ from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import make_request_row
 
 
-# NOTE: must be parseable by ``uuid.UUID`` — the service rejects
-# malformed MBIDs at the boundary with RESULT_TARGET_INVALID. Keep the
-# repeated-digit pattern for at-a-glance reading of test scenarios.
+# NOTE: must be a valid MB release id per ``detect_release_source``
+# (lib/release_identity.py regex) — the service rejects malformed MBIDs
+# at the boundary with RESULT_TARGET_INVALID. Keep the repeated-digit
+# pattern for at-a-glance reading of test scenarios.
 OLD_MBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 NEW_MBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 RG_ID = "11111111-1111-1111-1111-111111111111"
@@ -743,6 +744,88 @@ class TestReplaceDiscogsArm(_ServiceCase):
         self.assertEqual(result.outcome, RESULT_REPLACED)
         # Lazy-backfill issued a fresh lookup of the source id.
         self.assertIn(OLD_DISCOGS_ID, calls)
+
+    def test_source_lazy_backfill_mirror_unconfigured(self):
+        """SOURCE lazy-backfill lookup (masterless legacy row) surfaces
+        RESULT_MIRROR_UNCONFIGURED when the source-master resolution hits
+        an unconfigured Discogs mirror — the target lookup is never
+        reached and no supersede occurs (Rule B: the real
+        ``DiscogsMirrorNotConfigured`` is raised)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                raise DiscogsMirrorNotConfigured("no mirror")
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_MIRROR_UNCONFIGURED)
+        # Source lookup raised first → target lookup never ran.
+        self.assertEqual(calls, [OLD_DISCOGS_ID])
+        # No supersede: old row untouched, no descendant.
+        self.assertIsNone(result.new_request_id)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
+
+    def test_source_lazy_backfill_transient_urlerror(self):
+        """SOURCE lazy-backfill lookup classifies a network blip as
+        RESULT_TRANSIENT (retryable), not RESULT_TARGET_INVALID — the
+        source id is already known-good; the mirror was just unreachable
+        (Rule B: the real ``URLError`` is raised). No supersede occurs."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                raise URLError("connection refused")
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        # Source lookup raised first → target lookup never ran.
+        self.assertEqual(calls, [OLD_DISCOGS_ID])
+        self.assertIsNone(result.new_request_id)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
+
+    def test_source_lazy_backfill_generic_exception_target_invalid(self):
+        """SOURCE lazy-backfill lookup maps an unexpected error to
+        RESULT_TARGET_INVALID (the generic branch, which also logs a
+        warning). Target lookup never runs and no supersede occurs."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                raise RuntimeError("Discogs mirror 500")
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        # Source lookup raised first → target lookup never ran.
+        self.assertEqual(calls, [OLD_DISCOGS_ID])
+        self.assertIsNone(result.new_request_id)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
 
     def test_discogs_source_uuid_target_invalid(self):
         """AE2: a UUID target against a Discogs source is cross-pathway →

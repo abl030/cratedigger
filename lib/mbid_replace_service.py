@@ -512,41 +512,20 @@ class MbidReplaceService:
         ``get_request_by_release_id`` (KTD-6); the MB arm's call sites stay
         on ``get_request_by_mb_release_id``.
         """
-        from web.discogs import DiscogsMirrorNotConfigured
-
         normalized_target = normalize_release_id(target_mb_release_id)
         target_id_num = int(normalized_target)
 
         # Resolve the source master (guardrail before the target IO).
         source_master = source.get("mb_release_group_id")
         if not source_master:
-            try:
-                src_data = self.discogs_lookup(
-                    int(normalize_release_id(source_mbid)), fresh=True,
-                )
-            except DiscogsMirrorNotConfigured as exc:
-                return ReplaceResult(
-                    outcome=RESULT_MIRROR_UNCONFIGURED,
-                    request_id=request_id,
-                    error_message=f"Discogs mirror not configured: {exc}",
-                )
-            except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
-                return ReplaceResult(
-                    outcome=RESULT_TRANSIENT,
-                    request_id=request_id,
-                    error_message=(
-                        f"Discogs lookup failed (transient): {exc}"
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_INVALID,
-                    request_id=request_id,
-                    error_message=(
-                        f"source Discogs id {source_mbid} could not be "
-                        f"resolved: {exc}"
-                    ),
-                )
+            src_data, err = self._discogs_lookup_or_error(
+                int(normalize_release_id(source_mbid)),
+                request_id=request_id,
+                detail_context=f"source Discogs id {source_mbid}",
+            )
+            if err is not None:
+                return err
+            assert src_data is not None
             source_master = src_data.get("release_group_id")
             if not source_master:
                 # Masterless source: the only valid target is the source
@@ -577,29 +556,14 @@ class MbidReplaceService:
             )
 
         # Fresh Discogs lookup of the target.
-        try:
-            target_data = self.discogs_lookup(target_id_num, fresh=True)
-        except DiscogsMirrorNotConfigured as exc:
-            return ReplaceResult(
-                outcome=RESULT_MIRROR_UNCONFIGURED,
-                request_id=request_id,
-                error_message=f"Discogs mirror not configured: {exc}",
-            )
-        except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
-            return ReplaceResult(
-                outcome=RESULT_TRANSIENT,
-                request_id=request_id,
-                error_message=f"Discogs lookup failed (transient): {exc}",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return ReplaceResult(
-                outcome=RESULT_TARGET_INVALID,
-                request_id=request_id,
-                error_message=(
-                    f"target Discogs id {target_mb_release_id} could not "
-                    f"be resolved: {exc}"
-                ),
-            )
+        target_data, err = self._discogs_lookup_or_error(
+            target_id_num,
+            request_id=request_id,
+            detail_context=f"target Discogs id {target_mb_release_id}",
+        )
+        if err is not None:
+            return err
+        assert target_data is not None
 
         if not target_data:
             return ReplaceResult(
@@ -672,6 +636,61 @@ class MbidReplaceService:
             target_data=target_data,
             new_discogs_release_id=canonical_id,
         )
+
+    def _discogs_lookup_or_error(
+        self,
+        release_id_num: int,
+        *,
+        request_id: int,
+        detail_context: str,
+    ) -> tuple[dict[str, Any] | None, ReplaceResult | None]:
+        """Fresh Discogs-mirror lookup + the three-way exception→outcome
+        mapping shared by the source lazy-backfill and target lookup sites
+        in ``_replace_discogs_target``.
+
+        Returns ``(data, None)`` on success or ``(None, ReplaceResult(...))``
+        on failure. ``detail_context`` names the id being resolved in the
+        generic RESULT_TARGET_INVALID message (e.g. ``"source Discogs id
+        1001"`` / ``"target Discogs id 1002"``), preserving each call
+        site's original wording.
+
+        The three failure classes mirror the MB arm: an unconfigured
+        mirror is RESULT_MIRROR_UNCONFIGURED (503), a network blip /
+        timeout / malformed JSON is RESULT_TRANSIENT (503, retryable),
+        and anything else is RESULT_TARGET_INVALID (422). The generic
+        branch ALSO logs a warning so a real bug in the mirror client no
+        longer presents identically to bad operator input.
+        """
+        from web.discogs import DiscogsMirrorNotConfigured
+
+        try:
+            data = self.discogs_lookup(release_id_num, fresh=True)
+        except DiscogsMirrorNotConfigured as exc:
+            return None, ReplaceResult(
+                outcome=RESULT_MIRROR_UNCONFIGURED,
+                request_id=request_id,
+                error_message=f"Discogs mirror not configured: {exc}",
+            )
+        except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
+            return None, ReplaceResult(
+                outcome=RESULT_TRANSIENT,
+                request_id=request_id,
+                error_message=f"Discogs lookup failed (transient): {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Replace: unexpected Discogs lookup error resolving %s "
+                "(request_id=%d): %s: %s",
+                detail_context, request_id, type(exc).__name__, exc,
+            )
+            return None, ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                error_message=(
+                    f"{detail_context} could not be resolved: {exc}"
+                ),
+            )
+        return data, None
 
     def _finalize_replace(
         self,

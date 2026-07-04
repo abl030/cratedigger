@@ -546,6 +546,10 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
                 "/api/pipeline/42/resolve-rg", {},
             )
         self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg discogs masterless response",
+        )
         self.assertEqual(data["status"], "masterless")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
         self.assertEqual(self.db.update_request_fields_calls, [])
@@ -563,6 +567,10 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
                 "/api/pipeline/42/resolve-rg", {},
             )
         self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg discogs mirror-unconfigured response",
+        )
         self.assertEqual(data["status"], "mirror_unconfigured")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
         self.assertEqual(self.db.update_request_fields_calls, [])
@@ -580,7 +588,32 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
                 "/api/pipeline/42/resolve-rg", {},
             )
         self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg discogs transient response",
+        )
         self.assertEqual(data["status"], "transient")
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
+
+    def test_resolve_rg_discogs_lookup_failed_returns_422(self):
+        """Non-transient, non-mirror-config Discogs failure (e.g. a
+        malformed payload) falls into the generic lookup_failed branch —
+        422, not 503 — and leaves the row untouched."""
+        self._seed(None, mb_release_id="12345")
+        with patch(
+            "web.discogs.get_release",
+            side_effect=KeyError("malformed payload"),
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 422)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg discogs lookup-failed response",
+        )
+        self.assertEqual(data["status"], "lookup_failed")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
         self.assertEqual(self.db.update_request_fields_calls, [])
 

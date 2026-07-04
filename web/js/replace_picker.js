@@ -459,6 +459,22 @@ export async function openReplacePicker(options) {
 }
 
 /**
+ * Fetch the source request's release id, unwrapping the pipeline detail
+ * envelope. The endpoint wraps the row under `request` — a flat read
+ * returned `undefined`, leaving the id blank (which the picker silently
+ * tolerated because it only drove the "disable current pressing" visual).
+ * Fixed when we started depending on it for the reference tracklist.
+ * @param {number|string} requestId
+ * @returns {Promise<string>} '' when the fetch fails or the id is absent
+ */
+async function fetchSourceMbid(requestId) {
+  const detail = await fetch(`/api/pipeline/${requestId}`);
+  if (!detail.ok) return '';
+  const drow = await detail.json();
+  return (drow.request && drow.request.mb_release_id) || drow.mb_release_id || '';
+}
+
+/**
  * @param {ReplacePickerOptionsStandard} options
  * @param {(html: string) => void} showOverlay
  * @param {(r: ReplacePickerResult) => void} close
@@ -523,16 +539,7 @@ async function runStandard(options, showOverlay, close) {
     releases = isDiscogsAnchor ? mapDiscogsMasterReleases(body) : (body.releases || []);
     // Identify the current pressing for the source request (so we can
     // disable that row in the list).
-    const detail = await fetch(`/api/pipeline/${options.sourceRequestId}`);
-    if (detail.ok) {
-      const drow = await detail.json();
-      // The pipeline detail endpoint wraps the row under `request` —
-      // a flat read returned `undefined`, leaving sourceMbid blank
-      // (which the picker silently tolerated because it only drove the
-      // "disable current pressing" visual). Fixed when we started
-      // depending on it for the reference tracklist.
-      sourceMbid = (drow.request && drow.request.mb_release_id) || drow.mb_release_id || '';
-    }
+    sourceMbid = await fetchSourceMbid(options.sourceRequestId);
   } catch (err) {
     showOverlay(`${renderStandardHeader(options.sourceLabel || '')}
       <p style="color:#f66;">Failed to load release group: ${esc(String(err))}</p>
@@ -598,11 +605,7 @@ async function runMasterless(options, showOverlay, close) {
 
   let sourceMbid = '';
   try {
-    const detail = await fetch(`/api/pipeline/${options.sourceRequestId}`);
-    if (detail.ok) {
-      const drow = await detail.json();
-      sourceMbid = (drow.request && drow.request.mb_release_id) || drow.mb_release_id || '';
-    }
+    sourceMbid = await fetchSourceMbid(options.sourceRequestId);
   } catch (err) {
     // Non-fatal — falls through to the id-less row below; the picker
     // still communicates "nothing to swap to" even without the id.

@@ -1191,24 +1191,22 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
     # release-group analog is the Discogs master (KTD-1: the numeric
     # master id lives in this same column, per the
     # ``lib/field_resolver_service.py::_looks_numeric`` convention).
-    try:
-        import uuid as _uuid
-        _uuid.UUID(str(mb_release_id))
-    except (ValueError, TypeError, AttributeError):
-        try:
-            discogs_id_num = int(mb_release_id)
-        except (TypeError, ValueError):
-            h._json({
-                "request_id": request_id,
-                "mb_release_group_id": None,
-                "status": "non_mb_release_id",
-                "error": (
-                    f"request {request_id}.mb_release_id "
-                    f"{mb_release_id!r} is neither a MusicBrainz UUID "
-                    "nor a numeric Discogs id"
-                ),
-            }, status=422)
-            return
+    release_source = detect_release_source(mb_release_id)
+    if release_source == "unknown":
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": "non_mb_release_id",
+            "error": (
+                f"request {request_id}.mb_release_id "
+                f"{mb_release_id!r} is neither a MusicBrainz UUID "
+                "nor a numeric Discogs id"
+            ),
+        }, status=422)
+        return
+
+    if release_source == "discogs":
+        discogs_id_num = int(normalize_release_id(mb_release_id))
 
         from web.discogs import DiscogsMirrorNotConfigured
 
@@ -1234,6 +1232,16 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
                 "status": "transient",
                 "error": f"Discogs lookup failed (transient): {exc}",
             }, status=503)
+            return
+        except Exception as exc:  # noqa: BLE001
+            h._json({
+                "request_id": request_id,
+                "mb_release_group_id": None,
+                "status": "lookup_failed",
+                "error": (
+                    f"Discogs lookup for {mb_release_id} failed: {exc}"
+                ),
+            }, status=422)
             return
 
         master_id = (
@@ -1309,7 +1317,9 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
     ``MbidReplaceService.replace_request_mbid`` — keep them in sync (see
     ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
 
-    Body: ``{"target_mb_release_id": "<mbid>"}``.
+    Body: ``{"target_mb_release_id": "<id>"}`` — an MB release UUID or a
+    Discogs numeric release id; must share the source's pathway (MB or
+    Discogs) and release group/master.
 
     Status-code mapping mirrors the CLI exit codes:
       * 200 — ``RESULT_REPLACED``
@@ -3045,7 +3055,8 @@ POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
      "(by ordinal or strategy prefix)."),
     (re.compile(r"^/api/pipeline/(\d+)/replace$"),
      "Supersede the source request with a new row at a different "
-     "MBID in the same release group."),
+     "release id (MB UUID or Discogs numeric id) in the same "
+     "release group/master, same pathway as the source."),
     (re.compile(r"^/api/pipeline/(\d+)/resolve-rg$"),
      "Lazy-backfill mb_release_group_id for a legacy request row."),
 ]

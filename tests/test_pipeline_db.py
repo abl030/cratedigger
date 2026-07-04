@@ -127,6 +127,10 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
     def test_supersede_round_trip_with_discogs_id(self):
         db = make_db()
         old_id = self._seed_old(db)
+        new_tracks = [
+            {"disc_number": 1, "track_number": 1, "title": "Prelude"},
+            {"disc_number": 1, "track_number": 2, "title": "Slam"},
+        ]
         new_id = db.supersede_request_mbid(
             old_id,
             new_mb_release_id="new-mbid",
@@ -137,10 +141,7 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
             new_year=2007,
             new_country="JP",
             new_discogs_release_id="12345",
-            new_tracks=[
-                {"disc_number": 1, "track_number": 1, "title": "Prelude"},
-                {"disc_number": 1, "track_number": 2, "title": "Slam"},
-            ],
+            new_tracks=new_tracks,
         )
         expected = {
             "mb_release_id": "new-mbid",
@@ -166,6 +167,13 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
         old = db.get_request(old_id)
         assert old is not None
         self.assertEqual(old["status"], "replaced")
+        # album_tracks for the new row must round-trip through the same
+        # getter the rest of the pipeline reads tracks back with.
+        tracks = db.get_tracks(new_id)
+        self.assertEqual(
+            [(t["disc_number"], t["track_number"], t["title"]) for t in tracks],
+            [(t["disc_number"], t["track_number"], t["title"]) for t in new_tracks],
+        )
 
     def test_supersede_round_trip_mb_path_discogs_id_null(self):
         # MB Replace passes new_discogs_release_id=None — the column must be
