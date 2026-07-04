@@ -15,6 +15,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tests.web._harness import _assert_required_fields, _WebServerCase
 
 
+class TestRouteRegistryClassificationAudit(unittest.TestCase):
+    """#496 — the classification audit reads the ``classified`` field on
+    each route module's ``RouteRegistration`` list instead of a
+    hand-maintained ``CLASSIFIED_ROUTES`` set. This proves the detector
+    still has teeth: a registration that omits ``classified=True`` is
+    flagged, by name, independent of the live server's route set.
+    """
+
+    def test_unclassified_routes_helper_flags_a_bogus_route(self):
+        from web.routes._registry import route, unclassified_routes
+
+        bogus = route(
+            "GET", "/api/_bogus_496_test_route",
+            lambda h, params: None,
+            "Deliberately unclassified bogus route for the RED test.",
+            classified=False,
+        )
+        classified_sibling = route(
+            "GET", "/api/_bogus_496_test_route_classified",
+            lambda h, params: None,
+            "Deliberately classified sibling so the helper isn't vacuous.",
+            classified=True,
+        )
+        self.assertEqual(
+            unclassified_routes([bogus, classified_sibling]),
+            ["/api/_bogus_496_test_route"],
+        )
+
 
 class TestRouteContractAudit(unittest.TestCase):
     """Every web/routes.py endpoint must be covered by a frontend contract decision."""
