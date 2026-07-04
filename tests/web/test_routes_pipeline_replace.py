@@ -501,16 +501,86 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
         self.assertEqual(self.db.update_request_fields_calls, [])
 
-    def test_resolve_rg_discogs_release_id_returns_422(self):
-        """Numeric Discogs release id → 422 short-circuit, no MB hit."""
+    # U4 (docs/plans/2026-07-04-001-feat-discogs-pathway-replace-plan.md):
+    # a numeric Discogs release id used to short-circuit with a 422
+    # ("non_mb_release_id") before ever touching a mirror. R9 removes
+    # that short-circuit — the route now resolves (and persists) the
+    # Discogs master the same way the MB branch resolves the release
+    # group, via the same ``update_request_fields`` DB method. The 422
+    # equivalence: today's behavior asserted no mirror call and a 422;
+    # the replacement scenarios below assert a resolved/masterless 200
+    # (or a 503 on mirror trouble) with a real Discogs mirror call.
+
+    def test_resolve_rg_discogs_master_found_returns_200_and_persists(self):
+        """Discogs row, master exists → 200 resolved, row updated with
+        the master id via the same DB method the MB branch uses."""
         self._seed(None, mb_release_id="12345")
-        with patch("web.mb.get_release") as mock_mb:
+        with patch(
+            "web.discogs.get_release",
+            return_value={"id": "12345", "release_group_id": "98765"},
+        ) as mock_discogs:
             status, data = self._post(
                 "/api/pipeline/42/resolve-rg", {},
             )
-        self.assertEqual(status, 422)
-        self.assertEqual(data["status"], "non_mb_release_id")
-        mock_mb.assert_not_called()
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.RESOLVE_RG_REQUIRED_FIELDS,
+            "resolve-rg discogs master-found response",
+        )
+        self.assertEqual(data["status"], "resolved")
+        self.assertEqual(data["mb_release_group_id"], "98765")
+        mock_discogs.assert_called_once_with(12345, fresh=True)
+        self.assertEqual(
+            self.db.request(42)["mb_release_group_id"], "98765",
+        )
+
+    def test_resolve_rg_discogs_masterless_returns_200_untouched(self):
+        """Discogs row, no master → 200 'masterless' (R2), row left
+        untouched — not an error shape."""
+        self._seed(None, mb_release_id="12345")
+        with patch(
+            "web.discogs.get_release",
+            return_value={"id": "12345", "release_group_id": None},
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "masterless")
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
+
+    def test_resolve_rg_discogs_mirror_unconfigured_returns_503(self):
+        """AE3 / R11: unconfigured mirror is its own outcome, distinct
+        from a lookup failure or an invalid target."""
+        from web.discogs import DiscogsMirrorNotConfigured
+        self._seed(None, mb_release_id="12345")
+        with patch(
+            "web.discogs.get_release",
+            side_effect=DiscogsMirrorNotConfigured("no mirror configured"),
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(data["status"], "mirror_unconfigured")
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
+        self.assertEqual(self.db.update_request_fields_calls, [])
+
+    def test_resolve_rg_discogs_transient_returns_503(self):
+        """Network blip on the Discogs mirror → 503 retryable (mirrors
+        the MB transient mapping)."""
+        from urllib.error import URLError
+        self._seed(None, mb_release_id="12345")
+        with patch(
+            "web.discogs.get_release",
+            side_effect=URLError("connection refused"),
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg", {},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(data["status"], "transient")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
         self.assertEqual(self.db.update_request_fields_calls, [])
 

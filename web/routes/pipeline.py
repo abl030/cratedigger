@@ -1119,14 +1119,24 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
     already has a non-null RG the route returns it untouched (no
     redundant MB hit because ``get_release(fresh=False)`` is cache-served).
 
+    MB rows resolve the release group via the MB mirror. Discogs rows
+    (numeric ``mb_release_id``) resolve the release's Discogs master
+    instead — the release-group analog (KTD-1) — and persist it into
+    the same ``mb_release_group_id`` column via the same
+    ``update_request_fields`` call the MB branch uses.
+
     Status-code mapping:
-      * 200 — ``status='resolved'`` (RG found; row updated or already set)
+      * 200 — ``status='resolved'`` (RG/master found; row updated or
+              already set) or ``status='masterless'`` (Discogs release
+              has no master; row left untouched — R2, the picker
+              renders the one-element "nothing to swap to" state
+              instead of an error)
       * 404 — request id does not exist
-      * 422 — MB lookup returned no release_group_id (e.g. the row's
-              ``mb_release_id`` is a numeric Discogs id, or the upstream
-              MB release has no RG attached)
-      * 503 — transient MB-mirror error (timeout, network, malformed
-              JSON) — retryable
+      * 422 — MB lookup returned no release_group_id (the upstream MB
+              release has no RG attached)
+      * 503 — transient mirror error (timeout, network, malformed
+              JSON) — retryable — or ``status='mirror_unconfigured'``
+              when the Discogs mirror isn't configured (R11)
     """
     try:
         request_id = int(req_id_str)
@@ -1166,33 +1176,86 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         }, status=422)
         return
 
-    # MB release ids are UUIDs; numeric ids are Discogs and have no
-    # release-group concept here. Surface 422 so the picker can show a
-    # clean error rather than letting the mirror return 404 / 500.
-    try:
-        import uuid as _uuid
-        _uuid.UUID(str(mb_release_id))
-    except (ValueError, TypeError, AttributeError):
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": "non_mb_release_id",
-            "error": (
-                f"request {request_id}.mb_release_id "
-                f"{mb_release_id!r} is not a MusicBrainz UUID"
-            ),
-        }, status=422)
-        return
-
-    # MB-mirror transient errors (network, JSON decode) are retryable.
-    # See ``lib/mbid_replace_service.py::_TRANSIENT_LOOKUP_EXCEPTIONS``
-    # for the rationale and the same exception set.
+    # Mirror transient errors (network, JSON decode) are retryable, on
+    # either mirror. See
+    # ``lib/mbid_replace_service.py::_TRANSIENT_LOOKUP_EXCEPTIONS`` for
+    # the rationale and the same exception set.
     import socket as _socket
     from urllib.error import URLError
     transient: tuple[type[BaseException], ...] = (
         URLError, TimeoutError, _socket.timeout, ConnectionError,
         json.JSONDecodeError,
     )
+
+    # MB release ids are UUIDs; numeric ids are Discogs-pathway, whose
+    # release-group analog is the Discogs master (KTD-1: the numeric
+    # master id lives in this same column, per the
+    # ``lib/field_resolver_service.py::_looks_numeric`` convention).
+    try:
+        import uuid as _uuid
+        _uuid.UUID(str(mb_release_id))
+    except (ValueError, TypeError, AttributeError):
+        try:
+            discogs_id_num = int(mb_release_id)
+        except (TypeError, ValueError):
+            h._json({
+                "request_id": request_id,
+                "mb_release_group_id": None,
+                "status": "non_mb_release_id",
+                "error": (
+                    f"request {request_id}.mb_release_id "
+                    f"{mb_release_id!r} is neither a MusicBrainz UUID "
+                    "nor a numeric Discogs id"
+                ),
+            }, status=422)
+            return
+
+        from web.discogs import DiscogsMirrorNotConfigured
+
+        # Bypass the 24h meta cache — this write path can persist the
+        # resolved master into the pipeline DB, same rationale as the
+        # add flow's ``fresh=True`` calls above.
+        try:
+            discogs_data = discogs_api.get_release(
+                discogs_id_num, fresh=True,
+            )
+        except DiscogsMirrorNotConfigured as exc:
+            h._json({
+                "request_id": request_id,
+                "mb_release_group_id": None,
+                "status": "mirror_unconfigured",
+                "error": f"Discogs mirror not configured: {exc}",
+            }, status=503)
+            return
+        except transient as exc:
+            h._json({
+                "request_id": request_id,
+                "mb_release_group_id": None,
+                "status": "transient",
+                "error": f"Discogs lookup failed (transient): {exc}",
+            }, status=503)
+            return
+
+        master_id = (
+            discogs_data.get("release_group_id")
+            if isinstance(discogs_data, dict) else None
+        )
+        if not master_id:
+            h._json({
+                "request_id": request_id,
+                "mb_release_group_id": None,
+                "status": "masterless",
+            })
+            return
+
+        db.update_request_fields(request_id, mb_release_group_id=master_id)
+        h._json({
+            "request_id": request_id,
+            "mb_release_group_id": master_id,
+            "status": "resolved",
+        })
+        return
+
     try:
         data = mb_api.get_release(mb_release_id, fresh=False)
     except transient as exc:
