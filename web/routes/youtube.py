@@ -19,7 +19,6 @@ lives forever absent explicit ``refresh=true``.
 from __future__ import annotations
 
 import logging
-import re
 
 import msgspec
 from pydantic import BaseModel
@@ -35,6 +34,7 @@ from lib.youtube_ingest_service import (
 from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._pydantic import parse_body
+from web.routes._registry import RouteRegistration, pattern_route, route
 
 
 log = logging.getLogger(__name__)
@@ -46,14 +46,7 @@ log = logging.getLogger(__name__)
 # identity is asserted in the contract test — there is no second source
 # of truth.
 __all__ = [
-    "GET_ROUTES",
-    "POST_ROUTES",
-    "GET_PATTERNS",
-    "POST_PATTERNS",
-    "GET_DESCRIPTIONS",
-    "POST_DESCRIPTIONS",
-    "PATTERN_DESCRIPTIONS",
-    "POST_PATTERN_DESCRIPTIONS",
+    "ROUTES",
     "OUTCOME_HTTP_STATUS",
     "YOUTUBE_INGEST_HTTP_STATUS",
     "YoutubeRescueRequest",
@@ -323,43 +316,26 @@ def post_pipeline_youtube_rescue(h, body: dict, req_id_str: str) -> None:
 
 # ── Route tables ─────────────────────────────────────────────────────
 
-GET_ROUTES: dict[str, object] = {
-    "/api/youtube-album": get_youtube_album,
-}
-
-POST_ROUTES: dict[str, object] = {}
-
-GET_PATTERNS: list[tuple[re.Pattern[str], object]] = []
-
-POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-    (re.compile(r"^/api/pipeline/(\d+)/youtube-rescue$"),
-     post_pipeline_youtube_rescue),
-]
-
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/youtube-album": (
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/youtube-album", get_youtube_album,
         "YouTube Music album resolver — given an MB or Discogs "
         "release-or-group identifier, returns the typed "
         "(yt_release × mb_release) distance matrix. "
         "?refresh=true bypasses BOTH the durable cache "
         "(youtube_album_mappings) and the in-process Redis HTTP "
         "accelerator, forcing a fresh YT Music fetch; the fresh "
-        "response is then written back to both layers."
+        "response is then written back to both layers.",
+        classified=True,
     ),
-}
-
-POST_DESCRIPTIONS: dict[str, str] = {}
-
-# server.py merges this list into ``_FUNC_POST_PATTERN_DESCRIPTIONS``
-# so the description table stays symmetric with the dispatch table
-# (finding #21).
-POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^/api/pipeline/(\d+)/youtube-rescue$"),
-     "Submit a YouTube-Music rescue ingest for one album request. "
-     "Counterpart of ``pipeline-cli youtube-rescue``; both surfaces "
-     "wrap ``YoutubeIngestService.submit``. Body: {\"browse_id\": "
-     "\"<MPREb_...>\"}. Returns the new (or existing in-flight) "
-     "``download_log_id`` plus a structured outcome."),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/youtube-rescue$",
+        post_pipeline_youtube_rescue,
+        "Submit a YouTube-Music rescue ingest for one album request. "
+        "Counterpart of ``pipeline-cli youtube-rescue``; both surfaces "
+        "wrap ``YoutubeIngestService.submit``. Body: {\"browse_id\": "
+        "\"<MPREb_...>\"}. Returns the new (or existing in-flight) "
+        "``download_log_id`` plus a structured outcome.",
+        classified=True,
+    ),
 ]
-
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []

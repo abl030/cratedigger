@@ -47,6 +47,7 @@ from lib.validation_envelope import (
     decode_validation_envelope,
 )
 from web.routes.pipeline import _serialize_import_job
+from web.routes._registry import RouteRegistration, route
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
     build_wrong_match_explorer,
@@ -970,68 +971,72 @@ def get_wrong_match_triage_status(h, params: dict) -> None:
     h._json(_triage_runner.status())
 
 
-GET_ROUTES: dict[str, object] = {
-    "/api/manual-import/scan": get_manual_import_scan,
-    "/api/wrong-matches": get_wrong_matches,
-    "/api/wrong-matches/audio": get_wrong_match_audio,
-    "/api/wrong-matches/triage/status": get_wrong_match_triage_status,
-    "/api/wrong-matches/explorer": get_wrong_match_explorer,
-}
-POST_ROUTES: dict[str, object] = {
-    "/api/manual-import/import": post_manual_import,
-    "/api/import-preview": post_import_preview,
-    "/api/wrong-matches/delete": post_wrong_match_delete,
-    "/api/wrong-matches/delete-group": post_wrong_match_delete_group,
-    "/api/wrong-matches/converge": post_wrong_match_converge,
-    "/api/wrong-matches/triage": post_wrong_match_triage,
-}
-
-# Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / POST_ROUTES dispatch tables above.
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/manual-import/scan": (
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/manual-import/scan", get_manual_import_scan,
         "Scan a Complete folder for album dirs and fuzzy-match each to "
-        "wanted pipeline requests."
+        "wanted pipeline requests.",
+        classified=True,
     ),
-    "/api/wrong-matches": (
+    route(
+        "GET", "/api/wrong-matches", get_wrong_matches,
         "Wrong-match queue — rejected downloads grouped by request, with "
-        "per-entry quality + on-disk fields for operator review."
+        "per-entry quality + on-disk fields for operator review.",
+        classified=True,
     ),
-    "/api/wrong-matches/audio": (
-        "Stream one wrong-match audio file with byte-range support."
+    route(
+        "GET", "/api/wrong-matches/audio", get_wrong_match_audio,
+        "Stream one wrong-match audio file with byte-range support.",
+        classified=True,
     ),
-    "/api/wrong-matches/triage/status": (
+    route(
+        "GET", "/api/wrong-matches/triage/status",
+        get_wrong_match_triage_status,
         "Status of the background bulk-triage sweep — state plus the "
-        "cleanup summary once completed."
+        "cleanup summary once completed.",
+        classified=True,
     ),
-    "/api/wrong-matches/explorer": (
-        "Filesystem-backed file/tag explorer payload for one wrong match."
+    route(
+        "GET", "/api/wrong-matches/explorer", get_wrong_match_explorer,
+        "Filesystem-backed file/tag explorer payload for one wrong match.",
+        classified=True,
     ),
-}
-POST_DESCRIPTIONS: dict[str, str] = {
-    "/api/manual-import/import": (
+    route(
+        "POST", "/api/manual-import/import", post_manual_import,
         "Enqueue a manual-import job for an on-disk folder against a "
-        "pipeline request."
+        "pipeline request.",
+        classified=True,
     ),
-    "/api/import-preview": (
+    route(
+        "POST", "/api/import-preview", post_import_preview,
         "Preview whether an import would pass — accepts typed values, "
-        "a download_log_id, or a request_id+path."
+        "a download_log_id, or a request_id+path.",
+        classified=True,
     ),
-    "/api/wrong-matches/delete": (
+    route(
+        "POST", "/api/wrong-matches/delete", post_wrong_match_delete,
         "Operator-triggered deletion of one visible Wrong Matches "
-        "candidate (DESTRUCTIVE on disk)."
+        "candidate (DESTRUCTIVE on disk).",
+        classified=True,
     ),
-    "/api/wrong-matches/delete-group": (
+    route(
+        "POST", "/api/wrong-matches/delete-group",
+        post_wrong_match_delete_group,
         "Operator-triggered deletion of all current Wrong Matches for "
-        "a request (DESTRUCTIVE on disk)."
+        "a request (DESTRUCTIVE on disk).",
+        classified=True,
     ),
-    "/api/wrong-matches/converge": (
+    route(
+        "POST", "/api/wrong-matches/converge", post_wrong_match_converge,
         "Queue acceptable candidates for force-import and delete the "
-        "rest for one request (one-click cleanup)."
+        "rest for one request (one-click cleanup).",
+        classified=True,
     ),
-    "/api/wrong-matches/triage": (
+    route(
+        "POST", "/api/wrong-matches/triage", post_wrong_match_triage,
         "Start the full Wrong Matches cleanup sweep on a background "
         "thread (DESTRUCTIVE); requires confirm_all_wrong_matches=true. "
-        "Returns 202 immediately; poll /api/wrong-matches/triage/status."
+        "Returns 202 immediately; poll /api/wrong-matches/triage/status.",
+        classified=True,
     ),
-}
+]

@@ -1,9 +1,9 @@
 """Disk coverage API route."""
 
 import msgspec
-import re
 
 from lib.disk_coverage_service import disk_coverage
+from web.routes._registry import RouteRegistration, route
 
 
 def _server():
@@ -33,17 +33,11 @@ def get_disk_coverage(h, params: dict[str, list[str]]) -> None:
     h._json(msgspec.to_builtins(result))
 
 
-GET_ROUTES: dict[str, object] = {
-    "/api/disk-coverage": get_disk_coverage,
-}
-
-GET_PATTERNS: list[tuple[re.Pattern[str], object]] = []
-
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/disk-coverage": (
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/disk-coverage", get_disk_coverage,
         "Exact-ID reconciliation of active pipeline rows against beets "
-        "disk presence, with optional inverse beets-only rows."
+        "disk presence, with optional inverse beets-only rows.",
+        classified=True,
     ),
-}
-
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = []
+]
