@@ -99,7 +99,7 @@ web/              — Web UI (server.py, routes/, mb.py, discogs.py, js/)
 lib/              — Pipeline modules (quality/ package = pure decisions, split by concern; pipeline_db.py = PG CRUD + advisory locks)
 harness/          — beets_harness.py (JSON protocol), import_one.py
 migrations/       — Versioned SQL (NNN_name.sql), run by lib/migrator.py
-scripts/          — pipeline_cli.py + dev/ops scripts
+scripts/          — pipeline_cli/ (operator CLI package, split by command family) + dev/ops scripts
 tests/            — shared infra in fakes.py + helpers.py
 nix/              — package.nix, beets.nix, shell.nix, module.nix, VM check
 examples/         — sample consumer + mirror NixOS configs

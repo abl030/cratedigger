@@ -258,20 +258,24 @@ class TestResolveFailedPath(unittest.TestCase):
 
     def test_relative_path_resolved(self) -> None:
         """Relative path should be resolved against SLSKD_DOWNLOAD_DIRS."""
-        from scripts import pipeline_cli
+        from scripts.pipeline_cli import imports as pipeline_cli_imports
         import tempfile
         with tempfile.TemporaryDirectory() as base:
             # Create a subdir to simulate failed_imports/Album
             subdir = os.path.join(base, "failed_imports", "Test Album")
             os.makedirs(subdir)
-            # Temporarily override SLSKD_DOWNLOAD_DIRS
-            old = pipeline_cli.SLSKD_DOWNLOAD_DIRS
-            pipeline_cli.SLSKD_DOWNLOAD_DIRS = [base]
+            # Temporarily override SLSKD_DOWNLOAD_DIRS. Mutate on the
+            # defining submodule (``imports.py``, where ``_resolve_failed_path``
+            # reads the name from its own module globals) — the top-level
+            # ``pipeline_cli`` re-export is a separate namespace, so assigning
+            # there wouldn't be visible to the function (#495 package split).
+            old = pipeline_cli_imports.SLSKD_DOWNLOAD_DIRS
+            pipeline_cli_imports.SLSKD_DOWNLOAD_DIRS = [base]
             try:
-                result = pipeline_cli._resolve_failed_path("failed_imports/Test Album")
+                result = pipeline_cli_imports._resolve_failed_path("failed_imports/Test Album")
                 self.assertEqual(result, subdir)
             finally:
-                pipeline_cli.SLSKD_DOWNLOAD_DIRS = old
+                pipeline_cli_imports.SLSKD_DOWNLOAD_DIRS = old
 
 
 if __name__ == "__main__":

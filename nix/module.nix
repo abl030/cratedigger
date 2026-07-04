@@ -197,10 +197,14 @@
   # crashes it with ModuleNotFoundError. All internal imports use
   # `from lib.X import Y` / `from web.X import Y` against the repo root
   # already, so the flat entries are both unnecessary and harmful.
+  # pipeline-cli is a package (scripts/pipeline_cli/, issue #495) — exec
+  # the __main__.py entry shim, which bootstraps sys.path the same way
+  # the old flat file did (one extra ".." for the extra directory level)
+  # before importing anything package-local.
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli.py \
+    exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli/__main__.py \
       --dsn "${pipelineDsn}" "$@"
   '';
 

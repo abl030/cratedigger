@@ -93,7 +93,7 @@ class TestCmdAdd(unittest.TestCase):
         "release_group_id": "rg-uuid", "tracks": [], "labels": [],
     })
     @patch("web.mb.get_release_group_year", return_value=2014)
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid(self, mock_fetch, _mock_rgy, _mock_get_release):
         mock_fetch.return_value = SAMPLE_MB_RELEASE
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
@@ -113,7 +113,7 @@ class TestCmdAdd(unittest.TestCase):
         "release_group_id": "rg-uuid", "tracks": [], "labels": [],
     })
     @patch("web.mb.get_release_group_year", return_value=2014)
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_creates_active_search_plan(
         self, mock_fetch, _mock_rgy, _mock_get_release,
     ):
@@ -131,7 +131,7 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(active.next_ordinal, 0)
         self.assertGreater(len(active.items), 0)
 
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_duplicate_skipped(self, mock_fetch):
         self.db.add_request(
             mb_release_id="44438bf9-26d9-4460-9b4f-1a1b015e37a1",
@@ -143,7 +143,7 @@ class TestCmdAdd(unittest.TestCase):
 
     @patch("web.mb.get_release")
     @patch("web.mb.get_release_group_year")
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_persists_release_group_year_reissue(
         self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
@@ -172,7 +172,7 @@ class TestCmdAdd(unittest.TestCase):
 
     @patch("web.mb.get_release")
     @patch("web.mb.get_release_group_year")
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_persists_release_group_year_original(
         self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
@@ -198,7 +198,7 @@ class TestCmdAdd(unittest.TestCase):
 
     @patch("web.mb.get_release")
     @patch("web.mb.get_release_group_year")
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_release_group_404_leaves_column_null(
         self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
@@ -233,7 +233,7 @@ class TestCmdAdd(unittest.TestCase):
         "release-group": {"primary-type": "Compilation"},
     })
     @patch("web.mb.get_release_group_year", return_value=2010)
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_va_compilation_flag_set(
         self, mock_fetch, _mock_rgy, _mock_release,
     ):
@@ -302,7 +302,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         "release_group_id": "rg-uuid", "tracks": [], "labels": [],
     })
     @patch("web.mb.get_release_group_year", return_value=2014)
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_cli_add_calls_search_plan_service(
         self, mock_fetch, _mock_rgy, _mock_get_release,
     ):
@@ -321,7 +321,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         from lib.search import SEARCH_PLAN_GENERATOR_ID
         self.assertEqual(active.plan.generator_id, SEARCH_PLAN_GENERATOR_ID)
 
-    @patch("scripts.pipeline_cli.fetch_mb_release")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_cli_add_duplicate_does_not_regenerate(self, mock_fetch):
         from tests.fakes import FakePipelineDB
         db = FakePipelineDB()
@@ -436,7 +436,7 @@ class TestCmdCancel(unittest.TestCase):
 
 class TestCmdSet(unittest.TestCase):
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli.finalize_request")
+    @patch("scripts.pipeline_cli.album_requests.finalize_request")
     def test_set_routes_dynamic_status_through_shared_finalizer(
         self,
         mock_finalize,
@@ -471,7 +471,7 @@ class TestTracksFromMbRelease(unittest.TestCase):
 
 class TestCmdForceImport(unittest.TestCase):
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("scripts.pipeline_cli.imports._resolve_failed_path", return_value="/tmp/Test Album")
     def test_force_import_passes_source_username_to_queue(self, _mock_resolve, _mock_print):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 
@@ -508,7 +508,7 @@ class TestCmdForceImport(unittest.TestCase):
 
 class TestCmdManualImport(unittest.TestCase):
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
+    @patch("scripts.pipeline_cli.imports._resolve_failed_path", return_value="/tmp/Album")
     def test_manual_import_prints_queued_job(self, _mock_resolve, _mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -526,7 +526,7 @@ class TestCmdManualImport(unittest.TestCase):
         _mock_print.assert_any_call(f"  [OK] Queued import job #{job_id} (queued).")
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._resolve_failed_path", return_value="/tmp/Album")
+    @patch("scripts.pipeline_cli.imports._resolve_failed_path", return_value="/tmp/Album")
     def test_manual_import_enqueues_job(self, _mock_resolve, _mock_print):
         from lib.import_queue import IMPORT_JOB_MANUAL, manual_import_dedupe_key
 
@@ -548,7 +548,7 @@ class TestCmdManualImport(unittest.TestCase):
         self.assertEqual(job["payload"]["failed_path"], "/tmp/Album")
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._resolve_failed_path",
+    @patch("scripts.pipeline_cli.imports._resolve_failed_path",
            return_value="/mnt/virtio/music/slskd/failed_imports/Foo - Bar")
     def test_manual_import_resolves_relative_path(self, _mock_resolve, _mock_print):
         """Manual-import must resolve relative paths the same way force-import
@@ -571,7 +571,7 @@ class TestCmdManualImport(unittest.TestCase):
         )
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli._resolve_failed_path", return_value=None)
+    @patch("scripts.pipeline_cli.imports._resolve_failed_path", return_value=None)
     def test_manual_import_aborts_when_path_cannot_be_resolved(
         self, _mock_resolve, mock_print
     ):
@@ -992,7 +992,7 @@ class TestMainExitCodes(unittest.TestCase):
         ]
         db = FakePipelineDB()
         with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.PipelineDB",
+            "scripts.pipeline_cli.cli.PipelineDB",
             return_value=db,
         ):
             with self.assertRaises(SystemExit) as raised:
@@ -1024,7 +1024,7 @@ class TestMainExitCodes(unittest.TestCase):
             cleared_rows=1,
         )
         with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.PipelineDB",
+            "scripts.pipeline_cli.cli.PipelineDB",
             return_value=db,
         ), patch(
             "lib.wrong_match_delete_service.delete_wrong_match",
@@ -1065,7 +1065,7 @@ class TestMainExitCodes(unittest.TestCase):
             results=(),
         )
         with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.PipelineDB",
+            "scripts.pipeline_cli.cli.PipelineDB",
             return_value=db,
         ), patch(
             "lib.wrong_match_delete_service.delete_wrong_match_group",
@@ -1260,7 +1260,7 @@ class TestCmdSetIntent(unittest.TestCase):
         self.assertEqual(db.update_request_fields_calls, [(1, dict(target_format=None))])
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli.finalize_request")
+    @patch("scripts.pipeline_cli.album_requests.finalize_request")
     def test_set_lossless_on_imported_requeues(self, mock_finalize, _mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1378,7 +1378,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  patch("lib.beets_db.BeetsDB", return_value=mock_beets), \
-                 patch("scripts.pipeline_cli.finalize_request", finalize_request), \
+                 patch("scripts.pipeline_cli.quality.finalize_request", finalize_request), \
                  redirect_stdout(stdout):
                 pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
 
@@ -1422,11 +1422,11 @@ class TestCmdQuality(unittest.TestCase):
         )
 
         stdout = io.StringIO()
-        with patch("scripts.pipeline_cli._load_runtime_rank_config",
+        with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
-             patch("scripts.pipeline_cli._load_runtime_verified_lossless_target",
+             patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
                    return_value=runtime_target or ""), \
-             patch("scripts.pipeline_cli._load_beets_album_info",
+             patch("scripts.pipeline_cli.quality._load_beets_album_info",
                    return_value=beets_info), \
              redirect_stdout(stdout):
             pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_row["id"]))
@@ -1507,11 +1507,11 @@ class TestCmdQuality(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(request_row)
         stdout = io.StringIO()
-        with patch("scripts.pipeline_cli._load_runtime_rank_config",
+        with patch("scripts.pipeline_cli.quality._load_runtime_rank_config",
                    return_value=QualityRankConfig.defaults()), \
-             patch("scripts.pipeline_cli._load_runtime_verified_lossless_target",
+             patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
                    return_value=""), \
-             patch("scripts.pipeline_cli._load_beets_album_info",
+             patch("scripts.pipeline_cli.quality._load_beets_album_info",
                    return_value=beets_info), \
              redirect_stdout(stdout):
             pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=9))
@@ -2874,13 +2874,13 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
 
         with redirect_stdout(stdout):
             with patch(
-                "scripts.pipeline_cli._build_youtube_client",
+                "scripts.pipeline_cli.youtube._build_youtube_client",
                 return_value=(object(), _FakeSession()),
             ), patch(
-                "scripts.pipeline_cli._RedisYoutubeCache",
+                "scripts.pipeline_cli.youtube._RedisYoutubeCache",
                 return_value=object(),
             ), patch(
-                "scripts.pipeline_cli.resolve_youtube_album",
+                "scripts.pipeline_cli.youtube.resolve_youtube_album",
                 return_value=result,
             ) as mock_resolve:
                 rc = pipeline_cli.cmd_youtube_album(FakePipelineDB(), args)
@@ -3027,13 +3027,13 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
             raise RuntimeError("simulated mid-CLI failure")
 
         with patch(
-            "scripts.pipeline_cli._build_youtube_client",
+            "scripts.pipeline_cli.youtube._build_youtube_client",
             return_value=(object(), _FakeSession()),
         ), patch(
-            "scripts.pipeline_cli._RedisYoutubeCache",
+            "scripts.pipeline_cli.youtube._RedisYoutubeCache",
             return_value=object(),
         ), patch(
-            "scripts.pipeline_cli.resolve_youtube_album",
+            "scripts.pipeline_cli.youtube.resolve_youtube_album",
             side_effect=_raising_resolver,
         ):
             with self.assertRaises(RuntimeError):
@@ -3596,7 +3596,7 @@ class TestPipelineCliRoutes(unittest.TestCase):
         # in place defensively in case a future caller flips that wiring.
         db = FakePipelineDB()
         with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.PipelineDB", return_value=db,
+            "scripts.pipeline_cli.cli.PipelineDB", return_value=db,
         ), redirect_stdout(io.StringIO()) as out:
             with self.assertRaises(SystemExit) as raised:
                 pipeline_cli.main()
