@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Contract tests for the search-plan routes (web/routes/pipeline.py).
+"""Contract tests for the search-plan routes (web/routes/search_plan.py).
 
-Split from tests/test_web_server.py (#408). Shared harness in
-tests/web/_harness.py.
+Split from tests/test_web_server.py (#408). Moved from
+tests/web/test_routes_pipeline_search_plan.py to mirror
+web/routes/search_plan.py's own split out of web/routes/pipeline.py
+(#481 item 3). Shared harness in tests/web/_harness.py.
 """
 
 from datetime import datetime, timedelta, timezone
