@@ -9,6 +9,8 @@ import os
 import sys
 import unittest
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
@@ -1247,31 +1249,46 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(j["files"][0]["last_state"], "InProgress")
 
     def test_active_download_file_state_local_path_round_trip(self):
-        """local_path (issue #146 phase 1) survives to_dict/from_dict; absent
-        key deserializes to None (pre-141 rows have no local_path)."""
-        from lib.quality import ActiveDownloadFileState
-        stamped = ActiveDownloadFileState(
-            username="user1",
-            filename="user1\\Music\\01.flac",
-            file_dir="user1\\Music",
-            size=30000000,
-            local_path="/dl/Album/01_638827305447447018.flac",
-        )
-        d = stamped.to_dict()
-        self.assertEqual(d["local_path"], "/dl/Album/01_638827305447447018.flac")
-        restored = ActiveDownloadFileState.from_dict(d)
-        self.assertEqual(
-            restored.local_path, "/dl/Album/01_638827305447447018.flac")
+        """local_path (issue #146 phase 1) survives the state wire round-trip;
+        absent key deserializes to None (pre-141 rows have no local_path).
 
-        unstamped = ActiveDownloadFileState(
-            username="user1",
-            filename="user1\\Music\\01.flac",
-            file_dir="user1\\Music",
-            size=30000000,
+        Files are only ever (de)serialized as part of the parent state, so
+        the round-trip is exercised through ``ActiveDownloadState`` — the one
+        wire boundary — rather than via a file-level helper."""
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        stamped = ActiveDownloadState(
+            filetype="flac", enqueued_at="2026-04-03T12:00:00+00:00",
+            files=[ActiveDownloadFileState(
+                username="user1",
+                filename="user1\\Music\\01.flac",
+                file_dir="user1\\Music",
+                size=30000000,
+                local_path="/dl/Album/01_638827305447447018.flac",
+            )],
         )
-        d = unstamped.to_dict()
-        self.assertNotIn("local_path", d)
-        self.assertIsNone(ActiveDownloadFileState.from_dict(d).local_path)
+        j = json.loads(stamped.to_json())
+        self.assertEqual(
+            j["files"][0]["local_path"],
+            "/dl/Album/01_638827305447447018.flac")
+        restored = ActiveDownloadState.from_json(stamped.to_json())
+        self.assertEqual(
+            restored.files[0].local_path,
+            "/dl/Album/01_638827305447447018.flac")
+
+        unstamped = ActiveDownloadState(
+            filetype="flac", enqueued_at="2026-04-03T12:00:00+00:00",
+            files=[ActiveDownloadFileState(
+                username="user1",
+                filename="user1\\Music\\01.flac",
+                file_dir="user1\\Music",
+                size=30000000,
+            )],
+        )
+        j = json.loads(unstamped.to_json())
+        self.assertNotIn("local_path", j["files"][0])
+        self.assertIsNone(
+            ActiveDownloadState.from_json(
+                unstamped.to_json()).files[0].local_path)
 
     def test_active_download_state_from_json(self):
         """Deserialize, verify all fields."""
@@ -1389,7 +1406,10 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertIsNone(f.last_state)
 
     def test_active_download_state_missing_current_path_defaults_none(self):
-        """Pre-refactor rows without current_path still deserialize."""
+        """Rows without current_path still deserialize to None, and a None
+        current_path is now omitted from the wire (issue #467: the msgspec
+        encoder omits defaults; the hand-rolled encoder emitted ``null``).
+        Both shapes decode to the same struct — see the decode-compat test."""
         from lib.quality import ActiveDownloadState
         raw = json.dumps({
             "filetype": "flac",
@@ -1401,7 +1421,7 @@ class TestActiveDownloadState(unittest.TestCase):
         self.assertEqual(state.filetype, "flac")
         self.assertEqual(state.enqueued_at, "2026-04-03T12:00:00+00:00")
         self.assertEqual(state.files, [])
-        self.assertIsNone(json.loads(state.to_json())["current_path"])
+        self.assertNotIn("current_path", json.loads(state.to_json()))
 
     def test_active_download_state_enqueued_at_iso(self):
         """Verify ISO8601 datetime format."""
@@ -1416,6 +1436,132 @@ class TestActiveDownloadState(unittest.TestCase):
         from datetime import datetime, timezone
         dt = datetime.fromisoformat(j["enqueued_at"])
         self.assertEqual(dt.tzinfo, timezone.utc)
+
+    # --- issue #467: msgspec wire-boundary contract -----------------------
+
+    def _full_state(self):
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        return ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-04-03T12:00:00+00:00",
+            last_progress_at="2026-04-03T12:01:00+00:00",
+            processing_started_at="2026-04-03T12:02:00+00:00",
+            import_subprocess_started_at="2026-04-03T12:04:00+00:00",
+            current_path="/tmp/staged/user1/Album",
+            files=[ActiveDownloadFileState(
+                username="user1", filename="user1\\Music\\01.flac",
+                file_dir="user1\\Music", size=30000000,
+                disk_no=2, disk_count=3, retry_count=5,
+                bytes_transferred=8192, last_state="InProgress",
+                local_path="/dl/Album/01.flac")],
+        )
+
+    def _minimal_state(self):
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        return ActiveDownloadState(
+            filetype="flac", enqueued_at="2026-04-03T12:00:00+00:00",
+            files=[ActiveDownloadFileState(
+                username="u", filename="f", file_dir="d", size=100)])
+
+    # The exact wire the hand-rolled (@dataclass) encoder produced, captured
+    # from the pre-refactor code and frozen here as the legacy contract.
+    LEGACY_FULL_WIRE = {
+        "current_path": "/tmp/staged/user1/Album",
+        "enqueued_at": "2026-04-03T12:00:00+00:00",
+        "files": [{
+            "bytes_transferred": 8192, "disk_count": 3, "disk_no": 2,
+            "file_dir": "user1\\Music", "filename": "user1\\Music\\01.flac",
+            "last_state": "InProgress", "local_path": "/dl/Album/01.flac",
+            "retry_count": 5, "size": 30000000, "username": "user1"}],
+        "filetype": "flac",
+        "import_subprocess_started_at": "2026-04-03T12:04:00+00:00",
+        "last_progress_at": "2026-04-03T12:01:00+00:00",
+        "processing_started_at": "2026-04-03T12:02:00+00:00",
+    }
+    LEGACY_MINIMAL_WIRE = {
+        "current_path": None,
+        "enqueued_at": "2026-04-03T12:00:00+00:00",
+        "files": [{
+            "bytes_transferred": 0, "file_dir": "d", "filename": "f",
+            "retry_count": 0, "size": 100, "username": "u"}],
+        "filetype": "flac",
+    }
+
+    def test_wire_full_state_identical_to_legacy(self):
+        """A fully-populated state encodes byte-for-value identically to the
+        legacy hand-rolled encoder — no fields at their default, so
+        omit_defaults changes nothing."""
+        self.assertEqual(
+            json.loads(self._full_state().to_json()), self.LEGACY_FULL_WIRE)
+
+    def test_wire_minimal_state_omits_default_keys(self):
+        """A minimal state omits the keys the msgspec encoder now drops at
+        their default: file retry_count/bytes_transferred (were emitted as 0)
+        and state current_path (was emitted as null). This is the documented
+        issue #467 wire diff — the omitted keys all restore to their defaults
+        on decode."""
+        wire = json.loads(self._minimal_state().to_json())
+        self.assertNotIn("current_path", wire)
+        self.assertNotIn("retry_count", wire["files"][0])
+        self.assertNotIn("bytes_transferred", wire["files"][0])
+        # The non-default fields are still present.
+        self.assertEqual(wire["filetype"], "flac")
+        self.assertEqual(wire["files"][0]["size"], 100)
+
+    def test_minimal_legacy_and_new_wire_decode_equal(self):
+        """Decode-compat both ways: the legacy minimal wire (with
+        current_path=null, retry_count=0, bytes_transferred=0 present) and the
+        new minimal wire (those keys omitted) decode to the *same* struct. The
+        wire diff is therefore lossless."""
+        from lib.quality import ActiveDownloadState
+        legacy = ActiveDownloadState.from_json(json.dumps(self.LEGACY_MINIMAL_WIRE))
+        new = ActiveDownloadState.from_json(self._minimal_state().to_json())
+        self.assertEqual(legacy, new)
+        # And the load-bearing defaults are what we expect.
+        self.assertIsNone(new.current_path)
+        self.assertEqual(new.files[0].retry_count, 0)
+        self.assertEqual(new.files[0].bytes_transferred, 0)
+
+    def test_from_dict_decodes_live_prod_row_shape(self):
+        """The exact shape of a live album_requests.active_download_state row
+        (int fields as JSON numbers, retry_count present as 0, disk fields
+        present) decodes strictly with types preserved."""
+        from lib.quality import ActiveDownloadState
+        row = {
+            "filetype": "flac",
+            "enqueued_at": "2026-06-01T00:00:00+00:00",
+            "current_path": None,
+            "files": [{
+                "bytes_transferred": 63570957, "disk_count": 3, "disk_no": 1,
+                "file_dir": "peer\\Music", "filename": "peer\\Music\\01.flac",
+                "last_state": "Completed, Succeeded", "retry_count": 0,
+                "size": 63570957, "username": "peer"}],
+        }
+        state = ActiveDownloadState.from_dict(row)
+        f = state.files[0]
+        self.assertEqual(f.size, 63570957)
+        self.assertEqual(f.bytes_transferred, 63570957)
+        self.assertEqual(f.disk_no, 1)
+        self.assertEqual(f.disk_count, 3)
+        self.assertEqual(f.retry_count, 0)
+        self.assertEqual(f.last_state, "Completed, Succeeded")
+        self.assertIsNone(state.current_path)
+
+    def test_from_dict_rejects_string_size_wire_drift(self):
+        """int-vs-str drift at the wire boundary is caught, not coerced. The
+        hand-rolled decoder ran int(d['size']) and laundered a str; msgspec's
+        strict decode raises ValidationError instead (the regression guard
+        that makes the boundary worth having)."""
+        from lib.quality import ActiveDownloadState
+        drifted = {
+            "filetype": "flac",
+            "enqueued_at": "2026-06-01T00:00:00+00:00",
+            "files": [{
+                "username": "peer", "filename": "f", "file_dir": "d",
+                "size": "63570957"}],
+        }
+        with self.assertRaises(msgspec.ValidationError):
+            ActiveDownloadState.from_dict(drifted)
 
 
 if __name__ == "__main__":
