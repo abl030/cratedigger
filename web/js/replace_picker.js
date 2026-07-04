@@ -23,7 +23,28 @@
  *
  * The module is callable from cross-module onclick handlers via the
  * `window.openReplacePicker` binding installed in main.js.
+ *
+ * Discogs-pathway anchors (feat/discogs-pathway-replace, U5): the
+ * release-group analog for a Discogs row is the Discogs master, and the
+ * numeric master id lives in the SAME `releaseGroupId` field MB uses
+ * (KTD-1 — `lib/field_resolver_service.py::_looks_numeric` convention).
+ * `runStandard` branches purely on the anchor's shape (`detectSource`):
+ * a UUID anchor keeps the existing `GET /api/release-group/<id>` path
+ * byte-for-byte; a numeric anchor fetches `GET /api/discogs/master/<id>`
+ * instead and maps its `releases` onto the same pressing-row shape via
+ * `mapDiscogsMasterReleases`. `POST .../resolve-rg` returning
+ * `status: 'masterless'` (Discogs release with no master) renders the
+ * one-element "nothing to swap to" state (R2) via `runMasterless`
+ * instead of the generic error path. Tracklist fetches
+ * (`fetchTracklist`/`loadSourceTracklist`) need NO branch — `GET
+ * /api/release/<id>` already forwards numeric ids to the Discogs mirror
+ * server-side (`web/routes/browse.py::get_release`) and returns the
+ * identical `tracks` shape (`disc_number/track_number/title/
+ * length_seconds`), proven by
+ * `tests/web/test_routes_browse.py::test_release_detail_numeric_id_forwards_to_discogs`.
  */
+
+import { detectSource } from './util.js';
 
 /**
  * @typedef {Object} ReplacePickerOptionsStandard
@@ -139,6 +160,51 @@ export function renderPressingsList(releases, sourceMbid) {
 }
 
 /**
+ * Map a `GET /api/discogs/master/<id>` payload's `releases` array onto the
+ * same pressing-row shape (`ReleaseGroupSibling`) `GET /api/release-group/
+ * <id>` already returns for MB — field for field: `id`, `title`, `date`,
+ * `country`, `status`, `track_count`, `format` (see
+ * `web/discogs.py::get_master_releases` vs `web/mb.py::
+ * get_release_group_releases`, which already emit identical keys). This
+ * mapper exists as the one seam that would catch future drift between the
+ * two backends' shapes — it is intentionally NOT a real transformation
+ * today. Discogs-only extras (`media_count`, `labels`) are dropped;
+ * anything the payload omits falls back to a safe empty value, which
+ * `pressingMeta`/`renderPressingsList` already render as blank/dash.
+ * Marking the current pressing is unchanged — `renderPressingsList`
+ * compares `r.id === sourceMbid` the same way for both sources.
+ *
+ * @param {{releases?: Array<Object>}|null|undefined} payload
+ * @returns {ReleaseGroupSibling[]}
+ */
+export function mapDiscogsMasterReleases(payload) {
+  const releases = (payload && Array.isArray(payload.releases)) ? payload.releases : [];
+  return releases.map((r) => ({
+    id: String(r.id ?? ''),
+    title: r.title || '',
+    date: r.date || '',
+    country: r.country || '',
+    status: r.status || '',
+    track_count: typeof r.track_count === 'number' ? r.track_count : 0,
+    format: r.format || '',
+  }));
+}
+
+/**
+ * Explanatory note for the masterless-source state (R2 / AE1) — the
+ * source Discogs release has no master on file, so there are no sibling
+ * pressings to switch to. Rendered above the one-element pressings list
+ * (current release only, disabled) built via the existing
+ * `renderPressingsList` — no new list-rendering logic needed, just the
+ * copy explaining why the list has one row.
+ *
+ * @returns {string}
+ */
+export function renderMasterlessNote() {
+  return '<p style="color:#888;">This release has no Discogs master on file — there are no other pressings to switch to.</p>';
+}
+
+/**
  * Format seconds → "m:ss". Returns empty string for null/undefined/NaN.
  *
  * @param {number|null|undefined} secs
@@ -160,6 +226,26 @@ export function formatLength(secs) {
  * @property {string} [title]
  * @property {number|null} [length_seconds]
  */
+
+/**
+ * Extract the tracklist array from a `GET /api/release/<id>` payload.
+ *
+ * No MB/Discogs branch needed here: `GET /api/release/<id>` already
+ * forwards numeric ids to the Discogs mirror server-side
+ * (`web/routes/browse.py::get_release` → `get_discogs_release`) and both
+ * backends emit `tracks` in the identical shape (`disc_number`/
+ * `track_number`/`title`/`length_seconds` — compare
+ * `web/mb.py::_strip_release` and `web/discogs.py::get_release`). This
+ * helper is the one seam that would catch a future field-name drift
+ * between the two backends instead of silently rendering a blank
+ * tracklist.
+ *
+ * @param {{tracks?: TracklistTrack[]}|null|undefined} payload
+ * @returns {TracklistTrack[]}
+ */
+export function extractTracklist(payload) {
+  return (payload && Array.isArray(payload.tracks)) ? payload.tracks : [];
+}
 
 /**
  * Render a compact tracklist. Disc headers only appear when there is
@@ -390,6 +476,14 @@ async function runStandard(options, showOverlay, close) {
         `/api/pipeline/${options.sourceRequestId}/resolve-rg`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       const body = await res.json();
+      // R2/AE1: a masterless Discogs release is not an error — render the
+      // one-element "nothing to swap to" state instead of falling into
+      // the generic failure branch below (which would otherwise read
+      // `mb_release_group_id: null` as a failure).
+      if (res.ok && body.status === 'masterless') {
+        await runMasterless(options, showOverlay, close);
+        return;
+      }
       if (!res.ok || !body.mb_release_group_id) {
         const msg = body.error || `HTTP ${res.status}`;
         showOverlay(`${renderStandardHeader(options.sourceLabel || '')}
@@ -414,12 +508,19 @@ async function runStandard(options, showOverlay, close) {
   let releases;
   let sourceMbid = '';
   try {
-    const res = await fetch(`/api/release-group/${encodeURIComponent(releaseGroupId)}`);
+    // Discogs master ids live in the same field MB release-group ids do
+    // (KTD-1); dispatch on shape rather than threading a second
+    // "pathway" option through the caller.
+    const isDiscogsAnchor = detectSource(releaseGroupId) === 'discogs';
+    const res = await fetch(
+      isDiscogsAnchor
+        ? `/api/discogs/master/${encodeURIComponent(releaseGroupId)}`
+        : `/api/release-group/${encodeURIComponent(releaseGroupId)}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
     const body = await res.json();
-    releases = body.releases || [];
+    releases = isDiscogsAnchor ? mapDiscogsMasterReleases(body) : (body.releases || []);
     // Identify the current pressing for the source request (so we can
     // disable that row in the list).
     const detail = await fetch(`/api/pipeline/${options.sourceRequestId}`);
@@ -476,6 +577,45 @@ async function runStandard(options, showOverlay, close) {
   loadDistances(modal, options.sourceRequestId, releases).catch((err) => {
     console.warn('replace-picker distance overlay failed:', err);
   });
+}
+
+/**
+ * R2/AE1 — a masterless Discogs source has no siblings to swap to. Renders
+ * the current release as the sole (disabled) row via the existing
+ * `renderPressingsList`, with `renderMasterlessNote()` explaining why —
+ * not an error state, just nothing to pick. There is no submit path here:
+ * `renderPressingsList` already omits the "Use this pressing" button for
+ * the current/disabled row, so the operator's only action is Cancel.
+ *
+ * @param {ReplacePickerOptionsStandard} options
+ * @param {(html: string) => void} showOverlay
+ * @param {(r: ReplacePickerResult) => void} close
+ */
+async function runMasterless(options, showOverlay, close) {
+  const sourceLabel = options.sourceLabel || `request #${options.sourceRequestId}`;
+  showOverlay(`${renderStandardHeader(sourceLabel)}
+    <p>Loading current release…</p>`);
+
+  let sourceMbid = '';
+  try {
+    const detail = await fetch(`/api/pipeline/${options.sourceRequestId}`);
+    if (detail.ok) {
+      const drow = await detail.json();
+      sourceMbid = (drow.request && drow.request.mb_release_id) || drow.mb_release_id || '';
+    }
+  } catch (err) {
+    // Non-fatal — falls through to the id-less row below; the picker
+    // still communicates "nothing to swap to" even without the id.
+  }
+
+  const releases = sourceMbid ? [{ id: sourceMbid, title: sourceLabel }] : [];
+  showOverlay(`${renderStandardHeader(sourceLabel)}
+    ${renderMasterlessNote()}
+    ${renderPressingsList(releases, sourceMbid)}
+    <div class="replace-picker-cancel-bar">
+      <button class="btn" id="replace-picker-cancel">Cancel</button>
+    </div>`);
+  bindCancel(close);
 }
 
 /**
@@ -589,7 +729,7 @@ function fetchTracklist(mbid) {
     .then(async (res) => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json();
-      return { tracks: body.tracks || [] };
+      return { tracks: extractTracklist(body) };
     });
   tracklistCache.set(mbid, p);
   // If the fetch rejects, drop the cache entry so retries are possible.
