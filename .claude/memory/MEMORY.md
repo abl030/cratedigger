@@ -1,5 +1,6 @@
 - [User profile](user_profile.md) — Senior dev running a curated music pipeline on NixOS; prefers TDD and incremental refactoring
 - [Full library backfill](project_full_library_backfill.md) — 2026-06-04: whole beets library ingested as wanted requests for upgrade; explains the ~4700 wanted cohort (21 lossless excluded)
+- [Tier-2 packaging plan](project_tier2_packaging.md) — COMPLETE 2026-07-04: U1-U12 done, doc2 cutover verified live, tagged v2026.07.04; HM beets gone; sudo for cratedigger-beet
 - [beets 2.12 migration](project_beets_2_12_migration.md) — 2026-06-29: beets bump broke ALL imports two ways (Library/import API + duplicate-resolution hook); harness tests mock beets so drift shipped undetected; real-beets contract test now guards it
 - [Use nix-shell](feedback_use_nix_shell.md) — All Python/test commands must run inside nix-shell, never bare python3
 - [TDD](feedback_tdd.md) — Strict TDD: tests first, then implementation, verify at each step
@@ -19,7 +20,7 @@
 - [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from nixosconfig master; if ~/nixosconfig is dirty/on a feature branch, do flake bumps in a throwaway worktree off origin/master
 - [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — 2026-06-10: nixosconfig deploys via Forgejo + fleet-update, GitHub frozen; nixbot token header push; signed commits required
 - [CI only runs GitGuardian](project_ci_only_gitguardian.md) — cratedigger CI runs ONLY GitGuardian; tests/dead-code/pyright are NOT gated in CI; a green PR check ≠ green suite, so verify locally
-- [.bak file bug](project_bak_bug.md) — 24 albums have track 01 renamed to .bak after import, root cause unknown, needs logging + post-import check
+- [.bak file bug](project_bak_bug.md) — RESOLVED: mp3val -f caused it, fixed with -nb; rename repair deliberately removed (detect-and-warn only)
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2 in Soulseek.NET, batch searches in pairs
 - [Audio quality type system](project_audio_quality_types.md) — AudioFileSpec + AudioQualityMeasurement deployed; AudioQualityState deferred
 - [Refactoring phases](project_refactoring_phases.md) — Status of the multi-phase refactoring of cratedigger.py through pyright cleanup
@@ -35,4 +36,6 @@
 - [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — Mirror deploys via Forgejo/fleet-update (its own CLAUDE.md is stale on GitHub); nspawn DB is at 10.20.0.13 (not .192.168.100.13), pw in /run/secrets/discogs-pgpass
 - [Pipeline DB direct psql writes](project_pipeline_db_direct_psql_writes.md) — For write SQL (pipeline-cli query is read-only) use psql on doc2 with DSN postgresql://cratedigger@10.20.0.11:5432/cratedigger; CLAUDE.md's 192.168.100.11 is stale
 - [#184 sidecar producer](project_184_sidecar_producer.md) — 2026-06-18: cratedigger.json verified-lossless sidecar producer+backfill shipped (3910 written); consumer half deferred; reusable doc2 one-shot recipe
-- [#146 slskd events rollout](project_146_slskd_events_rollout.md) — 2026-07-02: phase 1 in PR #464 (typed client, slskd-api dep gone, event ingestion, resolver still wins); phase 2 gated on a week of clean EVENT-PATH COMPARE logs
+- [#146 slskd events rollout](project_146_slskd_events_rollout.md) — 2026-07-02: COMPLETE, deployed, issue closed; event stamp is the only file-location source; fake now mirrors download_log outcome CHECK (Rule A win x2); msgspec DecodeError-vs-ValidationError trap
+- [Opus for reviews](feedback_opus_for_reviews.md) — Review/verification subagents run on opus (model:"opus"), never fable — user preserves fable credits for main-loop work
+- [#282 Discogs Replace shipped](project_282_discogs_replace.md) — COMPLETE 2026-07-04: PR #499 merged, deployed, live-verified (1870→8818), tagged v2026.07.04-2; doc1 playwright MCP fixed in PR #500 (pending one-time TUI approval)

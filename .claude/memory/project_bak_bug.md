@@ -1,30 +1,14 @@
 ---
 name: bak-file-bug-in-beets-library
-description: "24 albums have track files renamed to .bak after import — systematic, mostly track 01. Root cause unknown."
+description: "RESOLVED: .bak track files were created by mp3val -f; fixed with -nb flag. Rename repair in import_one.py deliberately removed — bad extensions are now detect-and-warn only."
 metadata: 
   node_type: memory
   type: project
   originSessionId: deada68f-df61-4828-a3dd-87243539dee0
 ---
 
-24 albums in the beets library have a track (almost always track 01) with a .bak extension instead of .mp3. Meelo can't scan these files.
+**RESOLVED (verified 2026-07-02).** The 24 albums with track files renamed to `.bak` (mostly track 01) were caused by `mp3val -f` creating backup files during audio repair. Fixed by adding `-nb` (commit `ad033f8`) — the call is now `mp3val -f -nb` in `lib/util.py:190`.
 
-**What we know:**
-- Beets' scrub plugin does NOT create .bak files (verified by reading source code)
-- Mutagen, mediafile, music-tag, and our code do NOT create .bak files
-- The harness logs show the files as .mp3 at validation time
-- The .bak appears after beets import completes (between import and post-flight)
-- 22 of 24 cases are track 01, 2 are track 04/05
-- Pattern suggests a race condition or file locking issue, possibly virtiofs related
+Follow-on design decision: the automatic post-import rename repair (ffprobe-probe + rename + beets SQLite path rewrite) was **deliberately deleted** (commit `1a239a6`). `_record_bad_extension_warnings` in `harness/import_one.py` now only detects and records bad extensions in `postflight.bad_extensions` with loud logging — it never renames or mutates beets. A bad extension appearing now is an upstream corruption signal, not a recovery path.
 
-**Three actions needed (separate chat):**
-1. Fix existing .bak files — rename to .mp3, update beets paths (user will do manually)
-2. Add beets stderr logging to import_one.py — capture beets' internal operations during import to pin down when the rename happens. Currently we only log import_one's stderr, not beets' verbose output.
-3. Add post-import verification — after import_one.py succeeds, check that all files in the beets DB have valid audio extensions. If .bak found, auto-rename and update. Could be a new step in import_one.py after postflight_verify().
-
-**How to apply:** When working on import_one.py or post-import checks, remember this bug exists and these files need auditing.
-
-**Affected albums query:**
-```bash
-ssh doc2 'beet ls -p path::.bak$'
-```
+**How to apply:** don't re-add automatic extension-rename repair; don't re-investigate .bak as an unknown. Any leftover `.bak` files in the library are pre-fix residue: `ssh doc2 'beet ls -p path::.bak$'`.
