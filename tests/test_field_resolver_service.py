@@ -1036,6 +1036,87 @@ class TestResolveAll(unittest.TestCase):
         self.assertEqual(result.release_group_id, "rg-master-id")
         self.assertEqual(result.catalog_number, "CAT-7")
 
+    def test_discogs_master_persisted_into_mb_release_group_id_via_apply(self):
+        """KTD-1 pin (docs/plans/2026-07-04-001-feat-discogs-pathway-replace-plan.md
+        U2): new Discogs adds already persist the Discogs master id into
+        ``mb_release_group_id`` through ``resolve_all`` +
+        ``apply_resolve_all_result`` — the mechanism the Discogs-pathway
+        Replace picker anchors on. Chains both halves together; the two
+        halves were previously only pinned in isolation
+        (``test_discogs_release_fetched_at_most_once_per_invocation`` for
+        the resolver, ``test_writes_release_group_id_when_existing_is_none``
+        for the generic write helper)."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=803,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            discogs_release_id="900555",
+        )
+
+        discogs_payload = {
+            "id": "900555",
+            "title": "Album",
+            "artist_id": "12345",
+            "release_group_id": "98765",
+            "tracks": [],
+            "labels": [],
+        }
+
+        result = resolve_all(
+            req, db,
+            discogs_release_payload=discogs_payload,
+            discogs_get_master_year=lambda _id: 2010,
+            discogs_get_release=lambda _rid, *, fresh=True: discogs_payload,
+        )
+        self.assertEqual(result.release_group_id, "98765")
+
+        apply_resolve_all_result(
+            db, 803, result, existing_mb_release_group_id=None,
+        )
+        _req_id, fields = db.update_request_fields_calls[-1]
+        self.assertEqual(fields["mb_release_group_id"], "98765")
+
+    def test_discogs_masterless_release_leaves_mb_release_group_id_unwritten(self):
+        """AE1/R2 companion: a masterless Discogs release resolves
+        ``release_group_id=None`` and the write helper must neither write
+        the column nor raise — matching the YouTube resolver's orphan-shape
+        handling for the same case."""
+        from lib.field_resolver_service import resolve_all
+
+        db = FakePipelineDB()
+        req = _request(
+            id=804,
+            mb_release_id=None,
+            mb_release_group_id=None,
+            discogs_release_id="900777",
+        )
+
+        discogs_payload = {
+            "id": "900777",
+            "title": "Album",
+            "artist_id": "12345",
+            "release_group_id": None,
+            "tracks": [],
+            "labels": [],
+        }
+
+        result = resolve_all(
+            req, db,
+            discogs_release_payload=discogs_payload,
+            discogs_get_master_year=lambda _id: None,
+            discogs_get_release=lambda _rid, *, fresh=True: discogs_payload,
+        )
+        self.assertIsNone(result.release_group_id)
+
+        apply_resolve_all_result(
+            db, 804, result, existing_mb_release_group_id=None,
+        )
+        _req_id, fields = db.update_request_fields_calls[-1]
+        self.assertNotIn("mb_release_group_id", fields)
+
     def test_va_detection_via_canonical_mbid(self):
         """Rule 1: primary-artist MBID matches the canonical VA id."""
         from lib.field_resolver_service import resolve_all

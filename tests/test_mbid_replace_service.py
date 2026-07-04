@@ -22,6 +22,7 @@ from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
     MbidReplaceService,
     ReplaceResult,
+    RESULT_MIRROR_UNCONFIGURED,
     RESULT_NOT_FOUND,
     RESULT_REPLACED,
     RESULT_TARGET_COLLISION_REQUEST,
@@ -31,6 +32,7 @@ from lib.mbid_replace_service import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
 )
+from web.discogs import DiscogsMirrorNotConfigured
 from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
 from lib.release_cleanup import ReleaseCleanupResult
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
@@ -38,13 +40,23 @@ from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import make_request_row
 
 
-# NOTE: must be parseable by ``uuid.UUID`` — the service rejects
-# malformed MBIDs at the boundary with RESULT_TARGET_INVALID. Keep the
-# repeated-digit pattern for at-a-glance reading of test scenarios.
+# NOTE: must be a valid MB release id per ``detect_release_source``
+# (lib/release_identity.py regex) — the service rejects malformed MBIDs
+# at the boundary with RESULT_TARGET_INVALID. Keep the repeated-digit
+# pattern for at-a-glance reading of test scenarios.
 OLD_MBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 NEW_MBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 RG_ID = "11111111-1111-1111-1111-111111111111"
 OTHER_RG_ID = "22222222-2222-2222-2222-222222222222"
+
+# Discogs-pathway fixtures — numeric release ids; the master anchor lives
+# in ``mb_release_group_id`` as a numeric id (KTD-1). A Discogs source row
+# dual-writes the numeric id into both ``mb_release_id`` and
+# ``discogs_release_id`` (KTD-4), as the add flow does.
+OLD_DISCOGS_ID = "1001"
+NEW_DISCOGS_ID = "1002"
+DISCOGS_MASTER = "5000"
+OTHER_DISCOGS_MASTER = "6000"
 
 
 def _empty_wrong_match_summary(_db, request_id: int) -> WrongMatchDeleteSummary:
@@ -98,6 +110,37 @@ def _fake_target_payload(
     }
 
 
+def _fake_discogs_payload(
+    *,
+    release_id: str = NEW_DISCOGS_ID,
+    master: str | None = DISCOGS_MASTER,
+    artist_name: str = "Pet Grief",
+    title: str = "New Pressing",
+    artist_id: str | None = "art-d-1",
+    year: int | None = 2025,
+    country: str | None = "JP",
+    tracks: list[dict] | None = None,
+) -> dict:
+    """Mirror of ``web.discogs.get_release``'s normalized shape.
+
+    ``master`` maps to the ``release_group_id`` key (the mirror remaps
+    ``master_id`` there); ``None`` models a masterless release.
+    """
+    return {
+        "id": str(release_id),
+        "title": title,
+        "artist_name": artist_name,
+        "artist_id": artist_id,
+        "release_group_id": master,
+        "year": year,
+        "country": country,
+        "tracks": tracks if tracks is not None else [
+            {"disc_number": 1, "track_number": 1, "title": "T1"},
+            {"disc_number": 1, "track_number": 2, "title": "T2"},
+        ],
+    }
+
+
 class _ServiceCase(unittest.TestCase):
     """Shared scaffolding for MbidReplaceService tests."""
 
@@ -131,17 +174,57 @@ class _ServiceCase(unittest.TestCase):
         db.seed_request(row)
         return request_id
 
+    def _seed_discogs(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int = 42,
+        status: str = "wanted",
+        master: str | None = DISCOGS_MASTER,
+        release_id: str = OLD_DISCOGS_ID,
+        imported_path: str | None = None,
+        source: str = "request",
+    ) -> int:
+        """Seed a Discogs-pathway source row.
+
+        The numeric release id is dual-written into both ``mb_release_id``
+        and ``discogs_release_id`` (KTD-4); the numeric master lives in
+        ``mb_release_group_id`` (KTD-1). ``master=None`` models a legacy row
+        that predates master persistence (the lazy-backfill target).
+        """
+        row = make_request_row(
+            id=request_id,
+            mb_release_id=release_id,
+            discogs_release_id=release_id,
+            mb_release_group_id=master,
+            mb_artist_id="art-d-1",
+            artist_name="Pet Grief",
+            album_title="Old Pressing",
+            year=2024,
+            country="US",
+            status=status,
+            imported_path=imported_path,
+            source=source,
+        )
+        db.seed_request(row)
+        return request_id
+
     def _make_service(
         self,
         db: FakePipelineDB,
         *,
         mb_lookup=None,
+        discogs_lookup=None,
         search_plan_service=None,
         beets_db_factory=None,
         cfg: CratediggerConfig | None = None,
     ) -> MbidReplaceService:
         if mb_lookup is None:
             mb_lookup = lambda mbid, *, fresh=False: _fake_target_payload()
+        if discogs_lookup is None:
+            discogs_lookup = (
+                lambda rid, *, fresh=False: _fake_discogs_payload()
+            )
         if search_plan_service is None:
             search_plan_service = MagicMock()
         if beets_db_factory is None:
@@ -152,8 +235,41 @@ class _ServiceCase(unittest.TestCase):
             slskd=FakeSlskdAPI(),
             beets_db_factory=beets_db_factory,
             mb_lookup=mb_lookup,
+            discogs_lookup=discogs_lookup,
             search_plan_service=search_plan_service,
         )
+
+    def _patch_externals(self):
+        """Patch the five external edges (beets removal, wrong-match
+        cleanup, and the three rescan notifiers) and register cleanup via
+        ``self.addCleanup``. Returns the patched mocks as a list so tests
+        can assert on them. Scoped per-test — unlike ``patch.stopall``
+        which would stop EVERY active patch in the process."""
+        patches = [
+            patch(
+                "lib.mbid_replace_service.remove_and_reset_release",
+                MagicMock(return_value=ReleaseCleanupResult(
+                    beets_removed=True,
+                    absent_after=True,
+                    selector_failures=(),
+                )),
+            ),
+            patch(
+                "lib.mbid_replace_service.delete_wrong_match_group",
+                MagicMock(side_effect=_empty_wrong_match_summary),
+            ),
+            patch("lib.mbid_replace_service.trigger_meelo_scan", MagicMock()),
+            patch("lib.mbid_replace_service.trigger_plex_scan", MagicMock()),
+            patch(
+                "lib.mbid_replace_service.trigger_jellyfin_scan",
+                MagicMock(),
+            ),
+        ]
+        mocks = []
+        for p in patches:
+            mocks.append(p.start())
+            self.addCleanup(p.stop)
+        return mocks
 
     def _assert_slskd_untouched(self, slskd: object) -> None:
         """Assert FakeSlskdAPI recorded zero calls across every surface.
@@ -553,42 +669,303 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
 
 
+class TestReplaceDiscogsArm(_ServiceCase):
+    """Discogs-pathway Replace (U3): the full outcome matrix for a
+    numeric Discogs source. The MB arm is exercised separately and must
+    stay byte-for-byte unchanged (R3)."""
+
+    def test_discogs_happy_path_dual_writes_identity(self):
+        """Discogs source with a persisted master + sibling target →
+        replaced. The superseded-into row carries dual identity (KTD-4):
+        ``mb_release_id`` AND ``discogs_release_id`` both hold the picked
+        canonical id, and the numeric master lands in
+        ``mb_release_group_id``."""
+        self._patch_externals()
+        db = FakePipelineDB()
+        self._seed_discogs(db, status="wanted")
+        plan_svc = MagicMock()
+        svc = self._make_service(
+            db,
+            search_plan_service=plan_svc,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id=NEW_DISCOGS_ID, master=DISCOGS_MASTER,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        # Old row frozen as replaced audit.
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        # New row born wanted, back-linked, with dual identity + master.
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], 42)
+        self.assertEqual(new["mb_release_id"], NEW_DISCOGS_ID)
+        self.assertEqual(new["discogs_release_id"], NEW_DISCOGS_ID)
+        self.assertEqual(new["mb_release_group_id"], DISCOGS_MASTER)
+        plan_svc.generate_for_request.assert_called_once_with(
+            result.new_request_id, regenerate=False,
+        )
+        self._assert_slskd_untouched(svc.slskd)
+
+    def test_discogs_lazy_backfill_source_master(self):
+        """Source row with a NULL master (legacy row): the source id is
+        looked up fresh to resolve the master, then the replace proceeds
+        (mirror of ``test_release_group_mismatch_after_lazy_backfill``,
+        happy variant). No persistence of the source master is required —
+        the superseded-into row carries the master via the supersede
+        call, and the old row is about to freeze."""
+        self._patch_externals()
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                return _fake_discogs_payload(
+                    release_id=OLD_DISCOGS_ID, master=DISCOGS_MASTER,
+                )
+            return _fake_discogs_payload(
+                release_id=NEW_DISCOGS_ID, master=DISCOGS_MASTER,
+            )
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        # Lazy-backfill issued a fresh lookup of the source id.
+        self.assertIn(OLD_DISCOGS_ID, calls)
+
+    def test_source_lazy_backfill_mirror_unconfigured(self):
+        """SOURCE lazy-backfill lookup (masterless legacy row) surfaces
+        RESULT_MIRROR_UNCONFIGURED when the source-master resolution hits
+        an unconfigured Discogs mirror — the target lookup is never
+        reached and no supersede occurs (Rule B: the real
+        ``DiscogsMirrorNotConfigured`` is raised)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                raise DiscogsMirrorNotConfigured("no mirror")
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_MIRROR_UNCONFIGURED)
+        # Source lookup raised first → target lookup never ran.
+        self.assertEqual(calls, [OLD_DISCOGS_ID])
+        # No supersede: old row untouched, no descendant.
+        self.assertIsNone(result.new_request_id)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
+
+    def test_source_lazy_backfill_transient_urlerror(self):
+        """SOURCE lazy-backfill lookup classifies a network blip as
+        RESULT_TRANSIENT (retryable), not RESULT_TARGET_INVALID — the
+        source id is already known-good; the mirror was just unreachable
+        (Rule B: the real ``URLError`` is raised). No supersede occurs."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                raise URLError("connection refused")
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        # Source lookup raised first → target lookup never ran.
+        self.assertEqual(calls, [OLD_DISCOGS_ID])
+        self.assertIsNone(result.new_request_id)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
+
+    def test_source_lazy_backfill_generic_exception_target_invalid(self):
+        """SOURCE lazy-backfill lookup maps an unexpected error to
+        RESULT_TARGET_INVALID (the generic branch, which also logs a
+        warning). Target lookup never runs and no supersede occurs."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        calls: list[str] = []
+
+        def fake_lookup(rid, *, fresh=False):
+            calls.append(str(rid))
+            if str(rid) == OLD_DISCOGS_ID:
+                raise RuntimeError("Discogs mirror 500")
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        # Source lookup raised first → target lookup never ran.
+        self.assertEqual(calls, [OLD_DISCOGS_ID])
+        self.assertIsNone(result.new_request_id)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
+
+    def test_discogs_source_uuid_target_invalid(self):
+        """AE2: a UUID target against a Discogs source is cross-pathway →
+        target_invalid (never reaches the mirror)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db)
+        called = {"hit": False}
+
+        def fake_lookup(rid, *, fresh=False):
+            called["hit"] = True
+            return _fake_discogs_payload()
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertFalse(called["hit"])
+
+    def test_mb_source_numeric_target_invalid(self):
+        """AE2 (mirror direction): a numeric Discogs target against an MB
+        source is cross-pathway → target_invalid."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        svc = self._make_service(db)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+
+    def test_masterless_source_other_target_rejected(self):
+        """AE1 / R10: a masterless Discogs source rejects any target that
+        is not the source itself."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+
+        def fake_lookup(rid, *, fresh=False):
+            # Source resolves masterless; target never reached.
+            return _fake_discogs_payload(release_id=str(rid), master=None)
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        assert result.error_message is not None
+        self.assertIn("master", result.error_message)
+
+    def test_masterless_source_same_target_same_as_current(self):
+        """AE1: a masterless source with target == source is caught by the
+        shared same-as-current gate (before the arm runs)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=None)
+        svc = self._make_service(db)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=OLD_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
+
+    def test_discogs_master_mismatch(self):
+        """R10: target's master ≠ source's master → release-group mismatch
+        (reuses the shared MB mismatch outcome)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id=NEW_DISCOGS_ID, master=OTHER_DISCOGS_MASTER,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(
+            result.outcome, RESULT_TARGET_RELEASE_GROUP_MISMATCH
+        )
+
+    def test_discogs_mirror_unconfigured(self):
+        """AE3 / R11: an unconfigured Discogs mirror surfaces its own
+        outcome — distinct from target_invalid and transient (Rule B: the
+        real ``DiscogsMirrorNotConfigured`` is raised)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+
+        def fake_lookup(rid, *, fresh=False):
+            raise DiscogsMirrorNotConfigured("no mirror")
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_MIRROR_UNCONFIGURED)
+
+    def test_discogs_transient_urlerror(self):
+        """A network blip on the Discogs lookup is retryable → transient
+        (Rule B: the real ``URLError`` is raised)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+
+        def fake_lookup(rid, *, fresh=False):
+            raise URLError("connection refused")
+
+        svc = self._make_service(db, discogs_lookup=fake_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+
+    def test_discogs_collision_via_identity_lookup(self):
+        """KTD-6: an active row already holding the target Discogs id (in
+        ``discogs_release_id``) is a collision — found via the
+        identity-aware ``get_request_by_release_id``, NOT
+        ``get_request_by_mb_release_id`` (the holder's ``mb_release_id``
+        deliberately differs)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+        db.seed_request(make_request_row(
+            id=43, mb_release_id="9999",
+            discogs_release_id=NEW_DISCOGS_ID,
+            mb_release_group_id=DISCOGS_MASTER, status="downloading",
+        ))
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id=NEW_DISCOGS_ID, master=DISCOGS_MASTER,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+        self.assertEqual(result.current_status, "downloading")
+
+
 class TestReplaceHappyPath(_ServiceCase):
     """Cover RESULT_REPLACED + ordering invariants + the Pet Grief
-    merged-upstream case (target redirects to canonical)."""
-
-    def _patch_externals(self):
-        """Patch the five external edges and register cleanup via
-        ``self.addCleanup``. Returns the patched mocks as a tuple so
-        tests can assert on them. Scoped per-test — unlike
-        ``patch.stopall`` which would stop EVERY active patch in the
-        process (including any unrelated patch the test runner is
-        holding) and is a known footgun on shared mocks."""
-        patches = [
-            patch(
-                "lib.mbid_replace_service.remove_and_reset_release",
-                MagicMock(return_value=ReleaseCleanupResult(
-                    beets_removed=True,
-                    absent_after=True,
-                    selector_failures=(),
-                )),
-            ),
-            patch(
-                "lib.mbid_replace_service.delete_wrong_match_group",
-                MagicMock(side_effect=_empty_wrong_match_summary),
-            ),
-            patch("lib.mbid_replace_service.trigger_meelo_scan", MagicMock()),
-            patch("lib.mbid_replace_service.trigger_plex_scan", MagicMock()),
-            patch(
-                "lib.mbid_replace_service.trigger_jellyfin_scan",
-                MagicMock(),
-            ),
-        ]
-        mocks = []
-        for p in patches:
-            mocks.append(p.start())
-            self.addCleanup(p.stop)
-        return mocks
+    merged-upstream case (target redirects to canonical). ``_patch_externals``
+    is inherited from ``_ServiceCase``."""
 
     def _replace(self, *, old_status="wanted", **service_kwargs):
         db = FakePipelineDB()

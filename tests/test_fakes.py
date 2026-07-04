@@ -2364,6 +2364,44 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         self.assertEqual(new["source"], "request")  # inherited
         self.assertEqual(len(db.get_tracks(new_id)), 2)
 
+    def test_discogs_release_id_threaded_onto_new_row(self):
+        # U1: a Discogs-pathway supersede dual-writes discogs_release_id onto
+        # the new row — the fake must thread it identically to real PG.
+        db = self._seed_old()
+        new_id = db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id="art-1",
+            new_artist_name="Pet Grief",
+            new_album_title="New Album",
+            new_year=2025,
+            new_country="JP",
+            new_discogs_release_id="12345",
+            new_tracks=[],
+        )
+        new = db.get_request(new_id)
+        assert new is not None
+        self.assertEqual(new["discogs_release_id"], "12345")
+
+    def test_discogs_release_id_defaults_to_none(self):
+        # MB Replace omits new_discogs_release_id — the new row's column is None.
+        db = self._seed_old()
+        new_id = db.supersede_request_mbid(
+            42,
+            new_mb_release_id="new-mbid",
+            new_mb_release_group_id="rg-1",
+            new_mb_artist_id="art-1",
+            new_artist_name="Pet Grief",
+            new_album_title="New Album",
+            new_year=2025,
+            new_country="JP",
+            new_tracks=[],
+        )
+        new = db.get_request(new_id)
+        assert new is not None
+        self.assertIsNone(new["discogs_release_id"])
+
     def test_imported_path_cleared_on_old_row(self):
         db = self._seed_old()
         db.supersede_request_mbid(

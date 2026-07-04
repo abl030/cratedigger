@@ -2000,11 +2000,13 @@ def cmd_replace(db, args):
       * 4 — ``RESULT_WRONG_STATE`` (including supersede race —
             double-click landed first; descendant_request_id is set),
             ``RESULT_TARGET_COLLISION_REQUEST``
-      * 5 — ``RESULT_TRANSIENT`` (retryable; MB-mirror unreachable etc.)
+      * 5 — ``RESULT_TRANSIENT`` (retryable; mirror unreachable etc.),
+            ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (
         MbidReplaceService,
+        RESULT_MIRROR_UNCONFIGURED,
         RESULT_NOT_FOUND,
         RESULT_REPLACED,
         RESULT_TARGET_COLLISION_REQUEST,
@@ -2065,7 +2067,7 @@ def cmd_replace(db, args):
         RESULT_TARGET_COLLISION_REQUEST,
     ):
         return 4
-    if result.outcome == RESULT_TRANSIENT:
+    if result.outcome in (RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED):
         return 5
     return 1
 
@@ -3515,12 +3517,13 @@ def _build_parser() -> tuple[
     # replace
     p_replace = sub.add_parser(
         "replace",
-        help="Supersede a request with a new row at a different MBID "
-             "in the same release group")
+        help="Supersede a request with a new row at a different release id "
+             "in the same release group/master (same pathway as the source)")
     p_replace.add_argument("id", type=int, help="Source request ID")
     p_replace.add_argument(
         "--to", dest="target_mb_release_id", required=True,
-        help="Target MB release ID (must share the source's release group)")
+        help="Target release id — MB UUID or Discogs numeric id; must "
+             "share the source's pathway and release group/master")
     p_replace.add_argument("--json", action="store_true",
                            help="Print structured JSON instead of text")
 

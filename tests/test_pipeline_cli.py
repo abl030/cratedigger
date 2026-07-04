@@ -2646,9 +2646,25 @@ class TestCmdReplace(unittest.TestCase):
                 rc, _ = self._run(mock_outcome=outcome)
                 self.assertEqual(rc, 4)
 
-    def test_exit_5_on_transient(self):
-        rc, _ = self._run(mock_outcome="transient")
-        self.assertEqual(rc, 5)
+    def test_exit_5_on_transient_and_mirror_unconfigured(self):
+        # mirror_unconfigured (Discogs mirror not set up) shares exit 5
+        # with transient — both are service-unavailable/retryable.
+        for outcome in ("transient", "mirror_unconfigured"):
+            with self.subTest(outcome=outcome):
+                rc, _ = self._run(mock_outcome=outcome)
+                self.assertEqual(rc, 5)
+
+    def test_numeric_discogs_target_accepted(self):
+        """A numeric Discogs id is a valid target on the CLI surface —
+        argparse takes ``--to`` as an opaque string; the service
+        dispatches on id shape, not the wire param name."""
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={"new_request_id": 99},
+            target_mbid="1002",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("99", out)
 
     def test_json_output_carries_full_payload(self):
         rc, out = self._run(
