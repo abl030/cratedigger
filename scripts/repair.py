@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any, Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -30,22 +31,36 @@ from lib.download_recovery import (find_blocked_processing_path_issues,
 from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
                              release_id_to_lock_key)
 from lib.processing_paths import directory_has_entries
-from lib.quality import (OrphanInfo, find_inconsistencies,
-                         find_orphaned_downloads, suggest_repair)
+from lib.quality import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
+                         find_orphaned_downloads, find_slskd_orphans,
+                         suggest_repair)
 
-DEFAULT_DSN = os.environ.get(
-    "PIPELINE_DB_DSN",
-    "postgresql://cratedigger@192.168.100.11:5432/cratedigger",
-)
+# No hardcoded fallback (#479): the nspawn DB has moved before (last time to
+# 10.20.0.11) and a baked-in IP silently dials a dead host forever after the
+# next move. Fail loud in main() instead of guessing.
+DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN")
 
-def _get_slskd_active_transfers(host: str, api_key: str) -> set[tuple[str, str]]:
-    """Fetch active (username, filename) pairs from slskd API."""
+
+def _fetch_slskd_downloads(host: str, api_key: str) -> list[dict[str, Any]]:
+    """Fetch the raw slskd ``get_all_downloads()`` snapshot (live transfers only).
+
+    Kept as its own network seam so ``_collect_issues`` can derive BOTH the
+    forward orphan view (``_active_transfer_pairs``) and the inverse
+    slskd-side orphan report (``lib.quality.find_slskd_orphans``) from one
+    fetch, instead of flattening to pairs and discarding the raw structure
+    the way this used to (#479 item 1).
+    """
     from lib.slskd_client import SlskdClient
     client = SlskdClient(host=host, api_key=api_key)
     downloads: Any = client.transfers.get_all_downloads(includeRemoved=False)
-    pairs: set[tuple[str, str]] = set()
     if not isinstance(downloads, list):
-        return pairs
+        return []
+    return downloads
+
+
+def _active_transfer_pairs(downloads: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    """Flatten a slskd downloads snapshot to (username, filename) pairs. Pure."""
+    pairs: set[tuple[str, str]] = set()
     for user_group in downloads:
         username = user_group.get("username", "")
         for d in user_group.get("directories", []):
@@ -54,6 +69,22 @@ def _get_slskd_active_transfers(host: str, api_key: str) -> set[tuple[str, str]]
                 if fname:
                     pairs.add((username, fname))
     return pairs
+
+
+@dataclass(frozen=True)
+class CollectedIssues:
+    """Result of ``_collect_issues`` (#479): actionable DB issues, plus a
+    read-only report of slskd-side orphans (live transfers no
+    ``downloading`` row owns).
+
+    ``slskd_orphans`` is informational only — ``cmd_fix`` never acts on it.
+    The #278 convergence (``lib.slskd_transfers.converge_slskd_orphans``,
+    run every cycle before search) is the only thing that ever cancels
+    these; it self-heals on its own next pass regardless of whether anyone
+    reads this report.
+    """
+    issues: list[OrphanInfo]
+    slskd_orphans: list[SlskdOrphanTransfer]
 
 
 def _dedupe_issues(issues: list[OrphanInfo]) -> list[OrphanInfo]:
@@ -128,7 +159,7 @@ def _collect_issues(
     *,
     find_orphaned_fn: "Callable[..., list[OrphanInfo]]" = find_orphaned_downloads,
     find_blocked_recovery_fn: "Callable[..., list[Any]]" = find_blocked_recovery_issues,
-) -> list:
+) -> CollectedIssues:
     """Collect all issues: DB inconsistencies + optional orphaned downloads.
 
     The two ``find_*_fn`` kwargs are dependency-injection seams. Production
@@ -140,10 +171,15 @@ def _collect_issues(
     issues = find_inconsistencies(rows)
     if slskd_host and slskd_key:
         try:
-            active = _get_slskd_active_transfers(slskd_host, slskd_key)
+            downloads = _fetch_slskd_downloads(slskd_host, slskd_key)
         except Exception as e:
             print(f"  slskd: could not check orphans: {e}")
-            return _dedupe_issues(issues)
+            return CollectedIssues(issues=_dedupe_issues(issues), slskd_orphans=[])
+
+        active = _active_transfer_pairs(downloads)
+        # Inverse direction (#278/#479): live transfers no downloading row
+        # owns. Report-only — nothing here ever cancels a transfer.
+        slskd_orphans = find_slskd_orphans(downloads, rows)
 
         orphans = find_orphaned_fn(
             rows,
@@ -156,7 +192,8 @@ def _collect_issues(
             cfg = read_runtime_config()
         except Exception as e:
             print(f"  slskd: could not load runtime config for local-path checks: {e}")
-            return _dedupe_issues(issues)
+            return CollectedIssues(
+                issues=_dedupe_issues(issues), slskd_orphans=slskd_orphans)
 
         blocked_processing_path_issues: list[OrphanInfo] = []
         blocked_recovery_issues: list[OrphanInfo] = []
@@ -216,39 +253,66 @@ def _collect_issues(
             and not blocked_recovery_issues
         ):
             print(f"  slskd: checked {len(active)} active transfers, no orphans.")
-        return issues
+        return CollectedIssues(issues=issues, slskd_orphans=slskd_orphans)
 
     downloading = [r for r in rows if r["status"] == "downloading"
                    and r.get("active_download_state")]
     if downloading:
         print(f"  Note: {len(downloading)} downloading row(s) — pass "
               "--slskd-host/--slskd-key to check for orphans.")
-    return _dedupe_issues(issues)
+    return CollectedIssues(issues=_dedupe_issues(issues), slskd_orphans=[])
+
+
+def _print_slskd_orphan_report(slskd_orphans: list[SlskdOrphanTransfer]) -> None:
+    """Report-only (#479 item 1): live slskd transfers no ``downloading``
+    row owns. Never triggers a cancel — the #278 convergence
+    (``lib.slskd_transfers.converge_slskd_orphans``) is the only thing
+    that reaps these, on its own next cycle.
+    """
+    if not slskd_orphans:
+        return
+    print(
+        f"slskd-side orphans (read-only, {len(slskd_orphans)}): live "
+        "transfer(s) with no owning downloading row. The #278 "
+        "convergence cancels these automatically next cycle — no action "
+        "needed here.\n"
+    )
+    for orphan in slskd_orphans:
+        print(f"  user={orphan.username!r} file={orphan.filename!r} "
+              f"state={orphan.state!r} id={orphan.transfer_id}")
+    print()
 
 
 def cmd_scan(db: PipelineDB, slskd_host: str | None = None,
              slskd_key: str | None = None) -> list:
     """Scan for inconsistencies and print them."""
-    issues = _collect_issues(db, slskd_host, slskd_key)
+    collected = _collect_issues(db, slskd_host, slskd_key)
+    issues = collected.issues
 
     if not issues:
         print("No inconsistencies found.")
-        return []
+    else:
+        print(f"Found {len(issues)} inconsistency(ies):\n")
+        for issue in issues:
+            repair = suggest_repair(issue)
+            print(f"  [{issue.request_id}] {issue.issue_type}: {issue.detail}")
+            print(f"         → suggested: {repair.action} — {repair.detail}")
+            print()
 
-    print(f"Found {len(issues)} inconsistency(ies):\n")
-    for issue in issues:
-        repair = suggest_repair(issue)
-        print(f"  [{issue.request_id}] {issue.issue_type}: {issue.detail}")
-        print(f"         → suggested: {repair.action} — {repair.detail}")
-        print()
-
+    _print_slskd_orphan_report(collected.slskd_orphans)
     return issues
 
 
 def cmd_fix(db: PipelineDB, slskd_host: str | None = None,
             slskd_key: str | None = None) -> None:
-    """Apply suggested repairs."""
-    issues = _collect_issues(db, slskd_host, slskd_key)
+    """Apply suggested repairs.
+
+    Only ``collected.issues`` is actionable here. ``collected.slskd_orphans``
+    is deliberately ignored — it's a read-only report (see ``cmd_scan``);
+    the #278 convergence is the only path that ever cancels a slskd
+    transfer.
+    """
+    issues = _collect_issues(db, slskd_host, slskd_key).issues
 
     if not issues:
         print("No inconsistencies found. Nothing to fix.")
@@ -296,6 +360,11 @@ def main():
     sub.add_parser("fix", help="Apply suggested repairs")
 
     args = parser.parse_args()
+    if not args.dsn:
+        parser.error(
+            "no DSN: set PIPELINE_DB_DSN or pass --dsn "
+            "(no hardcoded fallback — issue #479)"
+        )
     if not args.command:
         parser.print_help()
         sys.exit(1)

@@ -1,6 +1,6 @@
 # Pipeline DB Schema (key fields + JSONB audit blobs)
 
-The pipeline DB is PostgreSQL. DSN: `192.168.100.11:5432/cratedigger`. Access via `pipeline-cli` on doc2, or from doc1 via `ssh doc2 'pipeline-cli ...'`.
+The pipeline DB is PostgreSQL. DSN: `10.20.0.11:5432/cratedigger`. Access via `pipeline-cli` on doc2, or from doc1 via `ssh doc2 'pipeline-cli ...'`.
 
 Full schema lives in `migrations/*.sql`. This doc covers the fields that appear in debugging and the JSONB audit blobs.
 

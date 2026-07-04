@@ -4421,6 +4421,18 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         self.assertEqual(calls[0].username, "peer2")
         self.assertEqual(calls[0].id, "t-orphan")
 
+    def test_snapshot_fetch_excludes_removed_transfers(self):
+        """#479 item 3: convergence only needs live transfers — trim the
+        payload by requesting includeRemoved=False (it filters
+        Completed* itself, so removed/terminal history is dead weight)."""
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = self._seed_slskd()
+        ctx = self._make_ctx(slskd, rows=[self._owning_row()])
+
+        converge_slskd_orphans(ctx)
+
+        self.assertEqual(slskd.transfers.get_all_downloads_calls, [False])
+
     def test_no_downloading_rows_cancels_stranded_transfer(self):
         """The Replace scenario: zero downloading rows, one live transfer."""
         from lib.slskd_transfers import converge_slskd_orphans

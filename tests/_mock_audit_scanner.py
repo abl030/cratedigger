@@ -392,9 +392,12 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.pipeline_cli\._resolve_failed_path$"),
 
     # scripts.repair helpers that wrap external boundaries.
-    # ``_get_slskd_active_transfers`` is a thin slskd HTTP call;
-    # ``_get_all_rows`` runs a single SELECT against the pipeline DB.
-    re.compile(r"^scripts\.repair\._get_slskd_active_transfers$"),
+    # ``_fetch_slskd_downloads`` is a thin slskd HTTP call (#479 rename of
+    # the former ``_get_slskd_active_transfers``, which flattened to pairs
+    # inline — now split so the raw snapshot survives for
+    # ``find_slskd_orphans`` too); ``_get_all_rows`` runs a single SELECT
+    # against the pipeline DB.
+    re.compile(r"^scripts\.repair\._fetch_slskd_downloads$"),
     re.compile(r"^scripts\.repair\._get_all_rows$"),
 
     # DB connection reconnect — network/socket boundary.

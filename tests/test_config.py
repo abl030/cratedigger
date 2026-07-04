@@ -285,7 +285,7 @@ class TestConfigFromIni(unittest.TestCase):
 
     def test_pipeline_db_dsn(self):
         self.assertEqual(self.cfg.pipeline_db_dsn,
-                         "postgresql://cratedigger@192.168.100.11:5432/cratedigger")
+                         "postgresql://cratedigger@10.20.0.11:5432/cratedigger")
 
     # --- Meelo ---
     def test_meelo_url(self):
