@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import SpectralMeasurement
+from lib.slskd_client import TransferSnapshot
 
 
 def _make_entry(**overrides):
@@ -196,13 +197,13 @@ class TestDownloadFileConstruction(unittest.TestCase):
             filename="track.flac", id="x", file_dir="\\dir", username="u", size=100,
             bitRate=320000, sampleRate=44100, bitDepth=16, isVariableBitRate=False,
             disk_no=1, disk_count=2,
-            status={"state": "Completed, Succeeded"}, retry=3,
+            status=TransferSnapshot(state="Completed, Succeeded"), retry=3,
             import_path="/tmp/import/track.flac",
         )
         self.assertEqual(f.bitRate, 320000)
         self.assertEqual(f.disk_no, 1)
         assert f.status is not None
-        self.assertEqual(f.status["state"], "Completed, Succeeded")
+        self.assertEqual(f.status.state, "Completed, Succeeded")
         self.assertEqual(f.import_path, "/tmp/import/track.flac")
 
 
@@ -217,9 +218,9 @@ class TestDownloadFileAttributeAccess(unittest.TestCase):
 
     def test_write_status(self):
         f = _make_file()
-        f.status = {"state": "Completed, Succeeded"}
+        f.status = TransferSnapshot(state="Completed, Succeeded")
         assert f.status is not None
-        self.assertEqual(f.status["state"], "Completed, Succeeded")
+        self.assertEqual(f.status.state, "Completed, Succeeded")
 
     def test_write_retry(self):
         f = _make_file()
@@ -254,9 +255,9 @@ class TestDownloadFileLifecycle(unittest.TestCase):
         """Created in slskd_do_enqueue, then status set by polling."""
         f = _make_file(bitRate=320000, isVariableBitRate=False)
         self.assertIsNone(f.status)
-        f.status = {"state": "Queued, Locally"}
+        f.status = TransferSnapshot(state="Queued, Locally")
         assert f.status is not None
-        self.assertEqual(f.status["state"], "Queued, Locally")
+        self.assertEqual(f.status.state, "Queued, Locally")
 
     def test_retry_cycle(self):
         """Error -> initialize retry -> increment -> requeue (new id)."""

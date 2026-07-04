@@ -17,6 +17,7 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import path_is_within_root
+from lib.slskd_client import parse_transfer_snapshot
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -137,13 +138,14 @@ def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,
             if snapshot is not None:
                 transfer = match_transfer(snapshot, file.filename, username=file.username)
                 if transfer is not None:
-                    file.status = dict(transfer)
+                    file.status = parse_transfer_snapshot(transfer)
+                    if file.status is None:
+                        ok = False
                 else:
                     file.status = None
                     ok = False
             else:
-                status = ctx.slskd.transfers.get_download(file.username, file.id)
-                file.status = status
+                file.status = ctx.slskd.transfers.get_download(file.username, file.id)
         except Exception:
             logger.exception(f"Error getting download status of {file.filename}")
             file.status = None
@@ -266,7 +268,7 @@ def downloads_all_done(downloads: list[Any]) -> tuple[bool, list[Any] | None, in
     remote_queue = 0
     for file in downloads:
         if file.status is not None:
-            state = file.status.get("state", "")
+            state = file.status.state
             if state != "Completed, Succeeded":
                 all_done = False
             if state in (
@@ -277,7 +279,7 @@ def downloads_all_done(downloads: list[Any]) -> tuple[bool, list[Any] | None, in
                 "Completed, Aborted",
             ):
                 error_list.append(file)
-            if file.status["state"] == "Queued, Remotely":
+            if state == "Queued, Remotely":
                 remote_queue += 1
     return all_done, error_list if error_list else None, remote_queue
 
@@ -496,7 +498,7 @@ def rederive_transfer_ids(
             f.id = transfer.get("id", "")
             state = str(transfer.get("state", ""))
             if state.startswith("Completed,"):
-                f.status = dict(transfer)
+                f.status = parse_transfer_snapshot(transfer)
             else:
                 f.status = None
         else:

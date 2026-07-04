@@ -7,6 +7,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+import msgspec
+
+from lib.slskd_client import TransferSnapshot
+
 @dataclass
 class EnqueueCall:
     """One slskd enqueue call captured by FakeSlskdAPI."""
@@ -56,14 +60,17 @@ class FakeSlskdTransfers:
         return self.get_all_downloads(
             includeRemoved=bool(kwargs.get("includeRemoved", False)))
 
-    def get_download(self, username: str, id: str) -> dict[str, Any]:
+    def get_download(self, username: str, id: str) -> TransferSnapshot:
         self.get_download_calls.append((username, id))
         if self.get_download_error is not None:
             raise self.get_download_error
         transfer = self._api._find_transfer(username, id)
         if transfer is None:
             raise KeyError(f"No transfer {id!r} for {username!r}")
-        return transfer
+        # Mirror the real client's decode-and-raise contract (#468) — the
+        # fake must fail the same way production does on wire-type drift,
+        # not silently pass through a shape production would reject.
+        return msgspec.convert(transfer, type=TransferSnapshot)
 
     def cancel_download(self, username: str, id: str,
                         remove: bool = False) -> bool:
