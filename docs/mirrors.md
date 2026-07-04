@@ -10,8 +10,8 @@ without it, and how the operator's instances are stood up.
 | Dependency | Without it | With it | Module option |
 |---|---|---|---|
 | MusicBrainz mirror | Works against public MB — functional but ~1 req/s | Production-speed matching (ratelimit 100) | `services.cratedigger.musicbrainz.apiBase` |
-| Discogs mirror | Discogs **browse is off** (clear 503); MB browse unaffected | Discogs search/artist/master/release browse + numeric-ID validation | `services.cratedigger.discogs.apiBase` + `beets.discogsMirrorUrl` |
-| LRCLIB instance | Lyrics fetched from public lrclib.net | Local lyrics lookups | `services.cratedigger.beets.lrclibUrl` |
+| Discogs mirror | Discogs **browse is off** (clear 503); MB browse unaffected | Discogs search/artist/master/release browse + numeric-ID validation | `services.cratedigger.discogs.apiBase` + `beets.package.discogsMirrorUrl` |
+| LRCLIB instance | Lyrics fetched from public lrclib.net | Local lyrics lookups | `services.cratedigger.beets.package.lrclibUrl` |
 | slskd | Nothing works — it's the Soulseek client | — | `services.slskd` exists in nixpkgs; point `slskd.hostUrl`/`apiKeyFile`/`downloadDir` at it |
 
 ## Public-MusicBrainz degraded mode (supported)
@@ -68,17 +68,17 @@ nspawn container on doc2, served at `https://discogs.ablz.au`).
 same pattern as this repo's tier-2 work) lives in the discogs-api repo.
 
 Wire it up: `services.cratedigger.discogs.apiBase` (browse) and
-`services.cratedigger.beets.discogsMirrorUrl` (build-time patch of the
+`services.cratedigger.beets.package.discogsMirrorUrl` (build-time patch of the
 beets discogs plugin, so *imports* also hit the mirror). The beets
 plugin additionally wants a Discogs user token via
-`beets.discogsTokenFile` (issue #117 `*File` pattern); tokenless installs
+`beets.package.discogsTokenFile` (issue #117 `*File` pattern); tokenless installs
 get a placeholder that keeps plugin load clean — public-Discogs lookups
 are then token-required.
 
 ## LRCLIB (optional)
 
 The operator runs a local LRCLIB instance (`http://192.168.1.35:3300`).
-`services.cratedigger.beets.lrclibUrl = "http://<host>:3300/api"`
+`services.cratedigger.beets.package.lrclibUrl = "http://<host>:3300/api"`
 build-time-patches the beets lyrics plugin at that base. Unset = public
 lrclib.net (stock behaviour).
 

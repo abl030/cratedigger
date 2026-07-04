@@ -528,9 +528,14 @@ def main():
     parser.add_argument("--port", type=int, default=8085)
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
     parser.add_argument("--beets-db", default="/mnt/virtio/Music/beets-library.db")
-    parser.add_argument("--mb-api", default=None, help="MusicBrainz API base URL (full base incl. /ws/2)")
+    parser.add_argument("--mb-api", default=None,
+                        help="MusicBrainz API base URL (full base incl. /ws/2). Dev-only override — "
+                             "production reads config.ini [MusicBrainz] api_base (issue #497); the "
+                             "NixOS module does not pass this flag.")
     parser.add_argument("--discogs-api", default=None,
-                        help="Discogs mirror base URL (mirror-required; unset = Discogs browse off)")
+                        help="Discogs mirror base URL (mirror-required; unset = Discogs browse off). "
+                             "Dev-only override — production reads config.ini [Discogs] api_base "
+                             "(issue #497); the NixOS module does not pass this flag.")
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
@@ -548,8 +553,11 @@ def main():
         # prefix in the helper or flush `meta:*` manually during deploy.
         cache.invalidate_pattern("web:*")
 
-    # API bases: runtime config first (shared startup wiring — the same
-    # call pipeline-cli and the youtube worker make), explicit flags win.
+    # API bases: config.ini is the ONE production source (issue #497 —
+    # the NixOS module no longer passes --mb-api/--discogs-api). Runtime
+    # config is read first (shared startup wiring — the same call
+    # pipeline-cli and the youtube worker make); the flags are a dev-only
+    # override for a manual invocation and win when set.
     # Config carries ORIGINS; the flag carries the full MB base incl.
     # /ws/2 (KTD6). Discogs stays unset without a mirror — web/discogs.py
     # then serves a clear 503 mirror-required (R13).

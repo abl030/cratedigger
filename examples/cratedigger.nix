@@ -54,11 +54,11 @@
     # --- Beets: cratedigger owns the package, config, and binary ------
     # `cratedigger-beet` lands on your PATH for manual ops (run it with
     # sudo — the service runs as root by default).
-    beetsConfig = {
+    beets.config = {
       directory = "/srv/music/library";          # where tagged albums live
       library = "/srv/music/beets-library.db";   # parent dir must exist
     };
-    beetsValidation = {
+    beets.validation = {
       stagingDir = "/srv/music/incoming";        # validated albums stage here
       trackingFile = "/srv/music/beets-validated.jsonl";
     };
@@ -78,7 +78,7 @@
     #
     # musicbrainz.apiBase = "http://mb-mirror.lan:5200";
     # discogs.apiBase = "http://discogs-mirror.lan:8086";
-    # beets = {
+    # beets.package = {
     #   discogsMirrorUrl = "http://discogs-mirror.lan:8086";
     #   lrclibUrl = "http://lrclib.lan:3300/api";
     #   # Discogs user token (https://www.discogs.com/settings/developers),

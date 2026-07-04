@@ -190,8 +190,8 @@ class TestOwnedBeetsContract(unittest.TestCase):
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn("beetsEnv = import ./beets.nix {", text)
         self.assertIn("pkgs = cfg.packageSet;", text)
-        self.assertIn("discogsMirrorUrl = cfg.beets.discogsMirrorUrl;", text)
-        self.assertIn("lrclibUrl = cfg.beets.lrclibUrl;", text)
+        self.assertIn("discogsMirrorUrl = cfg.beets.package.discogsMirrorUrl;", text)
+        self.assertIn("lrclibUrl = cfg.beets.package.lrclibUrl;", text)
         self.assertIn(
             "cratedigger = cfg.packageSet.callPackage ./package.nix { beetsPackage = beetsEnv; };",
             text,
@@ -212,6 +212,25 @@ class TestOwnedBeetsContract(unittest.TestCase):
         self.assertIn("discogsMirrorUrl ? null", beets_nix)
         self.assertIn("lrclibUrl ? null", beets_nix)
         self.assertIn("--replace-fail", beets_nix)
+
+    def test_beets_option_tree_is_consolidated(self) -> None:
+        """Issue #497: ONE beets option tree —
+        beets.{package,config,directory,validation} — not four separate
+        beets/beetsConfig/beetsValidation/beetsDirectory groups. No aliases,
+        no compat shims (scope.md): the old flat option names must be
+        entirely gone. (``beetsConfigDir``/``beetsConfigTemplate`` are
+        unrelated internal let-bindings for the rendered-config path/file —
+        not part of the option surface — so they're excluded here.)"""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("beets = {", text)
+        self.assertIn("package = {", text)
+        self.assertIn("config = {", text)
+        self.assertIn("validation = {", text)
+        self.assertNotIn("cfg.beetsConfig", text)
+        self.assertNotIn("beetsConfig = {", text)
+        self.assertNotIn("services.cratedigger.beetsConfig", text)
+        self.assertNotIn("beetsValidation", text)
+        self.assertNotIn("beetsDirectory", text)
 
 
 class TestRenderedBeetsConfigContract(unittest.TestCase):
@@ -332,14 +351,27 @@ class TestApiBaseThreading(unittest.TestCase):
         idx = text.index("discogs = {")
         self.assertIn("default = null;", text[idx:idx + 800])
 
-    def test_web_wrapper_passes_both_bases(self) -> None:
+    def test_web_wrapper_does_not_pass_api_base_flags(self) -> None:
+        """Issue #497: config.ini is the ONE production source for the MB/
+        Discogs API bases (read at startup via
+        configure_api_bases_from_runtime_config()). The module must not also
+        pass --mb-api/--discogs-api on the actual ExecStart invocation —
+        that was a second path carrying the same two values, which is
+        exactly the double-plumbing this consolidation removes. The flags
+        themselves stay on web/server.py for a manual dev-only override,
+        and a comment nearby is allowed to
+        mention them by name — only the invocation argv is asserted here."""
         text = MODULE_NIX.read_text(encoding="utf-8")
-        self.assertIn('--mb-api "${cfg.musicbrainz.apiBase}/ws/2"', text)
-        self.assertIn('--discogs-api "${cfg.discogs.apiBase}"', text)
+        web_start = text.index('writeShellScriptBin "cratedigger-web"')
+        exec_start = text.index("exec ${pyRunner} ${src}/web/server.py", web_start)
+        exec_end = text.index("'';", exec_start)
+        exec_block = text[exec_start:exec_end]
+        self.assertNotIn("--mb-api", exec_block)
+        self.assertNotIn("--discogs-api", exec_block)
 
     def test_beets_musicbrainz_derives_from_the_one_value(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
-        self.assertIn("services.cratedigger.beetsConfig.musicbrainz = let", text)
+        self.assertIn("services.cratedigger.beets.config.musicbrainz = let", text)
         self.assertIn('mbHost = lib.removePrefix "https://" (lib.removePrefix "http://" cfg.musicbrainz.apiBase);', text)
         self.assertIn("ratelimit = lib.mkDefault (if mbPublic then 1 else 100);", text)
 

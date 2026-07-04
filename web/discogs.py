@@ -28,8 +28,11 @@ from web import cache as _cache
 # /api/masters/<id>, ...) and the msgspec response Structs are the Rust
 # Discogs mirror's shape — public api.discogs.com does not serve them, so
 # there is no functional public fallback. None = Discogs browse is off;
-# the server wires this from `cratedigger-web --discogs-api`
-# (services.cratedigger.discogs.apiBase).
+# the server wires this from config.ini [Discogs] api_base via
+# configure_api_bases_from_runtime_config() at cratedigger-web startup
+# (services.cratedigger.discogs.apiBase; issue #497 dropped the module's
+# --discogs-api flag in favor of config.ini as the one production source
+# — the flag itself survives as a dev-only override).
 DISCOGS_API_BASE: str | None = None
 
 
@@ -46,9 +49,8 @@ def _api_base() -> str:
         raise DiscogsMirrorNotConfigured(
             "Discogs browse requires a Discogs mirror: this API speaks the "
             "Rust mirror's endpoint shape, which public api.discogs.com "
-            "does not serve. Set services.cratedigger.discogs.apiBase "
-            "(cratedigger-web --discogs-api). Without a mirror, browse via "
-            "MusicBrainz only."
+            "does not serve. Set services.cratedigger.discogs.apiBase. "
+            "Without a mirror, browse via MusicBrainz only."
         )
     return DISCOGS_API_BASE
 USER_AGENT = "cratedigger-web/1.0"
