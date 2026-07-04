@@ -2,7 +2,7 @@
 
 ## Quality decisions live in ONE place
 
-**`full_pipeline_decision_from_evidence`** in `lib/quality.py` (and its
+**`full_pipeline_decision_from_evidence`** in `lib/quality/pipeline.py` (and its
 flat-kwargs simulator twin `full_pipeline_decision`) is the single source of
 truth for every importer decision: the four folder/audio-integrity facts
 (`audio_corrupt`, `bad_audio_hash`, `nested_layout`, `empty_fileset`) AND
@@ -100,7 +100,7 @@ Scope:
 ## Wire-boundary types — use `msgspec.Struct`, not `@dataclass`
 Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blob written to or read from the DB, a subprocess's stdout — is a `msgspec.Struct`. **Same policy both directions:** encode via `msgspec.json.encode` (or `msgspec.to_builtins` when a dict is needed), decode via `msgspec.convert`. The declared Struct is the single contract that validates type drift at the boundary. Pyright does not see inside `dict.get()` — only runtime validation catches int-vs-str drift, mis-typed fields, or missing required data. This is the lesson of issue #99 / PR #98 (every Discogs validation silently logged `mbid_not_found` because a dataclass said `str` but the wire carried `int`) and the pre-#141 asymmetry (the old "dataclass if re-encoded, Struct if decoded only" split let docstrings lie about which side was strict).
 
-- **Use `msgspec.Struct`** for: harness/subprocess JSON messages, external API responses, DB JSONB rows we read back and type-check, any type that is ever encoded back out to JSON. Reference implementations: `HarnessItem`, `HarnessTrackInfo`, `TrackMapping`, `CandidateSummary`, `ChooseMatchMessage`, `ImportResult`, `PostflightInfo`, `ConversionInfo`, `SpectralDetail`, `AudioQualityMeasurement`, `MovedSibling`, `ValidationResult` (all in `lib/quality.py`), `BeetsOpFailure` in `lib/beets_album_op.py`.
+- **Use `msgspec.Struct`** for: harness/subprocess JSON messages, external API responses, DB JSONB rows we read back and type-check, any type that is ever encoded back out to JSON. Reference implementations: `HarnessItem`, `HarnessTrackInfo`, `TrackMapping`, `CandidateSummary`, `ChooseMatchMessage`, `ImportResult`, `PostflightInfo`, `ConversionInfo`, `SpectralDetail`, `AudioQualityMeasurement`, `MovedSibling`, `ValidationResult` (all re-exported from `lib.quality`; defined across `lib/quality/`), `BeetsOpFailure` in `lib/beets_album_op.py`.
 - **Keep `@dataclass`** for: types we construct entirely from our own typed Python code, inputs never crossing JSON (`QualityRankConfig`, `CratediggerConfig`, `DispatchAction`, `ActiveDownloadState` where the custom `from_dict`/`to_json` helpers do the work). Their inputs are already typed — the strict boundary buys nothing.
 - **Encode symmetrically.** `ImportResult.to_json()` is `msgspec.json.encode(self).decode()`, not `json.dumps(asdict(self))`. Route payloads that need a dict use `msgspec.to_builtins(struct)`, not `dataclasses.asdict(struct)` (which doesn't recurse into Structs anyway). Do NOT re-introduce `asdict` on a Struct — Pyright will let it through and it'll return the Struct instance unchanged, failing at `json.dumps`.
 - **Decode at exactly one site.** The wire boundary is the one place the untyped blob becomes a typed object. After that, every downstream consumer works with the Struct directly — no defensive coercion, no `dict.get()`, no re-validation. If you find yourself writing a `_coerce_x` helper on the consumer side, the boundary is in the wrong place.
@@ -133,7 +133,7 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - Never throw away data the harness or subprocess provides — log everything
 
 ## Decision Logic
-- All quality/import decisions must be pure functions in `lib/quality.py`
+- All quality/import decisions must be pure functions in `lib/quality/`
 - No decision logic inline in cratedigger.py — call the pure function, branch on result
 - Every pure function must have direct unit tests (not just tested through integration)
 
@@ -197,7 +197,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 
 | You're adding... | You owe... | Use this infrastructure |
 |------------------|-----------|-------------------------|
-| A new pure decision function in `lib/quality.py` | A subTest table covering every branch | `tests/test_quality_decisions.py` patterns |
+| A new pure decision function in `lib/quality/` | A subTest table covering every branch | `tests/test_quality_decisions.py` patterns |
 | A new dispatch / orchestration path | An orchestration test asserting domain state + an integration slice | `FakePipelineDB`, `patch_dispatch_externals()`, `tests/test_integration_slices.py` |
 | A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_FakeDbWebServerCase` + `_assert_required_fields` from `tests/web/_harness.py`, the matching `tests/web/test_routes_<module>.py`, `scripts/pipeline_cli.py` |
 | A new operator action (CLI subcommand or API endpoint) | A service-layer method with a typed `Result`, BOTH a CLI subcommand AND an API endpoint, exit-code and status-code tests for each | `tests/test_<service>.py` for the authoritative coverage; CLI/API tests check the wrapper only |

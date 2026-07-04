@@ -1093,7 +1093,7 @@ in {
         type = types.listOf types.str;
         default = ["flac 24/192" "flac 24/96" "flac 24/48" "flac 16/44.1" "flac" "alac" "mp3 v0" "mp3 320" "aac" "opus" "ogg" "mp3" "wav"];
         description = ''
-          Priority-ordered filetype filter. The rank model in lib/quality.py is
+          Priority-ordered filetype filter. The rank model in lib/quality/ranks.py is
           the authoritative quality decision (post-download); this filter is
           only for search-time peer/codec preference.
         '';

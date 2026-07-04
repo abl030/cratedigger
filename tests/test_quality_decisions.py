@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for lib/quality.py pure decision functions.
+"""Unit tests for the lib/quality/ pure decision functions.
 
 These test every branch of the four decision functions directly,
 independent of real audio fixtures or the full_pipeline_decision integrator.
@@ -180,7 +180,7 @@ class TestSpectralImportDecision(unittest.TestCase):
         self.assertNotIn(
             "existing_min_bitrate", sig.parameters,
             "spectral_import_decision must not accept a container-bitrate "
-            "fallback parameter — see lib/quality.py for the rationale")
+            "fallback parameter — see lib/quality/decisions.py for the rationale")
 
 
 # ============================================================================

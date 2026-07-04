@@ -592,7 +592,7 @@ def _build_last_search_payload(
     # (search_log.candidates persists at most 20). The long-tail console's
     # "peers seen" panel renders the wider slice; the compact detail view
     # shows the same ranking, just more rows. Shared ranking lives in
-    # lib/quality.py.
+    # lib/quality/wire_types.py.
     top = top_candidates(candidates, limit=20)
     return {
         "variant": latest.get("variant"),

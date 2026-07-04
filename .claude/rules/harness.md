@@ -2,7 +2,7 @@
 paths:
   - "harness/**"
   - "lib/beets.py"
-  - "lib/quality.py"
+  - "lib/quality/**"
 ---
 
 # Beets Harness Rules

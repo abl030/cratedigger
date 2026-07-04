@@ -124,7 +124,7 @@ boots a NixOS VM in the stranger posture — local postgres, rendered beets conf
 
 ## Quality pipeline in one paragraph
 
-Every download is validated against its exact target release (beets match distance ≤ 0.15), spectrally analysed (sox), converted (FLAC→V0 by default, or a configured `verifiedLosslessTarget` like `opus 128`), and compared against what's already on disk before beets imports it. All decisions are pure functions in `lib/quality.py` with a CLI simulator (`pipeline-cli quality <id>`); every outcome lands as queryable JSONB in the pipeline DB. Details: [docs/quality-ranks.md](docs/quality-ranks.md), [docs/quality-verification.md](docs/quality-verification.md).
+Every download is validated against its exact target release (beets match distance ≤ 0.15), spectrally analysed (sox), converted (FLAC→V0 by default, or a configured `verifiedLosslessTarget` like `opus 128`), and compared against what's already on disk before beets imports it. All decisions are pure functions in `lib/quality/` with a CLI simulator (`pipeline-cli quality <id>`); every outcome lands as queryable JSONB in the pipeline DB. Details: [docs/quality-ranks.md](docs/quality-ranks.md), [docs/quality-verification.md](docs/quality-verification.md).
 
 | Config value for `verifiedLosslessTarget` | Output | Notes |
 |---|---|---|

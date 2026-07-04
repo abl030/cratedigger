@@ -356,7 +356,7 @@ Every threshold, enum, and per-codec band in the rank model is tunable via Nix o
 
 All options live under `services.cratedigger.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. The `[Quality Ranks]` section of `config.ini` is regenerated from these options on every `nixos-rebuild switch`; Cratedigger picks up the new values on its next 5-min timer fire.
 
-**Source of truth**: `QualityRankConfig.defaults()` in `lib/quality.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `cratedigger.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at cratedigger test time: bump a default in either repo, the pin test fails and reminds you to update the other.
+**Source of truth**: `QualityRankConfig.defaults()` in `lib/quality/ranks.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `cratedigger.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at cratedigger test time: bump a default in either repo, the pin test fails and reminds you to update the other.
 
 ### Nix-exposed options
 
@@ -379,9 +379,9 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 
 Leaving every option at its default produces exactly `QualityRankConfig.defaults()` -- the defaults above are the shipping values.
 
-### Collection fields (NOT exposed via Nix -- edit `lib/quality.py` directly)
+### Collection fields (NOT exposed via Nix -- edit `lib/quality/ranks.py` directly)
 
-Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `nix/module.nix` to render them is a trivial follow-up if you find yourself retuning them often.
+Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality/ranks.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `nix/module.nix` to render them is a trivial follow-up if you find yourself retuning them often.
 
 - **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is an **explicit label contract** -- when a download advertises `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3Vbr` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT: the V0 label beats the 210 threshold.
 

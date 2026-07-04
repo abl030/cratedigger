@@ -28,7 +28,7 @@ except where those systems affect classifier inputs or policy decisions.
 The current detector lives primarily in:
 
 - `lib/spectral_check.py`
-- `lib/quality.py`
+- `lib/quality/`
 - `lib/download.py`
 - `scripts/spectral_corpus.py`
 
@@ -63,7 +63,7 @@ Current behavior in plain English:
 ### Policy layer
 
 The spectral classifier is not the whole decision system. The policy layer in
-`lib/quality.py` decides what to do with those results.
+`lib/quality/` decides what to do with those results.
 
 For MP3 imports, Stage 1 is a pre-import spectral gate:
 
@@ -261,7 +261,7 @@ release.
 
 ## The Narrow Patch and Why It Is Not Settled
 
-As an experiment, the Stage 1 MP3 spectral gate in `lib/quality.py` was
+As an experiment, the Stage 1 MP3 spectral gate in `lib/quality/` was
 patched so that nominal `256/320` MP3 downloads would not hard-reject on the
 strength of only one cliff track.
 
@@ -565,7 +565,7 @@ External projects inspected during this research pass:
 Relevant local files:
 
 - `lib/spectral_check.py`
-- `lib/quality.py`
+- `lib/quality/`
 - `lib/download.py`
 - `scripts/spectral_corpus.py`
 - `tests/test_spectral_corpus.py`

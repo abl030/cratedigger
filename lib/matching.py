@@ -40,7 +40,7 @@ PRE_FILTER_SKIP_SAMPLE_CAP = 5
 # ---------------------------------------------------------------------------
 #
 # `CandidateScore` is the wire-boundary type written into
-# ``search_log.candidates`` JSONB. It lives in ``lib/quality.py`` alongside
+# ``search_log.candidates`` JSONB. It lives in ``lib/quality/wire_types.py`` alongside
 # other ``msgspec.Struct`` boundaries (``ImportResult``, ``ValidationResult``).
 # Import it from ``lib.quality`` directly — no re-export here.
 

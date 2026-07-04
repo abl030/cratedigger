@@ -6,7 +6,7 @@ Global, temporary cooldowns for Soulseek users who consistently fail to deliver 
 
 After every timeout or beets rejection, `check_and_apply_cooldown(username)` queries the user's last 5 download outcomes globally (across all albums). If all 5 are failures (timeout/failed/rejected), a 3-day cooldown is inserted into `user_cooldowns`. During enqueue, cooled-down users are skipped with a distinct "on cooldown" log message.
 
-## Tunables (`CooldownConfig` in `lib/quality.py`)
+## Tunables (`CooldownConfig` in `lib/quality/download_state.py`)
 
 | Field | Default | Purpose |
 |-------|---------|---------|

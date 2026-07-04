@@ -27,7 +27,7 @@ Do NOT use `nixos-rebuild switch --flake github:...` — GitHub is stale. Break-
 
 4. Verify deployed code has the change:
 ```bash
-ssh doc2 'grep "<something unique>" /nix/store/*/lib/quality.py 2>/dev/null | head -1'
+ssh doc2 'grep "<something unique>" /nix/store/*/lib/quality/*.py 2>/dev/null | head -1'
 ```
 
 5. Verify the migration unit succeeded (especially when `migrations/` changed):

@@ -96,7 +96,7 @@ SQL
 cratedigger.py    — Main loop + thin wrappers; delegates to lib/
 album_source.py   — AlbumRecord, DatabaseSource abstraction
 web/              — Web UI (server.py, routes/, mb.py, discogs.py, js/)
-lib/              — Pipeline modules (quality.py = pure decisions; pipeline_db.py = PG CRUD + advisory locks)
+lib/              — Pipeline modules (quality/ package = pure decisions, split by concern; pipeline_db.py = PG CRUD + advisory locks)
 harness/          — beets_harness.py (JSON protocol), import_one.py
 migrations/       — Versioned SQL (NNN_name.sql), run by lib/migrator.py
 scripts/          — pipeline_cli.py + dev/ops scripts
@@ -127,7 +127,7 @@ Every operator action lives on **both** `pipeline-cli` and the web API, wrapping
 
 ## Decision architecture
 
-**Quality decisions live in ONE place** — `full_pipeline_decision_from_evidence` in `lib/quality.py` (simulator twin `full_pipeline_decision`). Preview measures and persists evidence; the importer reads evidence and decides. Never re-create an import decision elsewhere or add a narrower check upstream — full rules in `.claude/rules/code-quality.md` (always loaded). Evidence addressing/propagation policy (content-addressed rows, lossless-source-gated propagation to library rows): `docs/quality-verification.md` § "Evidence addressing, propagation, and ownership".
+**Quality decisions live in ONE place** — `full_pipeline_decision_from_evidence` in `lib/quality/pipeline.py` (simulator twin `full_pipeline_decision`; the `lib/quality/` package is split by concern per issue #477, `__init__.py` re-exports the full historical surface so `from lib.quality import X` still works everywhere). Preview measures and persists evidence; the importer reads evidence and decides. Never re-create an import decision elsewhere or add a narrower check upstream — full rules in `.claude/rules/code-quality.md` (always loaded). Evidence addressing/propagation policy (content-addressed rows, lossless-source-gated propagation to library rows): `docs/quality-verification.md` § "Evidence addressing, propagation, and ownership".
 
 The importer queue is the beets-mutating ownership boundary: web/CLI/poller enqueue; `cratedigger-importer` drains serially under an advisory singleton lock (startup requeues any `running` job). No new direct beets-mutating entry points outside the importer worker.
 

@@ -883,7 +883,7 @@ def _render_search_forensics_summary(
     # Top-3 by (matched_tracks DESC, avg_ratio DESC) for the compact CLI
     # glance; the web long-tail console's "peers seen" panel renders the full
     # stored slice (top-20). Same ranking, different surface depth. Shared
-    # ranking lives in lib/quality.py.
+    # ranking lives in lib/quality/wire_types.py.
     top = top_candidates(candidates, limit=3)
     lines.append(f"    top candidates ({len(top)} of {len(candidates)}):")
     for c in top:

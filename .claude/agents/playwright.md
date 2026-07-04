@@ -51,7 +51,7 @@ This is the current focus. The Discogs source came from a CC0 mirror at `discogs
 - **Release detail missing cover art** → known limitation (#82): Discogs CC0 dump has no images. Don't treat a missing cover as a bug unless the MusicBrainz side also lacks it.
 - **"Disambiguate/analysis" tab empty on Discogs artists** → known limitation (#81): requires MusicBrainz recording IDs.
 - **External links point at the wrong site** → verify `a[href]` targets contain `discogs.com/release/{id}` when source is Discogs, and `musicbrainz.org/release/{mbid}` when source is MusicBrainz.
-- **Add-to-pipeline silently fails** → intercept the `POST /api/add` request; check the payload has the numeric Discogs ID in `mb_release_id` (the pipeline reuses the column; `detect_release_source()` in `lib/quality.py` distinguishes UUID vs numeric).
+- **Add-to-pipeline silently fails** → intercept the `POST /api/add` request; check the payload has the numeric Discogs ID in `mb_release_id` (the pipeline reuses the column; `detect_release_source()` in `lib/release_identity.py` distinguishes UUID vs numeric).
 
 ### Golden-path test pattern for web-UI work
 

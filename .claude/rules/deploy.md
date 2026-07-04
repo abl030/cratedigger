@@ -7,7 +7,7 @@
 - The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports it via `inputs.cratedigger-src.nixosModules.default`.
 - Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
 - `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The 5-min timer picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch.
-- Always verify deployed code: `ssh doc2 'grep "<unique string>" /nix/store/*/lib/quality.py 2>/dev/null'`. For module changes: `ssh doc2 'cat /etc/systemd/system/cratedigger.service'` or check the rendered `/var/lib/cratedigger/config.ini`.
+- Always verify deployed code: `ssh doc2 'grep "<unique string>" /nix/store/*/lib/quality/pipeline.py 2>/dev/null'`. For module changes: `ssh doc2 'cat /etc/systemd/system/cratedigger.service'` or check the rendered `/var/lib/cratedigger/config.ini`.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): since tier-2 packaging, the flake.lock — not the consumer's nixpkgs — decides the beets version production runs. A lock bump is a beets upgrade until proven otherwise.
 - After live verification of a deploy-worthy state, tag it `vYYYY.MM.DD` (suffix `-N` for same-day). The pre-push hook (`scripts/pre-push`, runs `nix flake check`) gates every push; the tag records the verified state.
