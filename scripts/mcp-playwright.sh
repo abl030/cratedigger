@@ -21,11 +21,27 @@
 # Extra flags from the agent's mcpServers.args are appended via "$@".
 set -euo pipefail
 
+# The server binary name differs by packaging: nixpkgs installs
+# `playwright-mcp` (doc1 and other NixOS hosts, via home-manager);
+# the upstream npm package installs `mcp-server-playwright`.
+MCP_BIN=""
+for candidate in playwright-mcp mcp-server-playwright; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    MCP_BIN="$candidate"
+    break
+  fi
+done
+if [[ -z "$MCP_BIN" ]]; then
+  echo "mcp-playwright.sh: neither playwright-mcp (nixpkgs) nor" \
+       "mcp-server-playwright (npm) found on PATH" >&2
+  exit 127
+fi
+
 CDP_PORT="${PLAYWRIGHT_MCP_CDP_PORT:-9222}"
 CDP_ENDPOINT="http://127.0.0.1:${CDP_PORT}"
 
 if curl -sf --max-time 1 "${CDP_ENDPOINT}/json/version" >/dev/null 2>&1; then
-  exec mcp-server-playwright --cdp-endpoint "${CDP_ENDPOINT}" "$@"
+  exec "$MCP_BIN" --cdp-endpoint "${CDP_ENDPOINT}" "$@"
 fi
 
 mode=()
@@ -37,4 +53,4 @@ elif [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
   mode=(--headless)
 fi
 
-exec mcp-server-playwright "${mode[@]}" "$@"
+exec "$MCP_BIN" "${mode[@]}" "$@"
