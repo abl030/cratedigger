@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 import textwrap
 import urllib.error
 from pathlib import Path
@@ -12,6 +11,7 @@ import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from web.routes._pydantic import parse_body
+from web.routes._registry import RouteRegistration, pattern_route, route
 
 logger = logging.getLogger(__name__)
 
@@ -2808,255 +2808,260 @@ def get_api_index(h, params: dict[str, list[str]]) -> None:
 
     Returns a list of ``{method, path, description, request_model}`` rows
     sorted by ``(method, path)``. ``path`` is the registered string for
-    static routes and the compiled regex pattern for pattern routes.
+    static routes and the regex pattern string for pattern routes.
     ``request_model`` is the Pydantic model name for POST handlers that
     use ``parse_body``; null otherwise.
+
+    #496: reads directly from the merged ``RouteRegistration`` list
+    (``srv.ALL_ROUTES``) rather than four separate dispatch/description
+    dicts — one source of truth for path, method, and description.
     """
     from web import server as srv
 
-    entries: list[dict[str, object]] = []
-
-    for path, fn in srv.Handler._FUNC_GET_ROUTES.items():
-        entries.append({
-            "method": "GET",
-            "path": path,
-            "description": srv.Handler._FUNC_GET_DESCRIPTIONS.get(path, ""),
-            "request_model": None,
-        })
-
-    get_pattern_desc_by_str = {
-        p.pattern: d
-        for p, d in srv.Handler._FUNC_GET_PATTERN_DESCRIPTIONS
-    }
-    for pattern, _fn in srv.Handler._FUNC_GET_PATTERNS:
-        entries.append({
-            "method": "GET",
-            "path": pattern.pattern,
-            "description": get_pattern_desc_by_str.get(pattern.pattern, ""),
-            "request_model": None,
-        })
-
-    for path, fn in srv.Handler._FUNC_POST_ROUTES.items():
-        entries.append({
-            "method": "POST",
-            "path": path,
-            "description": srv.Handler._FUNC_POST_DESCRIPTIONS.get(path, ""),
-            "request_model": _extract_request_model(fn),
-        })
-
-    post_pattern_desc_by_str = {
-        p.pattern: d
-        for p, d in srv.Handler._FUNC_POST_PATTERN_DESCRIPTIONS
-    }
-    for pattern, fn in srv.Handler._FUNC_POST_PATTERNS:
-        entries.append({
-            "method": "POST",
-            "path": pattern.pattern,
-            "description": post_pattern_desc_by_str.get(pattern.pattern, ""),
-            "request_model": _extract_request_model(fn),
-        })
+    entries: list[dict[str, object]] = [
+        {
+            "method": r.method,
+            "path": r.path,
+            "description": r.description,
+            "request_model": (
+                _extract_request_model(r.handler) if r.method == "POST" else None
+            ),
+        }
+        for r in srv.ALL_ROUTES
+    ]
 
     entries.sort(key=lambda e: (str(e["method"]), str(e["path"])))
     h._json(entries)
 
 
-GET_ROUTES: dict[str, object] = {
-    "/api/_index": get_api_index,
-    "/api/pipeline/log": get_pipeline_log,
-    "/api/pipeline/status": get_pipeline_status,
-    "/api/pipeline/recent": get_pipeline_recent,
-    "/api/pipeline/all": get_pipeline_all,
-    "/api/pipeline/search": get_pipeline_search,
-    "/api/pipeline/downloading": get_pipeline_downloading,
-    "/api/pipeline/dashboard": get_pipeline_dashboard,
-    "/api/pipeline/constants": get_pipeline_constants,
-    "/api/pipeline/simulate": get_pipeline_simulate,
-    "/api/import-jobs": get_import_jobs,
-    "/api/import-jobs/timeline": get_import_jobs_timeline,
-    "/api/pipeline/active-rgs": get_pipeline_active_rgs,
-    "/api/pipeline/long-tail": get_pipeline_long_tail,
-    "/api/triage/list": get_triage_list,
-}
-
-GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-    # /api/beets-distance/<download_log_id>/<mbid> — real beets distance
-    # for one (download_log_id, mbid) pair. See get_beets_distance above.
-    (re.compile(r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$"),
-     get_beets_distance),
-    (re.compile(r"^/api/pipeline/(\d+)$"), get_pipeline_detail),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
-     get_pipeline_search_plan),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/dry-run$"),
-     get_pipeline_search_plan_dry_run),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/saturation$"),
-     get_pipeline_search_plan_saturation),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
-     get_pipeline_search_plan_history),
-    (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),
-     get_pipeline_requests_by_rg),
-    (re.compile(r"^/api/import-jobs/(\d+)$"), get_import_job),
-    (re.compile(r"^/api/triage/(\d+)$"), get_triage_for_request),
-]
-
-POST_ROUTES: dict[str, object] = {
-    "/api/pipeline/add": post_pipeline_add,
-    "/api/pipeline/update": post_pipeline_update,
-    "/api/pipeline/upgrade": post_pipeline_upgrade,
-    "/api/pipeline/set-quality": post_pipeline_set_quality,
-    "/api/pipeline/set-intent": post_pipeline_set_intent,
-    "/api/pipeline/ban-source": post_pipeline_ban_source,
-    "/api/pipeline/force-import": post_pipeline_force_import,
-    "/api/pipeline/delete": post_pipeline_delete,
-}
-
-POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/regenerate$"),
-     post_pipeline_search_plan_regenerate),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/advance$"),
-     post_pipeline_search_plan_advance),
-    (re.compile(r"^/api/pipeline/(\d+)/replace$"),
-     post_pipeline_replace),
-    (re.compile(r"^/api/pipeline/(\d+)/resolve-rg$"),
-     post_pipeline_resolve_rg),
-]
-
-# Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / GET_PATTERNS / POST_ROUTES / POST_PATTERNS dispatch tables
-# above.
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/_index": (
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/_index", get_api_index,
         "Self-documenting API surface — every route's path, method, "
-        "description, and Pydantic request model."
+        "description, and Pydantic request model.",
+        classified=True,
     ),
-    "/api/pipeline/log": (
+    route(
+        "GET", "/api/pipeline/log", get_pipeline_log,
         "Recent download_log rows with per-row classification badges + "
-        "rolling found-search counts."
+        "rolling found-search counts.",
+        classified=True,
     ),
-    "/api/pipeline/status": (
-        "Status counts + the first 50 wanted requests for the dashboard."
+    route(
+        "GET", "/api/pipeline/status", get_pipeline_status,
+        "Status counts + the first 50 wanted requests for the dashboard.",
+        classified=True,
     ),
-    "/api/pipeline/recent": (
+    route(
+        "GET", "/api/pipeline/recent", get_pipeline_recent,
         "Recently updated pipeline requests with beets / pipeline / "
-        "download-history enrichment."
+        "download-history enrichment.",
+        classified=True,
     ),
-    "/api/pipeline/all": (
+    route(
+        "GET", "/api/pipeline/all", get_pipeline_all,
         "Pipeline requests bucketed by status; latest download summary "
         "attached per row. The imported bucket is a recency window "
         "(newest 100; imported_total/imported_truncated flag the cap) — "
         "use /api/pipeline/search for the rest. include_replaced=true "
-        "opts in to frozen audit rows."
+        "opts in to frozen audit rows.",
+        classified=True,
     ),
-    "/api/pipeline/search": (
+    route(
+        "GET", "/api/pipeline/search", get_pipeline_search,
         "Operator search over artist/album across every status "
         "(?q=substring, case-insensitive); latest download summary "
-        "attached per row."
+        "attached per row.",
+        classified=True,
     ),
-    "/api/pipeline/downloading": (
+    route(
+        "GET", "/api/pipeline/downloading", get_pipeline_downloading,
         "Pipeline requests currently in the downloading status, plus "
-        "active YouTube rescue ingests."
+        "active YouTube rescue ingests.",
+        classified=True,
     ),
-    "/api/pipeline/dashboard": (
+    route(
+        "GET", "/api/pipeline/dashboard", get_pipeline_dashboard,
         "Operational metrics for the dashboard subtab (searches, "
-        "cycles, redis)."
+        "cycles, redis).",
+        classified=True,
     ),
-    "/api/pipeline/constants": (
-        "Decision tree structure + thresholds for the Decisions diagram."
+    route(
+        "GET", "/api/pipeline/constants", get_pipeline_constants,
+        "Decision tree structure + thresholds for the Decisions diagram.",
+        classified=True,
     ),
-    "/api/pipeline/simulate": (
+    route(
+        "GET", "/api/pipeline/simulate", get_pipeline_simulate,
         "Run the full pipeline decision with query-string inputs "
-        "(simulator)."
+        "(simulator).",
+        classified=True,
     ),
-    "/api/import-jobs": (
-        "Recent import-queue jobs filtered by status / request_id."
+    route(
+        "GET", "/api/import-jobs", get_import_jobs,
+        "Recent import-queue jobs filtered by status / request_id.",
+        classified=True,
     ),
-    "/api/import-jobs/timeline": (
+    route(
+        "GET", "/api/import-jobs/timeline", get_import_jobs_timeline,
         "Recent import-queue jobs with request metadata attached "
-        "(timeline view)."
+        "(timeline view).",
+        classified=True,
     ),
-    "/api/pipeline/active-rgs": (
+    route(
+        "GET", "/api/pipeline/active-rgs", get_pipeline_active_rgs,
         "Distinct release-group IDs held by any non-replaced request "
-        "(Replace-button enable set)."
+        "(Replace-button enable set).",
+        classified=True,
     ),
-    "/api/pipeline/long-tail": (
+    route(
+        "GET", "/api/pipeline/long-tail", get_pipeline_long_tail,
+        # U1: Long-Tail Triage Console worklist read. Wraps
+        # ``lib.long_tail_service.list_long_tail`` — same service as
+        # ``pipeline-cli long-tail`` per CLI ⇄ API symmetry.
         "Long-tail worklist — the full wanted cohort pre-banded by "
         "on-disk quality (missing / QualityRank band / unknown) and "
-        "stamped with in_flight_rescue. Optional ?band= filter."
+        "stamped with in_flight_rescue. Optional ?band= filter.",
+        classified=True,
     ),
-    "/api/triage/list": (
+    route(
+        "GET", "/api/triage/list", get_triage_list,
+        # U17: /api/triage HTTP endpoints. Per-request composition and
+        # cohort listing both wrap ``lib.triage_service`` (U15) — same
+        # service as ``pipeline-cli triage`` (U16) per CLI ⇄ API symmetry.
         "Cohort triage listing — filter by unfindable category, "
         "field-quality field/status/reason, or search-not-converting "
         "state. ``data_quality:status=<status>`` filters on the "
         "resolver-status column (e.g. unresolved_4xx_client); "
         "``data_quality:reason=<code>`` filters on the reason_code "
-        "column (e.g. http_400)."
+        "column (e.g. http_400).",
+        classified=True,
     ),
-}
-POST_DESCRIPTIONS: dict[str, str] = {
-    "/api/pipeline/add": (
-        "Add a new pipeline request by MB or Discogs release id."
+    # /api/beets-distance/<download_log_id>/<mbid> — real beets distance
+    # for one (download_log_id, mbid) pair. See get_beets_distance above.
+    pattern_route(
+        "GET", r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$",
+        get_beets_distance,
+        "Real beets match distance for one (download_log_id, mbid) pair; "
+        "refuses cross-release-group comparisons.",
+        classified=True,
     ),
-    "/api/pipeline/update": (
-        "Change the status of a pipeline request."
+    pattern_route(
+        "GET", r"^/api/pipeline/(\d+)$", get_pipeline_detail,
+        "Full pipeline request detail — tracks, download history, last "
+        "search, beets tracks if present.",
+        classified=True,
     ),
-    "/api/pipeline/upgrade": (
+    pattern_route(
+        "GET", r"^/api/pipeline/(\d+)/search-plan$", get_pipeline_search_plan,
+        "Read-only view of a request's persisted search plan (cursor, "
+        "items, provenance, per-slot stats).",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/pipeline/(\d+)/search-plan/dry-run$",
+        get_pipeline_search_plan_dry_run,
+        "Generator simulator — runs generate_search_plan against the "
+        "current snapshot without writing.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/pipeline/(\d+)/search-plan/saturation$",
+        get_pipeline_search_plan_saturation,
+        "Saturation rate + pre-filter skip total over a recent search_log "
+        "window for this request.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/pipeline/(\d+)/search-plan/history$",
+        get_pipeline_search_plan_history,
+        "Cursor-paginated read of one request's search_log rows.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$",
+        get_pipeline_requests_by_rg,
+        "Non-replaced album_requests rows sharing the given release "
+        "group, id-descending.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/import-jobs/(\d+)$", get_import_job,
+        "Single import-job detail by job id.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/triage/(\d+)$", get_triage_for_request,
+        "Per-request triage composition — unfindable categorisation, "
+        "field-resolution telemetry, search-log forensics.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/add", post_pipeline_add,
+        "Add a new pipeline request by MB or Discogs release id.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/update", post_pipeline_update,
+        "Change the status of a pipeline request.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/upgrade", post_pipeline_upgrade,
         "Queue an upgrade search for a release (lossless tiers, MB / "
-        "Discogs aware)."
+        "Discogs aware).",
+        classified=True,
     ),
-    "/api/pipeline/set-quality": (
-        "Set a request's min_bitrate and/or status."
+    route(
+        "POST", "/api/pipeline/set-quality", post_pipeline_set_quality,
+        "Set a request's min_bitrate and/or status.",
+        classified=True,
     ),
-    "/api/pipeline/set-intent": (
-        "Toggle lossless-on-disk intent for a request."
+    route(
+        "POST", "/api/pipeline/set-intent", post_pipeline_set_intent,
+        "Toggle lossless-on-disk intent for a request.",
+        classified=True,
     ),
-    "/api/pipeline/ban-source": (
+    route(
+        "POST", "/api/pipeline/ban-source", post_pipeline_ban_source,
         "Mark a rip as bad: denylist the uploader, hash + bad-byte "
-        "ripple-stop, and remove from beets."
+        "ripple-stop, and remove from beets.",
+        classified=True,
     ),
-    "/api/pipeline/force-import": (
-        "Enqueue a force-import job for a rejected download_log row."
+    route(
+        "POST", "/api/pipeline/force-import", post_pipeline_force_import,
+        "Enqueue a force-import job for a rejected download_log row.",
+        classified=True,
     ),
-    "/api/pipeline/delete": (
+    route(
+        "POST", "/api/pipeline/delete", post_pipeline_delete,
         "Delete a pipeline request (blocked when a superseding "
-        "request exists)."
+        "request exists).",
+        classified=True,
     ),
-}
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$"),
-     "Real beets match distance for one (download_log_id, mbid) pair; "
-     "refuses cross-release-group comparisons."),
-    (re.compile(r"^/api/pipeline/(\d+)$"),
-     "Full pipeline request detail — tracks, download history, last "
-     "search, beets tracks if present."),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan$"),
-     "Read-only view of a request's persisted search plan (cursor, "
-     "items, provenance, per-slot stats)."),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/dry-run$"),
-     "Generator simulator — runs generate_search_plan against the "
-     "current snapshot without writing."),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/saturation$"),
-     "Saturation rate + pre-filter skip total over a recent search_log "
-     "window for this request."),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/history$"),
-     "Cursor-paginated read of one request's search_log rows."),
-    (re.compile(r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$"),
-     "Non-replaced album_requests rows sharing the given release "
-     "group, id-descending."),
-    (re.compile(r"^/api/import-jobs/(\d+)$"),
-     "Single import-job detail by job id."),
-    (re.compile(r"^/api/triage/(\d+)$"),
-     "Per-request triage composition — unfindable categorisation, "
-     "field-resolution telemetry, search-log forensics."),
-]
-POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/regenerate$"),
-     "Regenerate the search plan for a request."),
-    (re.compile(r"^/api/pipeline/(\d+)/search-plan/advance$"),
-     "Forward-only operator advance of the search-plan cursor "
-     "(by ordinal or strategy prefix)."),
-    (re.compile(r"^/api/pipeline/(\d+)/replace$"),
-     "Supersede the source request with a new row at a different "
-     "release id (MB UUID or Discogs numeric id) in the same "
-     "release group/master, same pathway as the source."),
-    (re.compile(r"^/api/pipeline/(\d+)/resolve-rg$"),
-     "Lazy-backfill mb_release_group_id for a legacy request row."),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/search-plan/regenerate$",
+        post_pipeline_search_plan_regenerate,
+        "Regenerate the search plan for a request.",
+        classified=True,
+    ),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/search-plan/advance$",
+        post_pipeline_search_plan_advance,
+        "Forward-only operator advance of the search-plan cursor "
+        "(by ordinal or strategy prefix).",
+        classified=True,
+    ),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/replace$", post_pipeline_replace,
+        "Supersede the source request with a new row at a different "
+        "release id (MB UUID or Discogs numeric id) in the same "
+        "release group/master, same pathway as the source.",
+        classified=True,
+    ),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/resolve-rg$", post_pipeline_resolve_rg,
+        "Lazy-backfill mb_release_group_id for a legacy request row.",
+        classified=True,
+    ),
 ]

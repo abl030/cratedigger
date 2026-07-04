@@ -7,7 +7,6 @@ Both are enriched with library/pipeline status via check_beets_library() and che
 from __future__ import annotations
 
 import copy
-import re
 import urllib.error
 from typing import TYPE_CHECKING
 
@@ -25,6 +24,7 @@ from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
 from lib.artist_compare import annotate_in_library, merge_discographies
 from web.library_artist_service import list_library_artist_rows
 from web.routes._overlay import overlay_release_rows_in_place
+from web.routes._registry import RouteRegistration, pattern_route, route
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -636,62 +636,72 @@ def get_browse_resolve(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
 
 # ── Route tables ─────────────────────────────────────────────────────
 
-GET_ROUTES: dict[str, object] = {
-    "/api/search": get_search,
-    "/api/browse/resolve": get_browse_resolve,
-    "/api/library/artist": get_library_artist,
-    "/api/artist/compare": get_artist_compare,
-    "/api/discogs/search": get_discogs_search,
-}
-
-GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-    (re.compile(r"^/api/artist/([a-f0-9-]+)$"), get_artist),
-    (re.compile(r"^/api/artist/([a-f0-9-]+)/disambiguate$"), get_artist_disambiguate),
-    (re.compile(r"^/api/release-group/([a-f0-9-]+)$"), get_release_group),
-    (re.compile(r"^/api/release/([a-f0-9-]+)$"), get_release),
-    (re.compile(r"^/api/discogs/artist/(\d+)$"), get_discogs_artist),
-    (re.compile(r"^/api/discogs/master/(\d+)$"), get_discogs_master),
-    (re.compile(r"^/api/discogs/release/(\d+)$"), get_discogs_release),
-]
-
-# Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / GET_PATTERNS dispatch tables above.
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/search": (
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/search", get_search,
         "MusicBrainz search by artist (default) or release group "
-        "(type=release)."
+        "(type=release).",
+        classified=True,
     ),
-    "/api/browse/resolve": (
+    route(
+        "GET", "/api/browse/resolve", get_browse_resolve,
         "Resolve a pasted MBID / Discogs ID / URL into the artist-view "
-        "drop-in target (source, kind, expand_id, leaf_id)."
+        "drop-in target (source, kind, expand_id, leaf_id).",
+        classified=True,
     ),
-    "/api/library/artist": (
-        "Library albums by artist (beets-backed), pipeline-status enriched."
+    route(
+        "GET", "/api/library/artist", get_library_artist,
+        "Library albums by artist (beets-backed), pipeline-status enriched.",
+        classified=True,
     ),
-    "/api/artist/compare": (
+    route(
+        "GET", "/api/artist/compare", get_artist_compare,
         "Side-by-side MB + Discogs discographies for one artist, "
-        "fuzzy-merged with in-library overlay."
+        "fuzzy-merged with in-library overlay.",
+        classified=True,
     ),
-    "/api/discogs/search": (
-        "Discogs search by artist (default) or release (type=release)."
+    route(
+        "GET", "/api/discogs/search", get_discogs_search,
+        "Discogs search by artist (default) or release (type=release).",
+        classified=True,
     ),
-}
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^/api/artist/([a-f0-9-]+)$"),
-     "MB artist detail — release groups with library/pipeline overlay."),
-    (re.compile(r"^/api/artist/([a-f0-9-]+)/disambiguate$"),
-     "MB artist disambiguate view — per-release-group pressing analysis "
-     "with in-library + pipeline overlay."),
-    (re.compile(r"^/api/release-group/([a-f0-9-]+)$"),
-     "MB release group detail — releases in this group with overlay."),
-    (re.compile(r"^/api/release/([a-f0-9-]+)$"),
-     "MB release detail (auto-routes to Discogs for numeric IDs); "
-     "library + pipeline status and beets tracks if present."),
-    (re.compile(r"^/api/discogs/artist/(\d+)$"),
-     "Discogs artist detail — masters with in-library overlay."),
-    (re.compile(r"^/api/discogs/master/(\d+)$"),
-     "Discogs master detail — releases under this master with overlay."),
-    (re.compile(r"^/api/discogs/release/(\d+)$"),
-     "Discogs release detail — library + pipeline status and beets "
-     "tracks if present."),
+    pattern_route(
+        "GET", r"^/api/artist/([a-f0-9-]+)$", get_artist,
+        "MB artist detail — release groups with library/pipeline overlay.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/artist/([a-f0-9-]+)/disambiguate$",
+        get_artist_disambiguate,
+        "MB artist disambiguate view — per-release-group pressing analysis "
+        "with in-library + pipeline overlay.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/release-group/([a-f0-9-]+)$", get_release_group,
+        "MB release group detail — releases in this group with overlay.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/release/([a-f0-9-]+)$", get_release,
+        "MB release detail (auto-routes to Discogs for numeric IDs); "
+        "library + pipeline status and beets tracks if present.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/discogs/artist/(\d+)$", get_discogs_artist,
+        "Discogs artist detail — masters with in-library overlay.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/discogs/master/(\d+)$", get_discogs_master,
+        "Discogs master detail — releases under this master with overlay.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/discogs/release/(\d+)$", get_discogs_release,
+        "Discogs release detail — library + pipeline status and beets "
+        "tracks if present.",
+        classified=True,
+    ),
 ]

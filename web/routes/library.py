@@ -1,11 +1,11 @@
 """Beets library route handlers — search, album detail, recent, delete."""
 
-import re
 from typing import Literal, assert_never
 
 from pydantic import BaseModel, Field
 
 from web.routes._pydantic import parse_body
+from web.routes._registry import RouteRegistration, pattern_route, route
 
 
 def _server():
@@ -137,34 +137,26 @@ def post_beets_delete(h, body: dict) -> None:
     assert_never(result)
 
 
-GET_ROUTES: dict[str, object] = {
-    "/api/beets/search": get_beets_search,
-    "/api/beets/recent": get_beets_recent,
-}
-GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-    (re.compile(r"^/api/beets/album/(\d+)$"), get_beets_album),
-]
-POST_ROUTES: dict[str, object] = {
-    "/api/beets/delete": post_beets_delete,
-}
-
-# Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / GET_PATTERNS / POST_ROUTES dispatch tables above.
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/beets/search": (
-        "Beets library album search by query string; pipeline-enriched."
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/beets/search", get_beets_search,
+        "Beets library album search by query string; pipeline-enriched.",
+        classified=True,
     ),
-    "/api/beets/recent": (
-        "Recently imported beets albums; pipeline-enriched."
+    route(
+        "GET", "/api/beets/recent", get_beets_recent,
+        "Recently imported beets albums; pipeline-enriched.",
+        classified=True,
     ),
-}
-POST_DESCRIPTIONS: dict[str, str] = {
-    "/api/beets/delete": (
+    pattern_route(
+        "GET", r"^/api/beets/album/(\d+)$", get_beets_album,
+        "Beets album detail — full tracks + library / pipeline overlay.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/beets/delete", post_beets_delete,
         "Delete a beets album (DESTRUCTIVE — files removed); optional "
-        "pipeline purge. Requires confirm='DELETE'."
+        "pipeline purge. Requires confirm='DELETE'.",
+        classified=True,
     ),
-}
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^/api/beets/album/(\d+)$"),
-     "Beets album detail — full tracks + library / pipeline overlay."),
 ]

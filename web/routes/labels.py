@@ -8,7 +8,6 @@ frontend renders the same shape regardless of upstream.
 """
 from __future__ import annotations
 
-import re
 import urllib.error
 from typing import TYPE_CHECKING
 
@@ -16,6 +15,7 @@ import msgspec
 
 from web import discogs as discogs_api
 from web.routes._overlay import overlay_release_rows_in_place
+from web.routes._registry import RouteRegistration, pattern_route, route
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -194,24 +194,17 @@ def get_discogs_label_detail(
 
 # ── Route tables ─────────────────────────────────────────────────────
 
-GET_ROUTES: dict[str, object] = {
-    "/api/discogs/label/search": get_discogs_label_search,
-}
-
-GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-    (re.compile(r"^/api/discogs/label/(\d+)$"), get_discogs_label_detail),
-]
-
-# Human-readable descriptions for the route index (U18). Parallel to the
-# GET_ROUTES / GET_PATTERNS dispatch tables above.
-GET_DESCRIPTIONS: dict[str, str] = {
-    "/api/discogs/label/search": (
-        "Discogs label search — returns label entities (no release overlay)."
+ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/discogs/label/search", get_discogs_label_search,
+        "Discogs label search — returns label entities (no release overlay).",
+        classified=True,
     ),
-}
-PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"^/api/discogs/label/(\d+)$"),
-     "Discogs label detail — entity + paginated release catalogue with "
-     "library/pipeline overlay; auto-flips include_sublabels off for "
-     "UMG-class big labels."),
+    pattern_route(
+        "GET", r"^/api/discogs/label/(\d+)$", get_discogs_label_detail,
+        "Discogs label detail — entity + paginated release catalogue with "
+        "library/pipeline overlay; auto-flips include_sublabels off for "
+        "UMG-class big labels.",
+        classified=True,
+    ),
 ]

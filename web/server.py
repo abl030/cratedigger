@@ -63,6 +63,28 @@ from web.routes import library as _library_routes
 from web.routes import imports as _imports_routes
 from web.routes import pipeline as _pipeline_routes
 from web.routes import youtube as _youtube_routes
+from web.routes._registry import (
+    RouteRegistration,
+    build_get_patterns,
+    build_get_routes,
+    build_post_patterns,
+    build_post_routes,
+    merge_registries,
+)
+
+# Single merged registry (#496): each route module exports one
+# ``ROUTES: list[RouteRegistration]`` next to its handlers; this is the
+# one place they're combined. ``Handler``'s dispatch tables below are
+# derived views over this list — not separately maintained structures.
+ALL_ROUTES: list[RouteRegistration] = merge_registries(
+    _browse_routes,
+    _disk_coverage_routes,
+    _labels_routes,
+    _pipeline_routes,
+    _library_routes,
+    _imports_routes,
+    _youtube_routes,
+)
 
 _db_dsn = None
 
@@ -234,80 +256,18 @@ class Handler(BaseHTTPRequestHandler):
     # the connection and releasing its DB handles.
     timeout = 75
 
-    # Route tables: path → handler function.
-    # Route modules export their own dicts; we merge them here.
-    _FUNC_GET_ROUTES: dict[str, object] = {
-        **_browse_routes.GET_ROUTES,
-        **_disk_coverage_routes.GET_ROUTES,
-        **_labels_routes.GET_ROUTES,
-        **_pipeline_routes.GET_ROUTES,
-        **_library_routes.GET_ROUTES,
-        **_imports_routes.GET_ROUTES,
-        **_youtube_routes.GET_ROUTES,
-    }
-
-    _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-        *_browse_routes.GET_PATTERNS,
-        *_disk_coverage_routes.GET_PATTERNS,
-        *_labels_routes.GET_PATTERNS,
-        *_pipeline_routes.GET_PATTERNS,
-        *_library_routes.GET_PATTERNS,
-        *_youtube_routes.GET_PATTERNS,
-    ]
-
-    _FUNC_POST_ROUTES: dict[str, object] = {
-        **_pipeline_routes.POST_ROUTES,
-        **_library_routes.POST_ROUTES,
-        **_imports_routes.POST_ROUTES,
-        **_youtube_routes.POST_ROUTES,
-    }
-
-    _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], object]] = [
-        *getattr(_pipeline_routes, "POST_PATTERNS", []),
-        *_youtube_routes.POST_PATTERNS,
-    ]
-
-    # Description tables (U18): human-readable strings for the route index,
-    # mirroring the dispatch-table merge above. Each route module exports
-    # parallel `*_DESCRIPTIONS` dicts/lists that start empty and are
-    # populated incrementally. Empty until U18 step 2.
-    _FUNC_GET_DESCRIPTIONS: dict[str, str] = {
-        **_browse_routes.GET_DESCRIPTIONS,
-        **_disk_coverage_routes.GET_DESCRIPTIONS,
-        **_labels_routes.GET_DESCRIPTIONS,
-        **_pipeline_routes.GET_DESCRIPTIONS,
-        **_library_routes.GET_DESCRIPTIONS,
-        **_imports_routes.GET_DESCRIPTIONS,
-        **_youtube_routes.GET_DESCRIPTIONS,
-    }
-
-    _FUNC_POST_DESCRIPTIONS: dict[str, str] = {
-        **_pipeline_routes.POST_DESCRIPTIONS,
-        **_library_routes.POST_DESCRIPTIONS,
-        **_imports_routes.POST_DESCRIPTIONS,
-        **_youtube_routes.POST_DESCRIPTIONS,
-    }
-
-    _FUNC_GET_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-        *_browse_routes.PATTERN_DESCRIPTIONS,
-        *_disk_coverage_routes.PATTERN_DESCRIPTIONS,
-        *_labels_routes.PATTERN_DESCRIPTIONS,
-        *_pipeline_routes.PATTERN_DESCRIPTIONS,
-        *_library_routes.PATTERN_DESCRIPTIONS,
-        *_youtube_routes.PATTERN_DESCRIPTIONS,
-    ]
-
-    # POST pattern descriptions mirror the dispatch table — spread each
-    # route module's ``POST_PATTERN_DESCRIPTIONS`` (with getattr so the
-    # absence isn't an error). Finding #21: the YT module's list wasn't
-    # merged before, leaving its (empty) description list out of the
-    # symmetric pattern-description table.
-    _FUNC_POST_PATTERN_DESCRIPTIONS: list[tuple[re.Pattern[str], str]] = [
-        *getattr(_pipeline_routes, "POST_PATTERN_DESCRIPTIONS", []),
-        *getattr(_library_routes, "POST_PATTERN_DESCRIPTIONS", []),
-        *getattr(_imports_routes, "POST_PATTERN_DESCRIPTIONS", []),
-        *getattr(_youtube_routes, "POST_PATTERN_DESCRIPTIONS", []),
-    ]
+    # Route tables: path → handler function. #496: derived views over the
+    # single merged ``ALL_ROUTES`` registry above — not separately
+    # maintained structures. Descriptions and contract classification
+    # live on each ``RouteRegistration`` itself; see ``ALL_ROUTES``,
+    # ``get_api_index`` (web/routes/pipeline.py), and
+    # ``TestRouteContractAudit`` (tests/web/test_route_audit.py).
+    _FUNC_GET_ROUTES: dict[str, object] = build_get_routes(ALL_ROUTES)
+    _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = (
+        build_get_patterns(ALL_ROUTES))
+    _FUNC_POST_ROUTES: dict[str, object] = build_post_routes(ALL_ROUTES)
+    _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], object]] = (
+        build_post_patterns(ALL_ROUTES))
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         log.info(format % args)
