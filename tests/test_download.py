@@ -20,11 +20,13 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, TYPE_CHECKING, cast
 
+from lib.slskd_client import TransferSnapshot
 from tests.helpers import (
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
+    make_transfer_snapshot,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
@@ -352,8 +354,8 @@ class TestDownloadsAllDone(unittest.TestCase):
     def test_all_succeeded(self):
         from lib.slskd_transfers import downloads_all_done
         files = [_make_transfer_mock(), _make_transfer_mock()]
-        files[0].status = {"state": "Completed, Succeeded"}
-        files[1].status = {"state": "Completed, Succeeded"}
+        files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
+        files[1].status = make_transfer_snapshot(state="Completed, Succeeded")
         done, problems, queued = downloads_all_done(files)
         self.assertTrue(done)
         self.assertIsNone(problems)
@@ -362,8 +364,8 @@ class TestDownloadsAllDone(unittest.TestCase):
     def test_one_errored(self):
         from lib.slskd_transfers import downloads_all_done
         files = [_make_transfer_mock(), _make_transfer_mock()]
-        files[0].status = {"state": "Completed, Succeeded"}
-        files[1].status = {"state": "Completed, Errored"}
+        files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
+        files[1].status = make_transfer_snapshot(state="Completed, Errored")
         done, problems, queued = downloads_all_done(files)
         self.assertFalse(done)
         self.assertIsNotNone(problems)
@@ -374,8 +376,8 @@ class TestDownloadsAllDone(unittest.TestCase):
     def test_queued_remotely(self):
         from lib.slskd_transfers import downloads_all_done
         files = [_make_transfer_mock(), _make_transfer_mock()]
-        files[0].status = {"state": "Completed, Succeeded"}
-        files[1].status = {"state": "Queued, Remotely"}
+        files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
+        files[1].status = make_transfer_snapshot(state="Queued, Remotely")
         done, problems, queued = downloads_all_done(files)
         self.assertFalse(done)
         self.assertIsNone(problems)
@@ -393,7 +395,7 @@ class TestDownloadsAllDone(unittest.TestCase):
         ]
         for state in error_states:
             files = [_make_transfer_mock()]
-            files[0].status = {"state": state}
+            files[0].status = make_transfer_snapshot(state=state)
             done, problems, _ = downloads_all_done(files)
             self.assertFalse(done, f"state={state} should not be done")
             self.assertIsNotNone(problems, f"state={state} should be a problem")
@@ -592,7 +594,7 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNotNone(f.status)
         assert f.status is not None
-        self.assertEqual(f.status["state"], "Completed, Succeeded")
+        self.assertEqual(f.status.state, "Completed, Succeeded")
         self.assertEqual(slskd.transfers.get_download_calls, [("user1", "file-id-1")])
 
     def test_error_sets_none(self):
@@ -624,7 +626,7 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNotNone(f.status)
         assert f.status is not None
-        self.assertEqual(f.status["state"], "Completed, Succeeded")
+        self.assertEqual(f.status.state, "Completed, Succeeded")
         # No per-file API calls should have been made
         self.assertEqual(slskd.transfers.get_download_calls, [])
 
@@ -1250,7 +1252,7 @@ class TestRederiveTransferIds(unittest.TestCase):
         status = entry.files[0].status
         self.assertIsNotNone(status)
         assert status is not None
-        self.assertEqual(status["state"], "Completed, Succeeded")
+        self.assertEqual(status.state, "Completed, Succeeded")
 
     def test_not_before_ignores_stale_terminal_transfer(self):
         from lib.slskd_transfers import rederive_transfer_ids
@@ -4184,7 +4186,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
 
         self.assertEqual(
             entry.files[0].status,
-            {"state": "Completed, Rejected", "bytesTransferred": 0},
+            TransferSnapshot(state="Completed, Rejected", bytes_transferred=0),
         )
 
     def test_reconstruct_missing_year(self):

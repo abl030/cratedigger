@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import cratedigger
 from lib import enqueue as enqueue_module
 from lib.grab_list import DownloadFile
+from lib.slskd_client import TransferSnapshot
 from lib.slskd_transfers import (cancel_and_delete, slskd_download_status,
                           slskd_do_enqueue, downloads_all_done)
 from lib.dispatch import _build_download_info
@@ -125,9 +126,9 @@ DIRECTORY_FILE_MP3 = {
     "isVariableBitRate": True,
 }
 
-DOWNLOAD_STATUS_DONE = {"state": "Completed, Succeeded"}
-DOWNLOAD_STATUS_QUEUED = {"state": "Queued, Remotely"}
-DOWNLOAD_STATUS_FAILED = {"state": "Completed, Errored"}
+DOWNLOAD_STATUS_DONE = TransferSnapshot(state="Completed, Succeeded")
+DOWNLOAD_STATUS_QUEUED = TransferSnapshot(state="Queued, Remotely")
+DOWNLOAD_STATUS_FAILED = TransferSnapshot(state="Completed, Errored")
 
 
 def make_search_result(username, files, upload_speed=1048576):
@@ -520,7 +521,7 @@ class TestDownloadStatusFlow(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNotNone(f.status)
         assert f.status is not None
-        self.assertEqual(f.status["state"], "Completed, Succeeded")
+        self.assertEqual(f.status.state, "Completed, Succeeded")
 
     def test_downloads_all_done(self):
         """downloads_all_done reads .status on DownloadFile instances."""

@@ -27,8 +27,10 @@ from lib.slskd_client import (
     SlskdDownloadDirectoryCompleteEvent,
     SlskdDownloadFileCompleteEvent,
     SlskdRawEvent,
+    TransferSnapshot,
     decode_download_directory_complete,
     decode_download_file_complete,
+    parse_transfer_snapshot,
 )
 
 
@@ -322,14 +324,32 @@ class TestTransfersEndpoints(SlskdClientTestCase):
         self.assertEqual(
             self.last_request()["query"], {"includeRemoved": ["True"]})
 
-    def test_get_download_returns_transfer_dict(self):
+    def test_get_download_returns_typed_transfer_snapshot(self):
+        """#468: get_download() decodes at the client boundary — the
+        single flat transfer object it returns becomes a TransferSnapshot,
+        not a raw dict."""
         transfer = DOWNLOADS_FIXTURE[0]["directories"][0]["files"][0]
         self.set_fixture(
             "GET", "/transfers/downloads/FourTwenty/abc-123", transfer)
 
         result = self.client.transfers.get_download("FourTwenty", "abc-123")
 
-        self.assertEqual(result, transfer)
+        self.assertIsInstance(result, TransferSnapshot)
+        self.assertEqual(result.id, transfer["id"])
+        self.assertEqual(result.filename, transfer["filename"])
+        self.assertEqual(result.state, transfer["state"])
+        self.assertEqual(result.bytes_transferred, transfer["bytesTransferred"])
+
+    def test_get_download_wire_type_drift_raises_validation_error(self):
+        # RED-boundary guard per code-quality rules: an int-typed field
+        # arriving as a string must fail loudly at the decode site.
+        transfer = dict(DOWNLOADS_FIXTURE[0]["directories"][0]["files"][0])
+        transfer["size"] = "113325058"
+        self.set_fixture(
+            "GET", "/transfers/downloads/FourTwenty/abc-123", transfer)
+
+        with self.assertRaises(msgspec.ValidationError):
+            self.client.transfers.get_download("FourTwenty", "abc-123")
 
     def test_cancel_download_deletes_with_remove_param(self):
         self.set_fixture("DELETE", "/transfers/downloads/peer/abc", {}, status=204)
@@ -509,6 +529,102 @@ class TestClientConstruction(unittest.TestCase):
         client = SlskdClient(host="http://localhost:5030", api_key="k")
 
         self.assertEqual(client.api_url, "http://localhost:5030/api/v0")
+
+
+class TestTransferSnapshot(unittest.TestCase):
+    """#468: TransferSnapshot is the typed replacement for DownloadFile.status.
+
+    Fields/keys mirror the live-captured DOWNLOADS_FIXTURE entry above.
+    """
+
+    def test_decodes_full_fixture_entry(self):
+        raw = DOWNLOADS_FIXTURE[0]["directories"][0]["files"][0]
+
+        snap = parse_transfer_snapshot(raw)
+
+        assert snap is not None
+        self.assertEqual(snap.id, "1839fe97-46dd-4351-9ada-4422a57f9f7a")
+        self.assertEqual(snap.username, "FourTwenty")
+        self.assertEqual(
+            snap.filename,
+            "Music\\Rock\\Led Zeppelin\\1969 - Led Zeppelin II\\06 - Living Loving Maid.flac")
+        self.assertEqual(snap.state, "Queued, Remotely")
+        self.assertEqual(snap.size, 113325058)
+        self.assertEqual(snap.bytes_transferred, 0)
+        self.assertEqual(snap.percent_complete, 0)
+        # This fixture entry (a freshly-queued transfer) carries no
+        # lifecycle timestamps yet — every one must default to None.
+        self.assertIsNone(snap.requested_at)
+        self.assertIsNone(snap.enqueued_at)
+        self.assertIsNone(snap.started_at)
+        self.assertIsNone(snap.ended_at)
+
+    def test_unknown_fields_are_ignored(self):
+        # slskd's real Transfer DTO carries fields we don't model
+        # (direction, averageSpeed, placeInQueue, exception, ...) — these
+        # must not trip decoding.
+        raw = {
+            "id": "t1", "username": "u", "filename": "f.flac",
+            "state": "InProgress", "direction": "Download",
+            "averageSpeed": 1234.5, "placeInQueue": None, "exception": None,
+        }
+
+        snap = parse_transfer_snapshot(raw)
+
+        assert snap is not None
+        self.assertEqual(snap.id, "t1")
+
+    def test_missing_fields_default(self):
+        # A bare match-lookup style entry (only filename/id) still decodes —
+        # every other field defaults rather than raising.
+        raw = {"filename": "f.flac", "id": "t1"}
+
+        snap = parse_transfer_snapshot(raw)
+
+        assert snap is not None
+        self.assertEqual(snap.state, "")
+        self.assertEqual(snap.bytes_transferred, 0)
+        self.assertEqual(snap.size, 0)
+        self.assertIsNone(snap.ended_at)
+
+    def test_lifecycle_timestamps_round_trip(self):
+        raw = {
+            "id": "t1", "filename": "f.flac", "state": "Completed, Succeeded",
+            "requestedAt": "2026-04-03T20:00:00+00:00",
+            "enqueuedAt": "2026-04-03T20:00:01+00:00",
+            "startedAt": "2026-04-03T20:00:02+00:00",
+            "endedAt": "2026-04-03T21:00:00+00:00",
+        }
+
+        snap = parse_transfer_snapshot(raw)
+
+        assert snap is not None
+        self.assertEqual(snap.requested_at, "2026-04-03T20:00:00+00:00")
+        self.assertEqual(snap.enqueued_at, "2026-04-03T20:00:01+00:00")
+        self.assertEqual(snap.started_at, "2026-04-03T20:00:02+00:00")
+        self.assertEqual(snap.ended_at, "2026-04-03T21:00:00+00:00")
+
+    def test_malformed_entry_returns_none_not_raise(self):
+        # RED-boundary guard, tolerant side: this runs against a snapshot
+        # shared by every in-flight album in the 5-min poll loop — one
+        # malformed row must degrade to "no status observed", never crash
+        # or void matching for every other transfer in the cycle.
+        raw = {"id": "t1", "filename": "f.flac", "state": "InProgress",
+               "bytesTransferred": "not-a-number"}
+
+        snap = parse_transfer_snapshot(raw)
+
+        self.assertIsNone(snap)
+
+    def test_construction_with_only_state_for_synthetic_statuses(self):
+        # Mirrors _restored_terminal_status / the vanished-transfer
+        # fallback in lib/download.py — both build a TransferSnapshot
+        # directly (not via decode) with only state (+ bytes_transferred).
+        snap = TransferSnapshot(state="Completed, Errored")
+
+        self.assertEqual(snap.state, "Completed, Errored")
+        self.assertEqual(snap.id, "")
+        self.assertEqual(snap.bytes_transferred, 0)
 
 
 if __name__ == "__main__":

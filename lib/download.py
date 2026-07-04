@@ -43,6 +43,7 @@ from lib.import_queue import (
     automation_import_dedupe_key,
     automation_import_payload,
 )
+from lib.slskd_client import TransferSnapshot
 from lib.slskd_transfers import (
     _all_files_remotely_queued,
     _get_all_downloads_snapshot,
@@ -251,7 +252,7 @@ def reconstruct_grab_list_entry(
 def _restored_terminal_status(
     last_state: str | None,
     bytes_transferred: int,
-) -> dict[str, object] | None:
+) -> TransferSnapshot | None:
     """Rehydrate terminal slskd observations persisted in JSONB state.
 
     slskd's ``includeRemoved`` snapshot can stop exposing terminal transfer
@@ -260,10 +261,7 @@ def _restored_terminal_status(
     """
     if not last_state or not last_state.startswith("Completed,"):
         return None
-    return {
-        "state": last_state,
-        "bytesTransferred": bytes_transferred,
-    }
+    return TransferSnapshot(state=last_state, bytes_transferred=bytes_transferred)
 
 
 
@@ -280,7 +278,7 @@ def _timeout_album(
 
     total = len(entry.files)
     completed = sum(1 for f in entry.files
-                    if f.status and f.status.get("state") == "Completed, Succeeded")
+                    if f.status and f.status.state == "Completed, Succeeded")
 
     dl_info = _build_download_info(entry)
 
@@ -355,8 +353,8 @@ def _capture_download_progress(
         if not file.status:
             continue
 
-        current_state = str(file.status.get("state", ""))
-        current_bytes = int(file.status.get("bytesTransferred") or 0)
+        current_state = file.status.state
+        current_bytes = file.status.bytes_transferred
         previous_bytes = file.bytes_transferred or 0
         previous_state = file.last_state or ""
 
@@ -933,13 +931,13 @@ def _poll_one_active_download(
     # poll cycles so the reducer can report the real terminal failure.
     for f in entry.files:
         if f.id == "" and f.status is None:
-            f.status = {"state": "Completed, Errored"}
+            f.status = TransferSnapshot(state="Completed, Errored")
 
     # Track total album age separately from stall/progress timing.
     # Poll live status only for transfers that are still active in slskd.
     files_requiring_status = [
         f for f in entry.files
-        if f.id and not (f.status and str(f.status.get("state", "")).startswith("Completed,"))
+        if f.id and not (f.status and f.status.state.startswith("Completed,"))
     ]
     if files_requiring_status and not slskd_download_status(
             files_requiring_status, ctx, snapshot=cycle_snapshot):
@@ -1028,7 +1026,7 @@ def _poll_one_active_download(
 
     # Still in progress — log and continue to next album
     files_done = sum(1 for f in entry.files
-                    if f.status and f.status.get("state") == "Completed, Succeeded")
+                    if f.status and f.status.state == "Completed, Succeeded")
     logger.info(f"In progress: {entry.artist} - {entry.title} "
                 f"({files_done}/{len(entry.files)} files, "
                 f"{elapsed_seconds/60:.1f}min elapsed)")

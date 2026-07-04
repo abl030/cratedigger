@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from lib.quality import SpectralMeasurement
+from lib.slskd_client import TransferSnapshot
 
 
 @dataclass
@@ -63,7 +64,7 @@ class DownloadFile:
     disk_count: Optional[int] = None
 
     # Transient: poll_active_downloads
-    status: Optional[dict] = None   # slskd status object with "state" key
+    status: Optional[TransferSnapshot] = None   # typed slskd transfer snapshot (#468)
     retry: Optional[int] = None     # retry counter, initialized on error
     bytes_transferred: Optional[int] = None
     last_state: Optional[str] = None

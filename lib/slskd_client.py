@@ -76,6 +76,71 @@ class SlskdDownloadDirectoryCompleteEvent(msgspec.Struct, rename="camel", frozen
     username: str
 
 
+class TransferSnapshot(msgspec.Struct, rename="camel", frozen=True):
+    """One slskd transfer/file entry — the typed shape ``DownloadFile.status``
+    holds once a poll cycle observes a matching transfer (issue #468).
+
+    ``state`` and ``bytes_transferred`` are the two fields the poll state
+    machine actually reads back off ``DownloadFile.status``
+    (``lib/download.py``, ``lib/slskd_transfers.py``). The remaining
+    identity/lifecycle fields (``id``, ``username``, ``filename``,
+    ``size``, the four timestamps, ``percent_complete``) round out the
+    wire-boundary contract so this Struct models the whole transfer
+    concept slskd reports for a matched file — not a narrower ad hoc
+    subset — even though nothing downstream reads them via ``.status.*``
+    yet. slskd's real Transfer DTO carries many more fields still
+    (``direction``, ``averageSpeed``, ``placeInQueue``, ``exception``,
+    ...) that we don't model at all — msgspec ignores unknown fields by
+    default (no ``forbid_unknown_fields``).
+
+    Every field defaults: a queued transfer has no ``bytesTransferred``
+    or lifecycle timestamps yet, a bare match-lookup entry may carry only
+    ``filename``/``id``, and the two synthetic constructions
+    (``_restored_terminal_status``, the vanished-transfer fallback in
+    ``lib/download.py``) build a ``TransferSnapshot`` directly with only
+    ``state`` (+ optionally ``bytes_transferred``) set.
+    """
+
+    id: str = ""
+    username: str = ""
+    filename: str = ""
+    state: str = ""
+    size: int = 0
+    bytes_transferred: int = 0
+    requested_at: str | None = None
+    enqueued_at: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    percent_complete: float = 0.0
+
+
+def parse_transfer_snapshot(raw: dict[str, Any]) -> TransferSnapshot | None:
+    """Convert one slskd transfer/file dict — typically the winning
+    candidate ``match_transfer`` selected from a shared poll-cycle
+    snapshot — into a ``TransferSnapshot``.
+
+    Returns ``None`` (logging a warning) on a ``msgspec.ValidationError``
+    instead of raising. This runs inside the 5-minute poll loop against a
+    snapshot shared by every in-flight album: one malformed entry must
+    degrade to "no status observed this cycle" for just that one file —
+    the same signal already used for "no matching transfer found" — not
+    abort the whole snapshot or poll cycle. Contrast with
+    ``SlskdTransfersApi.get_download``, which decodes strictly (raises):
+    that is a single-item client boundary whose one production call site
+    already sits inside a per-file try/except, so raising there is
+    already contained at the same granularity.
+    """
+    try:
+        return msgspec.convert(raw, type=TransferSnapshot)
+    except msgspec.ValidationError:
+        logger.warning(
+            "slskd transfer snapshot: skipping malformed entry (keys=%s)",
+            sorted(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+            exc_info=True,
+        )
+        return None
+
+
 DOWNLOAD_FILE_COMPLETE = "DownloadFileComplete"
 DOWNLOAD_DIRECTORY_COMPLETE = "DownloadDirectoryComplete"
 
@@ -197,10 +262,10 @@ class SlskdTransfersApi:
             params={"includeRemoved": includeRemoved})
         return response.json()
 
-    def get_download(self, username: str, id: str) -> dict[str, Any]:
+    def get_download(self, username: str, id: str) -> TransferSnapshot:
         response = self._client._request(
             "GET", f"/transfers/downloads/{quote(username, safe='')}/{id}")
-        return response.json()
+        return msgspec.convert(response.json(), type=TransferSnapshot)
 
     def cancel_download(self, username: str, id: str, remove: bool = False) -> bool:
         self._client._request(

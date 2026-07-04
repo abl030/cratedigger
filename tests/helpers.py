@@ -33,6 +33,7 @@ from lib.quality import (
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import snapshot_fingerprint
+from lib.slskd_client import TransferSnapshot
 
 
 def make_request_row(**overrides: Any) -> dict[str, Any]:
@@ -333,6 +334,15 @@ def make_download_file(
         bitDepth=bitDepth,
         isVariableBitRate=isVariableBitRate,
     )
+
+
+def make_transfer_snapshot(**overrides: Any) -> TransferSnapshot:
+    """Build a TransferSnapshot (DownloadFile.status, issue #468) with a
+    sensible default state. Every other field defaults per the Struct
+    itself — pass overrides for the fields a scenario cares about."""
+    defaults: dict[str, Any] = {"state": "Completed, Succeeded"}
+    defaults.update(overrides)
+    return TransferSnapshot(**defaults)
 
 
 def make_grab_list_entry(
