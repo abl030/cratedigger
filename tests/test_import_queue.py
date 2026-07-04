@@ -16,6 +16,7 @@ from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DispatchOutcome,
 )
+from lib.download_processing import Completed, CompletionDispatched
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -1191,7 +1192,7 @@ class TestImporterWorker(unittest.TestCase):
 
         with patch(
             "lib.download._run_completed_processing",
-            return_value=True,
+            return_value=Completed(),
         ) as processing:
             updated = importer.process_claimed_job(
                 cast(Any, db),
@@ -1234,7 +1235,8 @@ class TestImporterWorker(unittest.TestCase):
 
         with patch(
             "lib.download._run_completed_processing",
-            return_value=DispatchOutcome(True, "Imported by dispatch"),
+            return_value=CompletionDispatched(
+                outcome=DispatchOutcome(True, "Imported by dispatch")),
         ) as processing:
             updated = importer.process_claimed_job(
                 cast(Any, db),
@@ -1278,7 +1280,8 @@ class TestImporterWorker(unittest.TestCase):
 
         with patch(
             "lib.download._run_completed_processing",
-            return_value=DispatchOutcome(False, "Pre-import gate rejected"),
+            return_value=CompletionDispatched(
+                outcome=DispatchOutcome(False, "Pre-import gate rejected")),
         ):
             updated = importer.process_claimed_job(
                 cast(Any, db),
@@ -2557,7 +2560,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=DispatchOutcome(True, "Imported by dispatch"),
+                return_value=CompletionDispatched(
+                    outcome=DispatchOutcome(True, "Imported by dispatch")),
             ) as proc:
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -2672,7 +2676,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=True,
+                return_value=Completed(),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -2715,7 +2719,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             self._mark_importable(db, job)
             claimed = self._claim(db)
 
-            def _run_real_finalize(*args: Any, **kwargs: Any) -> DispatchOutcome:
+            def _run_real_finalize(*args: Any, **kwargs: Any) -> CompletionDispatched:
                 # Mirror the production seam: dispatch_import_from_db
                 # would call finalize_request(to_imported) on auto-import
                 # success. That call routes to mark_imported_with_rescue.
@@ -2726,7 +2730,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                         from_status="wanted",
                     ),
                 )
-                return DispatchOutcome(True, "Imported")
+                return CompletionDispatched(outcome=DispatchOutcome(True, "Imported"))
 
             with patch(
                 "lib.download_processing.process_completed_album",
@@ -2775,7 +2779,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             self._mark_importable(db, job)
             claimed = self._claim(db)
 
-            def _run_real_finalize(*args: Any, **kwargs: Any) -> DispatchOutcome:
+            def _run_real_finalize(*args: Any, **kwargs: Any) -> CompletionDispatched:
                 transitions.finalize_request(
                     cast(Any, db),
                     42,
@@ -2783,7 +2787,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                         from_status="manual",
                     ),
                 )
-                return DispatchOutcome(True, "Imported from manual")
+                return CompletionDispatched(
+                    outcome=DispatchOutcome(True, "Imported from manual"))
 
             with patch(
                 "lib.download_processing.process_completed_album",
@@ -2828,8 +2833,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             # Simulate a wrong-matches reject from the pipeline.
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=DispatchOutcome(
-                    False, "Rejected: high_distance"),
+                return_value=CompletionDispatched(outcome=DispatchOutcome(
+                    False, "Rejected: high_distance")),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -2865,11 +2870,11 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=DispatchOutcome(
+                return_value=CompletionDispatched(outcome=DispatchOutcome(
                     False,
                     "Quality pipeline rejected",
                     code=DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-                ),
+                )),
             ):
                 updated = importer.process_claimed_job(
                     cast(Any, db),
@@ -2922,7 +2927,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
 
             with patch(
                 "lib.download_processing.process_completed_album",
-                return_value=DispatchOutcome(True, "ok"),
+                return_value=CompletionDispatched(
+                    outcome=DispatchOutcome(True, "ok")),
             ) as proc:
                 importer.process_claimed_job(
                     cast(Any, db),
