@@ -16,6 +16,11 @@ from lib.slskd_client import (
     SlskdClient,
     derive_slskd_http_pool_size,
 )
+# Unified slskd search lifecycle (issue #466).
+from lib.search_exec import (
+    SearchSubmitError,
+    execute_search,
+)
 
 if TYPE_CHECKING:
     from album_source import DatabaseSource
@@ -55,85 +60,10 @@ cfg: CratediggerConfig = None  # type: ignore[assignment]  # Set in main()
 slskd: SlskdClient = None  # type: ignore[assignment]  # Set in main()
 logger = logging.getLogger("cratedigger")
 
-# === Per-search progress watchdog (issue #212) ===
-# Hardcoded constants — not exposed via config.ini or the NixOS module
-# (R12). If empirical data argues for a different value, that is a
-# code-level edit + deploy, not a runtime tunable.
-#
-# SEARCH_WATCHDOG_DEADLINE_S — a search whose responseCount has not
-#   advanced for this many seconds (and is still InProgress / Queued)
-#   trips the watchdog. 90s catches the 8h-hang failure mode while
-#   leaving slow-but-receiving searches alone.
-# SEARCH_CANCEL_WAIT_DEADLINE_S — after stop(), wait at most this long
-#   for slskd's async response-persistence cleanup to complete. Reading
-#   `search_responses` before slskd flushes the response list silently
-#   degrades the harvest to no_results.
-# SEARCH_CANCEL_WAIT_POLL_S — inner poll cadence during the post-cancel
-#   wait. 200ms keeps end-to-end latency tight in the typical fast-
-#   cleanup case.
-# SEARCH_RESPONSE_SETTLE_DEADLINE_S — after slskd reports a terminal
-#   state (Completed, FileLimitReached / ResponseLimitReached / TimedOut),
-#   wait at most this long for slskd's async response-store commit to
-#   stabilise before reading. Issue #242: the response writer and the
-#   state writer are separate threads on slskd's side, so an immediate
-#   `search_responses` after `"Completed" in state` can return [] while
-#   the writer is still flushing. 2.0s is shorter than the 5.0s post-
-#   cancel deadline because natural completion is the happy path —
-#   responses are usually already settled and the helper exits after one
-#   confirmatory call. The cancel path is the worst case (slskd just got
-#   interrupted) so it earns more headroom.
-# SEARCH_RESPONSE_SETTLE_POLL_S — inner poll cadence during settle.
-#   200ms matches the cancel-wait cadence; one extra HTTP call in the
-#   happy path, a handful in the race case.
-SEARCH_WATCHDOG_DEADLINE_S = 90.0
-SEARCH_CANCEL_WAIT_DEADLINE_S = 5.0
-SEARCH_CANCEL_WAIT_POLL_S = 0.2
-SEARCH_RESPONSE_SETTLE_DEADLINE_S = 2.0
-SEARCH_RESPONSE_SETTLE_POLL_S = 0.2
-
-
-def _fetch_search_responses_settled(
-    slskd_client: Any,
-    search_id: Any,
-    *,
-    deadline_s: float,
-    poll_s: float,
-    clock_fn: Any = time.monotonic,
-) -> list[dict[str, Any]]:
-    """Fetch slskd ``search_responses`` after waiting for the response store
-    to commit. Mitigates the issue #242 race between slskd's terminal-state
-    update and its response-store flush.
-
-    Polls ``search_responses`` until two consecutive calls return the same
-    length, or ``deadline_s`` elapses. Returns the most-recently-fetched
-    list. In the happy path (responses already settled), this costs exactly
-    one extra HTTP call vs. a naive single-shot fetch — a small price for
-    eliminating the empirically-observed 56% zero-rate on
-    ``Completed, FileLimitReached``.
-
-    The two-consecutive-same-length condition is the natural stability
-    signal: slskd's writer flushes responses incrementally, and consecutive
-    same-length reads mean the writer is no longer making progress (either
-    because it's done, or because no further responses are coming). Either
-    way, the list we have is the list slskd intends to deliver.
-
-    On deadline expiry, returns the last list seen rather than raising — the
-    caller already wraps the harvest in try/except for transport errors;
-    a short list is better than a crash.
-
-    ``clock_fn`` is injected for test determinism; production callers omit
-    it (defaults to ``time.monotonic``).
-    """
-    deadline = clock_fn() + deadline_s
-    prev: list[dict[str, Any]] | None = None
-    current = slskd_client.searches.search_responses(search_id)
-    while clock_fn() < deadline:
-        if prev is not None and len(prev) == len(current):
-            return current
-        prev = current
-        time.sleep(poll_s)
-        current = slskd_client.searches.search_responses(search_id)
-    return current
+# Per-search progress watchdog (issue #212) + response-settle (issue #242)
+# constants and helpers now live in ``lib/search_exec.py`` alongside the
+# unified ``execute_search`` lifecycle they govern (issue #466). Imported at
+# the top of this module.
 
 # === API client instances (set in main()) ===
 pipeline_db_source: "DatabaseSource" = None  # type: ignore[assignment]  # Set in main()
@@ -335,11 +265,77 @@ def _select_active_plan_item_for_album(album, db):
     )
 
 
+def _plan_search_submit_kwargs(query, search_cfg):
+    """Build the ``searches.search_text`` kwargs for a plan-item search.
+
+    Single source of truth for the pipeline's search params, shared by the
+    serial (`search_for_album`) and parallel (`_submit_plan_search`) adapters.
+    Query construction stays upstream (`lib.search`); this only carries the
+    slskd tuning knobs.
+    """
+    return {
+        "searchText": query,
+        "searchTimeout": search_cfg.search_timeout,
+        "filterResponses": True,
+        "maximumPeerQueueLength": search_cfg.maximum_peer_queue,
+        "minimumPeerUploadSpeed": search_cfg.minimum_peer_upload_speed,
+        "responseLimit": search_cfg.search_response_limit,
+        "fileLimit": search_cfg.search_file_limit,
+    }
+
+
+def _search_result_from_execution(
+    exec_result, *, album_id, query, variant_tag, plan_execution, search_cfg,
+):
+    """Build a pipeline ``SearchResult`` from a completed ``execute_search``.
+
+    Shared by the serial (`search_for_album`) and parallel
+    (`_collect_search_results`) adapters so harvest classification and the
+    audio-count cache build live in exactly one place. Does NOT merge into
+    ctx caches — that stays with each adapter (main thread for serial, owner
+    thread for parallel).
+    """
+    from lib.search import SearchResult
+
+    responses = exec_result.responses
+    if not len(responses) > 0:
+        return SearchResult(
+            album_id=album_id, success=False, query=query,
+            result_count=0, elapsed_s=exec_result.elapsed_s, outcome="no_results",
+            variant_tag=variant_tag, final_state=exec_result.final_state,
+            watchdog_fired=exec_result.watchdog_fired,
+            plan_execution=plan_execution,
+            result_count_uncapped=exec_result.response_count_terminal,
+        )
+
+    filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
+    cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
+        responses, filter_specs
+    )
+    return SearchResult(
+        album_id=album_id, success=True,
+        cache_entries=cache_entries,
+        upload_speeds=upload_speeds,
+        dir_audio_counts=dir_audio_counts,
+        query=query,
+        result_count=len(responses),
+        elapsed_s=exec_result.elapsed_s,
+        variant_tag=variant_tag,
+        final_state=exec_result.final_state,
+        watchdog_fired=exec_result.watchdog_fired,
+        plan_execution=plan_execution,
+        result_count_uncapped=exec_result.response_count_terminal,
+    )
+
+
 def search_for_album(album, ctx):
     """Search slskd for an album. Returns SearchResult (always non-None).
 
-    Plan-driven (U5): query selection comes from the request's active
-    persisted search plan, not from runtime variant recomputation.
+    Thin adapter over the unified lifecycle (``lib.search_exec.execute_search``,
+    issue #466): plan-driven query selection (U5), then submit → poll (with the
+    #212 progress watchdog) → settle-harvest (#242) → optional delete, then
+    build the pipeline's ``SearchResult`` and merge caches on the main thread.
+    Gains the watchdog + settle that the serial path previously lacked.
     """
     from lib.search import SearchResult
 
@@ -372,17 +368,13 @@ def search_for_album(album, ctx):
                 f"(from '{artist_name} - {album_title}', "
                 f"variant={variant_tag}, ordinal={plan_execution.plan_ordinal})")
     try:
-        search = slskd.searches.search_text(
-            searchText=query,
-            searchTimeout=cfg.search_timeout,
-            filterResponses=True,
-            maximumPeerQueueLength=cfg.maximum_peer_queue,
-            minimumPeerUploadSpeed=cfg.minimum_peer_upload_speed,
-            responseLimit=cfg.search_response_limit,
-            fileLimit=cfg.search_file_limit,
+        exec_result = execute_search(
+            slskd,
+            submit_kwargs=_plan_search_submit_kwargs(query, cfg),
+            delete=cfg.delete_searches,
         )
-    except Exception:
-        # Pre-accepted-search failure: non-consuming.
+    except SearchSubmitError:
+        # Pre-accepted-search failure: non-consuming (final_state stays None).
         logger.exception(f"Failed to perform search via SLSKD: {query}")
         return SearchResult(
             album_id=album_id, success=False, query=query,
@@ -390,48 +382,6 @@ def search_for_album(album, ctx):
             variant_tag=variant_tag,
             plan_execution=plan_execution,
         )
-
-    # Wait for slskd to process the search. Searches go through:
-    #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
-    # We must wait while state is Queued OR InProgress. slskd's
-    # searchTimeout governs when it moves the search to a terminal state;
-    # we trust that and do not impose our own poll cap (it was firing on
-    # legitimately slow searches and starving the pipeline — see
-    # 2026-05-02 regression).
-    final_state: str | None = None
-    # U11 R23: capture slskd's terminal ``responseCount`` so the
-    # search-log row records the uncapped response count. Diverges from
-    # ``len(search_results)`` when slskd hits responseLimit/fileLimit
-    # and truncates the harvested array. ``None`` when no poll succeeded.
-    response_count_terminal: int | None = None
-    try:
-        while True:
-            state_resp = slskd.searches.state(search["id"], False)
-            state = state_resp["state"]
-            final_state = state
-            response_count_terminal = state_resp.get("responseCount", 0)
-            if (
-                "Completed" in state
-                or ("InProgress" not in state and "Queued" not in state)
-            ):
-                break
-            time.sleep(1)
-
-        # Bridge slskd's state→responses race (issue #242). slskd's
-        # state writer and response-store writer are separate threads;
-        # an immediate harvest after seeing `"Completed"` in state
-        # historically dropped 56% of `FileLimitReached` searches. The
-        # helper polls responses until two consecutive calls return the
-        # same length (the natural stability signal).
-        search_results = _fetch_search_responses_settled(
-            slskd, search["id"],
-            deadline_s=SEARCH_RESPONSE_SETTLE_DEADLINE_S,
-            poll_s=SEARCH_RESPONSE_SETTLE_POLL_S,
-        )
-        elapsed = time.time() - t0
-        logger.info(f"Search returned {len(search_results)} results")
-        if cfg.delete_searches:
-            slskd.searches.delete(search["id"])
     except Exception:
         # slskd already accepted this search id. Treat collection failures
         # as consumed attempts so the cursor and telemetry stay in lockstep.
@@ -444,37 +394,14 @@ def search_for_album(album, ctx):
             plan_execution=plan_execution,
         )
 
-    if not len(search_results) > 0:
-        return SearchResult(
-            album_id=album_id, success=False, query=query,
-            result_count=0, elapsed_s=elapsed, outcome="no_results",
-            variant_tag=variant_tag, final_state=final_state,
-            plan_execution=plan_execution,
-            result_count_uncapped=response_count_terminal,
-        )
-
-    filter_specs = list(zip(cfg.allowed_filetypes, cfg.allowed_specs))
-    cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
-        search_results, filter_specs
+    logger.info(f"Search returned {len(exec_result.responses)} results")
+    result = _search_result_from_execution(
+        exec_result, album_id=album_id, query=query,
+        variant_tag=variant_tag, plan_execution=plan_execution, search_cfg=cfg,
     )
-    for username in cache_entries:
-        logger.info(f"Caching and truncating results for user: {username}")
-
-    result = SearchResult(
-        album_id=album_id, success=True,
-        cache_entries=cache_entries,
-        upload_speeds=upload_speeds,
-        dir_audio_counts=dir_audio_counts,
-        query=query,
-        result_count=len(search_results),
-        elapsed_s=elapsed,
-        variant_tag=variant_tag,
-        final_state=final_state,
-        plan_execution=plan_execution,
-        result_count_uncapped=response_count_terminal,
-    )
-    # Reuse the same merge path as the parallel pipeline
-    _merge_search_result(result, ctx)
+    if result.success:
+        # Reuse the same merge path as the parallel pipeline
+        _merge_search_result(result, ctx)
     return result
 
 
@@ -507,13 +434,7 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
     for attempt in range(6):
         try:
             search = slskd_client.searches.search_text(
-                searchText=query,
-                searchTimeout=search_cfg.search_timeout,
-                filterResponses=True,
-                maximumPeerQueueLength=search_cfg.maximum_peer_queue,
-                minimumPeerUploadSpeed=search_cfg.minimum_peer_upload_speed,
-                responseLimit=search_cfg.search_response_limit,
-                fileLimit=search_cfg.search_file_limit,
+                **_plan_search_submit_kwargs(query, search_cfg)
             )
             return (search["id"], query, album_id, strategy_tag)
         except requests.exceptions.HTTPError as e:
@@ -534,146 +455,34 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
 
 def _collect_search_results(search_id, query, album_id, search_cfg, slskd_client,
                             variant_tag=None, clock_fn=time.monotonic):
-    """Wait for a submitted search to complete and collect results.
+    """Wait for an already-submitted search to complete and collect results.
 
-    This is the part that can run in parallel — it's just polling + reading.
-    `variant_tag` is the persisted tag chosen by `_submit_search` and is
-    plumbed onto the returned ``SearchResult`` so `_log_search_result` can
-    persist it without re-running variant selection.
+    Thin adapter over the unified lifecycle (``lib.search_exec.execute_search``,
+    issue #466). The parallel pipeline submits sequentially under slskd's
+    ``SemaphoreSlim(1,1)`` via ``_submit_plan_search`` and hands the accepted
+    ``search_id`` here; this is the part that runs in parallel — poll (with the
+    #212 progress watchdog) → settle-harvest (#242) → optional delete → build
+    the ``SearchResult``.
 
-    The poll loop is bounded by a per-search **progress watchdog** (issue
-    #212): if `state_resp["responseCount"]` does not advance for
-    ``SEARCH_WATCHDOG_DEADLINE_S`` seconds while the search is still
-    InProgress / Queued, cratedigger calls slskd's PUT cancel endpoint
-    best-effort, waits up to ``SEARCH_CANCEL_WAIT_DEADLINE_S`` seconds for
-    slskd's async response-persistence cleanup, then runs the existing
-    harvest path unchanged. The deadline measures *progress*, not
-    wall-time-from-submission — slow-but-receiving searches keep going.
+    ``variant_tag`` is the persisted tag chosen at submit and is plumbed onto
+    the returned ``SearchResult`` so ``_log_search_result`` can persist it
+    without re-running variant selection. A poll/harvest transport failure
+    propagates to the caller, which classifies it as a consumed
+    collection-crash (the search id was already accepted).
 
-    `clock_fn` is injected for test determinism; production callers omit
-    it (defaults to `time.monotonic`).
+    ``clock_fn`` is injected for test determinism; production callers omit it
+    (defaults to ``time.monotonic``).
     """
-    from lib.search import SearchResult
-
-    t0 = time.time()
-
-    # Wait for search to complete. slskd search states:
-    #   Queued -> InProgress -> Completed, (TimedOut|ResponseLimitReached|Errored)
-    # We must wait while state is Queued OR InProgress. slskd's
-    # searchTimeout (param on submit) drives the move to a terminal state.
-    # The watchdog below catches the failure mode where slskd's own state
-    # transition does not fire (issue #212; the 8h53m hung-cycle case).
-    final_state: str | None = None
-    watchdog_fired = False
-    prev_count = 0
-    last_progress_at = clock_fn()
-    # U11 R23: capture slskd's terminal ``responseCount`` so the
-    # search-log row records the uncapped response count slskd's
-    # writer tracked. May diverge from ``len(search_results)`` when
-    # slskd hits ``responseLimit`` / ``fileLimit`` and truncates the
-    # harvested array. ``None`` when no state poll ever succeeded.
-    response_count_terminal: int | None = None
-    while True:
-        try:
-            state_resp = slskd_client.searches.state(search_id, False)
-            state = state_resp["state"]
-            final_state = state
-            count = state_resp.get("responseCount", 0)
-            response_count_terminal = count
-            if count > prev_count:
-                prev_count = count
-                last_progress_at = clock_fn()
-            # State-transition exit MUST be checked BEFORE the watchdog
-            # deadline so a search that completes on the 90th-second poll
-            # exits naturally and never calls stop().
-            if "Completed" in state or ("InProgress" not in state and "Queued" not in state):
-                break
-        except Exception:
-            logger.warning(f"Failed to poll search state for {query}")
-            break
-
-        if clock_fn() - last_progress_at >= SEARCH_WATCHDOG_DEADLINE_S:
-            logger.info(
-                f"watchdog firing for search_id={search_id} "
-                f"after {SEARCH_WATCHDOG_DEADLINE_S}s of no progress: {query}"
-            )
-            try:
-                slskd_client.searches.stop(search_id)
-            except Exception:
-                logger.info(
-                    f"searches.stop({search_id}) failed; "
-                    f"proceeding with harvest anyway"
-                )
-            watchdog_fired = True
-            # Post-cancel response-store wait. slskd populates
-            # `Search.Responses` in an async Task.Run cleanup AFTER the
-            # cancel propagates and state transitions to Completed |
-            # Cancelled. Reading responses before that cleanup runs
-            # returns an empty list. The helper below polls responses
-            # directly (same idea, generalised) — bounded at
-            # ``SEARCH_CANCEL_WAIT_DEADLINE_S`` to keep us out of a
-            # doubly-broken-slskd hang.
-            break
-
-        time.sleep(1)
-
-    # Bridge slskd's state→responses race (issue #242). The natural-
-    # completion path has historically read responses immediately after
-    # seeing a terminal state; this dropped 56% of `FileLimitReached`
-    # searches because slskd's response writer hadn't committed yet. The
-    # cancel path needs a longer budget because slskd just got
-    # interrupted; the natural path is the happy case where responses
-    # are usually already settled and the helper exits after one
-    # confirmatory call.
-    settle_deadline = (
-        SEARCH_CANCEL_WAIT_DEADLINE_S
-        if watchdog_fired
-        else SEARCH_RESPONSE_SETTLE_DEADLINE_S
+    exec_result = execute_search(
+        slskd_client, search_id=search_id,
+        delete=search_cfg.delete_searches, clock_fn=clock_fn,
     )
-    settle_poll = (
-        SEARCH_CANCEL_WAIT_POLL_S
-        if watchdog_fired
-        else SEARCH_RESPONSE_SETTLE_POLL_S
-    )
-    search_results = _fetch_search_responses_settled(
-        slskd_client, search_id,
-        deadline_s=settle_deadline, poll_s=settle_poll, clock_fn=clock_fn,
-    )
-    elapsed = time.time() - t0
-    logger.info(f"Search returned {len(search_results)} results in {elapsed:.1f}s for: {query}")
-    if search_cfg.delete_searches:
-        slskd_client.searches.delete(search_id)
-
-    if not len(search_results) > 0:
-        return SearchResult(
-            album_id=album_id, success=False, query=query,
-            result_count=0, elapsed_s=elapsed, outcome="no_results",
-            variant_tag=variant_tag, final_state=final_state,
-            watchdog_fired=watchdog_fired,
-            # U11 R23: zero responses is the operator-meaningful uncapped
-            # count here too — slskd state's ``responseCount`` is the
-            # source of truth even on the no_results path.
-            result_count_uncapped=response_count_terminal,
-        )
-
-    filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
-    cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
-        search_results, filter_specs
-    )
-
-    return SearchResult(
-        album_id=album_id,
-        success=True,
-        cache_entries=cache_entries,
-        upload_speeds=upload_speeds,
-        dir_audio_counts=dir_audio_counts,
-        query=query,
-        result_count=len(search_results),
-        elapsed_s=elapsed,
-        variant_tag=variant_tag,
-        final_state=final_state,
-        watchdog_fired=watchdog_fired,
-        result_count_uncapped=response_count_terminal,
+    logger.info(
+        f"Search returned {len(exec_result.responses)} results in "
+        f"{exec_result.elapsed_s:.1f}s for: {query}")
+    return _search_result_from_execution(
+        exec_result, album_id=album_id, query=query,
+        variant_tag=variant_tag, plan_execution=None, search_cfg=search_cfg,
     )
 
 

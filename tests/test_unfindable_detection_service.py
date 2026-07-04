@@ -51,11 +51,13 @@ from lib.unfindable_detection_service import (
     RESULT_REQUEST_NOT_FOUND,
     WRONG_PRESSING_MIN_HITS,
     ArtistProbeResult,
+    ProbeDegradedError,
     UnfindableDetectionService,
     UnfindableInputs,
     UnfindableSearchLogSignal,
     classify_unfindable_from_state,
     fuzzy_artist_observed_in_probe,
+    run_artist_probe,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -316,6 +318,113 @@ class TestFuzzyArtistObservedInProbe(unittest.TestCase):
         )
 
 
+class TestRunArtistProbe(unittest.TestCase):
+    """Thin-wrapper coverage of ``run_artist_probe`` over the unified
+    ``execute_search`` lifecycle (issue #466).
+
+    The service tests stub the probe via ``_StubProbe``; this pins the probe
+    adapter's real slskd interaction against ``FakeSlskdAPI`` so its
+    contract (match_count sourcing, best-effort delete) can't drift.
+    """
+
+    def _noop(self, _s: float) -> None:
+        return None
+
+    def test_match_count_from_terminal_responsecount_after_settle(self) -> None:
+        """``match_count`` tracks slskd's uncapped terminal ``responseCount``,
+        not the (possibly truncated) settled-harvest length; the fuzzy
+        observation reads the settled harvest."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [1]
+        slskd.searches.add_search(
+            search_id=1, state="Completed",
+            responses=[{"username": "peer",
+                        "files": [{"filename": "/Russian-Winters/t.flac"}]}],
+            response_count=42,
+        )
+        probe = run_artist_probe(
+            slskd, artist_name="Russian Winters", poll_sleep=self._noop,
+        )
+        self.assertEqual(probe.match_count, 42)
+        self.assertTrue(probe.artist_observed)
+        # Probe forwards the artist-only params (no peer-queue / speed knobs).
+        call = slskd.searches.search_text_calls[0]
+        self.assertEqual(call.search_text, "Russian Winters")
+        self.assertNotIn("maximumPeerQueueLength", call.kwargs)
+        # delete_after defaults True.
+        self.assertEqual(slskd.searches.delete_calls, [1])
+
+    def test_delete_failure_still_returns_probe_result(self) -> None:
+        """A failed cleanup DELETE must not fail the probe (pre-#466 the probe
+        swallowed delete errors in a ``finally``; execute_search preserves
+        that)."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [2]
+        slskd.searches.add_search(
+            search_id=2, state="Completed", responses=[], response_count=0)
+
+        def _boom(sid: Any) -> None:
+            slskd.searches.delete_calls.append(sid)
+            raise RuntimeError("slskd delete failed")
+
+        slskd.searches.delete = _boom  # type: ignore[method-assign]
+        probe = run_artist_probe(
+            slskd, artist_name="Nobody", poll_sleep=self._noop,
+        )
+        self.assertEqual(probe.match_count, 0)
+        self.assertFalse(probe.artist_observed)
+        self.assertEqual(slskd.searches.delete_calls, [2])
+
+    def test_state_poll_error_raises_probe_degraded(self) -> None:
+        """A ``searches.state`` transport error → the execution is degraded →
+        ``ProbeDegradedError`` (so the service records nothing, restoring the
+        pre-#466 contract instead of writing a fabricated low match count)."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [3]
+        slskd.searches.add_search(
+            search_id=3, state="InProgress", responses=[], response_count=0)
+
+        def _boom_state(_sid: Any, _include: bool = False) -> dict[str, Any]:
+            raise RuntimeError("state endpoint flaky")
+
+        slskd.searches.state = _boom_state  # type: ignore[method-assign]
+        with self.assertRaises(ProbeDegradedError):
+            run_artist_probe(
+                slskd, artist_name="Flaky", poll_sleep=self._noop,
+            )
+
+    def test_watchdog_fired_raises_probe_degraded(self) -> None:
+        """A watchdog-cancelled probe is degraded → ``ProbeDegradedError``.
+
+        Conservative by design: even though this search would harvest a
+        best-effort response set, a watchdog cancel means the terminal
+        ``responseCount`` is untrustworthy, so we refuse to record it."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [4]
+        slskd.searches.add_search(
+            search_id=4, state="InProgress", responses=[], response_count=0,
+            post_stop_state="Completed | Cancelled", post_stop_responses=[],
+        )
+        clock = {"t": 0.0}
+        original_state = slskd.searches.state
+        n = {"i": 0}
+
+        def _state(sid: Any, include: bool = False) -> dict[str, Any]:
+            n["i"] += 1
+            if n["i"] == 2:
+                clock["t"] += 91.0  # trip the 90s no-progress watchdog
+            return original_state(sid, include)
+
+        slskd.searches.state = _state  # type: ignore[method-assign]
+        with self.assertRaises(ProbeDegradedError):
+            run_artist_probe(
+                slskd, artist_name="Wedged", poll_sleep=self._noop,
+                clock=lambda: clock["t"],
+            )
+        # The watchdog still cancelled the search on slskd's side.
+        self.assertEqual(slskd.searches.stop_calls, [4])
+
+
 # ---------------------------------------------------------------------------
 # 2. Service-layer tests.
 # ---------------------------------------------------------------------------
@@ -573,6 +682,34 @@ class TestUnfindableDetectionService(unittest.TestCase):
         self.assertEqual(len(self.db.record_artist_probe_calls), 0)
         self.assertEqual(len(self.db.set_unfindable_category_calls), 0)
         self.assertIn("RuntimeError", result.error_message or "")
+
+    def test_degraded_probe_records_nothing_end_to_end(self) -> None:
+        """A degraded probe (flaky ``state`` poll) records NOTHING.
+
+        End-to-end through the REAL production ``run_artist_probe`` (default
+        probe_runner) driven by a FakeSlskd whose ``state`` endpoint raises:
+        ``run_artist_probe`` raises ``ProbeDegradedError`` → the service
+        records no probe row and no category. This is the categorisation-
+        fidelity fix — pre-#466 a hung/errored probe would still write a low
+        ``last_artist_probe_match_count`` that accumulates toward a spurious
+        ``artist_absent``.
+        """
+        rid = _seed_wanted_request(self.db)
+        self.slskd.searches.search_text_id_sequence = [1]
+        self.slskd.searches.add_search(
+            search_id=1, state="InProgress", responses=[], response_count=0)
+
+        def _boom_state(_sid: Any, _include: bool = False) -> dict[str, Any]:
+            raise RuntimeError("state endpoint flaky")
+
+        self.slskd.searches.state = _boom_state  # type: ignore[method-assign]
+        # Default probe_runner == production run_artist_probe.
+        svc = UnfindableDetectionService(self.db, self.slskd)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_PROBE_FAILED)
+        self.assertEqual(self.db.record_artist_probe_calls, [])
+        self.assertEqual(self.db.set_unfindable_category_calls, [])
+        self.assertIn("ProbeDegradedError", result.error_message or "")
 
     def test_cadence_independent_of_plan_cursor(self) -> None:
         """next_plan_ordinal stays unchanged across a categorisation."""

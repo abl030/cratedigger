@@ -395,6 +395,20 @@ class ArtistProbeResult:
     artist_observed: bool
 
 
+class ProbeDegradedError(Exception):
+    """The probe search did not complete cleanly (watchdog cancel or a
+    state-poll error), so its ``responseCount`` / harvest cannot be trusted.
+
+    Raised by :func:`run_artist_probe` so the service treats a degraded probe
+    exactly like a slskd failure — ``RESULT_PROBE_FAILED``, nothing recorded.
+    This restores the pre-#466 contract: a hung or errored probe never writes
+    a (likely low) ``last_artist_probe_match_count``, which would otherwise
+    accumulate toward a spurious ``artist_absent`` categorisation. Recording a
+    fabricated absence signal from a broken probe is a categorisation-
+    corrupting bug for a service whose whole job is deciding "is this absent".
+    """
+
+
 def run_artist_probe(
     slskd_client: Any,
     *,
@@ -403,6 +417,7 @@ def run_artist_probe(
     response_limit: int = 100,
     file_limit: int = 1000,
     poll_sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
     delete_after: bool = True,
 ) -> ArtistProbeResult:
     """Run one artist-only probe via slskd and return the signal.
@@ -412,50 +427,59 @@ def run_artist_probe(
     Bypasses the entire matcher / plan / cursor surface — the search
     is a fire-and-forget telemetry probe.
 
-    Raises any exception slskd raises; the caller (the service) is
-    responsible for catching and recording ``RESULT_PROBE_FAILED`` so
-    a bad slskd response never crashes the daily run.
-    """
-    import time
+    Thin adapter over the unified slskd lifecycle
+    (``lib.search_exec.execute_search``, issue #466). Consolidation gained
+    this probe the #212 progress watchdog (a wedged probe search no longer
+    hangs the daily ``cratedigger-unfindable.service`` indefinitely — it is
+    cancelled after 90s of no progress) and the #242 response-settle (the
+    response list used for the fuzzy artist observation is now the settled
+    harvest rather than an immediate read that could race to empty and
+    spuriously report the artist absent).
 
-    sleep = poll_sleep or time.sleep
-    search = slskd_client.searches.search_text(
-        searchText=artist_name,
-        searchTimeout=search_timeout_ms,
-        filterResponses=True,
-        responseLimit=response_limit,
-        fileLimit=file_limit,
+    Exception contract:
+      * A submit failure or a harvest transport error propagates; the caller
+        (the service) records ``RESULT_PROBE_FAILED``.
+      * A *degraded* execution — the #212 watchdog cancelled the search, or a
+        ``searches.state`` poll raised and the loop fell back to a best-effort
+        harvest — raises :class:`ProbeDegradedError`. This restores the
+        pre-#466 contract: a hung/errored probe records NOTHING rather than a
+        fabricated low ``responseCount`` that would accumulate toward a
+        spurious ``artist_absent``. (Conservative by design: even a
+        watchdog-cancelled search that happened to harvest a high count is
+        treated as failed — categorisation fidelity over an extra data point.)
+      * A failed cleanup ``delete`` is swallowed and never fails the probe.
+
+    ``poll_sleep`` / ``clock`` are injected for test determinism (forwarded to
+    ``execute_search`` as ``sleep_fn`` / ``clock_fn``); production omits them.
+    """
+    from lib.search_exec import execute_search
+
+    exec_result = execute_search(
+        slskd_client,
+        submit_kwargs={
+            "searchText": artist_name,
+            "searchTimeout": search_timeout_ms,
+            "filterResponses": True,
+            "responseLimit": response_limit,
+            "fileLimit": file_limit,
+        },
+        delete=delete_after,
+        sleep_fn=poll_sleep,
+        clock_fn=clock,
     )
-    search_id = search["id"]
-    try:
-        # Poll terminal state. Bounded by slskd's own ``searchTimeout``.
-        while True:
-            state_resp = slskd_client.searches.state(search_id, False)
-            state = str(state_resp.get("state") or "")
-            if (
-                "Completed" in state
-                or ("InProgress" not in state and "Queued" not in state)
-            ):
-                match_count = int(state_resp.get("responseCount") or 0)
-                break
-            sleep(1)
-        responses = slskd_client.searches.search_responses(search_id) or []
-        return ArtistProbeResult(
-            match_count=match_count,
-            artist_observed=fuzzy_artist_observed_in_probe(
-                artist_name, responses,
-            ),
+    if exec_result.watchdog_fired or exec_result.state_poll_error:
+        raise ProbeDegradedError(
+            f"probe for {artist_name!r} degraded "
+            f"(watchdog_fired={exec_result.watchdog_fired}, "
+            f"state_poll_error={exec_result.state_poll_error}); "
+            f"refusing to record an untrustworthy match count"
         )
-    finally:
-        if delete_after:
-            try:
-                slskd_client.searches.delete(search_id)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "unfindable_detection: failed to delete probe "
-                    "search id=%s — slskd will GC it",
-                    search_id,
-                )
+    return ArtistProbeResult(
+        match_count=int(exec_result.response_count_terminal or 0),
+        artist_observed=fuzzy_artist_observed_in_probe(
+            artist_name, exec_result.responses,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +797,8 @@ __all__ = (
     "RESULT_PROBE_FAILED",
     "RESULT_REQUEST_NOT_FOUND",
     "SEARCH_LOG_WINDOW_DAYS",
+    "ArtistProbeResult",
+    "ProbeDegradedError",
     "UnfindableCategorisation",
     "UnfindableDetectionService",
     "UnfindableInputs",
