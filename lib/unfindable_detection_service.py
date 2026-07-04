@@ -412,50 +412,44 @@ def run_artist_probe(
     Bypasses the entire matcher / plan / cursor surface — the search
     is a fire-and-forget telemetry probe.
 
-    Raises any exception slskd raises; the caller (the service) is
-    responsible for catching and recording ``RESULT_PROBE_FAILED`` so
-    a bad slskd response never crashes the daily run.
-    """
-    import time
+    Thin adapter over the unified slskd lifecycle
+    (``lib.search_exec.execute_search``, issue #466). Consolidation gained
+    this probe the #212 progress watchdog (a wedged probe search no longer
+    hangs the daily ``cratedigger-unfindable.service`` indefinitely — it is
+    cancelled after 90s of no progress and harvested best-effort) and the
+    #242 response-settle (``match_count`` is still sourced from slskd's
+    terminal ``responseCount``, but the response list used for the fuzzy
+    artist observation is now the settled harvest rather than an immediate
+    read that could race to empty and spuriously report the artist absent).
 
-    sleep = poll_sleep or time.sleep
-    search = slskd_client.searches.search_text(
-        searchText=artist_name,
-        searchTimeout=search_timeout_ms,
-        filterResponses=True,
-        responseLimit=response_limit,
-        fileLimit=file_limit,
+    Exception contract (via ``execute_search``): a submit failure or a harvest
+    transport error propagates and the caller (the service) records
+    ``RESULT_PROBE_FAILED``; a flaky state poll is absorbed by the watchdog
+    loop and the probe returns a best-effort harvest (this is the deliberate
+    cost of the watchdog — the pre-#466 probe let a state exception fail the
+    run); a failed cleanup ``delete`` is swallowed and never fails the probe
+    (unchanged from pre-#466).
+    """
+    from lib.search_exec import execute_search
+
+    exec_result = execute_search(
+        slskd_client,
+        submit_kwargs={
+            "searchText": artist_name,
+            "searchTimeout": search_timeout_ms,
+            "filterResponses": True,
+            "responseLimit": response_limit,
+            "fileLimit": file_limit,
+        },
+        delete=delete_after,
+        sleep_fn=poll_sleep,
     )
-    search_id = search["id"]
-    try:
-        # Poll terminal state. Bounded by slskd's own ``searchTimeout``.
-        while True:
-            state_resp = slskd_client.searches.state(search_id, False)
-            state = str(state_resp.get("state") or "")
-            if (
-                "Completed" in state
-                or ("InProgress" not in state and "Queued" not in state)
-            ):
-                match_count = int(state_resp.get("responseCount") or 0)
-                break
-            sleep(1)
-        responses = slskd_client.searches.search_responses(search_id) or []
-        return ArtistProbeResult(
-            match_count=match_count,
-            artist_observed=fuzzy_artist_observed_in_probe(
-                artist_name, responses,
-            ),
-        )
-    finally:
-        if delete_after:
-            try:
-                slskd_client.searches.delete(search_id)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "unfindable_detection: failed to delete probe "
-                    "search id=%s — slskd will GC it",
-                    search_id,
-                )
+    return ArtistProbeResult(
+        match_count=int(exec_result.response_count_terminal or 0),
+        artist_observed=fuzzy_artist_observed_in_probe(
+            artist_name, exec_result.responses,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

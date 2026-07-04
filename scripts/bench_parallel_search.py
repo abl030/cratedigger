@@ -27,6 +27,10 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.slskd_client import SlskdClient  # noqa: E402  — after sys.path insert
+from lib.search_exec import (  # noqa: E402  — after sys.path insert
+    SearchSubmitError,
+    execute_search,
+)
 
 
 # Diverse queries: mix of popular (guaranteed results) and less common artists.
@@ -55,36 +59,27 @@ class SingleSearchResult:
 
 def run_single_search(client: SlskdClient, query: str,
                       search_timeout: int = 30000) -> SingleSearchResult:
-    """Run one search and return timing + result count."""
+    """Run one search and return timing + result count.
+
+    Drives the same unified lifecycle production uses
+    (``lib.search_exec.execute_search``, issue #466) so the benchmark
+    measures the real submit → poll (with the #212 watchdog) → settle-harvest
+    (#242) → delete path rather than a drifted hand-rolled copy.
+    """
     t0 = time.time()
     try:
-        search = client.searches.search_text(
-            searchText=query,
-            searchTimeout=search_timeout,
+        exec_result = execute_search(
+            client,
+            submit_kwargs={"searchText": query, "searchTimeout": search_timeout},
+            delete=True,
         )
-    except Exception as e:
+    except SearchSubmitError as e:
         return SingleSearchResult(query=query, result_count=0,
                                   elapsed_s=time.time() - t0, error=str(e))
 
-    # Wait for completion (same pattern as cratedigger.py)
-    time.sleep(5)
-    deadline = time.time() + (search_timeout / 1000) + 10
-    while time.time() < deadline:
-        state = client.searches.state(search["id"], False)
-        if state.get("state") != "InProgress":
-            break
-        time.sleep(1)
-
-    results = client.searches.search_responses(search["id"]) or []
-    elapsed = time.time() - t0
-
-    try:
-        client.searches.delete(search["id"])
-    except Exception:
-        pass
-
-    return SingleSearchResult(query=query, result_count=len(results),
-                              elapsed_s=elapsed)
+    return SingleSearchResult(query=query,
+                              result_count=len(exec_result.responses),
+                              elapsed_s=exec_result.elapsed_s)
 
 
 def run_batch(client: SlskdClient, queries: list[str],

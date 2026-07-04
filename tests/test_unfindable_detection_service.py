@@ -56,6 +56,7 @@ from lib.unfindable_detection_service import (
     UnfindableSearchLogSignal,
     classify_unfindable_from_state,
     fuzzy_artist_observed_in_probe,
+    run_artist_probe,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
@@ -314,6 +315,64 @@ class TestFuzzyArtistObservedInProbe(unittest.TestCase):
         self.assertFalse(
             fuzzy_artist_observed_in_probe("Radiohead", []),
         )
+
+
+class TestRunArtistProbe(unittest.TestCase):
+    """Thin-wrapper coverage of ``run_artist_probe`` over the unified
+    ``execute_search`` lifecycle (issue #466).
+
+    The service tests stub the probe via ``_StubProbe``; this pins the probe
+    adapter's real slskd interaction against ``FakeSlskdAPI`` so its
+    contract (match_count sourcing, best-effort delete) can't drift.
+    """
+
+    def _noop(self, _s: float) -> None:
+        return None
+
+    def test_match_count_from_terminal_responsecount_after_settle(self) -> None:
+        """``match_count`` tracks slskd's uncapped terminal ``responseCount``,
+        not the (possibly truncated) settled-harvest length; the fuzzy
+        observation reads the settled harvest."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [1]
+        slskd.searches.add_search(
+            search_id=1, state="Completed",
+            responses=[{"username": "peer",
+                        "files": [{"filename": "/Russian-Winters/t.flac"}]}],
+            response_count=42,
+        )
+        probe = run_artist_probe(
+            slskd, artist_name="Russian Winters", poll_sleep=self._noop,
+        )
+        self.assertEqual(probe.match_count, 42)
+        self.assertTrue(probe.artist_observed)
+        # Probe forwards the artist-only params (no peer-queue / speed knobs).
+        call = slskd.searches.search_text_calls[0]
+        self.assertEqual(call.search_text, "Russian Winters")
+        self.assertNotIn("maximumPeerQueueLength", call.kwargs)
+        # delete_after defaults True.
+        self.assertEqual(slskd.searches.delete_calls, [1])
+
+    def test_delete_failure_still_returns_probe_result(self) -> None:
+        """A failed cleanup DELETE must not fail the probe (pre-#466 the probe
+        swallowed delete errors in a ``finally``; execute_search preserves
+        that)."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_id_sequence = [2]
+        slskd.searches.add_search(
+            search_id=2, state="Completed", responses=[], response_count=0)
+
+        def _boom(sid: Any) -> None:
+            slskd.searches.delete_calls.append(sid)
+            raise RuntimeError("slskd delete failed")
+
+        slskd.searches.delete = _boom  # type: ignore[method-assign]
+        probe = run_artist_probe(
+            slskd, artist_name="Nobody", poll_sleep=self._noop,
+        )
+        self.assertEqual(probe.match_count, 0)
+        self.assertFalse(probe.artist_observed)
+        self.assertEqual(slskd.searches.delete_calls, [2])
 
 
 # ---------------------------------------------------------------------------
