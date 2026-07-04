@@ -23,6 +23,7 @@ node tests/test_js_history.mjs || exit 1
 node tests/test_js_pipeline.mjs || exit 1
 node tests/test_js_pipeline_dashboard.mjs || exit 1
 node tests/test_js_wrong_matches.mjs || exit 1
+node tests/test_js_long_tail_console.mjs || exit 1
 echo ""
 
 # Dead-code sweep — fails fast on new vulture findings before the slow

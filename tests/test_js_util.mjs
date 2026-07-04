@@ -1320,14 +1320,14 @@ console.log('long_tail.js __test__');
   // --- renderLongTailBody: the three list states (DOM-free string paint) ---
   const { renderLongTailBody } = longTailTest;
   // Empty cohort -> empty-cohort affordance, never blank.
-  state.longTail = { rows: [], band: null, query: '', open: new Set() };
+  state.longTail = { rows: [], band: null, query: '' };
   const emptyCohort = renderLongTailBody();
   assert(
     emptyCohort.includes('No wanted releases in the long tail'),
     'renderLongTailBody empty cohort shows the empty-cohort affordance',
   );
   // Populated cohort -> tab strip + rows for the default (Missing) band.
-  state.longTail = { rows: cohort, band: null, query: '', open: new Set() };
+  state.longTail = { rows: cohort, band: null, query: '' };
   const populated = renderLongTailBody();
   assert(
     populated.includes('lt-band-tabs') && populated.includes('lt-search-input'),
@@ -1344,7 +1344,7 @@ console.log('long_tail.js __test__');
   );
   // Empty-band -> a search filters the selected band to zero; the
   // affordance + cross-band hint show, never a blank area.
-  state.longTail = { rows: cohort, band: 'missing', query: 'hecker', open: new Set() };
+  state.longTail = { rows: cohort, band: 'missing', query: 'hecker' };
   const emptyBand = renderLongTailBody();
   assert(
     emptyBand.includes('No Missing releases match'),
@@ -1355,7 +1355,7 @@ console.log('long_tail.js __test__');
     'renderLongTailBody empty-band surfaces the cross-band match hint',
   );
   // Reset shared state so later tests are not affected.
-  state.longTail = { rows: null, band: null, query: '', open: new Set() };
+  state.longTail = { rows: null, band: null, query: '' };
 }
 
 // --- long_tail.js action console pure helpers (U4) ---
@@ -1612,7 +1612,6 @@ console.log('long_tail.js __test__ (U5 rescue flow)');
     youtubeBestDistance,
     youtubeRescueTargets,
     rescueOutcomeCopy,
-    canStartInFlight,
     renderYoutubeBody,
     renderRescueConfirm,
   } = longTailTest;
@@ -1730,15 +1729,9 @@ console.log('long_tail.js __test__ (U5 rescue flow)');
   // null result → generic error, never throws.
   assertEqual(rescueOutcomeCopy(null).tone, 'error', 'rescueOutcomeCopy null → error tone (no throw)');
 
-  // --- canStartInFlight: double-fire guard predicate ---
-  const inFlightSet = new Set();
-  assertEqual(canStartInFlight(inFlightSet, 5), true,
-    'canStartInFlight: nothing outstanding → may start');
-  inFlightSet.add(5);
-  assertEqual(canStartInFlight(inFlightSet, 5), false,
-    'canStartInFlight: an outstanding call for the id → suppressed (double-fire guard)');
-  assertEqual(canStartInFlight(inFlightSet, 6), true,
-    'canStartInFlight: a different id is independent');
+  // The double-fire guard predicate is now `consoleCanStart` (part of the
+  // #481 item 1 console-state consolidation) — covered in
+  // tests/test_js_long_tail_console.mjs, not here.
 
   // --- renderRescueConfirm: reuses the .confirm-box shell ---
   const confirm = renderRescueConfirm(11, 'MPREb_x', { artist_name: 'Smog', album_title: 'Knock Knock' });
@@ -1874,20 +1867,23 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     'renderActionsBar: MB row with no release group disables accept-sibling');
 }
 
-// --- long_tail.js #398 console-persistence state ---
-console.log('long_tail.js console persistence (#398)');
+// --- long_tail.js #398 / #481 item 1 console-persistence state ---
+console.log('long_tail.js console persistence (#398 / #481 item 1)');
 {
-  // The open-console set must be initialised on the shared state — the
-  // restore path (and the toggle bookkeeping) read it unconditionally.
-  assert(state.longTail.open instanceof Set,
-    'state.longTail.open is a Set (open-console ids persist across re-renders)');
+  // Open-console tracking lives in the module-scoped `consoleStates` map
+  // (#481 item 1 — no longer on shared state; see tests/test_js_long_tail_console.mjs
+  // for the pure open/close/prune/canStart/settle transition coverage).
+  const { consoleStates } = longTailTest;
+  assert(consoleStates instanceof Map,
+    'consoleStates is a Map (open-console ids persist across re-renders)');
   // The DOM-side entry points are no-ops outside a browser — must not throw
-  // when the module is imported into the Node test runner.
+  // when the module is imported into the Node test runner, and must not
+  // fabricate console state for a row nobody opened.
   const { restoreLongTailConsoles, toggleLongTailDetail } = await import('../web/js/long_tail.js');
   restoreLongTailConsoles();
   toggleLongTailDetail(1);
-  assert(state.longTail.open.size === 0,
-    'DOM-side no-ops leave the open-console set untouched in Node');
+  assert(consoleStates.size === 0,
+    'DOM-side no-ops leave consoleStates untouched in Node');
 }
 
 // --- Summary ---
