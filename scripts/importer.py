@@ -10,7 +10,7 @@ import shutil
 import socket
 import sys
 import time
-from typing import Any
+from typing import Any, assert_never
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -23,6 +23,13 @@ from lib.dispatch import (
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
+)
+from lib.download_processing import (
+    Completed,
+    CompletionDeferred,
+    CompletionDispatched,
+    CompletionFailed,
+    CompletionResult,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -225,6 +232,35 @@ def _build_runtime_context(db: PipelineDB):
     return CratediggerContext(cfg=cfg, slskd=None, pipeline_db_source=source)
 
 
+def _dispatch_outcome_from_completion(
+    result: CompletionResult,
+    *,
+    deferred_message: str,
+    completed_message: str,
+    failed_message: str,
+) -> DispatchOutcome:
+    """Map the completion-processing tag to the queue's DispatchOutcome.
+
+    Both ``execute_automation_import_job`` and ``execute_youtube_import_job``
+    drive the same completion-processing protocol (issue #474) and need to
+    report the same four outcomes back to the importer queue; this is the
+    single conversion so the two callers don't duplicate the match.
+    """
+    if isinstance(result, CompletionDeferred):
+        return DispatchOutcome(
+            success=False,
+            message=deferred_message,
+            deferred=True,
+        )
+    if isinstance(result, CompletionDispatched):
+        return result.outcome
+    if isinstance(result, Completed):
+        return DispatchOutcome(success=True, message=completed_message)
+    if isinstance(result, CompletionFailed):
+        return DispatchOutcome(success=False, message=failed_message)
+    assert_never(result)
+
+
 def execute_automation_import_job(
     db: PipelineDB,
     job: ImportJob,
@@ -268,24 +304,13 @@ def execute_automation_import_job(
     finally:
         if created_ctx:
             runtime_ctx.pipeline_db_source.close()
-    if result is None:
-        return DispatchOutcome(
-            success=False,
-            message=(
-                "Automation import was deferred or requires manual recovery"
-            ),
-            deferred=True,
-        )
-    if isinstance(result, DispatchOutcome):
-        return result
-    if result:
-        return DispatchOutcome(
-            success=True,
-            message="Automation import processing completed",
-        )
-    return DispatchOutcome(
-        success=False,
-        message="Automation import processing failed",
+    return _dispatch_outcome_from_completion(
+        result,
+        deferred_message=(
+            "Automation import was deferred or requires manual recovery"
+        ),
+        completed_message="Automation import processing completed",
+        failed_message="Automation import processing failed",
     )
 
 
@@ -381,7 +406,7 @@ def execute_youtube_import_job(
     created_ctx = ctx is None
     runtime_ctx = ctx or _build_runtime_context(db)
     try:
-        outcome = process_completed_album(
+        result = process_completed_album(
             entry,
             [],
             runtime_ctx,
@@ -391,24 +416,13 @@ def execute_youtube_import_job(
         if created_ctx:
             runtime_ctx.pipeline_db_source.close()
 
-    if outcome is None:
-        return DispatchOutcome(
-            success=False,
-            message=(
-                "YouTube import was deferred or requires manual recovery"
-            ),
-            deferred=True,
-        )
-    if isinstance(outcome, DispatchOutcome):
-        return outcome
-    if outcome:
-        return DispatchOutcome(
-            success=True,
-            message="YouTube import processing completed",
-        )
-    return DispatchOutcome(
-        success=False,
-        message="YouTube import processing failed",
+    return _dispatch_outcome_from_completion(
+        result,
+        deferred_message=(
+            "YouTube import was deferred or requires manual recovery"
+        ),
+        completed_message="YouTube import processing completed",
+        failed_message="YouTube import processing failed",
     )
 
 

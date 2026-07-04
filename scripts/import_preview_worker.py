@@ -136,7 +136,7 @@ def _materialize_automation_preview_path(
     """Ensure automation preview has the same stable folder importer uses."""
     from lib.config import read_runtime_config
     from lib.download import reconstruct_grab_list_entry
-    from lib.download_processing import _materialize_processing_dir
+    from lib.download_processing import Materialized, _materialize_processing_dir
     from lib.staged_album import StagedAlbum
 
     cfg = read_runtime_config()
@@ -153,7 +153,7 @@ def _materialize_automation_preview_path(
         default_path=canonical_path,
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
-    if materialized is not True:
+    if not isinstance(materialized, Materialized):
         raise ValueError(
             f"Album request {request_id} could not be materialized for preview"
         )

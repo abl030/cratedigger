@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, TYPE_CHECKING, cast
 
+from lib.download_processing import Materialized, MaterializeFailed, MaterializeGuarded
 from lib.slskd_client import TransferSnapshot
 from tests.helpers import (
     make_ctx_with_fake_db,
@@ -1300,8 +1301,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     """Test process_completed_album return ownership."""
 
     def test_returns_true_on_success(self):
-        """Successful file move + processing returns True."""
-        from lib.download_processing import process_completed_album
+        """Successful file move + processing returns Completed."""
+        from lib.download_processing import Completed, process_completed_album
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create source file
@@ -1320,13 +1321,13 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
             result = process_completed_album(album, [], ctx, import_job_id=1)
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
 
     def test_dispatch_outcome_summary_is_returned_to_queue_owner(
         self,
     ):
         """Auto-import summaries must survive for the importer queue result."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionDispatched, process_completed_album
         from lib.dispatch import DispatchOutcome
         import tempfile, os
 
@@ -1359,7 +1360,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 album, [], ctx, import_job_id=1, validate_fn=_stub_validate,
             )
 
-            self.assertIs(result, stub_outcome)
+            assert isinstance(result, CompletionDispatched)
+            self.assertIs(result.outcome, stub_outcome)
             self.assertEqual(len(validate_calls), 1)
 
     @patch("lib.beets.beets_validate")
@@ -1368,8 +1370,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
         mock_beets_validate,
     ):
         """Validation rejections must fail the queue job, not look completed."""
-        from lib.download_processing import process_completed_album
-        from lib.dispatch import DispatchOutcome
+        from lib.download_processing import CompletionDispatched, process_completed_album
         from lib.quality import ValidationResult
         import tempfile
 
@@ -1418,11 +1419,12 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            assert isinstance(result, DispatchOutcome)
-            self.assertFalse(result.success)
-            self.assertFalse(result.deferred)
+            assert isinstance(result, CompletionDispatched)
+            outcome = result.outcome
+            self.assertFalse(outcome.success)
+            self.assertFalse(outcome.deferred)
             self.assertEqual(
-                result.message,
+                outcome.message,
                 "Rejected: high_distance - distance=0.1919",
             )
             source = ctx.pipeline_db_source
@@ -1430,9 +1432,9 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertEqual(len(source.reject_and_requeue_calls), 1)
 
     def test_returns_false_on_file_move_failure(self):
-        """A mid-album move failure returns False and rolls back the
-        already-moved files to their stamped sources."""
-        from lib.download_processing import process_completed_album
+        """A mid-album move failure returns CompletionFailed and rolls back
+        the already-moved files to their stamped sources."""
+        from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             src_dir = os.path.join(tmpdir, "Music")
@@ -1467,14 +1469,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 result = process_completed_album(
                     album, [], ctx, import_job_id=1)
 
-            self.assertFalse(result)
+            self.assertIsInstance(result, CompletionFailed)
             # Rollback restored the first file to its stamped source.
             self.assertTrue(os.path.exists(srcs[0]))
             self.assertTrue(os.path.exists(srcs[1]))
 
     def test_resumes_from_persisted_current_path(self):
         """A post-move retry must process the persisted current_path, not slskd."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
@@ -1504,13 +1506,13 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(files[0].import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
     def test_resumes_multi_disc_from_persisted_current_path(self):
         """Resume must preserve the staged multi-disc filenames on disk."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
@@ -1542,13 +1544,13 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(file.import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
     def test_persists_canonical_current_path_for_fresh_materialization(self):
         """The first local materialization must persist the canonical path to DB."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_db = FakePipelineDB()
@@ -1583,7 +1585,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(
                 fake_db.request(42)["active_download_state"]["current_path"],
                 os.path.join(tmpdir, "downloads", "Artist - Album (2024)"),
@@ -1595,7 +1597,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
         mock_beets_validate,
     ):
         """Post-move auto-import retries must stop before re-dispatch."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionDeferred, process_completed_album
         from lib.quality import ValidationResult
         from lib.processing_paths import stage_to_ai_path
         import tempfile
@@ -1645,7 +1647,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                     dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
                 )
 
-            self.assertIsNone(result)
+            self.assertIsInstance(result, CompletionDeferred)
             self.assertEqual(dispatch_calls, [])
             self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
 
@@ -1653,7 +1655,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
         self,
     ):
         """Request-scoped auto-import staging without request id must stay blocked."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionDeferred, process_completed_album
         from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1692,14 +1694,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             with self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertIsNone(result)
+            self.assertIsInstance(result, CompletionDeferred)
             self.assertIn("missing db_request_id", "\n".join(logs.output))
 
     def test_post_validation_staged_path_without_request_id_still_resumes(
         self,
     ):
         """Post-validation staging remains resumable without the auto-import guard."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         from lib.processing_paths import stage_to_ai_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1738,7 +1740,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(album.files[0].import_path, resumed_file)
 
     @patch("lib.beets.beets_validate")
@@ -1747,7 +1749,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
         mock_beets_validate,
     ):
         """Legacy shared staged retries must stop before validation reruns."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionDeferred, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -1784,14 +1786,14 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                     dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
                 )
 
-            self.assertIsNone(result)
+            self.assertIsInstance(result, CompletionDeferred)
             mock_beets_validate.assert_not_called()
             self.assertEqual(dispatch_calls, [])
             self.assertIn("legacy shared staged path", "\n".join(logs.output))
 
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             album = make_grab_list_entry(
@@ -1812,11 +1814,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertFalse(result)
+            self.assertIsInstance(result, CompletionFailed)
 
     def test_returns_false_when_persisted_current_path_missing_file(self):
         """Resume dir must contain every tracked file before processing continues."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
@@ -1840,7 +1842,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertFalse(result)
+            self.assertIsInstance(result, CompletionFailed)
 
 
 class TestHandleValidResultMissingMbid(unittest.TestCase):
@@ -1926,7 +1928,7 @@ class TestEventPathMaterialization(unittest.TestCase):
         # slskd placed the file at an arbitrary event-reported location
         # with a collision suffix; the move follows the stamp and the
         # destination keeps the clean remote basename.
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = os.path.join(
@@ -1939,14 +1941,14 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertFalse(os.path.exists(event_path))
             self.assertEqual(self._moved(tmpdir), [self.FNAME])
 
     def test_stamped_forward_slash_remote_path_keeps_basename(self):
         # Destination basename extraction accepts slash-normalized remote
         # paths regardless of where the stamped source lives.
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             src = os.path.join(tmpdir, "Kid A", self.FNAME)
@@ -1969,14 +1971,14 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(self._moved(tmpdir), [self.FNAME])
 
     def test_unstamped_file_is_hard_failure(self):
         # No event was ever ingested for this file (pre-bootstrap
         # completion or cursor gap) — hard failure with diagnostics, no
         # guessing at on-disk locations.
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             # File IS on disk at the historical inferred location — the
@@ -1991,7 +1993,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 result = process_completed_album(
                     album, [], ctx, import_job_id=1)
 
-            self.assertFalse(result)
+            self.assertIsInstance(result, CompletionFailed)
             self.assertTrue(os.path.exists(src))
             joined = "\n".join(logs.output)
             self.assertIn("EVENT-PATH MISSING", joined)
@@ -2000,7 +2002,7 @@ class TestEventPathMaterialization(unittest.TestCase):
     def test_stale_stamp_without_dst_is_hard_failure(self):
         # Stamped path vanished and the destination has no already-moved
         # copy — hard failure, diagnostics name the stale stamp.
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             album, ctx = self._album(
@@ -2010,7 +2012,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 result = process_completed_album(
                     album, [], ctx, import_job_id=1)
 
-            self.assertFalse(result)
+            self.assertIsInstance(result, CompletionFailed)
             joined = "\n".join(logs.output)
             self.assertIn("EVENT-PATH MISSING", joined)
             self.assertIn("stale_stamp", joined)
@@ -2019,7 +2021,7 @@ class TestEventPathMaterialization(unittest.TestCase):
         """One stamped file, one unstamped: the pre-flight check fails the
         album BEFORE any move, so the stamped file stays at its event
         location — no move-then-rollback churn."""
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             event_src = os.path.join(
@@ -2052,7 +2054,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 result = process_completed_album(
                     album, [], ctx, import_job_id=1)
 
-            self.assertFalse(result)
+            self.assertIsInstance(result, CompletionFailed)
             self.assertTrue(os.path.exists(event_src))
             self.assertIn("EVENT-PATH MISSING", "\n".join(logs.output))
             dst_dir = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
@@ -2062,7 +2064,7 @@ class TestEventPathMaterialization(unittest.TestCase):
     def test_already_moved_resume_still_skips(self):
         # Crash-resume: dst exists, the stamped source is gone. The file
         # counts as already moved; processing succeeds.
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             dst_dir = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
@@ -2074,13 +2076,13 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(self._moved(tmpdir), [self.FNAME])
 
     def test_unstamped_already_moved_resume_still_skips(self):
         # Even an unstamped file counts as already moved when the
         # destination copy exists — pre-flight must not hard-fail it.
-        from lib.download_processing import process_completed_album
+        from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             dst_dir = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
@@ -2091,25 +2093,44 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
-            self.assertTrue(result)
+            self.assertIsInstance(result, Completed)
             self.assertEqual(self._moved(tmpdir), [self.FNAME])
 
 
 class TestMaterializeFailureAction(unittest.TestCase):
-    """Pure decision table for the poller's materialize-failure escape."""
+    """Pure decision table for the poller's materialize-failure escape.
+
+    Cases pin the ownership-protocol tags (#474): ``MaterializeGuarded``
+    (historical bare ``None``) always "leave"s regardless of age;
+    ``MaterializeFailed`` (historical bare ``False``) "retry"s within
+    the grace window and "reset"s past it; ``Materialized`` (historical
+    bare ``True``) also "leave"s — callers only invoke this function
+    after already excluding the success case, but the no-op answer must
+    still hold so a future caller that skips the exclusion check fails
+    safe rather than auto-resetting a successful materialization.
+    """
 
     NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
     OLD = (NOW - timedelta(hours=2)).isoformat()
     FRESH = (NOW - timedelta(minutes=5)).isoformat()
 
     CASES = [
-        ("none_fresh_leaves", None, FRESH, "leave"),
-        ("none_old_leaves_manual_recovery_alone", None, OLD, "leave"),
-        ("false_fresh_retries", False, FRESH, "retry"),
-        ("false_old_resets", False, OLD, "reset"),
-        ("false_no_start_retries", False, None, "retry"),
-        ("false_unparseable_start_retries", False, "not-a-date", "retry"),
-        ("naive_timestamp_treated_utc", False,
+        ("guarded_fresh_leaves",
+         MaterializeGuarded(detail="release_lock_held"), FRESH, "leave"),
+        ("guarded_old_leaves_manual_recovery_alone",
+         MaterializeGuarded(detail="release_lock_held"), OLD, "leave"),
+        ("materialized_leaves_as_no_op_safety_net",
+         Materialized(), OLD, "leave"),
+        ("failed_fresh_retries",
+         MaterializeFailed(reason="staged_path_missing"), FRESH, "retry"),
+        ("failed_old_resets",
+         MaterializeFailed(reason="staged_path_missing"), OLD, "reset"),
+        ("failed_no_start_retries",
+         MaterializeFailed(reason="staged_path_missing"), None, "retry"),
+        ("failed_unparseable_start_retries",
+         MaterializeFailed(reason="staged_path_missing"), "not-a-date", "retry"),
+        ("naive_timestamp_treated_utc",
+         MaterializeFailed(reason="staged_path_missing"),
          (NOW - timedelta(hours=2)).replace(tzinfo=None).isoformat(), "reset"),
     ]
 

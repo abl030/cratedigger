@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
 from lib.download_recovery import classify_processing_path
@@ -66,6 +67,102 @@ _ABANDON_PATH_PRESENT = "present"
 _ABANDON_PATH_ABSENT = "absent"
 _ABANDON_PATH_UNKNOWN = "unknown"
 
+
+# === Tagged results for the completion-processing ownership protocol (#474) ===
+#
+# ``_materialize_processing_dir`` and ``process_completed_album`` used to
+# return an anonymous ``bool | None`` / ``bool | DispatchOutcome | None``
+# union where ``None`` meant "leave the row untouched" — a convention
+# documented only in ~30-line comment blocks at each call site. These
+# frozen dataclasses name each outcome so pyright can exhaustiveness-check
+# every consumer (``match``/``isinstance`` + ``typing.assert_never``)
+# instead of relying on identity comparisons against ``True``/``False``/
+# ``None``. Never persisted — plain ``@dataclass``, not ``msgspec.Struct``
+# (see CLAUDE.md "Wire-boundary types").
+
+
+@dataclass(frozen=True)
+class Materialized:
+    """``_materialize_processing_dir`` succeeded: the album's tracked files
+    are present at ``staged_album.current_path`` (materialized this call,
+    or resumed from a prior crashed attempt). Historical bare ``True``."""
+
+
+@dataclass(frozen=True)
+class MaterializeFailed:
+    """A local-only materialize failure (missing event stamp, a file-move
+    error, a vanished staged directory/file, a failed ``mkdir``). The
+    caller retries within the materialize grace window, then self-heals
+    the request back to ``wanted``. Historical bare ``False``.
+
+    ``reason`` is a short, machine-stable diagnostic code — consumers
+    must branch on the type tag, never on this string.
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class MaterializeGuarded:
+    """Ownership/resume ambiguity: leave the row untouched (an active
+    release lock, unverifiable subprocess-start evidence, a post-move
+    resume block). Historical bare ``None``.
+
+    ``detail`` is diagnostic only — consumers must branch on the type
+    tag, never on this string.
+    """
+
+    detail: str
+
+
+MaterializeResult = Materialized | MaterializeFailed | MaterializeGuarded
+"""Return type of ``_materialize_processing_dir``."""
+
+
+@dataclass(frozen=True)
+class Completed:
+    """``process_completed_album`` succeeded without producing a dispatch
+    summary — no validation configured, or the redownload path already
+    called ``mark_done`` directly. Caller finalizes to ``imported`` only
+    if the request row is still ``downloading``. Historical bare ``True``.
+    """
+
+
+@dataclass(frozen=True)
+class CompletionFailed:
+    """A non-dispatch local failure (materialization failed). Caller
+    resets to ``wanted`` only if the request row is still ``downloading``.
+    Historical bare ``False``.
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class CompletionDispatched:
+    """The validation/dispatch path already owned the request transition.
+
+    ``outcome`` is an import summary for the queue owner ONLY — it must
+    NEVER drive a fallback status transition. Historical raw
+    ``DispatchOutcome`` return value.
+    """
+
+    outcome: DispatchOutcome
+
+
+@dataclass(frozen=True)
+class CompletionDeferred:
+    """The path intentionally left request state untouched: release-lock
+    contention, a guarded post-move staged path, or an ownership-less
+    reject needing manual recovery. Caller must NOT touch status.
+    Historical bare ``None``.
+    """
+
+    detail: str
+
+
+CompletionResult = Completed | CompletionFailed | CompletionDispatched | CompletionDeferred
+"""Return type of ``process_completed_album`` / ``_run_completed_processing``."""
 
 
 def _run_post_rejection_wrong_match_cleanup(
@@ -455,7 +552,7 @@ def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
-) -> bool | None:
+) -> MaterializeResult:
     """Ensure ``staged_album.current_path`` holds the album's local files."""
     canonical_path = _canonical_import_folder_path(
         album_data, ctx.cfg.slskd_download_dir)
@@ -476,7 +573,7 @@ def _materialize_processing_dir(
                 "verified; manual recovery is required."
             ),
         )
-        return None
+        return MaterializeGuarded(detail="missing_db_request_id_for_request_scoped_staged")
     current_path_location = classify_processing_path(
         current_path=staged_album.current_path,
         artist=album_data.artist,
@@ -503,7 +600,11 @@ def _materialize_processing_dir(
                         "redownload"
                     ),
                 )
-                return False if handled else None
+                if handled:
+                    return MaterializeFailed(
+                        reason="abandoned_interrupted_auto_import")
+                return MaterializeGuarded(
+                    detail="abandon_blocked_release_lock_or_probe_unknown")
             if subprocess_started is None:
                 _log_post_move_resume_blocked(
                     album_data,
@@ -514,7 +615,8 @@ def _materialize_processing_dir(
                         "verified; manual recovery is required."
                     ),
                 )
-                return None
+                return MaterializeGuarded(
+                    detail="ownership_unverifiable_request_scoped_staged")
         if not os.path.isdir(staged_album.current_path):
             if (
                 current_path_location.blocks_post_move_retry
@@ -531,9 +633,10 @@ def _materialize_processing_dir(
                         "recovery is required."
                     ),
                 )
-                return None
+                return MaterializeGuarded(
+                    detail="post_move_dir_missing_resume_blocked")
             logger.error(f"Current staged path missing: {staged_album.current_path}")
-            return False
+            return MaterializeFailed(reason="staged_path_missing")
         staged_album.bind_import_paths(album_data.files)
         missing_paths: list[str] = []
         for file in album_data.files:
@@ -556,12 +659,13 @@ def _materialize_processing_dir(
                         "already have started; manual recovery is required."
                     ),
                 )
-                return None
+                return MaterializeGuarded(
+                    detail="post_move_files_missing_resume_blocked")
             logger.error(
                 "Current staged path is missing tracked files: %s",
                 ", ".join(missing_paths),
             )
-            return False
+            return MaterializeFailed(reason="staged_path_missing_tracked_files")
         if (
             current_path_location.blocks_auto_import_dispatch
             and subprocess_started is not False
@@ -582,9 +686,9 @@ def _materialize_processing_dir(
                 current_path=staged_album.current_path,
                 detail=detail,
             )
-            return None
+            return MaterializeGuarded(detail="auto_import_dispatch_blocked_post_move")
         album_data.import_folder = staged_album.current_path
-        return True
+        return Materialized()
 
     # Pre-flight: every file must carry a stamped, on-disk local_path from
     # slskd's DownloadFileComplete event — or already-moved evidence at the
@@ -618,7 +722,7 @@ def _materialize_processing_dir(
             len(missing_stamps),
             "; ".join(missing_stamps),
         )
-        return False
+        return MaterializeFailed(reason="event_path_missing")
 
     rm_dirs: list[str] = []
     moved_files_history: list[tuple[str, str]] = []
@@ -637,7 +741,7 @@ def _materialize_processing_dir(
                 canonical_path,
                 album_data.db_request_id,
             )
-            return False
+            return MaterializeFailed(reason="staging_dir_create_failed")
 
     for file in album_data.files:
         dst_file = file.import_path
@@ -667,7 +771,7 @@ def _materialize_processing_dir(
                 os.rmdir(canonical_path)
             except OSError:
                 logger.warning(f"Could not remove temp import directory {canonical_path}")
-            return False
+            return MaterializeFailed(reason="file_move_failed")
 
     for rm_dir in rm_dirs:
         if os.path.abspath(rm_dir) == os.path.abspath(canonical_path):
@@ -679,7 +783,7 @@ def _materialize_processing_dir(
 
     album_data.import_folder = staged_album.current_path
     staged_album.persist_current_path(db)
-    return True
+    return Materialized()
 
 
 def _check_staged_audio_manifest(
@@ -714,18 +818,22 @@ def process_completed_album(
     validate_fn: "Callable[..., DispatchOutcome | None] | None" = None,
     handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
     dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
-) -> "bool | DispatchOutcome | None":
+) -> CompletionResult:
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
-    Returns the local processing result:
-    - ``True`` — local non-dispatch processing succeeded. Outer caller may
-      finalize only if the request row is still ``downloading``.
-    - ``False`` — local non-dispatch processing failed. Outer caller resets
-      to ``wanted`` only if the request row is still ``downloading``.
-    - ``DispatchOutcome`` — the validation / dispatch path already owned the
-      request transition and produced an import summary for the queue owner.
-    - ``None`` — the validation / dispatch path intentionally left state
-      untouched for retry / manual recovery. Outer caller must NOT touch status.
+    Returns the local processing result (see ``CompletionResult`` variants):
+    - ``Completed`` — local non-dispatch processing succeeded. Outer caller
+      may finalize to ``imported`` only if the request row is still
+      ``downloading``. Historical bare ``True``.
+    - ``CompletionFailed`` — local non-dispatch processing failed. Outer
+      caller resets to ``wanted`` only if the request row is still
+      ``downloading``. Historical bare ``False``.
+    - ``CompletionDispatched`` — the validation / dispatch path already owned
+      the request transition; ``.outcome`` is an import summary for the
+      queue owner only. Historical raw ``DispatchOutcome``.
+    - ``CompletionDeferred`` — the validation / dispatch path intentionally
+      left state untouched for retry / manual recovery. Outer caller must
+      NOT touch status. Historical bare ``None``.
     """
     staged_album = StagedAlbum.from_entry(
         album_data,
@@ -733,8 +841,11 @@ def process_completed_album(
             album_data, ctx.cfg.slskd_download_dir),
     )
     materialized = _materialize_processing_dir(album_data, staged_album, ctx)
-    if materialized is not True:
-        return materialized
+    if isinstance(materialized, MaterializeFailed):
+        return CompletionFailed(reason=materialized.reason)
+    if isinstance(materialized, MaterializeGuarded):
+        return CompletionDeferred(detail=materialized.detail)
+    assert isinstance(materialized, Materialized)
 
     logger.info(f"Processing completed download: {album_data.artist} - {album_data.title}")
     if ctx.cfg.beets_validation_enabled and album_data.mb_release_id:
@@ -749,16 +860,16 @@ def process_completed_album(
         )
         if outcome is not None:
             if outcome.deferred:
-                # Release-lock contention. Propagate ``None`` so
-                # ``_run_completed_processing`` leaves the request's
+                # Release-lock contention. Propagate ``CompletionDeferred``
+                # so ``_run_completed_processing`` leaves the request's
                 # status, active_download_state, and staged files
                 # untouched for the next cycle to retry.
-                return None
-            # DispatchOutcome is an import summary only. Return it so the
+                return CompletionDeferred(detail=outcome.message)
+            # DispatchOutcome is an import summary only. Wrap it so the
             # importer queue can record the real terminal job outcome, but do
             # not let it drive fallback request-status transitions below.
-            return outcome
-    return True
+            return CompletionDispatched(outcome=outcome)
+    return Completed()
 
 
 def _process_beets_validation(

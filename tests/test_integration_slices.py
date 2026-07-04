@@ -2521,7 +2521,9 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
 
 class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
-    """The ``process_completed_album`` return ownership seam.
+    """The ``process_completed_album`` return ownership seam (#474 tagged
+    ``CompletionResult``: ``Completed`` / ``CompletionFailed`` /
+    ``CompletionDispatched`` / ``CompletionDeferred``).
 
     Pre-#133 this was a 2-way ``bool``: True → flip to ``imported``,
     False → reset to ``wanted``. That binary misclassified release-
@@ -2531,11 +2533,11 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
     Codex R3 P2/P3 then flagged that the reset clobbered spectral
     state and staged files.
 
-    The proper seam separates local bool fallback, ``None`` deferred
-    retry, and ``DispatchOutcome`` queue summaries. These tests pin the
-    branching at
-    ``_run_completed_processing`` so a future refactor can't silently
-    collapse dispatch ownership into bool fallback transitions.
+    The proper seam separates local non-dispatch success/failure,
+    deferred retry, and dispatch queue summaries onto distinct tags.
+    These tests pin the branching at ``_run_completed_processing`` so a
+    future refactor can't silently collapse dispatch ownership into
+    fallback status transitions.
     """
 
     def _ctx(self, db: FakePipelineDB):
@@ -2553,11 +2555,12 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             files=[])
 
     def test_deferred_outcome_leaves_status_downloading(self):
-        """``process_completed_album`` returning ``None`` must NOT touch
-        the request's status. The next ``poll_active_downloads`` cycle
-        will re-enter via status='downloading'.
+        """``process_completed_album`` returning ``CompletionDeferred`` must
+        NOT touch the request's status. The next ``poll_active_downloads``
+        cycle will re-enter via status='downloading'.
         """
         from lib import download as dl_mod
+        from lib.download_processing import CompletionDeferred
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading",
@@ -2566,7 +2569,8 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: None,
+            process_album_fn=lambda *_a, **_kw: CompletionDeferred(
+                detail="release_lock_contention"),
         )
         self.assertEqual(db.request(42)["status"], "downloading")
         # Spectral untouched.
@@ -2576,39 +2580,44 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         # apply_transition at all.
         self.assertEqual(db.status_history, [])
 
-    def test_true_outcome_flips_to_imported(self):
-        """Happy path: ``process_completed_album`` returns ``True`` and
+    def test_completed_outcome_flips_to_imported(self):
+        """Happy path: ``process_completed_album`` returns ``Completed`` and
         status was 'downloading' → flip to 'imported'."""
         from lib import download as dl_mod
+        from lib.download_processing import Completed
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: True,
+            process_album_fn=lambda *_a, **_kw: Completed(),
         )
         self.assertEqual(db.request(42)["status"], "imported")
 
-    def test_false_outcome_resets_to_wanted_with_attempt(self):
-        """Failure: ``process_completed_album`` returns ``False`` →
-        reset to 'wanted' with an attempt increment (genuine failure
+    def test_completion_failed_resets_to_wanted_with_attempt(self):
+        """Failure: ``process_completed_album`` returns ``CompletionFailed``
+        → reset to 'wanted' with an attempt increment (genuine failure
         DOES deserve a backoff-scored attempt)."""
         from lib import download as dl_mod
+        from lib.download_processing import CompletionFailed
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: False,
+            process_album_fn=lambda *_a, **_kw: CompletionFailed(
+                reason="staged_path_missing"),
         )
         self.assertEqual(db.request(42)["status"], "wanted")
 
-    def test_false_outcome_after_inner_rejection_does_not_double_transition(self):
+    def test_completion_failed_after_inner_rejection_does_not_double_transition(self):
         """If ``process_completed_album`` already requeued the row, the outer
-        ``False`` branch must not apply a second reset-to-wanted transition.
+        ``CompletionFailed`` branch must not apply a second
+        reset-to-wanted transition.
         """
         from lib import download as dl_mod
         from lib import transitions
+        from lib.download_processing import CompletionFailed
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -2621,7 +2630,7 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
                     from_status="downloading",
                 ),
             )
-            return False
+            return CompletionFailed(reason="beets_validation_rejected")
 
         dl_mod._run_completed_processing(
             self._entry(),
@@ -2637,9 +2646,12 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         self.assertEqual(db.status_history, [(42, "wanted")])
 
     def test_dispatch_outcome_does_not_drive_fallback_transition(self):
-        """Dispatch summaries are queue results, not fallback bool outcomes."""
+        """Dispatch summaries are queue results, not fallback status
+        transitions — ``CompletionDispatched`` passes the wrapped
+        ``DispatchOutcome`` straight through untouched."""
         from lib import download as dl_mod
         from lib.dispatch import DispatchOutcome
+        from lib.download_processing import CompletionDispatched
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -2648,23 +2660,60 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             message="Pre-import gate rejected",
         )
 
-        with patch.object(
-            dl_mod,
-            "process_completed_album",
-            return_value=dispatch_outcome,
-        ):
-            outcome = dl_mod._run_completed_processing(
-                self._entry(),
-                42,
-                self._state(),
-                db,
-                self._ctx(db),
-                import_job_id=1,
-            )
+        result = dl_mod._run_completed_processing(
+            self._entry(),
+            42,
+            self._state(),
+            db,
+            self._ctx(db),
+            import_job_id=1,
+            process_album_fn=lambda *_a, **_kw: CompletionDispatched(
+                outcome=dispatch_outcome),
+        )
 
-        self.assertIs(outcome, dispatch_outcome)
+        assert isinstance(result, CompletionDispatched)
+        self.assertIs(result.outcome, dispatch_outcome)
         self.assertEqual(db.request(42)["status"], "downloading")
         self.assertEqual(db.status_history, [])
+
+    def test_real_process_completed_album_success_flips_to_imported(self):
+        """Integration slice: no DI stub — the REAL ``process_completed_album``
+        (materialize + validation-disabled path) runs through
+        ``_run_completed_processing`` end to end, and the ``Completed`` tag
+        it returns drives the status flip to 'imported'."""
+        from lib import download as dl_mod
+        from tests.helpers import make_download_file
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_dir = os.path.join(tmpdir, "source_dir")
+            os.makedirs(src_dir)
+            src_file = os.path.join(src_dir, "01 - Track.mp3")
+            with open(src_file, "w") as f:
+                f.write("fake audio")
+
+            files = [make_download_file(
+                filename="source_dir\\01 - Track.mp3",
+                file_dir="source_dir",
+            )]
+            files[0].local_path = src_file
+            entry = self._entry()
+            entry.files = files
+            entry.mb_release_id = ""
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, status="downloading"))
+            ctx = self._ctx(db)
+            ctx.cfg.slskd_download_dir = tmpdir
+            ctx.cfg.beets_validation_enabled = False
+
+            result = dl_mod._run_completed_processing(
+                entry, 42, self._state(), db, ctx, import_job_id=1,
+            )
+
+        from lib.download_processing import Completed
+        self.assertIsInstance(result, Completed)
+        self.assertEqual(db.request(42)["status"], "imported")
+
 
 class TestBadAudioHashSlice(unittest.TestCase):
     """Integration slice: bad-audio-hash gate inside ``measure_preimport_state``.
@@ -3882,7 +3931,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         Exercises ``_materialize_processing_dir`` (the actual fire site
         seen in production logs at ``lib/download.py:583``).
         """
-        from lib.download_processing import _materialize_processing_dir
+        from lib.download_processing import Materialized, _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3893,12 +3942,13 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
             result = _materialize_processing_dir(
                 entry, staged_album, ctx)
 
-        self.assertIs(
-            result, True,
+        self.assertIsInstance(
+            result, Materialized,
             "Legacy wedged row (subprocess never launched) must "
-            "materialize the existing files for retry. Returning None "
-            "perpetuates the 2026-05-04 wedge: every cycle requeues a "
-            "job that fails in <50ms with POST-MOVE RESUME BLOCKED.",
+            "materialize the existing files for retry. Returning "
+            "MaterializeGuarded perpetuates the 2026-05-04 wedge: every "
+            "cycle requeues a job that fails in <50ms with POST-MOVE "
+            "RESUME BLOCKED.",
         )
         # And ``import_folder`` must be wired to the staged path so the
         # downstream tag-write/beets-validate sequence picks the files up.
@@ -3910,7 +3960,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         attempt, preserves leftover files under failed_imports, and
         resets the request for a clean redownload.
         """
-        from lib.download_processing import _materialize_processing_dir
+        from lib.download_processing import MaterializeFailed, _materialize_processing_dir
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3928,9 +3978,9 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
             )
             moved = os.listdir(failed_parent)
 
-        self.assertIs(
+        self.assertIsInstance(
             result,
-            False,
+            MaterializeFailed,
             "Subprocess-started residue must not retry in place; it should "
             "abandon and let the next search/download cycle own recovery.",
         )

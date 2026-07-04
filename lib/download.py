@@ -14,10 +14,19 @@ import logging
 import os
 from datetime import datetime, timezone
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
+                    runtime_checkable)
 
 
 from lib.download_processing import (
+    Completed,
+    CompletionDeferred,
+    CompletionDispatched,
+    CompletionFailed,
+    CompletionResult,
+    Materialized,
+    MaterializeFailed,
+    MaterializeResult,
     _abandon_request_scoped_auto_import,
     _canonical_import_folder_path,
     _log_post_move_resume_blocked,
@@ -36,7 +45,7 @@ from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          decide_download_action,
                          extract_usernames)
 from lib import transitions
-from lib.dispatch import DispatchOutcome, _build_download_info
+from lib.dispatch import _build_download_info
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     ImportJob,
@@ -380,8 +389,8 @@ def _run_completed_processing(
     ctx: CratediggerContext,
     *,
     import_job_id: int,
-    process_album_fn: "Callable[..., bool | DispatchOutcome | None] | None" = None,
-) -> bool | DispatchOutcome | None:
+    process_album_fn: "Callable[..., CompletionResult] | None" = None,
+) -> CompletionResult:
     """Run or resume local post-download processing for a completed album.
 
     ``process_album_fn`` is an opt-in DI seam for tests that exercise the
@@ -403,7 +412,7 @@ def _run_completed_processing(
         _persist_updated_download_state(db, request_id, entry, state)
 
     try:
-        outcome = _process(
+        result = _process(
             entry,
             [],
             ctx,
@@ -412,34 +421,29 @@ def _run_completed_processing(
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
-        return None
+        return CompletionDeferred(detail="unhandled_exception_during_local_processing")
 
-    # Ownership return from ``process_completed_album``:
-    # - True  → processing succeeded; flip to 'imported' if status is
-    #   still 'downloading'.
-    # - False → a non-deferred failure path returned; reset to
-    #   'wanted' only if the request row is still 'downloading'.
-    # - DispatchOutcome → dispatch/finalization already owned request
+    # Ownership return from ``process_completed_album`` (see
+    # ``CompletionResult`` in lib/download_processing.py):
+    # - Completed           → processing succeeded; flip to 'imported' if
+    #   status is still 'downloading'.
+    # - CompletionFailed    → a non-deferred failure path returned; reset
+    #   to 'wanted' only if the request row is still 'downloading'.
+    # - CompletionDispatched → dispatch/finalization already owned request
     #   transitions; return the summary to the queue owner only.
-    # - None  → leave the row untouched. This covers release-lock
-    #   contention, guarded post-move staged paths, and ownership-less
-    #   request rejects that require manual recovery. Do NOT touch state
-    #   here.
-    if outcome is None:
-        return None
+    # - CompletionDeferred  → leave the row untouched. This covers
+    #   release-lock contention, guarded post-move staged paths, and
+    #   ownership-less request rejects that require manual recovery. Do
+    #   NOT touch state here.
+    if isinstance(result, CompletionDeferred):
+        return result
 
-    if isinstance(outcome, DispatchOutcome):
-        return outcome
+    if isinstance(result, CompletionDispatched):
+        return result
 
-    if outcome is not True and outcome is not False:
-        raise TypeError(
-            "process_completed_album returned unsupported outcome "
-            f"{type(outcome).__name__}"
-        )
-
-    refreshed = db.get_request(request_id)
-    if refreshed and refreshed["status"] == "downloading":
-        if outcome is True:
+    if isinstance(result, Completed):
+        refreshed = db.get_request(request_id)
+        if refreshed and refreshed["status"] == "downloading":
             logger.info(f"  process_completed_album succeeded without "
                         f"setting status — setting imported")
             transitions.finalize_request(
@@ -449,7 +453,11 @@ def _run_completed_processing(
                     from_status="downloading",
                 ),
             )
-        elif outcome is False:
+        return result
+
+    if isinstance(result, CompletionFailed):
+        refreshed = db.get_request(request_id)
+        if refreshed and refreshed["status"] == "downloading":
             logger.warning(f"  process_completed_album failed without "
                            f"setting status — resetting to wanted")
             transitions.finalize_request(
@@ -460,7 +468,9 @@ def _run_completed_processing(
                     attempt_type="download",
                 ),
             )
-    return outcome
+        return result
+
+    assert_never(result)
 
 
 def _active_import_job_for_request(
@@ -470,23 +480,25 @@ def _active_import_job_for_request(
 
 
 def materialize_failure_action(
-    materialized: bool | None,
+    materialized: MaterializeResult,
     processing_started_at: str | None,
     now: datetime,
     *,
     grace_seconds: int = PROCESSING_MATERIALIZE_GRACE_S,
 ) -> str:
-    """Decide what the poller does with a non-True materialize outcome.
+    """Decide what the poller does with a non-``Materialized`` outcome.
 
-    - ``"leave"`` — ``None`` marks guarded paths needing manual recovery;
-      NEVER auto-reset those, regardless of age.
-    - ``"retry"`` — ``False`` within the grace window retries next cycle
-      (covers the benign completion-vs-event-write race, which resolves
-      on the next ingest).
-    - ``"reset"`` — ``False`` past the grace window self-heals the
-      request back to 'wanted' for re-download.
+    - ``"leave"`` — ``MaterializeGuarded`` marks paths needing manual
+      recovery; NEVER auto-reset those, regardless of age. (Also the
+      no-op answer if ``materialized`` is actually ``Materialized`` —
+      callers only invoke this after already excluding that case.)
+    - ``"retry"`` — ``MaterializeFailed`` within the grace window retries
+      next cycle (covers the benign completion-vs-event-write race,
+      which resolves on the next ingest).
+    - ``"reset"`` — ``MaterializeFailed`` past the grace window self-heals
+      the request back to 'wanted' for re-download.
     """
-    if materialized is not False:
+    if not isinstance(materialized, MaterializeFailed):
         return "leave"
     if processing_started_at is None:
         return "retry"
@@ -530,7 +542,7 @@ def _enqueue_completed_processing(
         ),
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
-    if materialized is not True:
+    if not isinstance(materialized, Materialized):
         action = materialize_failure_action(
             materialized,
             state.processing_started_at,
