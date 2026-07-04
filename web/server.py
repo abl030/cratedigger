@@ -56,12 +56,16 @@ from web import mb as mb_api
 from web import overlay as _overlay
 from lib.beets_db import BeetsDB
 from lib.pipeline_db import PipelineDB
+from web.routes import api_index as _api_index_routes
 from web.routes import browse as _browse_routes
 from web.routes import disk_coverage as _disk_coverage_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
 from web.routes import imports as _imports_routes
+from web.routes import long_tail as _long_tail_routes
 from web.routes import pipeline as _pipeline_routes
+from web.routes import search_plan as _search_plan_routes
+from web.routes import triage as _triage_routes
 from web.routes import youtube as _youtube_routes
 from web.routes._registry import (
     RouteRegistration,
@@ -77,12 +81,16 @@ from web.routes._registry import (
 # one place they're combined. ``Handler``'s dispatch tables below are
 # derived views over this list — not separately maintained structures.
 ALL_ROUTES: list[RouteRegistration] = merge_registries(
+    _api_index_routes,
     _browse_routes,
     _disk_coverage_routes,
     _labels_routes,
+    _long_tail_routes,
     _pipeline_routes,
     _library_routes,
     _imports_routes,
+    _search_plan_routes,
+    _triage_routes,
     _youtube_routes,
 )
 
@@ -260,7 +268,7 @@ class Handler(BaseHTTPRequestHandler):
     # single merged ``ALL_ROUTES`` registry above — not separately
     # maintained structures. Descriptions and contract classification
     # live on each ``RouteRegistration`` itself; see ``ALL_ROUTES``,
-    # ``get_api_index`` (web/routes/pipeline.py), and
+    # ``get_api_index`` (web/routes/api_index.py), and
     # ``TestRouteContractAudit`` (tests/web/test_route_audit.py).
     _FUNC_GET_ROUTES: dict[str, object] = build_get_routes(ALL_ROUTES)
     _FUNC_GET_PATTERNS: list[tuple[re.Pattern[str], object]] = (
