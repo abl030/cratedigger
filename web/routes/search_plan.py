@@ -12,12 +12,11 @@ import logging
 import msgspec
 from pydantic import BaseModel, Field, model_validator
 
+from lib.quality import CandidateScore
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
 
 logger = logging.getLogger(__name__)
-
-from lib.quality import CandidateScore
 
 
 def _server():
