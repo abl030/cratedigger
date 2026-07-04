@@ -339,7 +339,7 @@ class CratediggerConfig:
             musicbrainz_api_base=get("MusicBrainz", "api_base", "https://musicbrainz.org"),
             discogs_api_base=get("Discogs", "api_base", ""),
             # Quality Ranks — codec-aware comparison policy. Missing section
-            # yields the default QualityRankConfig (see lib/quality.py).
+            # yields the default QualityRankConfig (see lib/quality/ranks.py).
             quality_ranks=QualityRankConfig.from_ini(config),
             # Pipeline DB
             pipeline_db_enabled=getbool("Pipeline DB", "enabled", False),

@@ -28,7 +28,7 @@ Always begin with the repo rules before forming conclusions.
 5. Read `.claude/rules/nix-shell.md` for Python or test changes.
 6. Read path-scoped rules for any touched files:
    - `.claude/rules/pipeline-db.md` for `lib/pipeline_db.py` or `scripts/pipeline_cli.py`
-   - `.claude/rules/harness.md` for `harness/**`, `lib/beets.py`, or `lib/quality.py`
+   - `.claude/rules/harness.md` for `harness/**`, `lib/beets.py`, or `lib/quality/**`
    - `.claude/rules/web.md` for `web/**`
    - `.claude/rules/deploy.md` when deployment or migration work is in scope
 
@@ -74,7 +74,7 @@ If the user asked for a review-only pass, stop after findings. If the user asked
 For Cratedigger specifically:
 
 - use typed dataclasses, not dict bridges
-- keep decision logic in `lib/quality.py` when the behavior is a pure decision
+- keep decision logic in `lib/quality/` when the behavior is a pure decision
 - keep pipeline logging complete and typed
 - ensure new code is actually wired into production paths
 

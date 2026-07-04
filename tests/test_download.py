@@ -4258,7 +4258,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
 # Pins that ctx.cfg.quality_ranks actually reaches rejection_backfill_override.
 # Pure-function tests in test_quality_decisions.py cover the decision logic
 # itself; this test guards the wiring layer between download.py and
-# lib/quality.py so a future refactor can't silently drop the cfg argument.
+# lib/quality/ so a future refactor can't silently drop the cfg argument.
 
 class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
     """_compute_rejection_backfill must thread ctx.cfg.quality_ranks through

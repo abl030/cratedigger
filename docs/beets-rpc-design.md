@@ -276,7 +276,7 @@ fragile subprocess-contract code.
    (`mb_release_id` / `album_requests.mb_release_id`). The RPC
    should keep this opaque — `validate_import(target_release_id=...)`
    where the RPC inspects the format and dispatches to the right
-   plugin. `detect_release_source()` from `lib/quality.py` moves
+   plugin. `detect_release_source()` from `lib/release_identity.py` moves
    into the RPC server.
 
 ## Porting plan
@@ -334,7 +334,7 @@ boundary.
   and the `03bfc63` defensive machinery (always-keep, pre-flight surgical
   remove, sibling `beet move`) remains valuable as defense-in-depth +
   `%aunique` correctness regardless of the RPC vs. subprocess model.
-- Quality decisions remain in `lib/quality.py`. The RPC is an IO
+- Quality decisions remain in `lib/quality/`. The RPC is an IO
   boundary, not a decision layer.
 - Beets version upgrades can still break us if they change
   library APIs. Testing against the dev shell's pinned beets is

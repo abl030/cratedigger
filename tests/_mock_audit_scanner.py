@@ -157,7 +157,6 @@ _LEAF_SEAM_PATTERNS = [
     # ``__IMPORT_RESULT__`` sentinel and decodes it via msgspec.
     # Patching it is morally equivalent to constructing a fake harness
     # stdout — same wire-boundary seam as ``beets_validate``.
-    re.compile(r"^lib\.quality\.parse_import_result$"),
     re.compile(r"^lib\.dispatch\.subprocess_runner\.parse_import_result$"),
 
     # Spectral / audio measurement wrappers. Each invokes sox / ffmpeg /

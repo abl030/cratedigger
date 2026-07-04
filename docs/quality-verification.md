@@ -24,7 +24,7 @@ After lossless-to-V0 conversion, the resulting bitrate reveals source quality:
 - **Transcode from ~192kbps**: ~190-210kbps
 - **Transcode from ~128kbps**: ~160-180kbps
 
-Threshold: `cfg.mp3_vbr.excellent` (default 210 kbps), read by `transcode_detection()` in `lib/quality.py`. The legacy `TRANSCODE_MIN_BITRATE_KBPS = 210` module constant is still exported as the default and used when no cfg is passed; operators who retune `[Quality Ranks] mp3_vbr.excellent` in `config.ini` automatically move both the gate threshold and this fallback (#66).
+Threshold: `cfg.mp3_vbr.excellent` (default 210 kbps), read by `transcode_detection()` in `lib/quality/decisions.py`. The legacy `TRANSCODE_MIN_BITRATE_KBPS = 210` module constant is still exported as the default and used when no cfg is passed; operators who retune `[Quality Ranks] mp3_vbr.excellent` in `config.ini` automatically move both the gate threshold and this fallback (#66).
 
 Limitation: This source-probe signal exists only when a lossless-container
 candidate can be converted or temporarily probed. It does not by itself prove
@@ -232,7 +232,7 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
   evidence. Source denylisted, file imported only as provisional when the probe
   is meaningfully better than the current comparable source probe, and the
   request stays wanted.
-- **Discogs-sourced albums**: numeric IDs stored in `mb_release_id` for pipeline compat. Beets auto-routes numeric IDs to the Discogs plugin via `--search-id`. `detect_release_source()` in `lib/quality.py` distinguishes UUID vs numeric format for conditional UI rendering. The full pipeline (search, download, validate, import, quality gate) works identically for both sources.
+- **Discogs-sourced albums**: numeric IDs stored in `mb_release_id` for pipeline compat. Beets auto-routes numeric IDs to the Discogs plugin via `--search-id`. `detect_release_source()` in `lib/release_identity.py` distinguishes UUID vs numeric format for conditional UI rendering. The full pipeline (search, download, validate, import, quality gate) works identically for both sources.
 
 ## Downgrade prevention
 
@@ -274,7 +274,7 @@ evidence row. `verified_lossless_proof`, `verified_lossless`, and
 `was_converted_from` propagate in **all** cases. `spectral_grade`,
 `spectral_bitrate_kbps`, `v0_metric`, and `matched_bad_audio_hash_*`
 propagate when the import is renamed-only OR when the candidate source
-codec is lossless (FLAC / ALAC / WAV) — `LOSSLESS_CODECS` in `lib/quality.py`
+codec is lossless (FLAC / ALAC / WAV) — `LOSSLESS_CODECS` in `lib/quality/filetypes.py`
 is the canonical set. Non-lossless transcoded imports (MP3 → Opus etc.)
 strip those fields onto NULL because a lossy source's spectral / V0
 lineage is not meaningfully comparable against future candidates and
@@ -289,7 +289,7 @@ this evidence to reject same-source duplicates.
 in the importer (`lib/dispatch/core.py`) or wrong-match cleanup
 triage (`lib/wrong_match_cleanup_service.py`) — the request's
 `search_filetype_override` is narrowed to `"lossless"` via
-`narrow_override_on_lossless_source_lock` (`lib/quality.py`). Future
+`narrow_override_on_lossless_source_lock` (`lib/quality/dispatch_actions.py`). Future
 search cycles only ask Soulseek for lossless tiers, so the lock
 doesn't fire repeatedly against new peers serving the same lossy
 file. No plan-generator change is needed — `generate_search_plan`

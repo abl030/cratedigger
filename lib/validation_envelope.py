@@ -1,6 +1,6 @@
 """Typed msgspec view over ``download_log.validation_result`` JSONB (#410).
 
-The blob is written by ``ValidationResult.to_json()`` (lib/quality.py) on
+The blob is written by ``ValidationResult.to_json()`` (lib/quality/wire_types.py) on
 rejection rows, by the curator-ban route with its own audit shape, and has
 ``wrong_match_triage`` grafted on later via ``jsonb_set``
 (``PipelineDB.record_wrong_match_triage``). This module is the single read
@@ -59,7 +59,7 @@ class ValidationResultEnvelope(msgspec.Struct, frozen=True):
     in ``tests/test_validation_envelope.py``). ``candidates`` and ``items``
     stay ``list[dict]``: pre-#100 rows use the ``mbid`` wire key where
     ``CandidateSummary`` now expects ``album_id`` (see the format note on
-    ``CandidateSummary`` in lib/quality.py), so strict nested decoding
+    ``CandidateSummary`` in lib/quality/wire_types.py), so strict nested decoding
     would reject valid historical audit rows.
     """
 

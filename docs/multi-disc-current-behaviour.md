@@ -186,7 +186,7 @@ to the filename when `disk_count > 1`. So a multi-disc download lands
 in a single staging directory under `/Incoming/auto-import/` with
 filenames like `Disk 1 - 01 - Pi.flac`, `Disk 1 - 02 - Bertie.flac`,
 …, `Disk 2 - 01 - Prelude.flac`, …. This is the auto-import flatten
-that the `preimport_nested` gate (`lib/quality.py:3340-3365`) is
+that the `preimport_nested` gate (`lib/quality/gates.py`) is
 expected to find pre-flattened. Force-import and manual-import paths
 go to `/Incoming/post-validation/` and would trip the `nested_layout`
 gate if presented with raw subfolders.
