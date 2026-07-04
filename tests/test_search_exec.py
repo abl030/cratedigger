@@ -181,6 +181,29 @@ class TestExecuteSearchSubmitSeam(unittest.TestCase):
         self.assertEqual(len(result.responses), 1)
         self.assertEqual(result.response_count_terminal, 1)
 
+    def test_harvest_error_still_deletes_search(self):
+        """The cleanup DELETE runs even when the harvest raises (try/finally).
+
+        Pre-#466 the probe deleted its search in a ``finally``, so a
+        ``search_responses`` transport error never leaked the search on
+        slskd's side. The unified lifecycle must preserve that: the harvest
+        exception still propagates to the caller, but delete fires first.
+        """
+        api = FakeSlskdAPI()
+        api.searches.add_search(search_id=9, state="Completed", responses=[])
+
+        def _raise(_sid: Any) -> list[dict[str, Any]]:
+            raise RuntimeError("harvest transport error")
+
+        api.searches.search_responses = _raise  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            execute_search(
+                api, search_id=9, delete=True,
+                clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+            )
+        self.assertEqual(api.searches.delete_calls, [9],
+                         "delete must run in finally even when harvest raises")
+
     def test_response_count_terminal_independent_of_harvest_length(self):
         """slskd truncates the harvested array at responseLimit/fileLimit but
         still reports the uncapped ``responseCount`` in state. The result
@@ -217,6 +240,7 @@ class TestWatchdogDoesNotFireOnHealthySearch(unittest.TestCase):
             clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
         )
         self.assertFalse(result.watchdog_fired)
+        self.assertFalse(result.state_poll_error)
         self.assertEqual(searches.stop_calls, [])
 
     def test_slow_but_progressing_search_does_not_trigger_watchdog(self):
@@ -461,8 +485,10 @@ class TestStateRaisesMidPoll(unittest.TestCase):
             clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
         )
         # state() exception is not a watchdog event; loop breaks and the
-        # harvest still runs against whatever slskd committed.
+        # harvest still runs against whatever slskd committed. The execution
+        # is flagged degraded so trust-sensitive callers (the probe) can bail.
         self.assertFalse(result.watchdog_fired)
+        self.assertTrue(result.state_poll_error)
         self.assertEqual(searches.stop_calls, [])
         self.assertEqual(len(result.responses), 1)
 

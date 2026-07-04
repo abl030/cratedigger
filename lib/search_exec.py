@@ -70,12 +70,9 @@ class SearchSubmitError(Exception):
     pre-accept failure as *non-consuming* (the search slot was never taken)
     while a post-accept collection failure is consuming. ``execute_search``
     only ever raises this from the submit phase; poll/harvest transport
-    errors propagate as their original exception type.
+    errors propagate as their original exception type. The underlying slskd
+    exception is preserved as ``__cause__`` via ``raise ... from``.
     """
-
-    def __init__(self, message: str, *, cause: BaseException | None = None) -> None:
-        super().__init__(message)
-        self.cause = cause
 
 
 @dataclass
@@ -98,6 +95,13 @@ class SearchExecutionResult:
       * ``watchdog_fired`` — True iff the #212 progress watchdog cancelled the
         search. Diagnostic only; harvest classification reflects the responses
         actually collected, not the watchdog.
+      * ``state_poll_error`` — True iff a ``searches.state`` poll raised and the
+        loop broke early to a best-effort harvest (so ``final_state`` /
+        ``response_count_terminal`` may be stale or ``None``). Together with
+        ``watchdog_fired`` this marks a *degraded* execution: the harvest is
+        best-effort and any terminal-state-derived signal is untrustworthy.
+        The unfindable probe uses it to refuse to record a low match count
+        from a degraded poll (which would corrupt categorisation).
       * ``elapsed_s`` — wall time of the ``execute_search`` call.
     """
 
@@ -105,6 +109,7 @@ class SearchExecutionResult:
     final_state: str | None = None
     response_count_terminal: int | None = None
     watchdog_fired: bool = False
+    state_poll_error: bool = False
     elapsed_s: float = 0.0
 
 
@@ -205,7 +210,7 @@ def execute_search(
             submitted = slskd_client.searches.search_text(**submit_kwargs)
         except Exception as exc:
             raise SearchSubmitError(
-                f"slskd search submission failed: {exc}", cause=exc,
+                f"slskd search submission failed: {exc}"
             ) from exc
         search_id = submitted["id"]
 
@@ -218,6 +223,7 @@ def execute_search(
     # wall-time-from-submission (issue #212; the 8h53m hung-cycle case).
     final_state: str | None = None
     watchdog_fired = False
+    state_poll_error = False
     prev_count = 0
     last_progress_at = clock()
     response_count_terminal: int | None = None
@@ -239,7 +245,12 @@ def execute_search(
             ):
                 break
         except Exception:
+            # A state-poll failure breaks to a best-effort harvest (the loop
+            # must be resilient to run the #212 watchdog at all), but it
+            # marks the execution *degraded* so callers that can't trust a
+            # partial harvest — the unfindable probe — can refuse to record.
             logger.warning("Failed to poll search state for %s", search_id)
+            state_poll_error = True
             break
 
         if clock() - last_progress_at >= SEARCH_WATCHDOG_DEADLINE_S:
@@ -273,31 +284,37 @@ def execute_search(
         if watchdog_fired
         else SEARCH_RESPONSE_SETTLE_POLL_S
     )
-    responses = _fetch_search_responses_settled(
-        slskd_client, search_id,
-        deadline_s=settle_deadline, poll_s=settle_poll,
-        clock_fn=clock, sleep_fn=sleep,
-    )
-    elapsed = time.time() - t0
-    if delete:
-        # Best-effort cleanup. slskd GCs an undeleted search on its own, so a
-        # failed DELETE must never discard a successful harvest (the pre-#466
-        # serial pipeline path had exactly that latent bug — delete lived
-        # inside the collection try/except and a failed delete rolled a good
-        # harvest into ``collection_crash``) nor fail an otherwise-good probe
-        # (the pre-#466 probe swallowed delete errors in a ``finally``). Log
-        # and move on either way.
-        try:
-            slskd_client.searches.delete(search_id)
-        except Exception:
-            logger.warning(
-                "searches.delete(%s) failed; slskd will GC it", search_id,
-            )
+    # The cleanup delete lives in a ``finally`` so it runs even when the
+    # harvest raises a transport error. The pre-#466 probe deleted its search
+    # in a ``finally`` for exactly this reason (a failed ``search_responses``
+    # must not leak the search on slskd's side); the unified lifecycle keeps
+    # that guarantee for every caller. The delete is itself best-effort: slskd
+    # GCs an undeleted search on its own, so a failed DELETE must never discard
+    # a successful harvest (the pre-#466 serial pipeline path had that latent
+    # bug — delete lived inside the collection try/except and a failed delete
+    # rolled a good harvest into ``collection_crash``) nor fail a good probe.
+    elapsed = 0.0
+    try:
+        responses = _fetch_search_responses_settled(
+            slskd_client, search_id,
+            deadline_s=settle_deadline, poll_s=settle_poll,
+            clock_fn=clock, sleep_fn=sleep,
+        )
+        elapsed = time.time() - t0
+    finally:
+        if delete:
+            try:
+                slskd_client.searches.delete(search_id)
+            except Exception:
+                logger.warning(
+                    "searches.delete(%s) failed; slskd will GC it", search_id,
+                )
 
     return SearchExecutionResult(
         responses=responses,
         final_state=final_state,
         response_count_terminal=response_count_terminal,
         watchdog_fired=watchdog_fired,
+        state_poll_error=state_poll_error,
         elapsed_s=elapsed,
     )

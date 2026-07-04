@@ -395,6 +395,20 @@ class ArtistProbeResult:
     artist_observed: bool
 
 
+class ProbeDegradedError(Exception):
+    """The probe search did not complete cleanly (watchdog cancel or a
+    state-poll error), so its ``responseCount`` / harvest cannot be trusted.
+
+    Raised by :func:`run_artist_probe` so the service treats a degraded probe
+    exactly like a slskd failure — ``RESULT_PROBE_FAILED``, nothing recorded.
+    This restores the pre-#466 contract: a hung or errored probe never writes
+    a (likely low) ``last_artist_probe_match_count``, which would otherwise
+    accumulate toward a spurious ``artist_absent`` categorisation. Recording a
+    fabricated absence signal from a broken probe is a categorisation-
+    corrupting bug for a service whose whole job is deciding "is this absent".
+    """
+
+
 def run_artist_probe(
     slskd_client: Any,
     *,
@@ -403,6 +417,7 @@ def run_artist_probe(
     response_limit: int = 100,
     file_limit: int = 1000,
     poll_sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
     delete_after: bool = True,
 ) -> ArtistProbeResult:
     """Run one artist-only probe via slskd and return the signal.
@@ -416,19 +431,26 @@ def run_artist_probe(
     (``lib.search_exec.execute_search``, issue #466). Consolidation gained
     this probe the #212 progress watchdog (a wedged probe search no longer
     hangs the daily ``cratedigger-unfindable.service`` indefinitely — it is
-    cancelled after 90s of no progress and harvested best-effort) and the
-    #242 response-settle (``match_count`` is still sourced from slskd's
-    terminal ``responseCount``, but the response list used for the fuzzy
-    artist observation is now the settled harvest rather than an immediate
-    read that could race to empty and spuriously report the artist absent).
+    cancelled after 90s of no progress) and the #242 response-settle (the
+    response list used for the fuzzy artist observation is now the settled
+    harvest rather than an immediate read that could race to empty and
+    spuriously report the artist absent).
 
-    Exception contract (via ``execute_search``): a submit failure or a harvest
-    transport error propagates and the caller (the service) records
-    ``RESULT_PROBE_FAILED``; a flaky state poll is absorbed by the watchdog
-    loop and the probe returns a best-effort harvest (this is the deliberate
-    cost of the watchdog — the pre-#466 probe let a state exception fail the
-    run); a failed cleanup ``delete`` is swallowed and never fails the probe
-    (unchanged from pre-#466).
+    Exception contract:
+      * A submit failure or a harvest transport error propagates; the caller
+        (the service) records ``RESULT_PROBE_FAILED``.
+      * A *degraded* execution — the #212 watchdog cancelled the search, or a
+        ``searches.state`` poll raised and the loop fell back to a best-effort
+        harvest — raises :class:`ProbeDegradedError`. This restores the
+        pre-#466 contract: a hung/errored probe records NOTHING rather than a
+        fabricated low ``responseCount`` that would accumulate toward a
+        spurious ``artist_absent``. (Conservative by design: even a
+        watchdog-cancelled search that happened to harvest a high count is
+        treated as failed — categorisation fidelity over an extra data point.)
+      * A failed cleanup ``delete`` is swallowed and never fails the probe.
+
+    ``poll_sleep`` / ``clock`` are injected for test determinism (forwarded to
+    ``execute_search`` as ``sleep_fn`` / ``clock_fn``); production omits them.
     """
     from lib.search_exec import execute_search
 
@@ -443,7 +465,15 @@ def run_artist_probe(
         },
         delete=delete_after,
         sleep_fn=poll_sleep,
+        clock_fn=clock,
     )
+    if exec_result.watchdog_fired or exec_result.state_poll_error:
+        raise ProbeDegradedError(
+            f"probe for {artist_name!r} degraded "
+            f"(watchdog_fired={exec_result.watchdog_fired}, "
+            f"state_poll_error={exec_result.state_poll_error}); "
+            f"refusing to record an untrustworthy match count"
+        )
     return ArtistProbeResult(
         match_count=int(exec_result.response_count_terminal or 0),
         artist_observed=fuzzy_artist_observed_in_probe(
@@ -767,6 +797,8 @@ __all__ = (
     "RESULT_PROBE_FAILED",
     "RESULT_REQUEST_NOT_FOUND",
     "SEARCH_LOG_WINDOW_DAYS",
+    "ArtistProbeResult",
+    "ProbeDegradedError",
     "UnfindableCategorisation",
     "UnfindableDetectionService",
     "UnfindableInputs",
