@@ -183,7 +183,7 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - Reference layout (worked example: `search-plan advance` in PR for the cursor-advance feature):
   - `lib/<thing>_service.py` — service method + typed `Result` dataclass (one outcome string per branch)
   - `lib/pipeline_db.py` — atomic mutation with `FOR UPDATE` row lock
-  - `scripts/pipeline_cli.py` — CLI subcommand wrapping the service
+  - `scripts/pipeline_cli/<family>.py` — CLI subcommand wrapping the service (the CLI is a package split by command family, issue #495; ``cli.py`` registers the handler in the dispatch dict, ``routes_meta.py`` adds the argparse subparser)
   - `web/routes/<thing>.py` — HTTP endpoint wrapping the service
   - `tests/test_<thing>_service.py` — authoritative coverage of every outcome branch
   - `tests/test_pipeline_cli.py` — CLI wrapper test (exit-code mapping)
@@ -199,7 +199,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 |------------------|-----------|-------------------------|
 | A new pure decision function in `lib/quality/` | A subTest table covering every branch | `tests/test_quality_decisions.py` patterns |
 | A new dispatch / orchestration path | An orchestration test asserting domain state + an integration slice | `FakePipelineDB`, `patch_dispatch_externals()`, `tests/test_integration_slices.py` |
-| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_FakeDbWebServerCase` + `_assert_required_fields` from `tests/web/_harness.py`, the matching `tests/web/test_routes_<module>.py`, `scripts/pipeline_cli.py` |
+| A new web API endpoint | A contract test with `REQUIRED_FIELDS` AND an entry in `TestRouteContractAudit.CLASSIFIED_ROUTES` AND a paired `pipeline-cli` subcommand (CLI ⇄ API symmetry) | `_FakeDbWebServerCase` + `_assert_required_fields` from `tests/web/_harness.py`, the matching `tests/web/test_routes_<module>.py`, `scripts/pipeline_cli/` |
 | A new operator action (CLI subcommand or API endpoint) | A service-layer method with a typed `Result`, BOTH a CLI subcommand AND an API endpoint, exit-code and status-code tests for each | `tests/test_<service>.py` for the authoritative coverage; CLI/API tests check the wrapper only |
 | A new slskd interaction | An orchestration test using `FakeSlskdAPI` | `FakeSlskdAPI` from `tests/fakes.py` |
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
@@ -298,7 +298,7 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
 
 1. **Real inputs (best).** Construct values that produce the branch you need. Borrow fixtures from the decision's dedicated unit tests.
 2. **Kwarg-DI seam.** Mid-tier helpers can accept the dependency as a kwarg with the production function as the default. Canonical examples in this repo: `try_enqueue(match_fn=)`, `dispatch_import_core(quality_gate_fn=)`, `_handle_valid_result(dispatch_fn=)`, `check_for_match(album_match_fn=, cross_check_fn=)`, `_collect_issues(find_orphaned_fn=, find_blocked_recovery_fn=)`.
-3. **Module-local DI seam (only for URL or argparse dispatchers).** When the entry point can't take a kwarg, bind the dependency at the calling module's top: `finalize_request = transitions.finalize_request`. Tests patch the module attribute. Allowlist the binding. Canonical examples: `web.routes.pipeline.finalize_request`, `scripts.pipeline_cli.finalize_request`, `scripts.repair._collect_issues`.
+3. **Module-local DI seam (only for URL or argparse dispatchers).** When the entry point can't take a kwarg, bind the dependency at the calling module's top: `finalize_request = transitions.finalize_request`. Tests patch the module attribute. Allowlist the binding. Canonical examples: `web.routes.pipeline.finalize_request`, `scripts.pipeline_cli.album_requests.finalize_request` (and its twin `scripts.pipeline_cli.quality.finalize_request` — the #495 CLI package split the single binding into one per command-family module that calls it), `scripts.repair._collect_issues`.
 4. **Allowlist (last resort).** Only if the target is a thin wrapper around an external boundary.
 
 **Adding a new `PipelineDB` / `BeetsDB` / `SlskdAPI` method:**

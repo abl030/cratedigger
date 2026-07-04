@@ -1,7 +1,7 @@
 ---
 paths:
   - "lib/pipeline_db.py"
-  - "scripts/pipeline_cli.py"
+  - "scripts/pipeline_cli/**/*.py"
   - "lib/migrator.py"
   - "scripts/migrate_db.py"
   - "migrations/**/*.sql"

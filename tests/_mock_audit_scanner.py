@@ -252,7 +252,11 @@ _LEAF_SEAM_PATTERNS = [
     # constructor wholesale (e.g. ``patch("scripts.X.PipelineDB",
     # return_value=fake_db)``).
     re.compile(r"^lib\.pipeline_db\.PipelineDB$"),
-    re.compile(r"^scripts\.\w+\.PipelineDB$"),
+    # ``scripts.pipeline_cli.cli.PipelineDB`` (one extra dotted segment,
+    # since #495 split pipeline_cli.py into a package — ``main()``, the
+    # only caller, now lives in ``scripts/pipeline_cli/cli.py``) alongside
+    # single-segment scripts like ``scripts.repair.PipelineDB``.
+    re.compile(r"^scripts\.\w+(\.\w+)?\.PipelineDB$"),
 
     # web.server.db — module-level pipeline DB connection cache.
     # Tests patch.object(server, "db", fake) to inject a per-test DB.
@@ -301,7 +305,11 @@ _LEAF_SEAM_PATTERNS = [
     # module-attribute swap is the established DI shape in this codebase.
     re.compile(r"^lib\.dispatch\.outcome_actions\.finalize_request$"),
     re.compile(r"^harness\.import_one\.finalize_request$"),
-    re.compile(r"^scripts\.pipeline_cli\.finalize_request$"),
+    # scripts/pipeline_cli.py split into a package (#495) — the single
+    # module-level binding split into two independent copies, one per
+    # command-family module that calls ``finalize_request``.
+    re.compile(r"^scripts\.pipeline_cli\.album_requests\.finalize_request$"),
+    re.compile(r"^scripts\.pipeline_cli\.quality\.finalize_request$"),
     re.compile(r"^scripts\.repair\.finalize_request$"),
 
     # ``lib.download`` formerly had module-local DI seams for the chain
@@ -380,16 +388,17 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^web\.server\.check_beets_by_artist_album$"),
 
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
-    re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release$"),
+    re.compile(r"^scripts\.pipeline_cli\.album_requests\.fetch_mb_release$"),
     re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release_group_year$"),
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
 
     # scripts.pipeline_cli loaders — each is a thin wrapper around a
-    # disk/SQLite read in lib.config or lib.beets_db.
-    re.compile(r"^scripts\.pipeline_cli\._load_runtime_rank_config$"),
-    re.compile(r"^scripts\.pipeline_cli\._load_runtime_verified_lossless_target$"),
-    re.compile(r"^scripts\.pipeline_cli\._load_beets_album_info$"),
-    re.compile(r"^scripts\.pipeline_cli\._resolve_failed_path$"),
+    # disk/SQLite read in lib.config or lib.beets_db. Split into
+    # scripts/pipeline_cli/quality.py and imports.py (#495).
+    re.compile(r"^scripts\.pipeline_cli\.quality\._load_runtime_rank_config$"),
+    re.compile(r"^scripts\.pipeline_cli\.quality\._load_runtime_verified_lossless_target$"),
+    re.compile(r"^scripts\.pipeline_cli\.quality\._load_beets_album_info$"),
+    re.compile(r"^scripts\.pipeline_cli\.imports\._resolve_failed_path$"),
 
     # scripts.repair helpers that wrap external boundaries.
     # ``_get_slskd_active_transfers`` is a thin slskd HTTP call;

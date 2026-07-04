@@ -37,7 +37,9 @@ pkgs.symlinkJoin {
   inherit version;
   paths = [
     # DSN via --dsn / PIPELINE_DB_DSN, same contract as everywhere else.
-    (mkCliTool "pipeline-cli" "scripts/pipeline_cli.py")
+    # pipeline-cli is a package (scripts/pipeline_cli/, issue #495); exec
+    # the __main__.py entry shim, same script-path invocation style.
+    (mkCliTool "pipeline-cli" "scripts/pipeline_cli/__main__.py")
     (mkCliTool "pipeline-migrate" "scripts/migrate_db.py")
   ];
   meta = {
