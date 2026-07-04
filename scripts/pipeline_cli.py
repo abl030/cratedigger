@@ -2000,11 +2000,13 @@ def cmd_replace(db, args):
       * 4 — ``RESULT_WRONG_STATE`` (including supersede race —
             double-click landed first; descendant_request_id is set),
             ``RESULT_TARGET_COLLISION_REQUEST``
-      * 5 — ``RESULT_TRANSIENT`` (retryable; MB-mirror unreachable etc.)
+      * 5 — ``RESULT_TRANSIENT`` (retryable; mirror unreachable etc.),
+            ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (
         MbidReplaceService,
+        RESULT_MIRROR_UNCONFIGURED,
         RESULT_NOT_FOUND,
         RESULT_REPLACED,
         RESULT_TARGET_COLLISION_REQUEST,
@@ -2065,7 +2067,7 @@ def cmd_replace(db, args):
         RESULT_TARGET_COLLISION_REQUEST,
     ):
         return 4
-    if result.outcome == RESULT_TRANSIENT:
+    if result.outcome in (RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED):
         return 5
     return 1
 

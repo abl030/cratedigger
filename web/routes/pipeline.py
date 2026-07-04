@@ -1258,11 +1258,13 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
               ``RESULT_TARGET_COLLISION_REQUEST``
       * 422 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
               ``RESULT_TARGET_SAME_AS_CURRENT``
-      * 503 — ``RESULT_TRANSIENT`` (MB-mirror unreachable etc.)
+      * 503 — ``RESULT_TRANSIENT`` (mirror unreachable etc.) or
+              ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (
         MbidReplaceService,
+        RESULT_MIRROR_UNCONFIGURED,
         RESULT_NOT_FOUND,
         RESULT_REPLACED,
         RESULT_TARGET_COLLISION_REQUEST,
@@ -1327,8 +1329,8 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
         payload["error"] = result.error_message or "Semantic violation"
         h._json(payload, status=422)
         return
-    if result.outcome == RESULT_TRANSIENT:
-        payload["error"] = result.error_message or "Transient; retry"
+    if result.outcome in (RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED):
+        payload["error"] = result.error_message or "Service unavailable; retry"
         h._json(payload, status=503)
         return
     h._error(f"Unknown replace outcome: {result.outcome}", 500)

@@ -103,7 +103,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
       * 409 — RESULT_WRONG_STATE, RESULT_TARGET_COLLISION_REQUEST
       * 422 — RESULT_TARGET_INVALID, RESULT_TARGET_RELEASE_GROUP_MISMATCH,
               RESULT_TARGET_SAME_AS_CURRENT
-      * 503 — RESULT_TRANSIENT
+      * 503 — RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED
     """
 
     REPLACE_REQUIRED_FIELDS = {
@@ -265,6 +265,47 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         self.assertIsNone(data["new_request_id"])
         self.assertIsNone(data["current_status"])
         self.assertIsNone(data["descendant_request_id"])
+
+    def test_replace_mirror_unconfigured_returns_503(self):
+        """503 also maps to RESULT_MIRROR_UNCONFIGURED — the Discogs
+        mirror is not configured on this host (R11 / AE3). The operator
+        sees "mirror not set up", distinct from target_invalid (422) and
+        transient. The response carries the full required-fields contract
+        so the frontend renders it uniformly."""
+        with self._patch_service(
+            outcome="mirror_unconfigured", request_id=100,
+            error_message="Discogs mirror not configured",
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002"},
+            )
+        self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.REPLACE_REQUIRED_FIELDS,
+            "replace 503 mirror_unconfigured response",
+        )
+        self.assertEqual(data["outcome"], "mirror_unconfigured")
+        self.assertEqual(
+            data["error_message"], "Discogs mirror not configured",
+        )
+        self.assertIsNone(data["new_request_id"])
+
+    def test_replace_numeric_discogs_target_passes_body(self):
+        """A numeric Discogs id passes the pydantic body (the wire param
+        stays ``target_mb_release_id``; the service dispatches on shape).
+        The service is patched, so this pins the route accepts the body
+        and returns the mapped success status."""
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "replaced")
+        self.assertEqual(data["new_request_id"], 200)
 
     def test_replace_missing_target_returns_400(self):
         from unittest.mock import patch as _patch
