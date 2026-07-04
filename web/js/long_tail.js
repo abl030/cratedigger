@@ -35,9 +35,9 @@
  *   1. "Check YouTube" (`checkYoutube`) — replaces U4's placeholder. Calls
  *      the SLOW, SIDE-EFFECTFUL resolver GET
  *      (`GET /api/youtube-album?identifier=<mb_release_id>`), disables the
- *      button + shows in-progress, GUARDS double-fire (a module-scoped
- *      `resolveInFlight` Set keyed by request id — a second click while
- *      outstanding fires nothing), and STAMPS the fetch with a per-row
+ *      button + shows in-progress, GUARDS double-fire
+ *      (`consoleCanStart(consoleStates, id, 'resolve')` — a second click
+ *      while outstanding fires nothing), and STAMPS the fetch with a per-row
  *      console token so a stale result (operator collapsed the console or
  *      moved to another row) never paints. On return the YouTube panel is
  *      re-rendered via `youtubeSectionState`: `resolved_with_matrix` →
@@ -85,16 +85,33 @@
  * no optimistic band moves, no polling. Set-imported / Delete remove just
  * the acted-on row's DOM nodes (it leaves the cohort); the confirmed Replace
  * closes the console and full-cohort refetches. Open consoles survive every
- * list re-render: `state.longTail.open` tracks expanded rows and
+ * list re-render: `consoleStates` tracks each row's open flag and
  * `restoreLongTailConsoles` re-opens them after the DOM wipe (#398).
+ *
+ * #481 item 1 (this unit): the console-state consolidation. Every per-row
+ * bookkeeping structure the console needs — the fetch token, the five
+ * action double-fire guards, the cached YouTube resolver result, and the
+ * open/closed flag — used to live in eight parallel module-scoped
+ * structures (plus `state.longTail.open` on shared state) with two
+ * independent prune sites that each had to remember to sweep every one of
+ * them (the #480 review caught two "forgot to prune one" instances — an
+ * open-set leak on full refetch, a stale resolver cache). `consoleStates`
+ * (a single `Map<id, ConsoleState>`) replaces all eight; five pure
+ * transition helpers (`consoleOpen`/`consoleClose`/`consolePrune`/
+ * `consoleCanStart`/`consoleSettle`) are the only way to mutate it, and
+ * `consolePrune` is the ONE prune function called from both former prune
+ * sites. The two deliberate token semantics from U5 are now explicit,
+ * separately named functions rather than comment-only: `consoleIsStale`
+ * (panel-paint — discard against the token CAPTURED at fetch time) vs.
+ * `consoleToken` (resolver-settle — read the CURRENT token at paint time).
  *
  * Pure / DOM-free helpers (band ordering, tab derivation, in-band search
  * filtering, cross-band match count, YouTube state classifier, console
- * emphasis selector) are exported via `__test__` for the Node unit suite.
- * The classifier + emphasis selector live in `util.js` (the shared pure
- * home) and are re-exported through `__test__` here for convenience.
- * Rendering and fetch live alongside them but never leak into the pure
- * helpers.
+ * emphasis selector, and the #481 console-state transitions) are exported
+ * via `__test__` for the Node unit suite. The classifier + emphasis
+ * selector live in `util.js` (the shared pure home) and are re-exported
+ * through `__test__` here for convenience. Rendering and fetch live
+ * alongside them but never leak into the pure helpers.
  *
  * Shape mirrors `web/js/search_plan.js` / `web/js/recents.js`:
  * `// @ts-check`, ES6 module, JSDoc on exports, the
@@ -510,15 +527,11 @@ export async function loadLongTail() {
     if (token !== longTailRequestToken) return;
     const rows = Array.isArray(data.results) ? data.results : [];
     state.longTail.rows = rows;
-    // Prune console-open marks (and cached resolver results) for rows that
-    // left the wanted cohort — imported out-of-band, replaced, deleted.
+    // Prune console state for rows that left the wanted cohort — imported
+    // out-of-band, replaced, deleted. One map, one prune function (#481
+    // item 1) — the fresh-cohort intersect.
     const cohortIds = new Set(rows.map((r) => r && r.id));
-    for (const openId of [...state.longTail.open]) {
-      if (!cohortIds.has(openId)) {
-        state.longTail.open.delete(openId);
-        youtubeResolveResults.delete(openId);
-      }
-    }
+    consolePrune(consoleStates, (id) => cohortIds.has(id));
     const tabs = deriveBandTabs(rows);
     // Pick a default band when none selected or the prior selection is
     // gone from the new cohort.
@@ -610,15 +623,263 @@ export function onLongTailSearchInput(value) {
 // source and patch only that panel's container. A per-row token guard
 // discards a console fetch that resolves after the operator has clicked a
 // different row (or re-collapsed this one).
+//
+// #481 item 1: all per-row console bookkeeping — the fetch token, the
+// five action double-fire guards (resolve/submit/intent/import/delete),
+// the cached YouTube resolver result, and the open/closed flag — used to
+// live in eight parallel module-scoped structures (plus `state.longTail.
+// open` on shared state) with two independent prune sites that each had to
+// remember to sweep every one of them. The #480 review caught two
+// "forgot to prune one" instances that shape produced. `consoleStates`
+// below is the single `Map<id, ConsoleState>` replacing all eight; the
+// five pure transition helpers (`consoleOpen`/`consoleClose`/
+// `consolePrune`/`consoleCanStart`/`consoleSettle`) are the only way to
+// mutate it, and `consolePrune` is the ONE prune function called from both
+// sites (`removeRowFromCohort`, `loadLongTail`'s fresh-cohort intersect).
 
 /**
- * Per-row console-fetch token. Bumped every time a row's console is
- * (re)opened so a slow panel fetch that resolves against a stale console
- * is discarded before it paints. Keyed by `album_requests.id`.
+ * Per-row console state — the single source of truth for everything the
+ * action console needs to track per `album_requests.id`. Replaces the
+ * eight parallel structures #481 item 1 called out (fetch token, five
+ * in-flight guard Sets, the YouTube-result cache, and the open-console
+ * Set) with one `Map<id, ConsoleState>` entry per row.
  *
- * @type {Map<number, number>}
+ * @typedef {Object} ConsoleState
+ * @property {boolean} open  Is this row's console currently expanded?
+ * @property {number} token  Per-row console-fetch token, bumped on every
+ *   {@link consoleOpen} / {@link consoleClose} so a panel fetch stamped
+ *   with a stale token is discarded before it paints ({@link consoleIsStale}).
+ * @property {Object|null} youtubeResult  The row's cached YouTube resolver
+ *   result (from a prior Check YouTube this session), so a console restore
+ *   after a list re-render doesn't reset a resolved matrix back to
+ *   `never_run` (#398).
+ * @property {Set<string>} inFlight  Action names (`'resolve'`, `'submit'`,
+ *   `'intent'`, `'import'`, `'delete'`) with an outstanding request —
+ *   double-fire guards, gated by {@link consoleCanStart} /
+ *   {@link consoleSettle}.
  */
-const consoleTokens = new Map();
+
+/**
+ * Per-row console state, keyed by `album_requests.id`. The single map
+ * backing every pure transition helper below — see the header comment for
+ * the eight-structures-to-one consolidation this replaces.
+ *
+ * @type {Map<number, ConsoleState>}
+ */
+const consoleStates = new Map();
+
+/**
+ * Get (creating if absent) the console-state entry for `id`. Every mutator
+ * below routes through this so a row's first touch — whichever action
+ * fires first — always finds a well-formed entry. Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {ConsoleState}
+ */
+function ensureConsoleState(map, id) {
+  let entry = map.get(id);
+  if (!entry) {
+    entry = { open: false, token: 0, youtubeResult: null, inFlight: new Set() };
+    map.set(id, entry);
+  }
+  return entry;
+}
+
+/**
+ * Open (or re-open) a row's console. Bumps the token so a panel fetch fired
+ * against a stale console (operator collapsed/reopened while it was
+ * outstanding) is discarded on resolve, and marks the row open. Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {number} The new token — stamp the panel fetches this open fires.
+ */
+export function consoleOpen(map, id) {
+  const entry = ensureConsoleState(map, id);
+  entry.open = true;
+  entry.token += 1;
+  return entry.token;
+}
+
+/**
+ * Close a row's console. Bumps the token (same discard effect as
+ * {@link consoleOpen}) and marks the row closed, but deliberately leaves
+ * `inFlight` and `youtubeResult` untouched: an outstanding action keeps its
+ * double-fire guard across a collapse (LT-R1 is a SEPARATE, explicit clear —
+ * see {@link consoleClearGuards}), and the cached resolver result survives so
+ * a later reopen restores the matrix instead of resetting to `never_run`
+ * (#398). Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {number} The new token.
+ */
+export function consoleClose(map, id) {
+  const entry = ensureConsoleState(map, id);
+  entry.open = false;
+  entry.token += 1;
+  return entry.token;
+}
+
+/**
+ * Drop every row's console state whose id does NOT satisfy `keep`. The
+ * ONE prune function called from BOTH prune sites — `loadLongTail`'s
+ * fresh-cohort intersect (`keep = (id) => cohortIds.has(id)`) and
+ * `removeRowFromCohort`'s single-row drop (`keep = (id) => id !== removedId`).
+ * Removing an id drops its ENTIRE row state atomically — open flag, token,
+ * cached YouTube result, in-flight guards — in one call, so there is no
+ * longer a second (or third…) structure a future change can forget to sweep
+ * (#481 item 1). Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {(id: number) => boolean} keep
+ * @returns {void}
+ */
+export function consolePrune(map, keep) {
+  for (const id of [...map.keys()]) {
+    if (!keep(id)) map.delete(id);
+  }
+}
+
+/**
+ * Atomic check-and-set double-fire guard for one row's named action
+ * (`'resolve'` | `'submit'` | `'intent'` | `'import'` | `'delete'`). Returns
+ * `true` and marks the action in-flight when none was outstanding for this
+ * id; returns `false` (no mutation) when one already was. Pair with
+ * {@link consoleSettle} in a `try/finally` around the async call. Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @param {string} action
+ * @returns {boolean}
+ */
+export function consoleCanStart(map, id, action) {
+  const entry = ensureConsoleState(map, id);
+  if (entry.inFlight.has(action)) return false;
+  entry.inFlight.add(action);
+  return true;
+}
+
+/**
+ * Clear one row's named action in-flight flag — the `finally` counterpart
+ * of {@link consoleCanStart}. No-op when the row has no tracked state
+ * (already pruned — e.g. the row left the cohort while its fetch was
+ * outstanding). Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @param {string} action
+ * @returns {void}
+ */
+export function consoleSettle(map, id, action) {
+  const entry = map.get(id);
+  if (entry) entry.inFlight.delete(action);
+}
+
+/**
+ * Clear EVERY in-flight action guard for one row (LT-R1) — called when the
+ * operator (re)opens or collapses THIS row's console via
+ * {@link toggleLongTailDetail}, so a console destroyed mid-flight doesn't
+ * leave a stale guard silently dead-ing the fresh console's buttons until an
+ * orphaned fetch settles. Deliberately NOT called by
+ * {@link restoreLongTailConsoles} — an outstanding operation keeps its
+ * double-fire protection across a list re-render (#398 fidelity). Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {void}
+ */
+export function consoleClearGuards(map, id) {
+  const entry = map.get(id);
+  if (entry) entry.inFlight.clear();
+}
+
+/**
+ * The row's CURRENT console token — the resolver-settle semantic. Used to
+ * paint the YouTube panel against whatever console exists NOW (even one
+ * re-created by a #398 restore while the resolver fetch was outstanding),
+ * never the token captured when the fetch fired. Contrast
+ * {@link consoleIsStale}, the panel-paint semantic, which discards against
+ * the CAPTURED token instead. Returns `0` for an untracked id (never
+ * opened, or already pruned). Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {number}
+ */
+export function consoleToken(map, id) {
+  const entry = map.get(id);
+  return entry ? entry.token : 0;
+}
+
+/**
+ * Stale-discard predicate for a panel fetch stamped with `capturedToken` at
+ * fire time — the panel-paint semantic (contrast {@link consoleToken}, the
+ * resolver-settle semantic). `true` means the console has moved on
+ * (reopened, closed, or pruned) since the fetch fired, and the result must
+ * be discarded rather than painted. Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @param {number} capturedToken
+ * @returns {boolean}
+ */
+export function consoleIsStale(map, id, capturedToken) {
+  return consoleToken(map, id) !== capturedToken;
+}
+
+/**
+ * Is this row's console currently marked open? Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {boolean}
+ */
+export function consoleIsOpen(map, id) {
+  const entry = map.get(id);
+  return entry != null && entry.open === true;
+}
+
+/**
+ * The row's cached YouTube resolver result, or `null` if none settled yet.
+ * Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @returns {Object|null}
+ */
+export function consoleYoutubeResult(map, id) {
+  const entry = map.get(id);
+  return entry ? entry.youtubeResult : null;
+}
+
+/**
+ * Cache a row's settled YouTube resolver result (#398 restore cache). Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @param {Object|null} result
+ * @returns {void}
+ */
+export function consoleSetYoutubeResult(map, id, result) {
+  ensureConsoleState(map, id).youtubeResult = result;
+}
+
+/**
+ * Every id currently marked open, in insertion order — drives
+ * {@link restoreLongTailConsoles}. Pure.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @returns {number[]}
+ */
+export function consoleOpenIds(map) {
+  const ids = [];
+  for (const [id, entry] of map) {
+    if (entry.open) ids.push(id);
+  }
+  return ids;
+}
 
 /**
  * Visible-row cap for the Soulseek peers panel before the "show all"
@@ -1191,7 +1452,7 @@ function renderActionsBar(row) {
  */
 function patchPanel(id, name, token, html) {
   if (typeof document === 'undefined') return;
-  if (consoleTokens.get(id) !== token) return;  // stale console — discard.
+  if (consoleIsStale(consoleStates, id, token)) return;  // stale console — discard.
   const panel = document.getElementById(`lt-panel-${name}-${id}`);
   if (!panel) return;
   const body = panel.querySelector('.lt-panel-body');
@@ -1290,10 +1551,11 @@ function consoleRow(id) {
  * per-row token stamps the fetch so a stale console (operator clicked
  * another row, or re-collapsed this one) is discarded before it paints.
  *
- * The open/closed state is tracked in `state.longTail.open` so a list
- * re-render (post-action single-row patch, band switch, search repaint)
- * can restore expanded consoles via {@link restoreLongTailConsoles}
- * instead of collapsing them (#398 / KTD8 fidelity).
+ * The open/closed state is tracked in `consoleStates` (the row's `open`
+ * flag) so a list re-render (post-action single-row patch, band switch,
+ * search repaint) can restore expanded consoles via
+ * {@link restoreLongTailConsoles} instead of collapsing them (#398 / KTD8
+ * fidelity).
  *
  * @param {number} id  album_requests.id
  * @returns {void}
@@ -1305,12 +1567,12 @@ export function toggleLongTailDetail(id) {
   // Re-opening or collapsing this console: drop stale action guards so the
   // fresh console's buttons aren't silently dead from a prior mid-flight op
   // (LT-R1). Any outstanding fetch's result is still token-discarded below.
-  clearActionGuards(id);
+  consoleClearGuards(consoleStates, id);
   if (el.classList.contains('open')) {
     el.classList.remove('open');
-    state.longTail.open.delete(id);
-    // Bump the token so any in-flight panel fetch is discarded on resolve.
-    consoleTokens.set(id, (consoleTokens.get(id) || 0) + 1);
+    // Bumps the token (any in-flight panel fetch is discarded on resolve)
+    // and marks the row closed.
+    consoleClose(consoleStates, id);
     return;
   }
   openConsole(id, el);
@@ -1318,19 +1580,17 @@ export function toggleLongTailDetail(id) {
 
 /**
  * Open one row's console: render the shell, mark it open in
- * `state.longTail.open`, and fire the independent panel loads. Shared by
- * the row-click toggle and the post-re-render restore path. DOM-side.
+ * `consoleStates`, and fire the independent panel loads. Shared by the
+ * row-click toggle and the post-re-render restore path. DOM-side.
  *
  * @param {number} id  album_requests.id
  * @param {HTMLElement} el  The row's `.lt-detail` container.
  * @returns {void}
  */
 function openConsole(id, el) {
-  const token = (consoleTokens.get(id) || 0) + 1;
-  consoleTokens.set(id, token);
-  state.longTail.open.add(id);
+  const token = consoleOpen(consoleStates, id);
   const row = consoleRow(id) || { id };
-  el.innerHTML = renderConsoleShell(row, youtubeResolveResults.get(id) || null);
+  el.innerHTML = renderConsoleShell(row, consoleYoutubeResult(consoleStates, id));
   el.classList.add('open');
   const inFlightFlag = !!row.in_flight_rescue;
   // Independent panel loads — no Promise.all, no shared await. One panel's
@@ -1361,7 +1621,7 @@ function openConsole(id, el) {
  */
 export function restoreLongTailConsoles() {
   if (typeof document === 'undefined') return;
-  for (const id of state.longTail.open) {
+  for (const id of consoleOpenIds(consoleStates)) {
     const el = document.getElementById(`lt-detail-${id}`);
     if (!el || el.classList.contains('open')) continue;
     openConsole(id, el);
@@ -1469,81 +1729,12 @@ export function rescueOutcomeCopy(result) {
 }
 
 /**
- * Request ids with an outstanding resolver GET. Guards the slow,
- * side-effectful Check-YouTube call against double-fire: a second click
- * while one is outstanding fires nothing.
- *
- * @type {Set<number>}
- */
-const resolveInFlight = new Set();
-
-/**
- * Last resolver result per request id, kept for the session so a console
- * restore after a list re-render re-renders the YouTube panel from the
- * already-fetched result instead of resetting it to `never_run` (#398).
- * Pruned with the row (`removeRowFromCohort`). Superseded in place by the
- * next Check YouTube / Re-check.
- *
- * @type {Map<number, Object>}
- */
-const youtubeResolveResults = new Map();
-
-/**
- * Request ids with an outstanding rescue-submit POST. Guards the confirm →
- * submit step against double-fire.
- *
- * @type {Set<number>}
- */
-const submitInFlight = new Set();
-
-/**
- * Request ids with an outstanding set-intent POST. Guards the intent toggle
- * against double-fire (two rapid clicks racing opposite intents at the DB).
- *
- * @type {Set<number>}
- */
-const intentInFlight = new Set();
-
-/**
  * True while a rescue confirm overlay is open. The overlay mounts into the
  * single shared modal host, so a second `pickYoutubeRescue` would overwrite
  * the first overlay's DOM and orphan its promise — this boolean serialises
  * them (one confirm at a time).
  */
 let rescueConfirmOpen = false;
-
-/**
- * Clear any stale per-id action guards when a console is (re)opened or
- * collapsed (LT-R1). The guards' `finally` blocks delete on settle, but a
- * console destroyed mid-flight (collapse/reopen, list re-render) would
- * otherwise leave a stale entry that silently no-ops the re-opened button
- * until the orphaned fetch settles. The outstanding fetch's result is still
- * token-discarded; clearing just re-enables the fresh console's buttons (a
- * duplicate resolver call hits the server-side cache, so it's harmless).
- *
- * @param {number} id
- * @returns {void}
- */
-function clearActionGuards(id) {
-  resolveInFlight.delete(id);
-  submitInFlight.delete(id);
-  intentInFlight.delete(id);
-  importInFlight.delete(id);
-  deleteInFlight.delete(id);
-}
-
-/**
- * Double-fire predicate for the resolver GET. Pure. `true` when a Check
- * YouTube call may START for this id (none outstanding); `false` when one
- * is already in flight (the click is suppressed).
- *
- * @param {Set<number>} inFlight  The in-flight id set.
- * @param {number} id
- * @returns {boolean}
- */
-export function canStartInFlight(inFlight, id) {
-  return !inFlight.has(id);
-}
 
 /**
  * Re-render just the YouTube panel body for one row's open console, guarded
@@ -1564,18 +1755,19 @@ function patchYoutubePanel(id, token, result) {
  * re-renders the YouTube panel with the fresh classification.
  *
  * Guards:
- *   * Double-fire — a module-scoped `resolveInFlight` Set keyed by request
- *     id; a second click while outstanding returns immediately.
+ *   * Double-fire — `consoleCanStart(consoleStates, id, 'resolve')`; a
+ *     second click while outstanding returns immediately.
  *   * Disabled button — the live "Check YouTube" / "Retry" button is
  *     disabled + relabelled while outstanding so the operator sees progress
  *     and can't re-click it.
  *
- * The settled result is cached in `youtubeResolveResults` and painted
- * against the row's CURRENT console token (not the one captured at fire
- * time): the panel container is per-row, so the only console it can paint
- * into is this row's — including one re-created by a #398 restore while
- * the fetch was outstanding. A collapsed console's hidden DOM may be
- * touched; harmless, since reopening re-renders the shell (from the cache).
+ * The settled result is cached via {@link consoleSetYoutubeResult} and
+ * painted against the row's CURRENT console token ({@link consoleToken} —
+ * not the one captured at fire time): the panel container is per-row, so
+ * the only console it can paint into is this row's — including one
+ * re-created by a #398 restore while the fetch was outstanding. A
+ * collapsed console's hidden DOM may be touched; harmless, since reopening
+ * re-renders the shell (from the cache).
  *
  * The resolver identifier is the request's `mb_release_id` (an MB release
  * MBID or a Discogs release id) — the same id the resolver's
@@ -1586,19 +1778,20 @@ function patchYoutubePanel(id, token, result) {
  * @returns {Promise<void>}
  */
 export async function checkYoutube(id) {
-  if (!canStartInFlight(resolveInFlight, id)) return;  // double-fire guard.
+  if (!consoleCanStart(consoleStates, id, 'resolve')) return;  // double-fire guard.
   const row = consoleRow(id);
   const identifier = row && row.mb_release_id ? String(row.mb_release_id) : '';
-  // Paint against the row's CURRENT token, re-read at paint time: the
-  // youtube panel container is per-row, so any console this can reach is
-  // this row's — including one re-created by a #398 restore mid-fetch.
-  const currentToken = () => consoleTokens.get(id) || 0;
+  // Paint against the row's CURRENT token, re-read at paint time (the
+  // resolver-settle semantic — see consoleToken's docstring): the youtube
+  // panel container is per-row, so any console this can reach is this
+  // row's — including one re-created by a #398 restore mid-fetch.
+  const currentToken = () => consoleToken(consoleStates, id);
   if (!identifier) {
     patchYoutubePanel(id, currentToken(), /** @type {any} */ (
       { outcome: 'transient', error_message: 'No release identifier on this request.' }));
+    consoleSettle(consoleStates, id, 'resolve');
     return;
   }
-  resolveInFlight.add(id);
   setYoutubeChecking(id);
   try {
     const r = await fetch(
@@ -1613,13 +1806,13 @@ export async function checkYoutube(id) {
     } catch (_e) {
       result = { outcome: 'transient', error_message: `HTTP ${r.status}` };
     }
-    youtubeResolveResults.set(id, result);
+    consoleSetYoutubeResult(consoleStates, id, result);
     patchYoutubePanel(id, currentToken(), result);
   } catch (_e) {
     patchYoutubePanel(id, currentToken(), /** @type {any} */ (
       { outcome: 'transient', error_message: 'Could not reach the resolver. Retry.' }));
   } finally {
-    resolveInFlight.delete(id);
+    consoleSettle(consoleStates, id, 'resolve');
   }
 }
 
@@ -1755,8 +1948,7 @@ export async function pickYoutubeRescue(id, browseId) {
  * @returns {Promise<void>}
  */
 async function submitYoutubeRescue(id, browseId) {
-  if (!canStartInFlight(submitInFlight, id)) return;  // double-fire guard.
-  submitInFlight.add(id);
+  if (!consoleCanStart(consoleStates, id, 'submit')) return;  // double-fire guard.
   try {
     let result;
     try {
@@ -1779,7 +1971,7 @@ async function submitYoutubeRescue(id, browseId) {
     // away the operator's scroll position. The "rescue running" badge
     // reconciles on the next manual Refresh.
   } finally {
-    submitInFlight.delete(id);
+    consoleSettle(consoleStates, id, 'submit');
   }
 }
 
@@ -1797,8 +1989,8 @@ async function submitYoutubeRescue(id, browseId) {
  *
  * The re-render does NOT collapse the acted-on row's console (or any
  * other): `renderPipeline`'s long-tail paint ends with
- * {@link restoreLongTailConsoles}, which re-opens every console in
- * `state.longTail.open` against the fresh DOM (#398).
+ * {@link restoreLongTailConsoles}, which re-opens every console marked
+ * open in `consoleStates` against the fresh DOM (#398).
  *
  * @param {number} id
  * @returns {Promise<void>}
@@ -1848,10 +2040,10 @@ function patchRowInCohort(id, fresh) {
  * @returns {void}
  */
 function removeRowFromCohort(id) {
-  // The row is gone for good — prune its console-open mark and cached
-  // resolver result so a later re-render doesn't resurrect either.
-  state.longTail.open.delete(id);
-  youtubeResolveResults.delete(id);
+  // The row is gone for good — prune its ENTIRE console state (open flag,
+  // token, cached resolver result, in-flight guards) in one call. One map,
+  // one prune function (#481 item 1) — the single-row drop.
+  consolePrune(consoleStates, (rowId) => rowId !== id);
   const rows = Array.isArray(state.longTail.rows) ? state.longTail.rows : null;
   if (!rows) return;
   const idx = rows.findIndex((r) => r && r.id === id);
@@ -1970,22 +2162,6 @@ export function buildAcceptSiblingOptions(row) {
 }
 
 /**
- * Request ids with an outstanding "Set imported" POST. Guards the button
- * against double-fire.
- *
- * @type {Set<number>}
- */
-const importInFlight = new Set();
-
-/**
- * Request ids with an outstanding "Delete request" POST. Guards the button
- * against double-fire.
- *
- * @type {Set<number>}
- */
-const deleteInFlight = new Set();
-
-/**
  * Accept-a-sibling-pressing handler (U6). Opens the existing Replace picker
  * (standard mode) for the row's MB release group; the picker owns the
  * sibling list + confirm + `POST .../replace`. On a CONFIRMED Replace the
@@ -2057,8 +2233,7 @@ function closeConsole(id) {
   if (typeof document === 'undefined') return;
   const el = document.getElementById(`lt-detail-${id}`);
   if (el) el.classList.remove('open');
-  state.longTail.open.delete(id);
-  consoleTokens.set(id, (consoleTokens.get(id) || 0) + 1);
+  consoleClose(consoleStates, id);
 }
 
 /**
@@ -2075,8 +2250,7 @@ function closeConsole(id) {
 export async function longTailSetIntent(id) {
   const row = consoleRow(id);
   if (!row) return;
-  if (!canStartInFlight(intentInFlight, id)) return;  // double-fire guard.
-  intentInFlight.add(id);
+  if (!consoleCanStart(consoleStates, id, 'intent')) return;  // double-fire guard.
   const intent = intentToggleTarget(row.target_format);
   try {
     let data;
@@ -2104,7 +2278,7 @@ export async function longTailSetIntent(id) {
     // off the authoritative refetched row.
     await refetchLongTailRow(id);
   } finally {
-    intentInFlight.delete(id);
+    consoleSettle(consoleStates, id, 'intent');
   }
 }
 
@@ -2120,8 +2294,7 @@ export async function longTailSetIntent(id) {
  * @returns {Promise<void>}
  */
 export async function longTailSetImported(id) {
-  if (!canStartInFlight(importInFlight, id)) return;  // double-fire guard.
-  importInFlight.add(id);
+  if (!consoleCanStart(consoleStates, id, 'import')) return;  // double-fire guard.
   try {
     let data;
     try {
@@ -2145,7 +2318,7 @@ export async function longTailSetImported(id) {
     removeRowFromCohort(id);
     removeRowElement(id);
   } finally {
-    importInFlight.delete(id);
+    consoleSettle(consoleStates, id, 'import');
   }
 }
 
@@ -2165,8 +2338,7 @@ export async function longTailDeleteRequest(id) {
       && !confirm(`Delete request #${id}? This removes the wanted request entirely.`)) {
     return;
   }
-  if (!canStartInFlight(deleteInFlight, id)) return;  // double-fire guard.
-  deleteInFlight.add(id);
+  if (!consoleCanStart(consoleStates, id, 'delete')) return;  // double-fire guard.
   try {
     let status = 0;
     let data;
@@ -2199,7 +2371,7 @@ export async function longTailDeleteRequest(id) {
       toast((data && data.error) || `Delete failed (HTTP ${status})`, true);
     }
   } finally {
-    deleteInFlight.delete(id);
+    consoleSettle(consoleStates, id, 'delete');
   }
 }
 
@@ -2230,8 +2402,21 @@ export const __test__ = {
   youtubeBestDistance,
   youtubeRescueTargets,
   rescueOutcomeCopy,
-  canStartInFlight,
   renderRescueConfirm,
+  // #481 item 1 — the console-state Map + its five pure transition helpers.
+  consoleStates,
+  consoleOpen,
+  consoleClose,
+  consolePrune,
+  consoleCanStart,
+  consoleSettle,
+  consoleClearGuards,
+  consoleToken,
+  consoleIsStale,
+  consoleIsOpen,
+  consoleYoutubeResult,
+  consoleSetYoutubeResult,
+  consoleOpenIds,
   // U6 — secondary action pure helpers.
   canAcceptSibling,
   acceptDisabledReason,

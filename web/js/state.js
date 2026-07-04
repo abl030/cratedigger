@@ -26,16 +26,18 @@ import { invalidateActiveRgs } from './active_rgs.js';
  * `wanted` cohort fetched once (KTD2 — one banded fetch, client-side
  * tab/search filtering); `band` is the selected band tab (`null` until
  * the first fetch picks a default); `query` is the live search box value.
- * `open` is the set of request ids whose action console is expanded —
- * persisted here so a list re-render (post-action single-row patch, band
- * switch, search repaint) can restore open consoles instead of collapsing
- * them (#398 / KTD8 fidelity).
+ *
+ * The per-row "is this console expanded" flag (and every other per-row
+ * console bookkeeping — fetch token, action double-fire guards, cached
+ * YouTube resolver result) lives in `long_tail.js`'s module-scoped
+ * `consoleStates` map, not here — #481 item 1 consolidated it out of
+ * shared state (it was read only within `long_tail.js`) alongside seven
+ * other parallel structures into one `Map<id, ConsoleState>`.
  *
  * @typedef {Object} LongTailState
  * @property {Array<Object>|null} rows  The fetched cohort, or `null` before the first load.
  * @property {string|null} band         Selected band tab, or `null` (no selection yet).
  * @property {string} query             Current search-box substring filter.
- * @property {Set<number>} open         Ids of rows with an expanded console.
  */
 
 /** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineSearchQuery: string, pipelineSearchResults: Array<Object>|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'queue', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
@@ -59,9 +61,9 @@ export const state = {
   pipelineDailyMatchGraphOpen: false,
   // Long-tail triage worklist (U3). `rows` null until the first fetch;
   // `band` null until the cohort's default band is picked; `query` is
-  // the live in-band search-box filter; `open` tracks expanded consoles
-  // across re-renders (#398).
-  longTail: { rows: null, band: null, query: '', open: new Set() },
+  // the live in-band search-box filter. Expanded-console tracking lives in
+  // long_tail.js's `consoleStates` map (#481 item 1), not here.
+  longTail: { rows: null, band: null, query: '' },
   recentsCounts: {
     all: 0,
     imported: 0,
