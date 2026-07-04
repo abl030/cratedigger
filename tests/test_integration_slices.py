@@ -195,7 +195,10 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
         self.assertTrue(attempt.matched)
         self.assertEqual(db.request(1)["status"], "downloading")
         planned_state = db.request(1)["active_download_state"]
-        self.assertIsNone(planned_state["current_path"])
+        # current_path is unset at enqueue time; the msgspec encoder omits it
+        # when None (issue #467), so read it the way production does — via
+        # .get(), which yields None whether the key is absent or null.
+        self.assertIsNone(planned_state.get("current_path"))
 
         poll_slskd = FakeSlskdAPI(downloads=[{
             "username": "u00",
