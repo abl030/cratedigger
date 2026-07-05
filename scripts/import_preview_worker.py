@@ -96,14 +96,6 @@ def _candidate_evidence_ready_for_job(
     )
 
 
-def _state_from_raw(raw: Any) -> ActiveDownloadState:
-    if isinstance(raw, dict):
-        return ActiveDownloadState.from_dict(raw)
-    if isinstance(raw, str):
-        return ActiveDownloadState.from_json(raw)
-    raise ValueError("Automation import job has no active_download_state")
-
-
 def derive_canonical_import_folder(
     row: dict[str, Any],
     state: ActiveDownloadState,
@@ -199,7 +191,7 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
         if state_raw is None:
             return None
         try:
-            state = _state_from_raw(state_raw)
+            state = ActiveDownloadState.from_raw(state_raw)
         except ValueError:
             return None
         try:
@@ -313,7 +305,7 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
         row = db.get_request(job.request_id)
         if not row:
             raise ValueError(f"Album request {job.request_id} not found")
-        state = _state_from_raw(row.get("active_download_state"))
+        state = ActiveDownloadState.from_raw(row.get("active_download_state"))
         if not state.current_path or not os.path.isdir(state.current_path):
             state.current_path = _materialize_automation_preview_path(
                 db,

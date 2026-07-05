@@ -175,11 +175,7 @@ def _stamp_local_paths(
         if not raw_state:
             continue
         try:
-            state = (
-                ActiveDownloadState.from_dict(raw_state)
-                if isinstance(raw_state, dict)
-                else ActiveDownloadState.from_json(str(raw_state))
-            )
+            state = ActiveDownloadState.from_raw(raw_state)
         except Exception:
             logger.warning(
                 "SLSKD EVENTS: unparseable active_download_state for "

@@ -284,11 +284,7 @@ def execute_automation_import_job(
             False,
             f"Album request {request_id} has no active_download_state",
         )
-    state = (
-        ActiveDownloadState.from_dict(raw_state)
-        if isinstance(raw_state, dict)
-        else ActiveDownloadState.from_json(str(raw_state))
-    )
+    state = ActiveDownloadState.from_raw(raw_state)
     entry = reconstruct_grab_list_entry(row, state)
     created_ctx = ctx is None
     runtime_ctx = ctx or _build_runtime_context(db)
