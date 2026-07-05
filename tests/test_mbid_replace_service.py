@@ -399,6 +399,55 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
 
+    def test_mb_source_lazy_backfill_unexpected_exception_logs_warning(self):
+        """#501 item 3: the MB arm gains the Discogs arm's parity — an
+        unexpected (non-transient) exception during the source
+        lazy-backfill lookup is TARGET_INVALID AND logs a warning, so a
+        real client bug doesn't present identically to expected operator
+        input error (mirrors
+        test_source_lazy_backfill_generic_exception_target_invalid on the
+        Discogs arm)."""
+        db = FakePipelineDB()
+        self._seed_old(db, mb_release_group_id=None)
+
+        def fake_lookup(mbid, *, fresh=False):
+            if mbid == OLD_MBID:
+                raise RuntimeError("MB mirror 500")
+            return _fake_target_payload()
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        with self.assertLogs("lib.mbid_replace_service", level="WARNING") as cm:
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertTrue(
+            any("source" in m.lower() for m in cm.output),
+            f"expected a warning naming the source lookup, got: {cm.output}",
+        )
+
+    def test_mb_target_lookup_unexpected_exception_logs_warning(self):
+        """#501 item 3: mirrors the above for the TARGET lookup site — a
+        previously-untested branch (the MB arm's target-lookup generic
+        exception handler had no outcome OR logging coverage) gains
+        both."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+
+        def fake_lookup(mbid, *, fresh=False):
+            raise RuntimeError("MB mirror 500")
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        with self.assertLogs("lib.mbid_replace_service", level="WARNING") as cm:
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertTrue(
+            any("target" in m.lower() for m in cm.output),
+            f"expected a warning naming the target lookup, got: {cm.output}",
+        )
+
     def test_transient_urlerror(self):
         db = FakePipelineDB()
         self._seed_old(db)

@@ -350,24 +350,14 @@ class MbidReplaceService:
                     ),
                 )
             # Lazy-backfill: resolve the source MBID's RG fresh.
-            try:
-                src_data = self.mb_lookup(source_mbid, fresh=True)
-            except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
-                # Network blip / timeout / malformed JSON — retryable.
-                return ReplaceResult(
-                    outcome=RESULT_TRANSIENT,
-                    request_id=request_id,
-                    error_message=f"MB lookup failed (transient): {exc}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_INVALID,
-                    request_id=request_id,
-                    error_message=(
-                        f"source MBID {source_mbid} could not be "
-                        f"resolved: {exc}"
-                    ),
-                )
+            src_data, err = self._mb_lookup_or_error(
+                source_mbid,
+                request_id=request_id,
+                detail_context=f"source MBID {source_mbid}",
+            )
+            if err is not None:
+                return err
+            assert src_data is not None
             # ``mb_lookup`` is typed dict[str, Any]; ``release_group_id``
             # is None when the mirror doesn't have one.
             source_rg = src_data.get("release_group_id")
@@ -396,26 +386,14 @@ class MbidReplaceService:
             )
 
         # Fresh MB lookup of the target.
-        try:
-            target_data = self.mb_lookup(
-                target_mb_release_id, fresh=True
-            )
-        except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
-            # Network blip / timeout / malformed JSON — retryable.
-            return ReplaceResult(
-                outcome=RESULT_TRANSIENT,
-                request_id=request_id,
-                error_message=f"MB lookup failed (transient): {exc}",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return ReplaceResult(
-                outcome=RESULT_TARGET_INVALID,
-                request_id=request_id,
-                error_message=(
-                    f"target MBID {target_mb_release_id} could not be "
-                    f"resolved: {exc}"
-                ),
-            )
+        target_data, err = self._mb_lookup_or_error(
+            target_mb_release_id,
+            request_id=request_id,
+            detail_context=f"target MBID {target_mb_release_id}",
+        )
+        if err is not None:
+            return err
+        assert target_data is not None
 
         if not target_data:
             return ReplaceResult(
@@ -491,6 +469,54 @@ class MbidReplaceService:
             target_data=target_data,
             new_discogs_release_id=None,
         )
+
+    def _mb_lookup_or_error(
+        self,
+        mbid: str,
+        *,
+        request_id: int,
+        detail_context: str,
+    ) -> tuple[dict[str, Any] | None, ReplaceResult | None]:
+        """Fresh MB-mirror lookup + the two-way exception→outcome mapping
+        shared by the source lazy-backfill and target lookup sites in
+        ``replace_request_mbid``. Mirrors ``_discogs_lookup_or_error``
+        (#501 item 3) — no ``mirror_unconfigured`` branch, since the MB
+        mirror has no analogous "unconfigured" failure mode (public MB is
+        the always-available fallback).
+
+        Returns ``(data, None)`` on success or ``(None, ReplaceResult(...))``
+        on failure. ``detail_context`` names the id being resolved in the
+        generic RESULT_TARGET_INVALID message (e.g. ``"source MBID
+        <id>"`` / ``"target MBID <id>"``), preserving each call site's
+        original wording.
+
+        A network blip / timeout / malformed JSON is RESULT_TRANSIENT
+        (503, retryable); anything else is RESULT_TARGET_INVALID (422)
+        AND logs a warning, so a real bug in the mirror client no longer
+        presents identically to bad operator input.
+        """
+        try:
+            data = self.mb_lookup(mbid, fresh=True)
+        except _TRANSIENT_LOOKUP_EXCEPTIONS as exc:
+            return None, ReplaceResult(
+                outcome=RESULT_TRANSIENT,
+                request_id=request_id,
+                error_message=f"MB lookup failed (transient): {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Replace: unexpected MB lookup error resolving %s "
+                "(request_id=%d): %s: %s",
+                detail_context, request_id, type(exc).__name__, exc,
+            )
+            return None, ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                error_message=(
+                    f"{detail_context} could not be resolved: {exc}"
+                ),
+            )
+        return data, None
 
     def _replace_discogs_target(
         self,
