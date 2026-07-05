@@ -31,9 +31,9 @@ from lib.download_recovery import (find_blocked_processing_path_issues,
 from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
                              release_id_to_lock_key)
 from lib.processing_paths import directory_has_entries
-from lib.quality import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
-                         find_orphaned_downloads, find_slskd_orphans,
-                         suggest_repair)
+from lib.repair import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
+                        find_orphaned_downloads, find_slskd_orphans,
+                        suggest_repair)
 from lib.slskd_client import DownloadUser
 
 # No hardcoded fallback (#479): the nspawn DB has moved before (last time to
@@ -49,7 +49,7 @@ def _fetch_slskd_downloads(host: str, api_key: str) -> list[DownloadUser]:
 
     Kept as its own network seam so ``_collect_issues`` can derive BOTH the
     forward orphan view (``_active_transfer_pairs``) and the inverse
-    slskd-side orphan report (``lib.quality.find_slskd_orphans``) from one
+    slskd-side orphan report (``lib.repair.find_slskd_orphans``) from one
     fetch, instead of flattening to pairs and discarding the raw structure
     the way this used to (#479 item 1).
     """

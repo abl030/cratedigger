@@ -5,9 +5,11 @@ works for every X callers/tests imported from the monolith. Submodule
 docstrings say what lives where; the decision twins live in
 ``lib.quality.pipeline`` (parity contract — keep them together).
 
-Refreshed onto main post-split to also carry ``SlskdOrphanTransfer`` /
-``find_slskd_orphans`` (issue #278), added to the monolith after the
-original #477 split landed.
+The orphan/repair cluster (``OrphanInfo``, ``RepairAction``,
+``SlskdOrphanTransfer``, ``find_orphaned_downloads``,
+``find_inconsistencies``, ``suggest_repair``, ``find_slskd_orphans``) was
+parked here by the #477 split even though it isn't quality-decision logic;
+relocated to ``lib.repair`` (issue #512).
 """
 
 from lib.quality.wire_types import (
@@ -180,15 +182,6 @@ from lib.quality.pipeline import (
     full_pipeline_decision_from_evidence,
     override_bitrate_from_current_evidence,
 )
-from lib.quality.repair import (
-    OrphanInfo,
-    RepairAction,
-    SlskdOrphanTransfer,
-    find_inconsistencies,
-    find_orphaned_downloads,
-    find_slskd_orphans,
-    suggest_repair,
-)
 
 __all__ = [
     "AUDIO_EXTENSIONS",
@@ -230,7 +223,6 @@ __all__ = [
     "MeasurementFailure",
     "MeasurementFailureReason",
     "MovedSibling",
-    "OrphanInfo",
     "PostflightInfo",
     "ProvisionalLosslessDecisionInput",
     "ProvisionalLosslessDecisionResult",
@@ -246,9 +238,7 @@ __all__ = [
     "QualityRank",
     "QualityRankConfig",
     "RankBitrateMetric",
-    "RepairAction",
     "SPECTRAL_TRANSCODE_GRADES",
-    "SlskdOrphanTransfer",
     "SpectralDetail",
     "SpectralMeasurement",
     "TRANSCODE_MIN_BITRATE_KBPS",
@@ -306,9 +296,6 @@ __all__ = [
     "extract_usernames",
     "file_identity",
     "filetype_matches",
-    "find_inconsistencies",
-    "find_orphaned_downloads",
-    "find_slskd_orphans",
     "full_pipeline_decision",
     "full_pipeline_decision_from_evidence",
     "gate_rank",
@@ -339,7 +326,6 @@ __all__ = [
     "should_cooldown",
     "spectral_gate_trigger",
     "spectral_import_decision",
-    "suggest_repair",
     "top_candidates",
     "top_candidates_with_skip_split",
     "transcode_detection",
