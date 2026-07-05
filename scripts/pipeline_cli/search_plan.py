@@ -6,6 +6,7 @@ over persisted search plans. All wrap ``lib.search_plan_service`` (CLI ⇄
 API surface symmetry, CLAUDE.md).
 """
 
+import argparse
 import json
 
 from scripts.pipeline_cli._format import _json_default
@@ -493,3 +494,93 @@ def cmd_search_plan_history(db, args):
             print(f"  Error message:     {result.error_message}")
 
     return _search_plan_exit_code(result.outcome)
+
+
+def add_search_plan_subparser(
+    sub: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
+    """Add ``search-plan`` + its nested subcommands (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions).
+
+    Returns the ``search-plan`` subparser itself so ``main()`` can print
+    its help when invoked without a nested subcommand (mirrors the
+    ``triage`` no-subcommand handling).
+    """
+    p_sp = sub.add_parser(
+        "search-plan",
+        help="Inspect persisted search plans (read-only, U6)")
+    sp_sub = p_sp.add_subparsers(dest="search_plan_command")
+    p_sp_show = sp_sub.add_parser(
+        "show",
+        help="Show active/failed plans, cursor, items, provenance, "
+             "legacy logs for one request")
+    p_sp_show.add_argument("id", type=int, help="Request ID")
+    p_sp_show.add_argument("--json", action="store_true",
+                            help="Print structured JSON instead of text")
+    p_sp_show.add_argument("--no-stats", action="store_true",
+                            dest="no_stats",
+                            help="Suppress per-slot/query usefulness stats")
+    p_sp_regen = sp_sub.add_parser(
+        "regenerate",
+        help="Regenerate the search plan for a request (U8)")
+    p_sp_regen.add_argument("id", type=int, help="Request ID")
+    p_sp_regen.add_argument("--prepend-artist", action="store_true",
+                             dest="prepend_artist", default=None,
+                             help="Prepend artist name to album title in "
+                             "generated queries (overrides config; absent "
+                             "means use config's album_prepend_artist)")
+    p_sp_regen.add_argument("--json", action="store_true",
+                             help="Print structured JSON instead of text")
+    p_sp_advance = sp_sub.add_parser(
+        "advance",
+        help="Forward-only operator advance of the cursor (e.g. skip "
+             "collapsed default-strategy slots on a self-titled release)")
+    p_sp_advance.add_argument("id", type=int, help="Request ID")
+    sp_target = p_sp_advance.add_mutually_exclusive_group(required=True)
+    sp_target.add_argument(
+        "--to-ordinal", type=int, dest="to_ordinal",
+        help="Absolute target ordinal in [0, plan_item_count)")
+    sp_target.add_argument(
+        "--to-strategy", dest="to_strategy",
+        help="Strategy prefix; advance to the first plan item past the "
+             "current cursor whose strategy starts with this string "
+             "(e.g. `track`, `unwild_year`)")
+    p_sp_advance.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
+    p_sp_dry_run = sp_sub.add_parser(
+        "dry-run",
+        help="Run the generator against the request's snapshot without "
+             "persisting (U6 simulator)")
+    p_sp_dry_run.add_argument("id", type=int, help="Request ID")
+    p_sp_dry_run.add_argument("--prepend-artist", action="store_true",
+                              dest="prepend_artist", default=None,
+                              help="Prepend artist name to album title in "
+                              "generated queries (overrides config; absent "
+                              "means use config's album_prepend_artist)")
+    p_sp_dry_run.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
+    p_sp_saturation = sp_sub.add_parser(
+        "saturation",
+        help="Show per-request saturation rate + pre-filter skip total "
+             "over the recent search_log window (U7 telemetry)")
+    p_sp_saturation.add_argument("id", type=int, help="Request ID")
+    p_sp_saturation.add_argument(
+        "--window-days", type=int, default=None, dest="window_days",
+        help="Window in days; defaults to 14; valid range [1, 90]")
+    p_sp_saturation.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON instead of text")
+    p_sp_history = sp_sub.add_parser(
+        "history",
+        help="Cursor-paginated read of one request's search_log rows "
+             "(per-attempt forensics)")
+    p_sp_history.add_argument("id", type=int, help="Request ID")
+    p_sp_history.add_argument(
+        "--limit", type=int, default=None,
+        help="Rows per page; defaults to 50; valid range [1, 200]")
+    p_sp_history.add_argument(
+        "--before-id", type=int, default=None, dest="before_id",
+        help="Resume cursor: pass the previous page's next_before_id")
+    p_sp_history.add_argument("--json", action="store_true",
+                              help="Print structured JSON instead of text")
+    return p_sp

@@ -6,6 +6,7 @@ forensics summary), download history (+ import-result rendering), and
 denylisted users.
 """
 
+import argparse
 import json
 
 import msgspec
@@ -302,3 +303,10 @@ def cmd_show(db, args):
         print(f"\n  Denylisted Users ({len(denied)}):")
         for d in denied:
             print(f"    {d['username']}: {d['reason']}")
+
+
+def add_show_subparser(sub: argparse._SubParsersAction) -> None:
+    """Add ``show`` (#521 carve out of ``routes_meta._build_parser``,
+    verbatim argument definitions)."""
+    p_show = sub.add_parser("show", help="Show full details of a request")
+    p_show.add_argument("id", type=int, help="Request ID")

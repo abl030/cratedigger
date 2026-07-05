@@ -5,6 +5,8 @@ current quality state. ``repair-spectral`` — find and fix albums stuck
 by stale ``current_spectral_bitrate`` (issue #18).
 """
 
+import argparse
+
 from lib import transitions
 from scripts.pipeline_cli._format import _fmt_br
 
@@ -456,3 +458,17 @@ def cmd_repair_spectral(db, args):
 
     print(f"\nRepaired {repaired} album(s)." if not args.dry_run
           else f"\n[DRY RUN] Would repair {len(candidates)} album(s).")
+
+
+def add_quality_subparsers(sub: argparse._SubParsersAction) -> None:
+    """Add ``quality`` / ``repair-spectral`` (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions)."""
+    # quality
+    p_quality = sub.add_parser("quality", help="Show quality state and simulate decisions")
+    p_quality.add_argument("id", type=int, help="Request ID")
+
+    # repair-spectral
+    p_repair = sub.add_parser("repair-spectral",
+                              help="Fix albums stuck by stale current_spectral_bitrate (#18)")
+    p_repair.add_argument("--dry-run", action="store_true",
+                          help="Show what would be repaired without changing anything")

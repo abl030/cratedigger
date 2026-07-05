@@ -3,6 +3,7 @@
 Debugging read-only SQL escape hatch — ``pipeline-cli query <sql>``.
 """
 
+import argparse
 import json
 import sys
 from datetime import date, datetime, time
@@ -91,3 +92,11 @@ def cmd_query(db, args):
     for line in _render_query_table(rows, columns):
         print(line)
     return None
+
+
+def add_query_subparser(sub: argparse._SubParsersAction) -> None:
+    """Add ``query`` (#521 carve out of ``routes_meta._build_parser``,
+    verbatim argument definitions)."""
+    p_query = sub.add_parser("query", help="Run a read-only SQL query for debugging")
+    p_query.add_argument("sql", help="SQL query string, or '-' to read SQL from stdin")
+    p_query.add_argument("--json", action="store_true", help="Print rows as JSON")

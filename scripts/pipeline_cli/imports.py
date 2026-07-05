@@ -6,6 +6,7 @@ stage a local folder as a request, list recent queue jobs, and preview
 whether an import would pass without actually running one.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -274,3 +275,66 @@ def cmd_import_preview(db, args):
 
     _print_preview_result(result, json_output=args.json)
     return 0
+
+
+def add_imports_subparsers(sub: argparse._SubParsersAction) -> None:
+    """Add ``force-import`` / ``manual-import`` / ``import-jobs`` /
+    ``import-preview`` (#521 carve out of ``routes_meta._build_parser``,
+    verbatim argument definitions)."""
+    # force-import
+    p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")
+    p_force.add_argument("download_log_id", type=int, help="Download log ID")
+    p_force.add_argument("--verified-lossless-target",
+                         help="Override the runtime verified-lossless target for this import")
+
+    # manual-import
+    p_manual = sub.add_parser("manual-import", help="Import a local folder as a pipeline request")
+    p_manual.add_argument("id", type=int, help="Pipeline request ID")
+    p_manual.add_argument("path", help="Path to album folder")
+    p_manual.add_argument("--verified-lossless-target",
+                          help="Override the runtime verified-lossless target for this import")
+
+    # import-jobs
+    p_jobs = sub.add_parser("import-jobs", help="List recent import queue jobs")
+    p_jobs.add_argument("--status", choices=["queued", "running", "completed", "failed"])
+    p_jobs.add_argument("--limit", type=int, default=20)
+
+    # import-preview
+    p_preview = sub.add_parser("import-preview", help="Preview whether an import would pass")
+    p_preview.add_argument("--download-log-id", type=int,
+                           help="Preview the failed_path from a download_log row")
+    p_preview.add_argument("--request-id", type=int,
+                           help="Request ID for --path preview")
+    p_preview.add_argument("--path", help="Preview a real folder for a request")
+    p_preview.add_argument("--no-force", action="store_true",
+                           help="Do not pass --force to import_one.py preview")
+    p_preview.add_argument("--values", action="store_true",
+                           help="Preview typed override values instead of a real folder")
+    p_preview.add_argument("--values-json",
+                           help="JSON object with ImportPreviewValues fields")
+    p_preview.add_argument("--json", action="store_true",
+                           help="Print the common preview result as JSON")
+    p_preview.add_argument("--is-flac", action="store_true", default=None)
+    p_preview.add_argument("--min-bitrate", type=int)
+    p_preview.add_argument("--is-cbr", action="store_true", default=None)
+    p_preview.add_argument("--is-vbr", action="store_true", default=None)
+    p_preview.add_argument("--avg-bitrate", type=int)
+    p_preview.add_argument("--spectral-grade", choices=SPECTRAL_GRADE_CHOICES)
+    p_preview.add_argument("--spectral-bitrate", type=int)
+    p_preview.add_argument("--existing-min-bitrate", type=int)
+    p_preview.add_argument("--existing-avg-bitrate", type=int)
+    p_preview.add_argument("--existing-spectral-bitrate", type=int)
+    p_preview.add_argument("--existing-spectral-grade", choices=SPECTRAL_GRADE_CHOICES)
+    p_preview.add_argument("--override-min-bitrate", type=int)
+    p_preview.add_argument("--existing-format")
+    p_preview.add_argument("--existing-is-cbr", action="store_true", default=None)
+    p_preview.add_argument("--post-conversion-min-bitrate", type=int)
+    p_preview.add_argument("--converted-count", type=int)
+    p_preview.add_argument("--verified-lossless", action="store_true", default=None)
+    p_preview.add_argument("--verified-lossless-target")
+    p_preview.add_argument("--target-format")
+    p_preview.add_argument("--new-format")
+    p_preview.add_argument("--audio-check-mode")
+    p_preview.add_argument("--audio-corrupt", action="store_true", default=None)
+    p_preview.add_argument("--import-mode")
+    p_preview.add_argument("--has-nested-audio", action="store_true", default=None)

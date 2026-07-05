@@ -3,6 +3,7 @@
 Real beets-distance between a download_log's failed_path and an MBID.
 """
 
+import argparse
 import json
 
 from scripts.pipeline_cli._format import _json_default
@@ -104,3 +105,18 @@ def cmd_beets_distance(db, args):
     if result.outcome == "mb_lookup_failed":
         return 5
     return 1
+
+
+def add_beets_distance_subparser(sub: argparse._SubParsersAction) -> None:
+    """Add ``beets-distance`` (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions)."""
+    p_bd = sub.add_parser(
+        "beets-distance",
+        help="Real beets-distance between a download_log's audio and an MBID "
+             "(refuses if MBID is outside the request's release group)")
+    p_bd.add_argument("download_log_id", type=int,
+                      help="download_log row id (see `pipeline-cli show <req>`)")
+    p_bd.add_argument("mbid",
+                      help="Candidate release id — MB UUID or Discogs numeric id")
+    p_bd.add_argument("--json", action="store_true",
+                      help="Print structured JSON instead of text")
