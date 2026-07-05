@@ -2,7 +2,7 @@
 
 import unittest
 
-from lib.quality import (
+from lib.repair import (
     OrphanInfo,
     find_inconsistencies,
     find_orphaned_downloads,

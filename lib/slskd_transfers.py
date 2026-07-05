@@ -432,7 +432,7 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
     logged and the remaining orphans are still attempted. Returns the
     number of transfers successfully cancelled.
     """
-    from lib.quality import find_slskd_orphans
+    from lib.repair import find_slskd_orphans
 
     downloads = _get_all_downloads_snapshot(
         ctx.slskd, purpose="orphan-transfer convergence",

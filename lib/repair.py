@@ -1,10 +1,12 @@
-"""Orphan/inconsistency detection + repair suggestions (parked here by #477; not quality logic).
+"""Orphan/inconsistency detection + repair suggestions.
 
-Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477),
-refreshed onto main to also carry ``SlskdOrphanTransfer`` /
+Originally extracted verbatim from the monolithic ``lib/quality.py`` (issue
+#477), which parked it under ``lib/quality/`` even though it isn't
+quality-decision logic; refreshed to also carry ``SlskdOrphanTransfer`` /
 ``find_slskd_orphans`` (issue #278, the inverse orphan direction — live
-slskd transfers no downloading row owns). Pure move: every definition is
-AST-identical to the current monolith.
+slskd transfers no downloading row owns); relocated to this top-level
+module (issue #512). Pure moves both times: every definition here is
+AST-identical to its prior incarnation.
 """
 
 from __future__ import annotations
@@ -13,10 +15,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    # Deferred: lib.slskd_client -> lib.config -> lib.quality (this
-    # package's __init__) -> lib.quality.repair would otherwise be a
-    # circular import at module load time. DownloadUser is only used for
-    # the find_slskd_orphans() type annotation, never constructed here.
+    # DownloadUser is only used for the find_slskd_orphans() type
+    # annotation, never constructed here — deferred so this module doesn't
+    # need lib.slskd_client at runtime import time.
     from lib.slskd_client import DownloadUser
 
 

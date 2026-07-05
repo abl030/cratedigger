@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from typing import Any, cast
 
-from lib.quality import OrphanInfo, SlskdOrphanTransfer
+from lib.repair import OrphanInfo, SlskdOrphanTransfer
 from scripts import repair
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_download_directory, make_download_user, make_transfer_snapshot
