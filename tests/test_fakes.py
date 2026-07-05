@@ -12,7 +12,6 @@ import msgspec
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralMeasurement, ValidationResult
-from lib.slskd_client import TransferSnapshot
 from tests.fakes import (
     FakeBeetsDB,
     FakeCursor,
@@ -1601,42 +1600,6 @@ class TestFakeSlskdAPI(unittest.TestCase):
         self.assertEqual(slskd.transfers.get_all_downloads(includeRemoved=True), second)
         self.assertEqual(slskd.transfers.get_all_downloads(includeRemoved=True), second)
         self.assertEqual(slskd.transfers.get_all_downloads_calls, [True, True, True])
-
-    def test_get_download_matches_username_and_id(self):
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="user1",
-            directory="user1\\Music",
-            filename="user1\\Music\\01.flac",
-            id="tid-1",
-            state="Completed, Succeeded",
-        )
-
-        transfer = slskd.transfers.get_download("user1", "tid-1")
-
-        self.assertIsInstance(transfer, TransferSnapshot)
-        self.assertEqual(transfer.filename, "user1\\Music\\01.flac")
-        self.assertEqual(transfer.state, "Completed, Succeeded")
-        self.assertEqual(slskd.transfers.get_download_calls, [("user1", "tid-1")])
-
-    def test_get_download_mirrors_real_client_validation_error(self):
-        """#468 test-fidelity: the fake must fail the same way production
-        does on wire-type drift, not silently pass a bad shape through."""
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="user1",
-            directory="user1\\Music",
-            filename="user1\\Music\\01.flac",
-            id="tid-1",
-            state="InProgress",
-            bytesTransferred=12345,
-        )
-        # Corrupt the stored transfer's type after the fact — add_transfer's
-        # own kwargs are already correctly typed.
-        slskd._downloads[0]["directories"][0]["files"][0]["bytesTransferred"] = "oops"
-
-        with self.assertRaises(msgspec.ValidationError):
-            slskd.transfers.get_download("user1", "tid-1")
 
     def test_records_enqueue_and_cancel_calls(self):
         slskd = FakeSlskdAPI()

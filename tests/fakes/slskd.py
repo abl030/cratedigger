@@ -7,10 +7,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-import msgspec
-
-from lib.slskd_client import TransferSnapshot
-
 @dataclass
 class EnqueueCall:
     """One slskd enqueue call captured by FakeSlskdAPI."""
@@ -32,13 +28,10 @@ class FakeSlskdTransfers:
         self._api = api
         self.enqueue_calls: list[EnqueueCall] = []
         self.get_all_downloads_calls: list[bool] = []
-        self.get_download_calls: list[tuple[str, str]] = []
-        self.get_downloads_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.cancel_download_calls: list[CancelDownloadCall] = []
         self.enqueue_result = True
         self.enqueue_error: Exception | None = None
         self.get_all_downloads_error: Exception | None = None
-        self.get_download_error: Exception | None = None
         self.cancel_download_error: Exception | None = None
         self.cancel_download_result = True
 
@@ -54,23 +47,6 @@ class FakeSlskdTransfers:
         if self.get_all_downloads_error is not None:
             raise self.get_all_downloads_error
         return self._api._next_download_snapshot()
-
-    def get_downloads(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-        self.get_downloads_calls.append((args, copy.deepcopy(kwargs)))
-        return self.get_all_downloads(
-            includeRemoved=bool(kwargs.get("includeRemoved", False)))
-
-    def get_download(self, username: str, id: str) -> TransferSnapshot:
-        self.get_download_calls.append((username, id))
-        if self.get_download_error is not None:
-            raise self.get_download_error
-        transfer = self._api._find_transfer(username, id)
-        if transfer is None:
-            raise KeyError(f"No transfer {id!r} for {username!r}")
-        # Mirror the real client's decode-and-raise contract (#468) — the
-        # fake must fail the same way production does on wire-type drift,
-        # not silently pass through a shape production would reject.
-        return msgspec.convert(transfer, type=TransferSnapshot)
 
     def cancel_download(self, username: str, id: str,
                         remove: bool = False) -> bool:
@@ -457,16 +433,6 @@ class FakeSlskdAPI:
         if self._download_snapshots:
             self._downloads = self._download_snapshots.pop(0)
         return copy.deepcopy(self._downloads)
-
-    def _find_transfer(self, username: str, transfer_id: str) -> dict[str, Any] | None:
-        for group in self._downloads:
-            if group.get("username") not in (None, "", username):
-                continue
-            for directory in group.get("directories", []):
-                for transfer in directory.get("files", []):
-                    if transfer.get("id") == transfer_id:
-                        return copy.deepcopy(transfer)
-        return None
 
     def remove_transfer(self, *, username: str, id: str) -> None:
         for group in self._downloads:

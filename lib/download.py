@@ -952,7 +952,7 @@ def _poll_one_active_download(
         if f.id and not (f.status and f.status.state.startswith("Completed,"))
     ]
     if files_requiring_status and not slskd_download_status(
-            files_requiring_status, ctx, snapshot=cycle_snapshot):
+            files_requiring_status, snapshot=cycle_snapshot):
         logger.warning(f"API error polling {entry.artist} - {entry.title} — "
                       f"will retry next cycle")
         return
