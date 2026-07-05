@@ -46,6 +46,30 @@ from tests.helpers import (
 )
 
 
+def setUpModule() -> None:
+    """Force a real, unmocked import of ``lib.download`` up front (#511).
+
+    ``lib/download.py`` binds its module-level ``process_completed_album``
+    name at import time via a ``from lib.download_processing import ...``
+    statement. Several tests below reach that import lazily for the first
+    time (via ``scripts.importer.execute_youtube_import_job``'s own
+    deferred ``from lib.download import ...``) while a mock-patch context
+    on ``lib.download_processing``'s own ``process_completed_album``
+    attribute is active. Python caches module imports, so whichever call
+    site imports ``lib.download`` FIRST permanently decides what its
+    module-level name refers to — if that first import happens mid-patch,
+    the mock gets baked in forever; the patch's own restore on exit only
+    resets the OTHER module's attribute, which this separately-bound name
+    never observes again. That silently broke ``TestImporterWorker``'s
+    automation-import tests (which rely on ``lib.download``'s real
+    function), whenever this module ran standalone, because
+    ``TestExecuteYoutubeImportJob`` sorts before ``TestImporterWorker`` and
+    got there first. Importing it here, before any test or patch runs,
+    makes the real binding deterministic regardless of test order.
+    """
+    import lib.download  # noqa: F401
+
+
 # Migration 021 helpers — seed evidence and wire the FK chain that
 # production reads through.
 def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
