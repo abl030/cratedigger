@@ -229,7 +229,19 @@ def get_artist_disambiguate(h: BaseHTTPRequestHandler, params: dict[str, list[st
 
 def get_release_group(h: BaseHTTPRequestHandler, params: dict[str, list[str]], rg_id: str) -> None:
     srv = _server()
-    data = srv.mb_api.get_release_group_releases(rg_id)
+    normalized_id = normalize_release_id(rg_id) or rg_id.strip()
+    identity = ReleaseIdentity.from_id(normalized_id)
+    if identity and identity.source == "discogs":
+        # A numeric id here is a Discogs master, not an MB release-group
+        # UUID — dispatch server-side the same way get_release() forwards
+        # numeric release ids to get_discogs_release(). get_master_releases
+        # deliberately mirrors mb.get_release_group_releases()'s shape
+        # (web/discogs.py), so get_discogs_master's overlay is the same
+        # contract the frontend already reads for MB rows (#501 item 1).
+        get_discogs_master(h, params, identity.release_id)
+        return
+
+    data = srv.mb_api.get_release_group_releases(normalized_id)
     # Standard toolbar (Remove from beets) and badge renderer (in library
     # + codec-aware rank) read these overlay fields per row, so route
     # them through the shared helper.
@@ -679,7 +691,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     pattern_route(
         "GET", r"^/api/release-group/([a-f0-9-]+)$", get_release_group,
-        "MB release group detail — releases in this group with overlay.",
+        "MB release group detail (auto-routes to the Discogs master "
+        "endpoint for numeric IDs) — releases in this group with overlay.",
         classified=True,
     ),
     pattern_route(

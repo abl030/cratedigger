@@ -108,7 +108,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
 
     REPLACE_REQUIRED_FIELDS = {
         "outcome", "request_id", "new_request_id", "current_status",
-        "descendant_request_id", "error_message", "warnings",
+        "descendant_request_id", "error_message", "reason", "warnings",
     }
     REQUESTS_BY_RG_FIELDS = {
         "id", "mb_release_id", "mb_release_group_id", "status",
@@ -206,12 +206,14 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         with self._patch_service(
             outcome="target_invalid", request_id=100,
             error_message="MB lookup empty",
+            reason="unresolvable_target",
         ):
             status, data = self._post(
                 "/api/pipeline/100/replace",
                 {"target_mb_release_id": "bogus"},
             )
         self.assertEqual(status, 422)
+        self.assertEqual(data["reason"], "unresolvable_target")
 
     def test_replace_rg_mismatch_returns_422(self):
         with self._patch_service(

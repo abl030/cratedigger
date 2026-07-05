@@ -17,7 +17,7 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import path_is_within_root
-from lib.slskd_client import parse_transfer_snapshot
+from lib.slskd_client import DownloadUser, TransferSnapshot
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -125,8 +125,8 @@ def _delete_completed_payloads(
             pass  # Non-empty (shared with another album) or already gone.
 
 
-def slskd_download_status(downloads: list[Any], *,
-                          snapshot: list[dict[str, Any]]) -> bool:
+def slskd_download_status(downloads: list[DownloadFile], *,
+                          snapshot: list[DownloadUser]) -> bool:
     """Get status of each download file by matching locally against the
     pre-fetched bulk poll-cycle snapshot (issue #508: every caller already
     has one — there is no per-file API fallback)."""
@@ -135,9 +135,7 @@ def slskd_download_status(downloads: list[Any], *,
         try:
             transfer = match_transfer(snapshot, file.filename, username=file.username)
             if transfer is not None:
-                file.status = parse_transfer_snapshot(transfer)
-                if file.status is None:
-                    ok = False
+                file.status = transfer
             else:
                 file.status = None
                 ok = False
@@ -198,7 +196,7 @@ def slskd_enqueue_with_outcome(
     max_wait = 10.0
     interval = 1.0
     elapsed = 0.0
-    download_list: list[dict[str, Any]] | None = None
+    download_list: list[DownloadUser] | None = None
 
     while elapsed < max_wait:
         time.sleep(interval)
@@ -256,10 +254,12 @@ def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
     return outcome.downloads
 
 
-def downloads_all_done(downloads: list[Any]) -> tuple[bool, list[Any] | None, int]:
+def downloads_all_done(
+    downloads: list[DownloadFile],
+) -> tuple[bool, list[DownloadFile] | None, int]:
     """Check status of all files. Returns (all_done, error_list_or_none, remote_queue_count)."""
     all_done = True
-    error_list: list[Any] = []
+    error_list: list[DownloadFile] = []
     remote_queue = 0
     for file in downloads:
         if file.status is not None:
@@ -279,7 +279,9 @@ def downloads_all_done(downloads: list[Any]) -> tuple[bool, list[Any] | None, in
     return all_done, error_list if error_list else None, remote_queue
 
 
-def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) -> bool:
+def _all_files_remotely_queued(
+    downloads: list[DownloadFile], remote_queue_count: int,
+) -> bool:
     """Return True when every tracked file is still queued on the remote peer.
 
     This is intentionally separate from stalled transfer detection: a file that has
@@ -295,13 +297,13 @@ def _all_files_remotely_queued(downloads: list[Any], remote_queue_count: int) ->
 # === Transfer ID re-derivation ===
 
 def match_transfer_id(
-    downloads: dict[str, Any] | list[dict[str, Any]],
+    downloads: DownloadUser | list[DownloadUser],
     target_filename: str,
     username: str | None = None,
 ) -> str | None:
     """Find the slskd transfer ID for a filename in slskd download responses.
 
-    downloads may be a single-user transfer dict or the list returned by
+    downloads may be a single user-group entry or the list returned by
     slskd.transfers.get_all_downloads(). When a list is provided, username
     narrows the search to one peer.
     Returns the transfer ID string, or None if not found.
@@ -309,7 +311,7 @@ def match_transfer_id(
     transfer = match_transfer(downloads, target_filename, username=username)
     if transfer is None:
         return None
-    return transfer.get("id", "")
+    return transfer.id
 
 
 def _parse_transfer_timestamp(value: Any) -> datetime:
@@ -328,23 +330,23 @@ def _parse_transfer_timestamp(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _transfer_latest_timestamp(transfer: dict[str, Any]) -> datetime:
+def _transfer_latest_timestamp(transfer: TransferSnapshot) -> datetime:
     return max(
-        _parse_transfer_timestamp(transfer.get("endedAt")),
-        _parse_transfer_timestamp(transfer.get("startedAt")),
-        _parse_transfer_timestamp(transfer.get("enqueuedAt")),
-        _parse_transfer_timestamp(transfer.get("requestedAt")),
+        _parse_transfer_timestamp(transfer.ended_at),
+        _parse_transfer_timestamp(transfer.started_at),
+        _parse_transfer_timestamp(transfer.enqueued_at),
+        _parse_transfer_timestamp(transfer.requested_at),
     )
 
 
-def _transfer_priority(transfer: dict[str, Any]) -> tuple[int, int, datetime]:
+def _transfer_priority(transfer: TransferSnapshot) -> tuple[int, int, datetime]:
     """Rank duplicate transfer snapshots for the same username+filename.
 
     Prefer active transfers over terminal ones. Among terminal snapshots,
     prefer successful completions over cancelled/errored attempts, and then
     pick the newest lifecycle timestamp.
     """
-    state = str(transfer.get("state", ""))
+    state = transfer.state
     is_terminal = state.startswith("Completed,")
     is_success = state == "Completed, Succeeded"
     latest_ts = _transfer_latest_timestamp(transfer)
@@ -352,12 +354,12 @@ def _transfer_priority(transfer: dict[str, Any]) -> tuple[int, int, datetime]:
 
 
 def _is_terminal_transfer_before(
-    transfer: dict[str, Any],
+    transfer: TransferSnapshot,
     not_before: str | None,
 ) -> bool:
     if not_before is None:
         return False
-    state = str(transfer.get("state", ""))
+    state = transfer.state
     if not state.startswith("Completed,"):
         return False
     threshold = _parse_transfer_timestamp(not_before)
@@ -368,19 +370,19 @@ def _is_terminal_transfer_before(
 
 
 def match_transfer(
-    downloads: dict[str, Any] | list[dict[str, Any]],
+    downloads: DownloadUser | list[DownloadUser],
     target_filename: str,
     username: str | None = None,
-) -> dict[str, Any] | None:
+) -> TransferSnapshot | None:
     """Find the best slskd transfer snapshot for a username+filename pair."""
     groups = downloads if isinstance(downloads, list) else [downloads]
-    candidates: list[dict[str, Any]] = []
+    candidates: list[TransferSnapshot] = []
     for group in groups:
-        if username is not None and group.get("username") not in (None, "", username):
+        if username is not None and group.username not in ("", username):
             continue
-        for directory in group.get("directories", []):
-            for slskd_file in directory.get("files", []):
-                if slskd_file.get("filename") == target_filename:
+        for directory in group.directories:
+            for slskd_file in directory.files:
+                if slskd_file.filename == target_filename:
                     candidates.append(slskd_file)
 
     if not candidates:
@@ -393,7 +395,7 @@ def _get_all_downloads_snapshot(
     *,
     purpose: str,
     include_removed: bool = True,
-) -> list[dict[str, Any]] | None:
+) -> list[DownloadUser] | None:
     """Fetch the full slskd download snapshot via the bulk endpoint.
 
     The username-scoped endpoint is unreliable for some valid peer names
@@ -406,18 +408,11 @@ def _get_all_downloads_snapshot(
     states itself), so it passes False to trim the payload.
     """
     try:
-        downloads = slskd_client.transfers.get_all_downloads(
+        return slskd_client.transfers.get_all_downloads(
             includeRemoved=include_removed)
     except Exception:
         logger.warning(f"Failed to get all downloads for {purpose}", exc_info=True)
         return None
-
-    if not isinstance(downloads, list):
-        logger.warning("Unexpected get_all_downloads() response type %s",
-                       type(downloads).__name__)
-        return None
-
-    return downloads
 
 
 def converge_slskd_orphans(ctx: CratediggerContext) -> int:
@@ -472,7 +467,7 @@ def rederive_transfer_ids(
     entry: GrabListEntry,
     slskd_client: Any,
     *,
-    snapshot: list[dict[str, Any]] | None = None,
+    snapshot: list[DownloadUser] | None = None,
     not_before: str | None = None,
 ) -> bool:
     """Re-derive slskd transfer IDs for all files in a GrabListEntry.
@@ -498,10 +493,9 @@ def rederive_transfer_ids(
         ):
             transfer = None
         if transfer is not None:
-            f.id = transfer.get("id", "")
-            state = str(transfer.get("state", ""))
-            if state.startswith("Completed,"):
-                f.status = parse_transfer_snapshot(transfer)
+            f.id = transfer.id
+            if transfer.state.startswith("Completed,"):
+                f.status = transfer
             else:
                 f.status = None
         else:

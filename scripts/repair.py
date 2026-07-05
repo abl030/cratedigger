@@ -34,6 +34,7 @@ from lib.processing_paths import directory_has_entries
 from lib.quality import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
                          find_orphaned_downloads, find_slskd_orphans,
                          suggest_repair)
+from lib.slskd_client import DownloadUser
 
 # No hardcoded fallback (#479): the nspawn DB has moved before (last time to
 # 10.20.0.11) and a baked-in IP silently dials a dead host forever after the
@@ -41,8 +42,10 @@ from lib.quality import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
 DEFAULT_DSN = os.environ.get("PIPELINE_DB_DSN")
 
 
-def _fetch_slskd_downloads(host: str, api_key: str) -> list[dict[str, Any]]:
-    """Fetch the raw slskd ``get_all_downloads()`` snapshot (live transfers only).
+def _fetch_slskd_downloads(host: str, api_key: str) -> list[DownloadUser]:
+    """Fetch the ``get_all_downloads()`` snapshot (live transfers only),
+    already typed via ``lib.slskd_client.parse_downloads_envelope``
+    (issue #507).
 
     Kept as its own network seam so ``_collect_issues`` can derive BOTH the
     forward orphan view (``_active_transfer_pairs``) and the inverse
@@ -52,22 +55,18 @@ def _fetch_slskd_downloads(host: str, api_key: str) -> list[dict[str, Any]]:
     """
     from lib.slskd_client import SlskdClient
     client = SlskdClient(host=host, api_key=api_key)
-    downloads: Any = client.transfers.get_all_downloads(includeRemoved=False)
-    if not isinstance(downloads, list):
-        return []
-    return downloads
+    return client.transfers.get_all_downloads(includeRemoved=False)
 
 
-def _active_transfer_pairs(downloads: list[dict[str, Any]]) -> set[tuple[str, str]]:
+def _active_transfer_pairs(downloads: list[DownloadUser]) -> set[tuple[str, str]]:
     """Flatten a slskd downloads snapshot to (username, filename) pairs. Pure."""
     pairs: set[tuple[str, str]] = set()
     for user_group in downloads:
-        username = user_group.get("username", "")
-        for d in user_group.get("directories", []):
-            for f in d.get("files", []):
-                fname = f.get("filename")
-                if fname:
-                    pairs.add((username, fname))
+        username = user_group.username
+        for d in user_group.directories:
+            for f in d.files:
+                if f.filename:
+                    pairs.add((username, f.filename))
     return pairs
 
 

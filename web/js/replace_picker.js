@@ -28,23 +28,23 @@
  * release-group analog for a Discogs row is the Discogs master, and the
  * numeric master id lives in the SAME `releaseGroupId` field MB uses
  * (KTD-1 — `lib/field_resolver_service.py::_looks_numeric` convention).
- * `runStandard` branches purely on the anchor's shape (`detectSource`):
- * a UUID anchor keeps the existing `GET /api/release-group/<id>` path
- * byte-for-byte; a numeric anchor fetches `GET /api/discogs/master/<id>`
- * instead and maps its `releases` onto the same pressing-row shape via
- * `mapDiscogsMasterReleases`. `POST .../resolve-rg` returning
- * `status: 'masterless'` (Discogs release with no master) renders the
- * one-element "nothing to swap to" state (R2) via `runMasterless`
- * instead of the generic error path. Tracklist fetches
- * (`fetchTracklist`/`loadSourceTracklist`) need NO branch — `GET
+ * `runStandard` needs NO client-side anchor-shape branch — `GET
+ * /api/release-group/<id>` already forwards numeric ids to the Discogs
+ * master endpoint server-side (`web/routes/browse.py::get_release_group`,
+ * #501 item 1) and returns the identical pressing-row shape
+ * (`web/discogs.py::get_master_releases` deliberately mirrors
+ * `mb.get_release_group_releases()`), proven by
+ * `tests/web/test_routes_browse.py::test_release_group_numeric_id_forwards_to_discogs`.
+ * `POST .../resolve-rg` returning `status: 'masterless'` (Discogs release
+ * with no master) renders the one-element "nothing to swap to" state (R2)
+ * via `runMasterless` instead of the generic error path. Tracklist fetches
+ * (`fetchTracklist`/`loadSourceTracklist`) need NO branch either — `GET
  * /api/release/<id>` already forwards numeric ids to the Discogs mirror
  * server-side (`web/routes/browse.py::get_release`) and returns the
  * identical `tracks` shape (`disc_number/track_number/title/
  * length_seconds`), proven by
  * `tests/web/test_routes_browse.py::test_release_detail_numeric_id_forwards_to_discogs`.
  */
-
-import { detectSource } from './util.js';
 
 /**
  * @typedef {Object} ReplacePickerOptionsStandard
@@ -157,37 +157,6 @@ export function renderPressingsList(releases, sourceMbid) {
     </li>`;
   });
   return `<ul class="replace-picker-list">${rows.join('')}</ul>`;
-}
-
-/**
- * Map a `GET /api/discogs/master/<id>` payload's `releases` array onto the
- * same pressing-row shape (`ReleaseGroupSibling`) `GET /api/release-group/
- * <id>` already returns for MB — field for field: `id`, `title`, `date`,
- * `country`, `status`, `track_count`, `format` (see
- * `web/discogs.py::get_master_releases` vs `web/mb.py::
- * get_release_group_releases`, which already emit identical keys). This
- * mapper exists as the one seam that would catch future drift between the
- * two backends' shapes — it is intentionally NOT a real transformation
- * today. Discogs-only extras (`media_count`, `labels`) are dropped;
- * anything the payload omits falls back to a safe empty value, which
- * `pressingMeta`/`renderPressingsList` already render as blank/dash.
- * Marking the current pressing is unchanged — `renderPressingsList`
- * compares `r.id === sourceMbid` the same way for both sources.
- *
- * @param {{releases?: Array<Object>}|null|undefined} payload
- * @returns {ReleaseGroupSibling[]}
- */
-export function mapDiscogsMasterReleases(payload) {
-  const releases = (payload && Array.isArray(payload.releases)) ? payload.releases : [];
-  return releases.map((r) => ({
-    id: String(r.id ?? ''),
-    title: r.title || '',
-    date: r.date || '',
-    country: r.country || '',
-    status: r.status || '',
-    track_count: typeof r.track_count === 'number' ? r.track_count : 0,
-    format: r.format || '',
-  }));
 }
 
 /**
@@ -525,18 +494,15 @@ async function runStandard(options, showOverlay, close) {
   let sourceMbid = '';
   try {
     // Discogs master ids live in the same field MB release-group ids do
-    // (KTD-1); dispatch on shape rather than threading a second
-    // "pathway" option through the caller.
-    const isDiscogsAnchor = detectSource(releaseGroupId) === 'discogs';
-    const res = await fetch(
-      isDiscogsAnchor
-        ? `/api/discogs/master/${encodeURIComponent(releaseGroupId)}`
-        : `/api/release-group/${encodeURIComponent(releaseGroupId)}`);
+    // (KTD-1). No anchor-shape branch needed here — the route dispatches
+    // numeric ids to the Discogs master endpoint server-side and returns
+    // the identical shape (#501 item 1).
+    const res = await fetch(`/api/release-group/${encodeURIComponent(releaseGroupId)}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
     const body = await res.json();
-    releases = isDiscogsAnchor ? mapDiscogsMasterReleases(body) : (body.releases || []);
+    releases = body.releases || [];
     // Identify the current pressing for the source request (so we can
     // disable that row in the list).
     sourceMbid = await fetchSourceMbid(options.sourceRequestId);

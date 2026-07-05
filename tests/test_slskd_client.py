@@ -23,6 +23,8 @@ import msgspec
 import requests
 
 from lib.slskd_client import (
+    DownloadDirectory,
+    DownloadUser,
     SlskdClient,
     SlskdDownloadDirectoryCompleteEvent,
     SlskdDownloadFileCompleteEvent,
@@ -30,6 +32,7 @@ from lib.slskd_client import (
     TransferSnapshot,
     decode_download_directory_complete,
     decode_download_file_complete,
+    parse_downloads_envelope,
     parse_transfer_snapshot,
 )
 
@@ -320,7 +323,12 @@ class TestTransfersEndpoints(SlskdClientTestCase):
 
         downloads = self.client.transfers.get_all_downloads(includeRemoved=True)
 
-        self.assertEqual(downloads, DOWNLOADS_FIXTURE)
+        self.assertEqual(downloads, parse_downloads_envelope(DOWNLOADS_FIXTURE))
+        self.assertIsInstance(downloads[0], DownloadUser)
+        self.assertEqual(downloads[0].username, "FourTwenty")
+        self.assertEqual(
+            downloads[0].directories[0].files[0].id,
+            "1839fe97-46dd-4351-9ada-4422a57f9f7a")
         self.assertEqual(
             self.last_request()["query"], {"includeRemoved": ["True"]})
 
@@ -598,6 +606,95 @@ class TestTransferSnapshot(unittest.TestCase):
         self.assertEqual(snap.state, "Completed, Errored")
         self.assertEqual(snap.id, "")
         self.assertEqual(snap.bytes_transferred, 0)
+
+
+class TestDownloadsEnvelope(unittest.TestCase):
+    """#507: type the get_all_downloads() nested user->directories->files
+    envelope end-to-end — the second slice #468 deliberately left raw.
+    """
+
+    def test_parses_nested_fixture_into_typed_structs(self):
+        users = parse_downloads_envelope(DOWNLOADS_FIXTURE)
+
+        self.assertEqual(len(users), 1)
+        self.assertIsInstance(users[0], DownloadUser)
+        self.assertEqual(users[0].username, "FourTwenty")
+        self.assertIsInstance(users[0].directories[0], DownloadDirectory)
+        self.assertEqual(
+            users[0].directories[0].directory,
+            "Music\\Rock\\Led Zeppelin\\1969 - Led Zeppelin II")
+        file = users[0].directories[0].files[0]
+        self.assertIsInstance(file, TransferSnapshot)
+        self.assertEqual(file.id, "1839fe97-46dd-4351-9ada-4422a57f9f7a")
+        self.assertEqual(file.state, "Queued, Remotely")
+
+    def test_empty_envelope_returns_empty_list(self):
+        self.assertEqual(parse_downloads_envelope([]), [])
+
+    def test_missing_directories_defaults_to_empty_list(self):
+        users = parse_downloads_envelope([{"username": "solo"}])
+
+        self.assertEqual(users, [DownloadUser(username="solo", directories=[])])
+
+    def test_malformed_file_entry_dropped_sibling_survives(self):
+        # RED-boundary guard: one bad file (bytesTransferred as a string)
+        # must not drop its sibling file in the same directory — mirrors
+        # #468's parse_transfer_snapshot per-entry tolerance, but at finer
+        # granularity than a whole user-group row so one poison file in a
+        # peer's payload can't blind the poll to every other in-flight
+        # file that same peer is also transferring.
+        raw = [{
+            "username": "peer1",
+            "directories": [{
+                "directory": "Music\\Album",
+                "files": [
+                    {"filename": "good.flac", "id": "ok-1",
+                     "state": "InProgress"},
+                    {"filename": "bad.flac", "id": "bad-1",
+                     "bytesTransferred": "not-a-number"},
+                ],
+            }],
+        }]
+
+        users = parse_downloads_envelope(raw)
+
+        files = users[0].directories[0].files
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].filename, "good.flac")
+
+    def test_malformed_directory_entry_dropped_sibling_survives(self):
+        raw = [{
+            "username": "peer1",
+            "directories": [
+                "not-a-directory-dict",
+                {"directory": "Music\\Good", "files": [
+                    {"filename": "01.flac", "id": "id-1"},
+                ]},
+            ],
+        }]
+
+        users = parse_downloads_envelope(raw)
+
+        self.assertEqual(len(users[0].directories), 1)
+        self.assertEqual(users[0].directories[0].directory, "Music\\Good")
+
+    def test_malformed_user_row_dropped_sibling_survives(self):
+        raw = [
+            "not-a-user-dict",
+            {"username": "peer2", "directories": []},
+        ]
+
+        users = parse_downloads_envelope(raw)
+
+        self.assertEqual(len(users), 1)
+        self.assertEqual(users[0].username, "peer2")
+
+    def test_unknown_fields_at_every_level_are_ignored(self):
+        # slskd's directory row also carries fileCount (see DOWNLOADS_FIXTURE)
+        # — an unmodeled field must not trip decoding at any level.
+        users = parse_downloads_envelope(DOWNLOADS_FIXTURE)
+
+        self.assertEqual(users[0].directories[0].files[0].size, 113325058)
 
 
 if __name__ == "__main__":

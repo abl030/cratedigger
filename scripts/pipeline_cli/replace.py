@@ -10,7 +10,9 @@ from scripts.pipeline_cli._format import _json_default
 
 
 def cmd_replace(db, args):
-    """Supersede a request with a new row at a different MBID.
+    """Supersede a request with a new row at a different release id (an
+    MB release UUID or a Discogs numeric release id — must share the
+    source's pathway and release group/master).
 
     Counterpart of ``POST /api/pipeline/<id>/replace``. Both surfaces
     wrap ``MbidReplaceService.replace_request_mbid`` — keep them in
@@ -19,7 +21,9 @@ def cmd_replace(db, args):
     Exit codes:
       * 0 — ``RESULT_REPLACED``
       * 2 — ``RESULT_NOT_FOUND``
-      * 3 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
+      * 3 — ``RESULT_TARGET_INVALID`` (``reason`` carries the typed
+            sub-code — see ``lib/replace_status.py``),
+            ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
             ``RESULT_TARGET_SAME_AS_CURRENT`` (semantic input violations)
       * 4 — ``RESULT_WRONG_STATE`` (including supersede race —
             double-click landed first; descendant_request_id is set),
@@ -55,6 +59,7 @@ def cmd_replace(db, args):
         "current_status": result.current_status,
         "descendant_request_id": result.descendant_request_id,
         "error_message": result.error_message,
+        "reason": result.reason,
         "warnings": list(result.warnings),
     }
     if getattr(args, "json", False):
@@ -69,6 +74,8 @@ def cmd_replace(db, args):
             print(f"  Holder status:     {result.current_status}")
         if result.descendant_request_id is not None:
             print(f"  Descendant id:     {result.descendant_request_id}")
+        if result.reason is not None:
+            print(f"  Reason:            {result.reason}")
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
         if result.warnings:

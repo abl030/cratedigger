@@ -2654,6 +2654,30 @@ class TestCmdReplace(unittest.TestCase):
                 rc, _ = self._run(mock_outcome=outcome)
                 self.assertEqual(rc, 5)
 
+    def test_json_output_includes_reason(self):
+        """#501 item 2: the CLI's --json payload surfaces the new typed
+        ``reason`` field (a REPLACE_REASON_* code) so operators/tooling
+        can assert on the stable code instead of parsing error_message."""
+        rc, out = self._run(
+            mock_outcome="target_invalid",
+            mock_kwargs={
+                "reason": "cross_pathway_target",
+                "error_message": "target ... is not a valid same-pathway target",
+            },
+            json_out=True,
+        )
+        payload = json.loads(out)
+        self.assertEqual(payload["reason"], "cross_pathway_target")
+
+    def test_text_output_includes_reason_line(self):
+        """#501 item 2: the human-readable output also surfaces the
+        reason code when set (target_invalid outcomes only)."""
+        rc, out = self._run(
+            mock_outcome="target_invalid",
+            mock_kwargs={"reason": "cross_pathway_target"},
+        )
+        self.assertIn("cross_pathway_target", out)
+
     def test_numeric_discogs_target_accepted(self):
         """A numeric Discogs id is a valid target on the CLI surface —
         argparse takes ``--to`` as an opaque string; the service
