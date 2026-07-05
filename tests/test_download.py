@@ -21,6 +21,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, TYPE_CHECKING, cast
 
 from lib.download_processing import Materialized, MaterializeFailed, MaterializeGuarded
+from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
 from lib.slskd_client import TransferSnapshot
 from tests.helpers import (
     make_ctx_with_fake_db,
@@ -2125,6 +2126,157 @@ class TestMaterializeFailureAction(unittest.TestCase):
                     expected)
 
 
+class TestEvaluateStagedPathReadiness(unittest.TestCase):
+    """Pure decision table for the ONE shared "staged path safe to resume"
+    decision (issue #509) — previously duplicated between
+    ``_materialize_processing_dir`` and
+    ``lib.download._processing_path_ready_for_importer``, which had
+    drifted (a missing ``blocks_auto_import_dispatch`` guard on the
+    poller side, and two different ways of reading subprocess-start
+    evidence). Both callers now route through
+    ``_evaluate_staged_path_readiness``; this table pins its branches
+    directly, independent of either caller's own reaction to the tag.
+    """
+
+    def _seed_and_build(
+        self,
+        tmpdir: str,
+        *,
+        kind: ProcessingPathKind,
+        dir_exists: bool,
+        files_present: bool,
+        subprocess_started_at: str | None,
+        seed_row: bool = True,
+        request_id: int = 1,
+    ):
+        from lib.staged_album import StagedAlbum
+
+        current_path = os.path.join(tmpdir, "staged")
+        entry = make_grab_list_entry(
+            files=[make_download_file(filename="01 - Track.flac")],
+            db_request_id=request_id,
+            db_source="request",
+            mb_release_id="test-mbid-509",
+        )
+        staged_album = StagedAlbum(current_path=current_path, request_id=request_id)
+        if dir_exists:
+            os.makedirs(current_path, exist_ok=True)
+        if files_present:
+            dest = staged_album.import_path_for(entry.files[0])
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w") as fp:
+                fp.write("fake audio")
+        location = ProcessingPathLocation(path=current_path, kind=kind)
+
+        db = FakePipelineDB()
+        if seed_row:
+            state = {
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": current_path,
+                "import_subprocess_started_at": subprocess_started_at,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01 - Track.flac",
+                     "file_dir": "user1\\Music", "size": 1000},
+                ],
+            }
+            db.seed_request(make_request_row(
+                id=request_id,
+                status="downloading",
+                mb_release_id="test-mbid-509",
+                active_download_state=state,
+            ))
+        return entry, staged_album, location, db
+
+    CASES = [
+        # (desc, kind, dir_exists, files_present, subprocess_started_at,
+        #  seed_row, expected_type, expected_attr)
+        ("post_validation_dir_missing_not_blocked",
+         "request_scoped_post_validation_staged", False, False, None, True,
+         MaterializeFailed, "staged_path_missing"),
+        ("post_validation_files_present_ready",
+         "request_scoped_post_validation_staged", True, True, None, True,
+         Materialized, None),
+        ("post_validation_files_missing_not_blocked",
+         "request_scoped_post_validation_staged", True, False, None, True,
+         MaterializeFailed, "staged_path_missing_tracked_files"),
+        ("legacy_shared_dir_missing_not_blocked_by_post_move_guard",
+         "legacy_shared_staged", False, False, None, True,
+         MaterializeFailed, "staged_path_missing"),
+        ("legacy_shared_files_present_dispatch_blocked_when_subprocess_true",
+         "legacy_shared_staged", True, True, _utc_now_iso(), True,
+         MaterializeGuarded, "auto_import_dispatch_blocked_post_move"),
+        ("legacy_shared_files_present_allowed_when_subprocess_false",
+         "legacy_shared_staged", True, True, None, True,
+         Materialized, None),
+        ("auto_import_staged_dir_missing_not_blocked_when_subprocess_false",
+         "request_scoped_auto_import_staged", False, False, None, True,
+         MaterializeFailed, "staged_path_missing"),
+        ("auto_import_staged_subprocess_unknown_guards_immediately",
+         "request_scoped_auto_import_staged", False, False, None, False,
+         MaterializeGuarded, "ownership_unverifiable_request_scoped_staged"),
+        ("auto_import_staged_files_missing_not_blocked_when_subprocess_false",
+         "request_scoped_auto_import_staged", True, False, None, True,
+         MaterializeFailed, "staged_path_missing_tracked_files"),
+        ("auto_import_staged_files_present_ready_when_subprocess_false",
+         "request_scoped_auto_import_staged", True, True, None, True,
+         Materialized, None),
+    ]
+
+    def test_decision_table(self):
+        for (desc, kind, dir_exists, files_present, subprocess_started_at,
+             seed_row, expected_type, expected_attr) in self.CASES:
+            with self.subTest(desc=desc):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    from lib.download_processing import (
+                        _evaluate_staged_path_readiness,
+                    )
+                    entry, staged_album, location, db = self._seed_and_build(
+                        tmpdir,
+                        kind=kind,
+                        dir_exists=dir_exists,
+                        files_present=files_present,
+                        subprocess_started_at=subprocess_started_at,
+                        seed_row=seed_row,
+                    )
+                    result = _evaluate_staged_path_readiness(
+                        entry, staged_album, location, db,
+                    )
+                    self.assertIsInstance(result, expected_type)
+                    if expected_attr is not None:
+                        if isinstance(result, MaterializeFailed):
+                            self.assertEqual(result.reason, expected_attr)
+                        elif isinstance(result, MaterializeGuarded):
+                            self.assertEqual(result.detail, expected_attr)
+                        else:
+                            self.fail(
+                                f"result {result!r} has no reason/detail "
+                                "to compare")
+
+    def test_abandon_success_resets_via_shared_decision(self):
+        """kind=auto-import-staged + subprocess started + abandon commits
+        cleanly: the shared decision reports ``MaterializeFailed`` (the
+        caller's cue to treat this as a completed self-heal, not a
+        guarded manual-recovery case) and the DB row is already reset."""
+        from lib.download_processing import _evaluate_staged_path_readiness
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entry, staged_album, location, db = self._seed_and_build(
+                tmpdir,
+                kind="request_scoped_auto_import_staged",
+                dir_exists=True,
+                files_present=False,
+                subprocess_started_at=_utc_now_iso(),
+            )
+            result = _evaluate_staged_path_readiness(
+                entry, staged_album, location, db,
+            )
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "abandoned_interrupted_auto_import")
+            self.assertEqual(db.request(1)["status"], "wanted")
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 
@@ -3777,6 +3929,53 @@ class TestPollActiveDownloads(unittest.TestCase):
                 "Subprocess never launched + missing files = stale "
                 "crash residue; must reset to wanted, not block forever.",
             )
+
+    def test_poll_legacy_wedge_row_with_files_present_resumes_via_shared_decision(self):
+        """Counterpart to the missing-file case above: when the tracked
+        file IS present and the subprocess never launched, the poller's
+        readiness gate must permit resume — proving it shares the exact
+        "2026-05-04 wedge" verdict with ``_materialize_processing_dir``
+        (pinned directly, through the OTHER caller, by
+        ``TestPostMoveResumeBlockGuard.test_legacy_wedge_permits_retry``
+        in tests/test_integration_slices.py). Issue #509: before the
+        unification this was reachable through the poller path too, but
+        via a second, independently-written copy of the same guard.
+        """
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import stage_to_ai_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging_root = os.path.join(tmpdir, "staging")
+            resumed_path = stage_to_ai_path(
+                artist="Test Artist",
+                title="Test Album",
+                staging_dir=staging_root,
+                request_id=1,
+                auto_import=True,
+            )
+            os.makedirs(resumed_path)
+            with open(os.path.join(resumed_path, "01.flac"), "w") as fp:
+                fp.write("audio")
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                # NO ``import_subprocess_started_at`` — legacy wedge shape.
+                "current_path": resumed_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.beets_staging_dir = staging_root
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertEqual(fake_db.status_history, [])
+            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_no_redownload_window(self):
         """Album stays 'downloading' while queued for importer."""

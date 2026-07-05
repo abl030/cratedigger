@@ -3991,6 +3991,32 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         self.assertEqual(len(moved), 1)
         self.assertTrue(moved[0].startswith("abandoned_auto_import"))
 
+    def test_readiness_gate_agrees_with_materialize_on_legacy_wedge(self):
+        """Issue #509: the poller's pre-enqueue gate
+        (``_processing_path_ready_for_importer``) and
+        ``_materialize_processing_dir`` above now share ONE decision
+        (``_evaluate_staged_path_readiness``). Same wedge shape
+        (subprocess never launched) through the OTHER caller must reach
+        the same verdict: ready, not blocked.
+        """
+        from lib.download import _processing_path_ready_for_importer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entry, request_id, state, db, ctx, staged_path = (
+                self._setup_wedged_request(
+                    tmpdir, import_subprocess_started_at=None))
+
+            ready = _processing_path_ready_for_importer(
+                entry, request_id, state, db, ctx)
+
+        self.assertTrue(
+            ready,
+            "Legacy wedged row (subprocess never launched) must be "
+            "reported ready by the poller's own gate too — it shares "
+            "the materialize path's decision now.",
+        )
+        self.assertEqual(db.request(request_id)["status"], "downloading")
+
 
 class TestSearchWatchdogSlice(unittest.TestCase):
     """End-to-end slice for issue #212: parallel-search-executor's
