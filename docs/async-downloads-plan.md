@@ -942,7 +942,7 @@ Transfer IDs are ephemeral. We persist filenames in `ActiveDownloadState` and re
 3. **Verify**: 
    ```bash
    # Check schema
-   ssh doc2 'psql -h 192.168.100.11 -U cratedigger cratedigger -c "
+   ssh doc2 'psql -h 10.20.0.11 -U cratedigger cratedigger -c "
      SELECT column_name, data_type FROM information_schema.columns 
      WHERE table_name = '\''album_requests'\'' AND column_name = '\''active_download_state'\''
    "'

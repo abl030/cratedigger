@@ -24,7 +24,7 @@ operator-facing CLI and API surfaces.
 ### 1.1 Backup the pipeline DB
 
 ```bash
-ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
+ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' \
   > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql
 ```
 

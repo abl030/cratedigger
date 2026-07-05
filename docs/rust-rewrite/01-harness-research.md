@@ -45,7 +45,7 @@ a single `ImportResult` JSON sentinel (`__IMPORT_RESULT__{...}`) on
 success or crash.
 
 **Wire boundary types** today (all `msgspec.Struct`, all in
-`lib/quality.py`):
+`lib/quality/`):
 
 | Direction              | Type                       | Purpose                                       | Survives? |
 |------------------------|----------------------------|-----------------------------------------------|-----------|
@@ -421,7 +421,7 @@ What stays Python:
   `run_import()` phase (the harness driving). Later phases of the
   rewrite can move orchestration to Rust too, but it's not required
   for this slice.
-- `lib/quality.py` decision functions, the simulator
+- `lib/quality/` decision functions, the simulator
   (`pipeline-cli quality`), the spectral analyzer.
 - `tagging-workspace/scripts/*` (operator toolkit, not runtime).
 - Cratedigger pipeline itself (downloads, search, web, CLI, importer
@@ -488,7 +488,7 @@ defenses.
    mirror, files unreadable, track-count unmappable) only. If the
    caller hands it nonsense, it imports nonsense — that's the trust
    contract.
-9. **Codec-aware quality ranking** stays in `lib/quality.py`. The
+9. **Codec-aware quality ranking** stays in `lib/quality/`. The
    Rust binary never sees `QualityRankConfig` because the quality
    decision happened upstream in `import_one.py` before the binary
    was called.
@@ -504,7 +504,7 @@ Honest list of subprocess-contract bugs that survive:
   `std::process::Command` doesn't UTF-8-decode stderr for you, so
   the strict-decode class goes away by default — but rate-limit /
   PATH / `which()` / version-mismatch bugs all stay.
-- Quality decisions stay in `lib/quality.py`. The Rust binary is an
+- Quality decisions stay in `lib/quality/`. The Rust binary is an
   IO + matching boundary, not a decision layer.
 - Beets-version drift (when the `beets` package upgrades) still
   affects tagging-workspace operator scripts and any post-import
@@ -693,7 +693,7 @@ Source files (cratedigger repo, all paths absolute):
   populates
 - `lib/beets_album_op.py` — `beet remove`/`beet move` surface that
   becomes direct SQLite mutation in Rust
-- `lib/quality.py` — Struct definitions for all wire-boundary types,
+- `lib/quality/` — Struct definitions for all wire-boundary types,
   `QualityRankConfig`, `ImportResult`, `ValidationResult`
 - `lib/import_dispatch.py::run_import_one` — the caller whose argv
   shape and `__IMPORT_RESULT__` parser the Rust binary must satisfy
