@@ -5,6 +5,7 @@ on-disk quality and stamped with ``in_flight_rescue``. Counterpart of
 ``GET /api/pipeline/long-tail`` (U1).
 """
 
+import argparse
 import json
 import sys
 
@@ -149,3 +150,22 @@ def cmd_long_tail(db, args, *, band_fn=None):
         ))
     print(f"  ({len(result.rows)} rows)")
     return 0
+
+
+def add_long_tail_subparser(sub: argparse._SubParsersAction) -> None:
+    """Add ``long-tail`` (#521 carve out of ``routes_meta._build_parser``,
+    verbatim argument definitions)."""
+    p_long_tail = sub.add_parser(
+        "long-tail",
+        help="Long-tail worklist — wanted cohort pre-banded by on-disk "
+             "quality (missing / QualityRank / unknown) + in_flight_rescue")
+    p_long_tail.add_argument(
+        "--band", default=None,
+        help="Filter to a single band: missing | transparent | excellent "
+             "| good | acceptable | poor | unknown")
+    p_long_tail.add_argument(
+        "--id", type=int, default=None,
+        help="Band a single request by id (post-action refetch); "
+             "exits 2 if not found / not wanted")
+    p_long_tail.add_argument("--json", action="store_true",
+                             help="Print structured JSON instead of text")

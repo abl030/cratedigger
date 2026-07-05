@@ -5,6 +5,7 @@
 folders for one request).
 """
 
+import argparse
 import json
 import sys
 
@@ -164,3 +165,37 @@ def _wrong_match_delete_group_exit_code(summary) -> int:
     if outcomes & {OUTCOME_SKIPPED_INVALID_ROW, OUTCOME_SKIPPED_NOT_VISIBLE}:
         return 2
     return 1
+
+
+def add_wrong_match_subparsers(sub: argparse._SubParsersAction) -> None:
+    """Add ``wrong-match-triage`` / ``wrong-match-delete`` /
+    ``wrong-match-delete-group`` (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions)."""
+    # wrong-match-triage
+    p_triage = sub.add_parser(
+        "wrong-match-triage",
+        help="Clean the full Wrong Matches queue using existing evidence",
+    )
+    p_triage.add_argument("--apply", action="store_true",
+                          help="Allow destructive full-queue cleanup")
+    p_triage.add_argument("--json", action="store_true")
+
+    # wrong-match-delete
+    p_wm_delete = sub.add_parser(
+        "wrong-match-delete",
+        help="Delete one visible Wrong Matches source folder",
+    )
+    p_wm_delete.add_argument("download_log_id", type=int)
+    p_wm_delete.add_argument("--apply", action="store_true",
+                             help="Allow destructive source deletion")
+    p_wm_delete.add_argument("--json", action="store_true")
+
+    # wrong-match-delete-group
+    p_wm_delete_group = sub.add_parser(
+        "wrong-match-delete-group",
+        help="Delete visible Wrong Matches source folders for one request",
+    )
+    p_wm_delete_group.add_argument("request_id", type=int)
+    p_wm_delete_group.add_argument("--apply", action="store_true",
+                                   help="Allow destructive source deletion")
+    p_wm_delete_group.add_argument("--json", action="store_true")

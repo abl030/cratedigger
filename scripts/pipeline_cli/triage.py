@@ -11,6 +11,7 @@ thin wrapper around ``lib.triage_service``; the matching HTTP routes
 status-code mapping.
 """
 
+import argparse
 import json
 import sys
 
@@ -320,3 +321,52 @@ def cmd_triage_list(db, args):
             f"--limit={limit} --after={next_after}"
         )
     return 0
+
+
+def add_triage_subparser(
+    sub: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
+    """Add ``triage`` + its nested subcommands (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions).
+
+    Returns the ``triage`` subparser itself so ``main()`` can print its
+    help when invoked without a nested subcommand.
+    """
+    # triage (U16) — operator-facing composition of unfindable + field-quality
+    # + search-forensics. Wraps ``lib.triage_service`` (U15). Nested under a
+    # subparser for the same reason ``search-plan`` is: the per-request view
+    # and the cohort list share enough state to benefit from a shared
+    # namespace, and the convention is consistent with the rest of this CLI.
+    p_triage_op = sub.add_parser(
+        "triage",
+        help="Operator triage (U16) — compose unfindable + field-quality + "
+             "search-forensics for one request, or list a cohort by filter")
+    tr_sub = p_triage_op.add_subparsers(dest="triage_command")
+
+    p_tr_show = tr_sub.add_parser(
+        "show",
+        help="Per-request triage composition (request meta + unfindable + "
+             "field-quality + search forensics + last 10 search_log rows). "
+             "Note: subcommand form mirrors `search-plan show <id>`; bare "
+             "`triage <id>` is not accepted.")
+    p_tr_show.add_argument("id", type=int, help="Request ID")
+    p_tr_show.add_argument("--json", action="store_true",
+                            help="Print structured JSON instead of text")
+
+    p_tr_list = tr_sub.add_parser(
+        "list",
+        help="Cohort listing by filter spec")
+    p_tr_list.add_argument(
+        "--filter", default="all",
+        help="Filter spec: all | unfindable[:<category>] | "
+             "data_quality[:<field>] | data_quality:status=<status> | "
+             "data_quality:reason=<code> | search_not_converting")
+    p_tr_list.add_argument(
+        "--limit", type=int, default=50,
+        help="Page size (default 50)")
+    p_tr_list.add_argument(
+        "--after", type=int, default=None,
+        help="Resume cursor: last request_id from prior page")
+    p_tr_list.add_argument("--json", action="store_true",
+                            help="Print structured JSON instead of text")
+    return p_triage_op

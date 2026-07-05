@@ -5,6 +5,7 @@ distance matrix. ``youtube-rescue`` — submit a rescue ingest for one
 request. Both wrap the U7/U4 service layer (CLI ⇄ API surface symmetry).
 """
 
+import argparse
 import sys
 
 import msgspec
@@ -263,3 +264,57 @@ def cmd_youtube_rescue(db, args, *, service_factory=None):
                 )
 
     return YOUTUBE_INGEST_EXIT_CODE.get(result.outcome, 1)
+
+
+def add_youtube_subparsers(sub: argparse._SubParsersAction) -> None:
+    """Add ``youtube-album`` / ``youtube-rescue`` (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions)."""
+    # youtube-album (U7): MBID/Discogs ID → YT Music album matrix.
+    # Counterpart of ``GET /api/youtube-album`` (U8).
+    p_ya = sub.add_parser(
+        "youtube-album",
+        help="Resolve MBID/Discogs ID → YouTube Music album matrix "
+             "(auto-widens to release group; N×M beets distances per "
+             "YT sibling × MB sibling)",
+    )
+    p_ya.add_argument(
+        "identifier",
+        help="MB release/release-group MBID OR Discogs release/master ID "
+             "(service auto-discriminates via leaf-then-group fallback)",
+    )
+    p_ya.add_argument(
+        "--refresh", action="store_true",
+        help="Bypass BOTH the durable cache (youtube_album_mappings) "
+             "AND the in-process Redis HTTP accelerator, forcing a "
+             "fresh YouTube Music fetch. The fresh response is then "
+             "written back to both layers. (Default: serve from cache.)",
+    )
+    p_ya.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON instead of human-readable matrix",
+    )
+
+    # youtube-rescue (U4): submit a YouTube Music rescue ingest for one
+    # request. Counterpart of ``POST /api/pipeline/<id>/youtube-rescue``
+    # (U5). Both surfaces wrap ``YoutubeIngestService.submit``.
+    p_yr = sub.add_parser(
+        "youtube-rescue",
+        help="Submit a YouTube Music rescue ingest for one request "
+             "(requires a resolver mapping; emits a youtube_running "
+             "download_log row).",
+    )
+    p_yr.add_argument(
+        "request_id", type=int,
+        help="album_requests.id to attach the rescue to",
+    )
+    p_yr.add_argument(
+        "browse_id",
+        help="YouTube Music browse_id (e.g. MPREb_...); must already "
+             "be cached in youtube_album_mappings for this request's "
+             "release group",
+    )
+    p_yr.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON ({outcome, download_log_id, detail}) "
+             "instead of plain text.",
+    )

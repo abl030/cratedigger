@@ -6,7 +6,9 @@
 needs.
 """
 
+import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -494,3 +496,66 @@ def cmd_set_intent(db, args):
         action = "lossless on disk" if target_format else "default (pipeline decides)"
         print(f"  [{args.id}] {label}: {action} "
               f"(target_format: {old_target} → {target_format})")
+
+
+def add_album_requests_subparsers(sub: argparse._SubParsersAction) -> None:
+    """Add ``list`` / ``add`` / ``status`` / ``disk-coverage`` / ``retry`` /
+    ``cancel`` / ``set`` / ``set-intent`` (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions)."""
+    # list
+    p_list = sub.add_parser("list", help="List album requests")
+    p_list.add_argument("filter_status", nargs="?", help="Filter by status")
+    p_list.add_argument(
+        "--search",
+        help="Case-insensitive substring match on artist or album "
+             "(mirrors GET /api/pipeline/search)",
+    )
+
+    # add
+    p_add = sub.add_parser("add", help="Add a new request by MBID or Discogs ID")
+    p_add.add_argument("mbid", help="MusicBrainz release UUID or Discogs numeric release ID")
+    p_add.add_argument("--source", default="request", choices=["request", "redownload", "manual"],
+                       help="Source type (default: request)")
+
+    # status
+    sub.add_parser("status", help="Show counts by status")
+
+    # disk-coverage
+    p_disk = sub.add_parser(
+        "disk-coverage",
+        help="Show which active pipeline rows are actually present in beets",
+    )
+    p_disk.add_argument(
+        "--beets-db",
+        default=os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db"),
+        help="Path to beets SQLite DB (default: BEETS_DB or production path)",
+    )
+    p_disk.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="Suppress the off-disk row list and print counts only",
+    )
+    p_disk.add_argument(
+        "--include-inverse",
+        action="store_true",
+        help="Also include beets albums with no active pipeline row",
+    )
+
+    # retry
+    p_retry = sub.add_parser("retry", help="Reset a failed request to wanted")
+    p_retry.add_argument("id", type=int, help="Request ID")
+
+    # cancel
+    p_cancel = sub.add_parser("cancel", help="Cancel a request (set to skipped)")
+    p_cancel.add_argument("id", type=int, help="Request ID")
+
+    # set
+    p_set = sub.add_parser("set", help="Change the status of a request")
+    p_set.add_argument("id", type=int, help="Request ID")
+    p_set.add_argument("status", choices=VALID_STATUSES, help="New status")
+
+    # set-intent
+    p_intent = sub.add_parser("set-intent", help="Toggle lossless-on-disk for a request")
+    p_intent.add_argument("id", type=int, help="Request ID")
+    p_intent.add_argument("intent", choices=["lossless", "default"],
+                          help="'lossless' = keep lossless on disk, 'default' = pipeline decides")

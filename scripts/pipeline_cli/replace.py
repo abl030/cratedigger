@@ -4,6 +4,7 @@ Supersede a request with a new row at a different release id in the
 same release group / master. Counterpart of the Replace web action.
 """
 
+import argparse
 import json
 
 from scripts.pipeline_cli._format import _json_default
@@ -101,3 +102,19 @@ def cmd_replace(db, args):
     if result.outcome in (RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED):
         return 5
     return 1
+
+
+def add_replace_subparser(sub: argparse._SubParsersAction) -> None:
+    """Add ``replace`` (#521 carve out of ``routes_meta._build_parser``,
+    verbatim argument definitions)."""
+    p_replace = sub.add_parser(
+        "replace",
+        help="Supersede a request with a new row at a different release id "
+             "in the same release group/master (same pathway as the source)")
+    p_replace.add_argument("id", type=int, help="Source request ID")
+    p_replace.add_argument(
+        "--to", dest="target_mb_release_id", required=True,
+        help="Target release id — MB UUID or Discogs numeric id; must "
+             "share the source's pathway and release group/master")
+    p_replace.add_argument("--json", action="store_true",
+                           help="Print structured JSON instead of text")
