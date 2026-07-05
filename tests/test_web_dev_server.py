@@ -161,6 +161,57 @@ class WebDevServerProxyTest(unittest.TestCase):
         self.assertEqual(body, b"bcd")
 
 
+class WebDevServerLiveDbErrorMappingTest(unittest.TestCase):
+    """#501 item 4: the `--data live-db` GET dispatch's generic
+    `except Exception` mapped EVERY route-handler exception to 500,
+    including `DiscogsMirrorNotConfigured` — which production's
+    `web/server.py::do_GET` maps to 503 (a deliberate config posture, not
+    a crash). Dev sessions should exercise the same status code."""
+
+    def setUp(self) -> None:
+        config = DevConfig(
+            data="live-db",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=None,
+            beets_db=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        self.server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def test_discogs_mirror_not_configured_maps_to_503_not_500(self):
+        import web.server as web_server
+        from web.discogs import DiscogsMirrorNotConfigured
+
+        def _raise(h, params):
+            raise DiscogsMirrorNotConfigured("no mirror configured")
+
+        # Throwaway route registration (test-only wiring into the real
+        # route dict, not a mock of our own logic) so the real exception
+        # class flows through the real dispatch path (test-fidelity Rule B).
+        probe_path = "/api/__test_mirror_probe"
+        web_server.Handler._FUNC_GET_ROUTES[probe_path] = _raise
+        self.addCleanup(
+            web_server.Handler._FUNC_GET_ROUTES.pop, probe_path, None,
+        )
+
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(f"{self.base}{probe_path}")
+        self.assertEqual(raised.exception.code, 503)
+
+
 class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
     """`--data live-db` sessions must stay read-only after #427.
 

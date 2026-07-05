@@ -252,6 +252,7 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def _serve_live_db_get(self, parsed) -> None:
         import web.server as web_server
+        from web import discogs as _discogs
 
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
@@ -266,6 +267,12 @@ class DevHandler(BaseHTTPRequestHandler):
                     fn(self, params, *match.groups())  # type: ignore[operator]
                     return
             self._error("Not found", 404)
+        except _discogs.DiscogsMirrorNotConfigured as exc:
+            # Reuse production's mapping (web/server.py::do_GET) — a
+            # deliberate config posture (no Discogs mirror), not a crash.
+            # Dev sessions should exercise the same 503, not a generic 500
+            # (#501 item 4).
+            self._error(str(exc), 503)
         except Exception as exc:
             web_server.log.exception("dev live-db GET %s failed", path)
             web_server._try_reconnect_db()
