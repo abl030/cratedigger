@@ -1563,7 +1563,7 @@ class TestActiveDownloadState(unittest.TestCase):
         with self.assertRaises(msgspec.ValidationError):
             ActiveDownloadState.from_dict(drifted)
 
-    # --- issue #510: from_raw() collapses the four isinstance(dict) dances --
+    # --- issue #510: from_raw() collapses the isinstance(dict) dance -------
 
     def test_from_raw_dict_delegates_to_from_dict(self):
         """A dict (psycopg2's JSONB decode) goes through from_dict."""
@@ -1590,19 +1590,11 @@ class TestActiveDownloadState(unittest.TestCase):
         state = ActiveDownloadState.from_raw(raw)
         self.assertEqual(state, ActiveDownloadState.from_json(raw))
 
-    def test_from_raw_passthrough_for_already_typed_instance(self):
-        """An already-constructed ActiveDownloadState is returned unchanged —
-        idempotent, so a caller that isn't sure whether a value has already
-        been decoded can route through from_raw either way."""
-        from lib.quality import ActiveDownloadState
-        original = self._minimal_state()
-        self.assertIs(ActiveDownloadState.from_raw(original), original)
-
     def test_from_raw_rejects_none(self):
-        """None is neither dict, str, nor an ActiveDownloadState — raises
-        ValueError. Load-bearing for scripts/import_preview_worker.py's
-        second call site, which calls the coercion directly on
-        ``row.get("active_download_state")`` with no prior falsy guard."""
+        """None is neither dict nor str — raises ValueError. Load-bearing
+        for scripts/import_preview_worker.py's second call site, which
+        calls the coercion directly on ``row.get("active_download_state")``
+        with no prior falsy guard."""
         from lib.quality import ActiveDownloadState
         with self.assertRaises(ValueError):
             ActiveDownloadState.from_raw(None)
