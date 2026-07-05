@@ -38,4 +38,6 @@
 - [#184 sidecar producer](project_184_sidecar_producer.md) — 2026-06-18: cratedigger.json verified-lossless sidecar producer+backfill shipped (3910 written); consumer half deferred; reusable doc2 one-shot recipe
 - [#146 slskd events rollout](project_146_slskd_events_rollout.md) — 2026-07-02: COMPLETE, deployed, issue closed; event stamp is the only file-location source; fake now mirrors download_log outcome CHECK (Rule A win x2); msgspec DecodeError-vs-ValidationError trap
 - [Opus for reviews](feedback_opus_for_reviews.md) — Review/verification subagents run on opus (model:"opus"), never fable — user preserves fable credits for main-loop work
+- [Review loop at orchestrator](feedback_review_loop_at_orchestrator.md) — Review-until-clean iteration is the orchestrator's job; tell implementer subs to self-review ONCE, never "iterate until clean" (they spawn nested reviewers)
+- [Reviewer git-reset hazard](feedback_reviewer_git_reset_hazard.md) — Review subs must stay in the PR worktree; a reviewer's git reset --hard in the shared checkout wiped uncommitted work (resume mid-task agents via SendMessage)
 - [#282 Discogs Replace shipped](project_282_discogs_replace.md) — COMPLETE 2026-07-04: PR #499 merged, deployed, live-verified (1870→8818), tagged v2026.07.04-2; doc1 playwright MCP fixed in PR #500 (pending one-time TUI approval)
