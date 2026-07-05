@@ -28,10 +28,6 @@ from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
 
-# ``scripts/pipeline_cli/imports.py`` -> repo root is two levels up (the
-# original monolith at ``scripts/pipeline_cli.py`` only needed one).
-IMPORT_ONE = os.path.join(os.path.dirname(__file__), "..", "..", "harness", "import_one.py")
-
 # Known slskd download dirs to resolve old relative failed_paths against
 SLSKD_DOWNLOAD_DIRS = ["/mnt/virtio/music/slskd"]
 
