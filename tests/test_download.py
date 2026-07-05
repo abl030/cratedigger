@@ -3571,6 +3571,131 @@ class TestPollActiveDownloads(unittest.TestCase):
             self.assertEqual(fake_db.status_history, [])
             self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
+    def test_poll_canonical_dir_present_file_missing_defers_to_grace_not_reset(self):
+        """Issue #509 third divergence (intentional, safer): canonical
+        current_path, dir EXISTS but the tracked file is absent AND
+        unstamped.
+
+        OLD ``_processing_path_ready_for_importer`` reached its
+        missing-files branch and IMMEDIATELY reset the request to
+        'wanted'. The unified gate short-circuits ``kind == 'canonical'``
+        -> ready and lets ``_materialize_processing_dir`` own the
+        decision: it recovers from the slskd event stamp if present, else
+        returns ``MaterializeFailed(event_path_missing)`` which
+        ``materialize_failure_action`` treats as a grace-windowed retry.
+        So the request stays 'downloading' within the grace window —
+        NOT a wrongful immediate reset — consistent with the grace
+        policy the enqueue path already applied to canonical materialize
+        failures. This case is only reachable via manual FS interference
+        / an exquisitely-timed partial move (``StagedAlbum.move_to``
+        rmtrees the source and repoints current_path in the normal flow).
+        """
+        from lib.download import poll_active_downloads
+        from lib.processing_paths import canonical_processing_path
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = os.path.join(tmpdir, "downloads")
+            canonical_path = canonical_processing_path(
+                artist="Test Artist",
+                title="Test Album",
+                year="2020",
+                slskd_download_dir=download_root,
+            )
+            # Dir EXISTS (empty) but the tracked file is absent.
+            os.makedirs(canonical_path)
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": canonical_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     # Unstamped: no event-stamped local_path, so
+                     # materialize cannot recover -> event_path_missing.
+                     "local_path": None},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = download_root
+
+            poll_active_downloads(ctx)
+
+            # Stays downloading within grace — NOT reset to wanted.
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+            self.assertEqual(fake_db.status_history, [])
+            # Materialize failed within grace -> no job enqueued, no reset.
+            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 0)
+            self.assertEqual(fake_db.download_logs, [])
+
+    def test_poll_canonical_file_missing_gate_and_materialize_agree(self):
+        """Parity for the #509 third divergence: on the exact
+        canonical-dir-present / file-missing / unstamped fixture, the
+        poller's gate (``_processing_path_ready_for_importer``) and
+        ``_materialize_processing_dir`` AGREE — neither does an immediate
+        reset. The gate reports ready (delegating the real decision), and
+        materialize returns the grace-eligible ``MaterializeFailed``. The
+        request row is left 'downloading' by both.
+        """
+        from lib.download import (
+            _processing_path_ready_for_importer,
+            reconstruct_grab_list_entry,
+        )
+        from lib.download_processing import (
+            MaterializeFailed,
+            _materialize_processing_dir,
+        )
+        from lib.processing_paths import canonical_processing_path
+        from lib.quality import ActiveDownloadState
+        from lib.staged_album import StagedAlbum
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = os.path.join(tmpdir, "downloads")
+            canonical_path = canonical_processing_path(
+                artist="Test Artist",
+                title="Test Album",
+                year="2020",
+                slskd_download_dir=download_root,
+            )
+            os.makedirs(canonical_path)
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": _utc_now_iso(),
+                "processing_started_at": _utc_now_iso(),
+                "current_path": canonical_path,
+                "files": [
+                    {"username": "user1", "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     "local_path": None},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = download_root
+
+            raw = fake_db.request(1)["active_download_state"]
+            assert isinstance(raw, dict)
+            state = ActiveDownloadState.from_raw(raw)
+            entry = reconstruct_grab_list_entry(fake_db.request(1), state)
+
+            # Gate: canonical short-circuit -> ready, and it does NOT reset.
+            ready = _processing_path_ready_for_importer(
+                entry, 1, state, fake_db, ctx)
+            self.assertTrue(ready)
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+
+            # Materialize on the same fixture: grace-eligible failure,
+            # again NOT an immediate reset.
+            assert state.current_path is not None
+            staged_album = StagedAlbum.from_entry(
+                entry, default_path=state.current_path)
+            result = _materialize_processing_dir(entry, staged_album, ctx)
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "event_path_missing")
+            self.assertEqual(fake_db.request(1)["status"], "downloading")
+
     def test_poll_post_move_staged_path_without_validation_queues(self):
         """Staged retries are queued for importer ownership."""
         from lib.download import poll_active_downloads
