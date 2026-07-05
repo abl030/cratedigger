@@ -216,6 +216,33 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     def from_json(s: str) -> "ActiveDownloadState":
         return msgspec.json.decode(s, type=ActiveDownloadState)
 
+    @staticmethod
+    def from_raw(raw: object) -> "ActiveDownloadState":
+        """Coerce an ``album_requests.active_download_state`` column value,
+        whatever shape it arrives in, into a state.
+
+        psycopg2 decodes JSONB to a ``dict``; raw SQL / re-serialized state
+        arrives as a JSON ``str``. Collapses the identical
+        ``from_dict(x) if isinstance(x, dict) else from_json(str(x))`` dance
+        at every call site that reads this column — ``lib/download.py``,
+        ``lib/download_processing.py``, ``lib/slskd_events.py``,
+        ``scripts/importer.py``, and both sites in
+        ``scripts/import_preview_worker.py`` (issue #510).
+
+        Raises ``ValueError`` for anything else (including ``None``) —
+        load-bearing for ``scripts/import_preview_worker.py``, which calls
+        this directly on ``row.get("active_download_state")`` with no
+        earlier falsy guard at one of its two call sites.
+        """
+        if isinstance(raw, dict):
+            return ActiveDownloadState.from_dict(raw)
+        if isinstance(raw, str):
+            return ActiveDownloadState.from_json(raw)
+        raise ValueError(
+            "active_download_state must be a dict or JSON string, "
+            f"got {type(raw).__name__}"
+        )
+
 
 @dataclass
 class DownloadInfo:

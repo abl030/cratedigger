@@ -173,6 +173,12 @@ def execute_import_job(
         )
 
     if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_MANUAL):
+        # FORCE/MANUAL delegate straight to dispatch_import_from_db, which
+        # already returns a terminal DispatchOutcome from its own decision
+        # tree — no CompletionResult in the middle, so nothing here is
+        # parallel to _dispatch_outcome_from_completion below. See that
+        # function's docstring (issue #510) for why this isn't unified
+        # further.
         from lib.dispatch import dispatch_import_from_db
 
         payload = job.payload
@@ -245,6 +251,21 @@ def _dispatch_outcome_from_completion(
     drive the same completion-processing protocol (issue #474) and need to
     report the same four outcomes back to the importer queue; this is the
     single conversion so the two callers don't duplicate the match.
+
+    FORCE and MANUAL import jobs deliberately do NOT route through this
+    mapper (issue #510 considered and rejected folding all four job types
+    in here): they never produce a ``CompletionResult`` at all.
+    ``execute_import_job`` sends them straight to
+    ``dispatch_import_from_db`` -> ``dispatch_import_core`` — a
+    structurally different decision tree (manifest guard, evidence gate,
+    quality gate) that already returns ``DispatchOutcome`` directly from
+    many branches. Routing them through here would mean wrapping that
+    already-terminal ``DispatchOutcome`` in a synthetic completion tag
+    just to unwrap it again a line later — ceremony, not dedup. The
+    mapper that DOES unify all four job types is one layer up:
+    ``process_claimed_job`` (+ ``_job_result``) converts any
+    ``DispatchOutcome`` — regardless of which job-type executor produced
+    it — into the ``ImportJob``'s terminal queue status.
     """
     if isinstance(result, CompletionDeferred):
         return DispatchOutcome(
@@ -284,11 +305,7 @@ def execute_automation_import_job(
             False,
             f"Album request {request_id} has no active_download_state",
         )
-    state = (
-        ActiveDownloadState.from_dict(raw_state)
-        if isinstance(raw_state, dict)
-        else ActiveDownloadState.from_json(str(raw_state))
-    )
+    state = ActiveDownloadState.from_raw(raw_state)
     entry = reconstruct_grab_list_entry(row, state)
     created_ctx = ctx is None
     runtime_ctx = ctx or _build_runtime_context(db)
@@ -450,7 +467,16 @@ def process_claimed_job(
     *,
     ctx: Any = None,
 ) -> ImportJob | None:
-    """Execute a claimed job and persist its terminal queue status."""
+    """Execute a claimed job and persist its terminal queue status.
+
+    This is the single queue-outcome mapper all four job types (automation,
+    force, manual, youtube) route through: whichever job-type executor
+    produced ``outcome``, the success/requeue/failure -> terminal
+    ``ImportJob`` status conversion below is one shared path (see
+    ``_dispatch_outcome_from_completion``'s docstring for why the
+    completion-result -> DispatchOutcome conversion is instead scoped to
+    just automation + youtube, issue #510).
+    """
     try:
         outcome = execute_import_job(db, job, ctx=ctx)
     except Exception as exc:

@@ -1563,6 +1563,51 @@ class TestActiveDownloadState(unittest.TestCase):
         with self.assertRaises(msgspec.ValidationError):
             ActiveDownloadState.from_dict(drifted)
 
+    # --- issue #510: from_raw() collapses the isinstance(dict) dance -------
+
+    def test_from_raw_dict_delegates_to_from_dict(self):
+        """A dict (psycopg2's JSONB decode) goes through from_dict."""
+        from lib.quality import ActiveDownloadState
+        row = {
+            "filetype": "flac",
+            "enqueued_at": "2026-06-01T00:00:00+00:00",
+            "files": [{
+                "username": "peer", "filename": "f", "file_dir": "d",
+                "size": 100}],
+        }
+        state = ActiveDownloadState.from_raw(row)
+        self.assertEqual(state, ActiveDownloadState.from_dict(row))
+
+    def test_from_raw_json_string_delegates_to_from_json(self):
+        """A JSON string (raw SQL / re-serialized state) goes through
+        from_json."""
+        from lib.quality import ActiveDownloadState
+        raw = json.dumps({
+            "filetype": "flac",
+            "enqueued_at": "2026-06-01T00:00:00+00:00",
+            "files": [],
+        })
+        state = ActiveDownloadState.from_raw(raw)
+        self.assertEqual(state, ActiveDownloadState.from_json(raw))
+
+    def test_from_raw_rejects_none(self):
+        """None is neither dict nor str — raises ValueError. Load-bearing
+        for scripts/import_preview_worker.py's second call site, which
+        calls the coercion directly on ``row.get("active_download_state")``
+        with no prior falsy guard."""
+        from lib.quality import ActiveDownloadState
+        with self.assertRaises(ValueError):
+            ActiveDownloadState.from_raw(None)
+
+    def test_from_raw_rejects_other_types(self):
+        """Any other type (int, list, ...) also raises ValueError rather
+        than silently stringifying garbage into from_json."""
+        from lib.quality import ActiveDownloadState
+        for bad in (42, ["not", "a", "state"], object()):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ActiveDownloadState.from_raw(bad)
+
 
 if __name__ == "__main__":
     unittest.main()

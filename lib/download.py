@@ -818,11 +818,7 @@ def _poll_one_active_download(
         )
         return
 
-    # psycopg2 returns JSONB as dict, not string — use from_dict directly
-    if isinstance(raw_state, dict):
-        state = ActiveDownloadState.from_dict(raw_state)
-    else:
-        state = ActiveDownloadState.from_json(raw_state)
+    state = ActiveDownloadState.from_raw(raw_state)
     active_import_job = _active_import_job_for_request(db, request_id)
     if active_import_job is not None:
         job_id = (

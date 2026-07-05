@@ -302,11 +302,7 @@ def _request_import_subprocess_started(
     if not raw_state:
         return False
     try:
-        state = (
-            ActiveDownloadState.from_dict(raw_state)
-            if isinstance(raw_state, dict)
-            else ActiveDownloadState.from_json(str(raw_state))
-        )
+        state = ActiveDownloadState.from_raw(raw_state)
     except Exception:
         logger.debug(
             "Failed to parse active_download_state for resume guard",
