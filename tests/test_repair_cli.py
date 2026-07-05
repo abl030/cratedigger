@@ -17,6 +17,7 @@ from typing import Any, cast
 from lib.quality import OrphanInfo, SlskdOrphanTransfer
 from scripts import repair
 from tests.fakes import FakePipelineDB
+from tests.helpers import make_download_directory, make_download_user, make_transfer_snapshot
 
 
 class TestCmdFix(unittest.TestCase):
@@ -49,6 +50,47 @@ class TestCmdFix(unittest.TestCase):
         self.assertEqual(transition.target_status, "wanted")
         self.assertEqual(transition.from_status, "downloading")
         self.assertIn("Reset to wanted", stdout.getvalue())
+
+
+class TestActiveTransferPairs(unittest.TestCase):
+    """#507: _active_transfer_pairs walks the typed downloads envelope."""
+
+    def test_flattens_nested_envelope_to_pairs(self) -> None:
+        downloads = [
+            make_download_user(username="peer1", directories=[
+                make_download_directory(directory="Music\\Album", files=[
+                    make_transfer_snapshot(filename="Music\\Album\\01.flac"),
+                    make_transfer_snapshot(filename="Music\\Album\\02.flac"),
+                ]),
+            ]),
+            make_download_user(username="peer2", directories=[
+                make_download_directory(directory="Music\\Other", files=[
+                    make_transfer_snapshot(filename="Music\\Other\\01.flac"),
+                ]),
+            ]),
+        ]
+
+        pairs = repair._active_transfer_pairs(downloads)
+
+        self.assertEqual(pairs, {
+            ("peer1", "Music\\Album\\01.flac"),
+            ("peer1", "Music\\Album\\02.flac"),
+            ("peer2", "Music\\Other\\01.flac"),
+        })
+
+    def test_file_without_filename_excluded(self) -> None:
+        downloads = [
+            make_download_user(username="peer1", directories=[
+                make_download_directory(directory="d", files=[
+                    make_transfer_snapshot(filename=""),
+                ]),
+            ]),
+        ]
+
+        self.assertEqual(repair._active_transfer_pairs(downloads), set())
+
+    def test_empty_downloads_returns_empty_set(self) -> None:
+        self.assertEqual(repair._active_transfer_pairs([]), set())
 
 
 class TestCollectIssues(unittest.TestCase):
@@ -236,17 +278,15 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
     """
 
     RAW_SNAPSHOT = [
-        {
-            "username": "peer1",
-            "directories": [{
-                "directory": "Music\\Orphan",
-                "files": [{
-                    "id": "t-orphan",
-                    "filename": "Music\\Orphan\\01.flac",
-                    "state": "InProgress",
-                }],
-            }],
-        },
+        make_download_user(username="peer1", directories=[
+            make_download_directory(directory="Music\\Orphan", files=[
+                make_transfer_snapshot(
+                    id="t-orphan",
+                    filename="Music\\Orphan\\01.flac",
+                    state="InProgress",
+                ),
+            ]),
+        ]),
     ]
 
     @patch("scripts.repair._fetch_slskd_downloads", return_value=RAW_SNAPSHOT)

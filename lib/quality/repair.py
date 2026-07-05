@@ -7,8 +7,17 @@ slskd transfers no downloading row owns). Pure move: every definition is
 AST-identical to the current monolith.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Deferred: lib.slskd_client -> lib.config -> lib.quality (this
+    # package's __init__) -> lib.quality.repair would otherwise be a
+    # circular import at module load time. DownloadUser is only used for
+    # the find_slskd_orphans() type annotation, never constructed here.
+    from lib.slskd_client import DownloadUser
 
 
 # --- Repair / orphan detection (pure functions) ---
@@ -105,7 +114,7 @@ class SlskdOrphanTransfer:
 
 
 def find_slskd_orphans(
-    downloads: list[dict[str, Any]],
+    downloads: list[DownloadUser],
     db_rows: list[dict[str, Any]],
 ) -> list[SlskdOrphanTransfer]:
     """Detect live slskd transfers no downloading row owns. Pure — no I/O.
@@ -118,7 +127,8 @@ def find_slskd_orphans(
 
     Args:
         downloads: slskd ``transfers.get_all_downloads()`` snapshot
-            (username → directories → files groups).
+            (username → directories → files groups), already decoded via
+            ``lib.slskd_client.parse_downloads_envelope`` (issue #507).
         db_rows: album_requests rows (must include status,
             active_download_state).
 
@@ -142,20 +152,20 @@ def find_slskd_orphans(
 
     orphans: list[SlskdOrphanTransfer] = []
     for user_group in downloads:
-        username = user_group.get("username", "")
-        for directory in user_group.get("directories", []):
-            for transfer in directory.get("files", []):
-                transfer_state = str(transfer.get("state", ""))
+        username = user_group.username
+        for directory in user_group.directories:
+            for transfer in directory.files:
+                transfer_state = transfer.state
                 if transfer_state.startswith("Completed"):
                     continue
-                filename = transfer.get("filename")
+                filename = transfer.filename
                 if not filename:
                     continue
                 if (username, filename) in owned:
                     continue
                 orphans.append(SlskdOrphanTransfer(
                     username=username,
-                    transfer_id=str(transfer.get("id", "")),
+                    transfer_id=transfer.id,
                     filename=filename,
                     state=transfer_state,
                 ))

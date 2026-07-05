@@ -52,7 +52,7 @@ from lib.import_queue import (
     automation_import_dedupe_key,
     automation_import_payload,
 )
-from lib.slskd_client import TransferSnapshot
+from lib.slskd_client import DownloadUser, TransferSnapshot
 from lib.slskd_transfers import (
     _all_files_remotely_queued,
     _get_all_downloads_snapshot,
@@ -793,7 +793,7 @@ def _poll_one_active_download(
     row: dict[str, Any],
     db: DownloadDB,
     ctx: CratediggerContext,
-    cycle_snapshot: Any,
+    cycle_snapshot: list[DownloadUser],
 ) -> None:
     """Process one ``downloading`` row.
 
