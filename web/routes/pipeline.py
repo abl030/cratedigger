@@ -51,6 +51,17 @@ from lib.disk_coverage_service import disk_coverage
 from lib.import_preview import ImportPreviewValues, preview_import_from_values
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
+from lib.replace_status import (
+    RESOLVE_STATUS_LOOKUP_FAILED,
+    RESOLVE_STATUS_MASTERLESS,
+    RESOLVE_STATUS_MIRROR_UNCONFIGURED,
+    RESOLVE_STATUS_MISSING_RELEASE_ID,
+    RESOLVE_STATUS_NON_MB_RELEASE_ID,
+    RESOLVE_STATUS_NO_RELEASE_GROUP,
+    RESOLVE_STATUS_NOT_FOUND,
+    RESOLVE_STATUS_RESOLVED,
+    RESOLVE_STATUS_TRANSIENT,
+)
 from lib.util import resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
 from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
@@ -681,7 +692,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
-            "status": "not_found",
+            "status": RESOLVE_STATUS_NOT_FOUND,
             "error": f"request {request_id} not found",
         }, status=404)
         return
@@ -691,7 +702,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": existing_rg,
-            "status": "resolved",
+            "status": RESOLVE_STATUS_RESOLVED,
         })
         return
 
@@ -700,7 +711,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
-            "status": "missing_release_id",
+            "status": RESOLVE_STATUS_MISSING_RELEASE_ID,
             "error": (
                 f"request {request_id} has no mb_release_id to resolve"
             ),
@@ -727,7 +738,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
-            "status": "non_mb_release_id",
+            "status": RESOLVE_STATUS_NON_MB_RELEASE_ID,
             "error": (
                 f"request {request_id}.mb_release_id "
                 f"{mb_release_id!r} is neither a MusicBrainz UUID "
@@ -752,7 +763,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
             h._json({
                 "request_id": request_id,
                 "mb_release_group_id": None,
-                "status": "mirror_unconfigured",
+                "status": RESOLVE_STATUS_MIRROR_UNCONFIGURED,
                 "error": f"Discogs mirror not configured: {exc}",
             }, status=503)
             return
@@ -760,7 +771,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
             h._json({
                 "request_id": request_id,
                 "mb_release_group_id": None,
-                "status": "transient",
+                "status": RESOLVE_STATUS_TRANSIENT,
                 "error": f"Discogs lookup failed (transient): {exc}",
             }, status=503)
             return
@@ -768,7 +779,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
             h._json({
                 "request_id": request_id,
                 "mb_release_group_id": None,
-                "status": "lookup_failed",
+                "status": RESOLVE_STATUS_LOOKUP_FAILED,
                 "error": (
                     f"Discogs lookup for {mb_release_id} failed: {exc}"
                 ),
@@ -783,7 +794,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
             h._json({
                 "request_id": request_id,
                 "mb_release_group_id": None,
-                "status": "masterless",
+                "status": RESOLVE_STATUS_MASTERLESS,
             })
             return
 
@@ -791,7 +802,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": master_id,
-            "status": "resolved",
+            "status": RESOLVE_STATUS_RESOLVED,
         })
         return
 
@@ -801,7 +812,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
-            "status": "transient",
+            "status": RESOLVE_STATUS_TRANSIENT,
             "error": f"MB lookup failed (transient): {exc}",
         }, status=503)
         return
@@ -809,7 +820,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
-            "status": "lookup_failed",
+            "status": RESOLVE_STATUS_LOOKUP_FAILED,
             "error": (
                 f"MB lookup for {mb_release_id} failed: {exc}"
             ),
@@ -821,7 +832,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
-            "status": "no_release_group",
+            "status": RESOLVE_STATUS_NO_RELEASE_GROUP,
             "error": (
                 f"MB release {mb_release_id} has no release_group_id"
             ),
@@ -832,7 +843,7 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
     h._json({
         "request_id": request_id,
         "mb_release_group_id": rg_id,
-        "status": "resolved",
+        "status": RESOLVE_STATUS_RESOLVED,
     })
 
 
@@ -909,6 +920,7 @@ def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
         "current_status": result.current_status,
         "descendant_request_id": result.descendant_request_id,
         "error_message": result.error_message,
+        "reason": result.reason,
         "warnings": list(result.warnings),
     }
     if result.outcome == RESULT_REPLACED:

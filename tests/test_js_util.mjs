@@ -778,7 +778,6 @@ import {
   pickBestDistance,
   formatDistanceBadge,
   runWithConcurrency,
-  mapDiscogsMasterReleases,
   renderMasterlessNote,
   extractTracklist,
   esc as replaceEsc,
@@ -981,63 +980,14 @@ assertEqual(replaceEsc('<script>'), '&lt;script&gt;', 'esc escapes <');
 assertEqual(replaceEsc('a&b'), 'a&amp;b', 'esc escapes &');
 assertEqual(replaceEsc('"x"'), '&quot;x&quot;', 'esc escapes "');
 
-// ============================================================
-// replace_picker.js — Discogs-pathway Replace (U5)
-// ============================================================
-
-// mapDiscogsMasterReleases — GET /api/discogs/master/<id> payload → the
-// same pressing-row shape GET /api/release-group/<id> already returns
-// for MB (id/title/date/country/format/track_count preserved).
-const discogsMasterPayload = {
-  title: 'Hold Your Colour',
-  type: 'Album',
-  first_release_date: '2005-05-23',
-  artist_credit: 'Pendulum',
-  primary_artist_id: '287459',
-  releases: [
-    {
-      id: '1122334', title: 'Hold Your Colour (CD, Album)', date: '2005-05-23',
-      country: 'UK', status: 'Official', track_count: 13, format: 'CD, Album',
-      media_count: 1, labels: [{ name: 'Breakbeat Kaos' }],
-    },
-    {
-      id: '5566778', title: 'Hold Your Colour (2xLP)', date: '2006-01-01',
-      country: 'US', status: 'Official', track_count: 13, format: 'Vinyl, LP',
-      media_count: 2, labels: [{ name: 'Breakbeat Kaos' }],
-    },
-  ],
-};
-const mappedDiscogs = mapDiscogsMasterReleases(discogsMasterPayload);
-assertEqual(mappedDiscogs.length, 2, 'mapDiscogsMasterReleases preserves release count');
-assertEqual(mappedDiscogs[0].id, '1122334', 'mapDiscogsMasterReleases preserves id');
-assertEqual(mappedDiscogs[0].title, 'Hold Your Colour (CD, Album)', 'mapDiscogsMasterReleases preserves title');
-assertEqual(mappedDiscogs[0].date, '2005-05-23', 'mapDiscogsMasterReleases preserves date');
-assertEqual(mappedDiscogs[0].country, 'UK', 'mapDiscogsMasterReleases preserves country');
-assertEqual(mappedDiscogs[0].format, 'CD, Album', 'mapDiscogsMasterReleases preserves format');
-assertEqual(mappedDiscogs[0].track_count, 13, 'mapDiscogsMasterReleases preserves track_count');
-
-// The mapped rows feed straight into the existing renderPressingsList —
-// current-release marking works identically to the MB path.
-const discogsPressingsHtml = renderPressingsList(mappedDiscogs, '1122334');
-assert(/data-expand-mbid="1122334"[^>]*disabled|disabled[^>]*data-expand-mbid="1122334"/.test(discogsPressingsHtml),
-  'mapDiscogsMasterReleases + renderPressingsList marks the current Discogs release disabled');
-assert(discogsPressingsHtml.includes('current pressing'),
-  'mapDiscogsMasterReleases + renderPressingsList labels the current Discogs release');
-assert(/replace-picker-confirm[^>]*data-mbid="5566778"/.test(discogsPressingsHtml),
-  'mapDiscogsMasterReleases + renderPressingsList renders a pick button for the Discogs sibling');
-
-// Missing fields render through the picker's existing empty/dash handling
-// rather than throwing or leaking `undefined` into the HTML.
-const sparseMapped = mapDiscogsMasterReleases({ releases: [{ id: 999 }] });
-assertEqual(sparseMapped[0].id, '999', 'mapDiscogsMasterReleases coerces numeric id to string');
-assertEqual(sparseMapped[0].title, '', 'mapDiscogsMasterReleases missing title → empty string');
-assertEqual(sparseMapped[0].track_count, 0, 'mapDiscogsMasterReleases missing track_count → 0');
-assert(!renderPressingsList(sparseMapped, 'other').includes('undefined'),
-  'mapDiscogsMasterReleases sparse row never renders "undefined"');
-
-// Absent/malformed payload → empty list, not a throw.
-assertEqual(mapDiscogsMasterReleases(null).length, 0, 'mapDiscogsMasterReleases(null) → []');
-assertEqual(mapDiscogsMasterReleases({}).length, 0, 'mapDiscogsMasterReleases({}) → []');
+// mapDiscogsMasterReleases (the client-side MB/Discogs release-group shape
+// adapter) and its dedicated coverage are deleted (#501 item 1) — GET
+// /api/release-group/<id> now dispatches numeric ids to the Discogs master
+// endpoint server-side (web/routes/browse.py::get_release_group) and
+// returns the identical shape, so replace_picker.js's runStandard needs no
+// anchor-shape branch or client-side mapping at all. Parity is proven
+// server-side by
+// tests/web/test_routes_browse.py::test_release_group_numeric_id_forwards_to_discogs.
 
 // renderMasterlessNote — R2/AE1 copy, pure/DOM-free.
 assert(renderMasterlessNote().toLowerCase().includes('no other pressings'),
@@ -1065,16 +1015,9 @@ assert(renderTracklist(extracted).includes('Slam'),
 assertEqual(extractTracklist({}).length, 0, 'extractTracklist({}) → []');
 assertEqual(extractTracklist(null).length, 0, 'extractTracklist(null) → []');
 
-// Anchor-shape dispatch — the exact predicate replace_picker.js uses to
-// pick /api/release-group/<id> (MB) vs /api/discogs/master/<id>
-// (Discogs). Reuses util.js's detectSource rather than a duplicate
-// isNumericId helper (already exhaustively covered above).
-assertEqual(detectSource('89ad4ac3-39f7-470e-963a-56509c546377') === 'discogs', false,
-  'replace-picker anchor dispatch: UUID anchor is not routed to the Discogs master endpoint');
-assertEqual(detectSource('1122334') === 'discogs', true,
-  'replace-picker anchor dispatch: numeric anchor is routed to the Discogs master endpoint');
-assertEqual(detectSource('not-an-id') === 'discogs', false,
-  'replace-picker anchor dispatch: junk anchor is not routed to the Discogs master endpoint');
+// Anchor-shape dispatch test removed (#501 item 1) — replace_picker.js no
+// longer branches on the anchor's shape client-side; detectSource's own
+// exhaustive coverage lives at the top of this file.
 
 // renderReplaceButton (release_actions.js) — U9
 import { renderReplaceButton } from '../web/js/release_actions.js';

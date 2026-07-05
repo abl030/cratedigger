@@ -24,8 +24,12 @@
  *      `source==='youtube'` ("rescue running" / "last rescue failed: …").
  *   4. Sibling pressings ← `GET /api/release-group/<rg>` (rg read straight
  *      off the cohort row's `mb_release_group_id` — projected by
- *      `_LONG_TAIL_SELECT`, #398; skipped for rows without one, e.g.
- *      Discogs-sourced).
+ *      `_LONG_TAIL_SELECT`, #398; skipped only for rows with no release
+ *      group / master at all. `mb_release_group_id` doubles as the
+ *      Discogs master id for Discogs-sourced rows (KTD-1), and the route
+ *      dispatches numeric ids to the Discogs master endpoint server-side
+ *      (#501 item 1) — a Discogs row with a resolved master gets real
+ *      sibling pressings here too, not a doomed MB lookup).
  *   5. YouTube matrix  ← the four-state shell. Defaults to `never_run`
  *      with a "Check YouTube" button (U5 wires the actual resolver call —
  *      U4 must NOT auto-call the slow, side-effectful resolver GET).
@@ -1505,13 +1509,19 @@ async function loadPipelinePanels(id, token, inFlightFlag) {
 /**
  * Load the sibling-pressings panel from `GET /api/release-group/<rg>`.
  * Independent — a slow / failing release-group renders only this panel's
- * error affordance and never blocks the others. Rows without a release
- * group (Discogs-sourced, or a legacy MB row with none) render an explicit
- * "no sibling data" state rather than firing a doomed fetch (KTD7).
+ * error affordance and never blocks the others. `rgId` doubles as the
+ * Discogs master id for Discogs-sourced rows (KTD-1 — numeric ids share
+ * this column); the route dispatches numeric ids to the Discogs master
+ * endpoint server-side (`web/routes/browse.py::get_release_group`, #501
+ * item 1), so a Discogs row with a resolved master gets REAL sibling
+ * pressings here, not a doomed MB lookup. Rows with no release group /
+ * master at all (masterless Discogs releases, or a legacy MB row with
+ * none) render an explicit "no sibling data" state instead of fetching.
  *
  * @param {number} id
  * @param {number} token
- * @param {string|null} rgId  The request's `mb_release_group_id`, or null.
+ * @param {string|null} rgId  The request's `mb_release_group_id` (MB
+ *   release-group UUID or Discogs numeric master id), or null.
  * @returns {Promise<void>}
  */
 async function loadSiblingsPanel(id, token, rgId) {
