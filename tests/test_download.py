@@ -24,7 +24,9 @@ from lib.download_processing import Materialized, MaterializeFailed, Materialize
 from lib.slskd_client import TransferSnapshot
 from tests.helpers import (
     make_ctx_with_fake_db,
+    make_download_directory,
     make_download_file,
+    make_download_user,
     make_grab_list_entry,
     make_request_row,
     make_transfer_snapshot,
@@ -34,37 +36,6 @@ from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _make_transfer_mock(filename="01 - Track.mp3", username="user1",
-                        bitRate=320, sampleRate=44100, bitDepth=None,
-                        isVariableBitRate=None, file_dir="user1\\Music",
-                        size=5000000, bytes_transferred=None, last_state=None):
-    """Build a mock slskd transfer object with runtime state attributes.
-
-    Use this ONLY for tests that want a bare MagicMock transfer object
-    (``status``/``bytes_transferred``/``last_state``/``import_path`` are
-    all real ``DownloadFile`` fields as of #468). For tests that only need
-    DownloadFile fields, use make_download_file() from tests.helpers instead.
-    """
-    f = MagicMock()
-    f.filename = filename
-    f.username = username
-    f.bitRate = bitRate
-    f.sampleRate = sampleRate
-    f.bitDepth = bitDepth
-    f.isVariableBitRate = isVariableBitRate
-    f.file_dir = file_dir
-    f.size = size
-    f.id = "file-id-1"
-    f.status = None
-    f.retry = None
-    f.bytes_transferred = bytes_transferred
-    f.last_state = last_state
-    f.import_path = None
-    f.disk_no = None
-    f.disk_count = None
-    return f
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
@@ -354,7 +325,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_all_succeeded(self):
         from lib.slskd_transfers import downloads_all_done
-        files = [_make_transfer_mock(), _make_transfer_mock()]
+        files = [make_download_file(), make_download_file()]
         files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
         files[1].status = make_transfer_snapshot(state="Completed, Succeeded")
         done, problems, queued = downloads_all_done(files)
@@ -364,7 +335,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_one_errored(self):
         from lib.slskd_transfers import downloads_all_done
-        files = [_make_transfer_mock(), _make_transfer_mock()]
+        files = [make_download_file(), make_download_file()]
         files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
         files[1].status = make_transfer_snapshot(state="Completed, Errored")
         done, problems, queued = downloads_all_done(files)
@@ -376,7 +347,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_queued_remotely(self):
         from lib.slskd_transfers import downloads_all_done
-        files = [_make_transfer_mock(), _make_transfer_mock()]
+        files = [make_download_file(), make_download_file()]
         files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
         files[1].status = make_transfer_snapshot(state="Queued, Remotely")
         done, problems, queued = downloads_all_done(files)
@@ -395,7 +366,7 @@ class TestDownloadsAllDone(unittest.TestCase):
             "Completed, Aborted",
         ]
         for state in error_states:
-            files = [_make_transfer_mock()]
+            files = [make_download_file()]
             files[0].status = make_transfer_snapshot(state=state)
             done, problems, _ = downloads_all_done(files)
             self.assertFalse(done, f"state={state} should not be done")
@@ -403,7 +374,7 @@ class TestDownloadsAllDone(unittest.TestCase):
 
     def test_none_status_skipped(self):
         from lib.slskd_transfers import downloads_all_done
-        files = [_make_transfer_mock()]
+        files = [make_download_file()]
         files[0].status = None
         done, problems, queued = downloads_all_done(files)
         # None status means we can't confirm done
@@ -586,15 +557,16 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         """When snapshot is provided, use match_transfer instead of per-file API."""
         from lib.slskd_transfers import slskd_download_status
         f = make_download_file(filename="Music\\01 - Track.mp3", username="user1")
-        snapshot = [{
-            "username": "user1",
-            "directories": [{"files": [{
-                "filename": "Music\\01 - Track.mp3",
-                "id": "file-id-1",
-                "state": "Completed, Succeeded",
-                "size": 5000000,
-            }]}],
-        }]
+        snapshot = [make_download_user(username="user1", directories=[
+            make_download_directory(directory="", files=[
+                make_transfer_snapshot(
+                    filename="Music\\01 - Track.mp3",
+                    id="file-id-1",
+                    state="Completed, Succeeded",
+                    size=5000000,
+                ),
+            ]),
+        ])]
         ok = slskd_download_status([f], snapshot=snapshot)
         self.assertTrue(ok)
         self.assertIsNotNone(f.status)
@@ -605,21 +577,10 @@ class TestSlskdDownloadStatus(unittest.TestCase):
         """When snapshot doesn't contain the file, status is None, returns False."""
         from lib.slskd_transfers import slskd_download_status
         f = make_download_file(filename="Music\\missing.mp3", username="user1")
-        snapshot = [{"username": "user1", "directories": [{"files": []}]}]
+        snapshot = [make_download_user(username="user1", directories=[
+            make_download_directory(directory="", files=[]),
+        ])]
         ok = slskd_download_status([f], snapshot=snapshot)
-        self.assertFalse(ok)
-        self.assertIsNone(f.status)
-
-    def test_malformed_snapshot_entry_sets_none(self):
-        """A snapshot entry with an unexpected shape (e.g. ``directories``
-        not a list of dicts) hits the generic except-Exception branch:
-        status cleared and ok=False. Repointed from the retired
-        per-file-API error test (#508 — that branch is gone)."""
-        from lib.slskd_transfers import slskd_download_status
-        f = make_download_file(filename="Music\\01 - Track.mp3", username="user1")
-        snapshot = [{"username": "user1", "directories": "not-a-list"}]
-        with self.assertLogs("cratedigger", level="ERROR"):
-            ok = slskd_download_status([f], snapshot=snapshot)
         self.assertFalse(ok)
         self.assertIsNone(f.status)
 
@@ -996,54 +957,49 @@ class TestMatchTransferId(unittest.TestCase):
 
     def test_exact_filename_match(self):
         from lib.slskd_transfers import match_transfer_id
-        downloads = {
-            "directories": [{
-                "directory": "user\\Music",
-                "files": [
-                    {"filename": "user\\Music\\01.flac", "id": "abc-123"},
-                    {"filename": "user\\Music\\02.flac", "id": "def-456"},
-                ],
-            }],
-        }
+        downloads = make_download_user(directories=[
+            make_download_directory(directory="user\\Music", files=[
+                make_transfer_snapshot(filename="user\\Music\\01.flac", id="abc-123"),
+                make_transfer_snapshot(filename="user\\Music\\02.flac", id="def-456"),
+            ]),
+        ])
         result = match_transfer_id(downloads, "user\\Music\\01.flac")
         self.assertEqual(result, "abc-123")
 
     def test_not_found(self):
         from lib.slskd_transfers import match_transfer_id
-        downloads = {"directories": [{"directory": "user\\Music", "files": []}]}
+        downloads = make_download_user(directories=[
+            make_download_directory(directory="user\\Music", files=[]),
+        ])
         result = match_transfer_id(downloads, "user\\Music\\missing.flac")
         self.assertIsNone(result)
 
     def test_multi_directory(self):
         from lib.slskd_transfers import match_transfer_id
-        downloads = {
-            "directories": [
-                {"directory": "d1", "files": [
-                    {"filename": "d1\\01.flac", "id": "id-1"},
-                ]},
-                {"directory": "d2", "files": [
-                    {"filename": "d2\\01.flac", "id": "id-2"},
-                ]},
-            ],
-        }
+        downloads = make_download_user(directories=[
+            make_download_directory(directory="d1", files=[
+                make_transfer_snapshot(filename="d1\\01.flac", id="id-1"),
+            ]),
+            make_download_directory(directory="d2", files=[
+                make_transfer_snapshot(filename="d2\\01.flac", id="id-2"),
+            ]),
+        ])
         result = match_transfer_id(downloads, "d2\\01.flac")
         self.assertEqual(result, "id-2")
 
     def test_bulk_downloads_respects_username(self):
         from lib.slskd_transfers import match_transfer_id
         downloads = [
-            {
-                "username": "Mr. Odd",
-                "directories": [{"directory": "a", "files": [
-                    {"filename": "shared\\01.flac", "id": "wrong-id"},
-                ]}],
-            },
-            {
-                "username": "Miick Starr",
-                "directories": [{"directory": "b", "files": [
-                    {"filename": "shared\\01.flac", "id": "right-id"},
-                ]}],
-            },
+            make_download_user(username="Mr. Odd", directories=[
+                make_download_directory(directory="a", files=[
+                    make_transfer_snapshot(filename="shared\\01.flac", id="wrong-id"),
+                ]),
+            ]),
+            make_download_user(username="Miick Starr", directories=[
+                make_download_directory(directory="b", files=[
+                    make_transfer_snapshot(filename="shared\\01.flac", id="right-id"),
+                ]),
+            ]),
         ]
         result = match_transfer_id(
             downloads,
@@ -1055,52 +1011,50 @@ class TestMatchTransferId(unittest.TestCase):
     def test_bulk_downloads_prefers_active_over_old_completed(self):
         from lib.slskd_transfers import match_transfer
         downloads = [
-            {
-                "username": "user1",
-                "directories": [{"directory": "d", "files": [
-                    {
-                        "filename": "shared\\01.flac",
-                        "id": "completed-id",
-                        "state": "Completed, Succeeded",
-                        "endedAt": "2026-04-03T21:00:00+00:00",
-                    },
-                    {
-                        "filename": "shared\\01.flac",
-                        "id": "active-id",
-                        "state": "InProgress",
-                        "startedAt": "2026-04-03T22:00:00+00:00",
-                    },
-                ]}],
-            },
+            make_download_user(username="user1", directories=[
+                make_download_directory(directory="d", files=[
+                    make_transfer_snapshot(
+                        filename="shared\\01.flac",
+                        id="completed-id",
+                        state="Completed, Succeeded",
+                        ended_at="2026-04-03T21:00:00+00:00",
+                    ),
+                    make_transfer_snapshot(
+                        filename="shared\\01.flac",
+                        id="active-id",
+                        state="InProgress",
+                        started_at="2026-04-03T22:00:00+00:00",
+                    ),
+                ]),
+            ]),
         ]
         result = match_transfer(downloads, "shared\\01.flac", username="user1")
         assert result is not None
-        self.assertEqual(result["id"], "active-id")
+        self.assertEqual(result.id, "active-id")
 
     def test_bulk_downloads_prefers_latest_successful_attempt(self):
         from lib.slskd_transfers import match_transfer
         downloads = [
-            {
-                "username": "user1",
-                "directories": [{"directory": "d", "files": [
-                    {
-                        "filename": "shared\\01.flac",
-                        "id": "old-cancelled",
-                        "state": "Completed, Cancelled",
-                        "endedAt": "2026-04-03T20:00:00+00:00",
-                    },
-                    {
-                        "filename": "shared\\01.flac",
-                        "id": "new-succeeded",
-                        "state": "Completed, Succeeded",
-                        "endedAt": "2026-04-03T21:00:00+00:00",
-                    },
-                ]}],
-            },
+            make_download_user(username="user1", directories=[
+                make_download_directory(directory="d", files=[
+                    make_transfer_snapshot(
+                        filename="shared\\01.flac",
+                        id="old-cancelled",
+                        state="Completed, Cancelled",
+                        ended_at="2026-04-03T20:00:00+00:00",
+                    ),
+                    make_transfer_snapshot(
+                        filename="shared\\01.flac",
+                        id="new-succeeded",
+                        state="Completed, Succeeded",
+                        ended_at="2026-04-03T21:00:00+00:00",
+                    ),
+                ]),
+            ]),
         ]
         result = match_transfer(downloads, "shared\\01.flac", username="user1")
         assert result is not None
-        self.assertEqual(result["id"], "new-succeeded")
+        self.assertEqual(result.id, "new-succeeded")
 
 
 class TestRederiveTransferIds(unittest.TestCase):

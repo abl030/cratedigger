@@ -5,7 +5,10 @@ from __future__ import annotations
 import copy
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from lib.slskd_client import DownloadUser
 
 @dataclass
 class EnqueueCall:
@@ -41,12 +44,17 @@ class FakeSlskdTransfers:
             raise self.enqueue_error
         return self.enqueue_result
 
-    def get_all_downloads(self, includeRemoved: bool = False) -> list[dict[str, Any]]:
+    def get_all_downloads(self, includeRemoved: bool = False) -> list[DownloadUser]:
+        from lib.slskd_client import DownloadUser, parse_downloads_envelope
         self.get_all_downloads_calls.append(includeRemoved)
         self._api.call_log.append("transfers.get_all_downloads")
         if self.get_all_downloads_error is not None:
             raise self.get_all_downloads_error
-        return self._api._next_download_snapshot()
+        # Mirror production's decode exactly (test-fidelity Rule B):
+        # SlskdTransfersApi.get_all_downloads() runs the raw JSON through
+        # parse_downloads_envelope() before returning — the fake must do
+        # the same so tests exercise the identical typed shape (#507).
+        return parse_downloads_envelope(self._api._next_download_snapshot())
 
     def cancel_download(self, username: str, id: str,
                         remove: bool = False) -> bool:

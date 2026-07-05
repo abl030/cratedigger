@@ -9,6 +9,7 @@ from lib.quality import (
     find_slskd_orphans,
     suggest_repair,
 )
+from tests.helpers import make_download_directory, make_download_user, make_transfer_snapshot
 
 
 class TestFindInconsistencies(unittest.TestCase):
@@ -222,14 +223,12 @@ class TestFindSlskdOrphans(unittest.TestCase):
     def _snapshot(username="peer1", directory="Music\\Album",
                   filename="Music\\Album\\01 - Track.flac",
                   transfer_id="t-1", state="InProgress"):
-        return [{
-            "username": username,
-            "directories": [{
-                "directory": directory,
-                "files": [{"filename": filename, "id": transfer_id,
-                           "state": state}],
-            }],
-        }]
+        return [make_download_user(username=username, directories=[
+            make_download_directory(directory=directory, files=[
+                make_transfer_snapshot(
+                    filename=filename, id=transfer_id, state=state),
+            ]),
+        ])]
 
     @staticmethod
     def _owning_row(status="downloading", username="peer1",
@@ -294,15 +293,16 @@ class TestFindSlskdOrphans(unittest.TestCase):
         self.assertEqual(len(orphans), 1)
 
     def test_missing_state_treated_as_live(self):
-        snapshot = self._snapshot()
-        del snapshot[0]["directories"][0]["files"][0]["state"]
+        # state="" is TransferSnapshot's own default — mirrors an entry
+        # where slskd omitted the field entirely (issue #507: the
+        # envelope's file entries decode through the same Struct).
+        snapshot = self._snapshot(state="")
         orphans = find_slskd_orphans(snapshot, [])
         self.assertEqual(len(orphans), 1)
         self.assertEqual(orphans[0].state, "")
 
     def test_file_without_filename_skipped(self):
-        snapshot = self._snapshot()
-        del snapshot[0]["directories"][0]["files"][0]["filename"]
+        snapshot = self._snapshot(filename="")
         orphans = find_slskd_orphans(snapshot, [])
         self.assertEqual(orphans, [])
 

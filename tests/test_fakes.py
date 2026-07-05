@@ -1588,15 +1588,25 @@ class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
 
 class TestFakeSlskdAPI(unittest.TestCase):
     def test_get_downloads_returns_queued_snapshots(self):
+        """#507: get_all_downloads() now runs the raw JSON snapshot through
+        parse_downloads_envelope(), the same as production — mirroring the
+        real decode is the point (test-fidelity Rule B)."""
+        from lib.slskd_client import parse_downloads_envelope
         first = [{"username": "user1", "directories": [{"files": []}]}]
         second = [{"username": "user1", "directories": [{"files": [
             {"filename": "track.mp3", "id": "tid-1"},
         ]}]}]
         slskd = FakeSlskdAPI(download_snapshots=[first, second])
 
-        self.assertEqual(slskd.transfers.get_all_downloads(includeRemoved=True), first)
-        self.assertEqual(slskd.transfers.get_all_downloads(includeRemoved=True), second)
-        self.assertEqual(slskd.transfers.get_all_downloads(includeRemoved=True), second)
+        self.assertEqual(
+            slskd.transfers.get_all_downloads(includeRemoved=True),
+            parse_downloads_envelope(first))
+        self.assertEqual(
+            slskd.transfers.get_all_downloads(includeRemoved=True),
+            parse_downloads_envelope(second))
+        self.assertEqual(
+            slskd.transfers.get_all_downloads(includeRemoved=True),
+            parse_downloads_envelope(second))
         self.assertEqual(slskd.transfers.get_all_downloads_calls, [True, True, True])
 
     def test_records_enqueue_and_cancel_calls(self):

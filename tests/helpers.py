@@ -33,7 +33,7 @@ from lib.quality import (
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import snapshot_fingerprint
-from lib.slskd_client import TransferSnapshot
+from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
 
 
 def make_request_row(**overrides: Any) -> dict[str, Any]:
@@ -343,6 +343,24 @@ def make_transfer_snapshot(**overrides: Any) -> TransferSnapshot:
     defaults: dict[str, Any] = {"state": "Completed, Succeeded"}
     defaults.update(overrides)
     return TransferSnapshot(**defaults)
+
+
+def make_download_directory(**overrides: Any) -> DownloadDirectory:
+    """Build a DownloadDirectory — one directory row of the
+    get_all_downloads() envelope (issue #507) — with an empty file list
+    by default."""
+    defaults: dict[str, Any] = {"directory": "user1\\Music", "files": []}
+    defaults.update(overrides)
+    return DownloadDirectory(**defaults)
+
+
+def make_download_user(**overrides: Any) -> DownloadUser:
+    """Build a DownloadUser — one user-group row of the
+    get_all_downloads() envelope (issue #507) — with an empty directory
+    list by default."""
+    defaults: dict[str, Any] = {"username": "user1", "directories": []}
+    defaults.update(overrides)
+    return DownloadUser(**defaults)
 
 
 def make_grab_list_entry(
