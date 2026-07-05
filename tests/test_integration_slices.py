@@ -2714,6 +2714,34 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         self.assertIsInstance(result, Completed)
         self.assertEqual(db.request(42)["status"], "imported")
 
+    def test_default_process_album_fn_honors_patched_download_processing(self):
+        """Regression guard (#536): with no ``process_album_fn`` override,
+        ``_run_completed_processing`` must resolve ``process_completed_album``
+        from ``lib.download_processing`` at call time. Before #536 that
+        default was captured once via a from-import at ``lib.download``
+        import time, so patching the leaf seam here — the same seam
+        production tests already patch elsewhere — silently had no effect
+        on this call site.
+        """
+        from lib import download as dl_mod
+        from lib.download_processing import Completed
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+
+        with patch(
+            "lib.download_processing.process_completed_album",
+            return_value=Completed(),
+        ) as patched:
+            result = dl_mod._run_completed_processing(
+                self._entry(), 42, self._state(), db, self._ctx(db),
+                import_job_id=1,
+            )
+
+        patched.assert_called_once()
+        self.assertIsInstance(result, Completed)
+        self.assertEqual(db.request(42)["status"], "imported")
+
 
 class TestBadAudioHashSlice(unittest.TestCase):
     """Integration slice: bad-audio-hash gate inside ``measure_preimport_state``.
