@@ -395,7 +395,6 @@ _LEAF_SEAM_PATTERNS = [
 
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.album_requests\.fetch_mb_release$"),
-    re.compile(r"^scripts\.pipeline_cli\.fetch_mb_release_group_year$"),
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
 
     # scripts.pipeline_cli loaders — each is a thin wrapper around a

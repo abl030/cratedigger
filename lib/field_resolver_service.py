@@ -1240,7 +1240,7 @@ def detect_va_compilation(
 #
 # ``resolve_all`` is the single entry point the web add path
 # (``web/routes/pipeline.py::post_pipeline_add``) and the CLI add path
-# (``scripts/pipeline_cli.py::cmd_add``) call after they have a freshly
+# (``scripts/pipeline_cli/album_requests.py::cmd_add``) call after they have a freshly
 # inserted ``album_requests`` row id and the upstream release payload(s)
 # in hand. It:
 #
@@ -1365,7 +1365,7 @@ def resolve_all(
     """Run all field resolvers inline at enqueue with a wall-clock budget.
 
     Called from ``web/routes/pipeline.py::post_pipeline_add`` and from
-    ``scripts/pipeline_cli.py::cmd_add`` after the new ``album_requests``
+    ``scripts/pipeline_cli/album_requests.py::cmd_add`` after the new ``album_requests``
     row has been inserted (so ``request["id"]`` is real and the FK in
     ``album_request_field_resolutions`` is satisfiable). The caller then
     updates the row with the returned values (proceed-with-NULL where
@@ -1589,7 +1589,7 @@ def resolve_all(
 #
 # Single canonical implementation of the "result → update_request_fields"
 # mapping. Web (``web/routes/pipeline.py::_resolve_and_update_after_add``)
-# and CLI (``scripts/pipeline_cli.py::_resolve_and_update_after_add``)
+# and CLI (``scripts/pipeline_cli/album_requests.py::_resolve_and_update_after_add``)
 # previously each carried a near-identical copy. The transient deploy
 # one-shot (``docs/search-plan-iter2-deploy.md`` § 3.2) also benefits —
 # its inline ``updates`` dict-building is the same shape.

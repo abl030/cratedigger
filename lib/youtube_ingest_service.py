@@ -432,8 +432,9 @@ def _default_mb_track_count(_mbid: str) -> Optional[int]:
     bare ``YoutubeIngestService(pdb)`` without an MB-wiring fail fast
     at the first precheck/gate rather than silently passing a
     ``None`` MB count through. The production callers (CLI in
-    ``scripts/pipeline_cli.py``, HTTP route in ``web/routes/youtube.py``)
-    go through :func:`default_youtube_ingest_service_factory` which wires
+    ``scripts/pipeline_cli/youtube.py``, HTTP route in
+    ``web/routes/youtube.py``) go through
+    :func:`default_youtube_ingest_service_factory` which wires
     the live MB-mirror flavour. Tests inject a fake that returns canned
     values.
     """
@@ -453,8 +454,8 @@ def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
     ``track_count_precheck_failed`` and the operator escalates.
 
     Shared by both production callers (CLI in
-    ``scripts/pipeline_cli.py::cmd_youtube_rescue`` and HTTP route in
-    ``web/routes/youtube.py::post_pipeline_youtube_rescue``) per CLI ⇄
+    ``scripts/pipeline_cli/youtube.py::cmd_youtube_rescue`` and HTTP route
+    in ``web/routes/youtube.py::post_pipeline_youtube_rescue``) per CLI ⇄
     API symmetry — duplicating the helper across the two wrappers would
     let them drift in subtle ways (different timeout, different cache
     behaviour). Tests inject a fake instead of calling this helper.
@@ -475,7 +476,7 @@ def default_youtube_ingest_service_factory(pdb: _PipelineDB) -> "YoutubeIngestSe
 
     Wires the live MB-mirror ``mb_track_count_fn`` (other ports retain
     their library-side production defaults). Both
-    ``scripts/pipeline_cli.py::cmd_youtube_rescue`` and
+    ``scripts/pipeline_cli/youtube.py::cmd_youtube_rescue`` and
     ``web/routes/youtube.py::post_pipeline_youtube_rescue`` call this
     so the two surfaces share one wiring per CLI ⇄ API symmetry. Tests
     inject a service via ``service_factory=`` (CLI) or patch the

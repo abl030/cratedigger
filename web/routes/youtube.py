@@ -2,7 +2,7 @@
 
 Single GET endpoint, ``/api/youtube-album?identifier=<id>&refresh=<bool>``,
 that wraps ``lib.youtube_album_service.resolve_youtube_album``. The CLI
-counterpart (U7) lives at ``scripts/pipeline_cli.py::cmd_youtube_album``;
+counterpart (U7) lives at ``scripts/pipeline_cli/youtube.py::cmd_youtube_album``;
 both surfaces share the same service + outcome vocabulary per
 ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
 
@@ -65,7 +65,7 @@ class _RedisYoutubeCache:
     ``youtube:album:youtube:album:<browse_id>`` keys).
 
     Mirrors ``_RedisFingerprintCache`` in ``web/routes/pipeline.py``
-    (and ``scripts/pipeline_cli.py::_RedisYoutubeCache`` on the CLI
+    (and ``scripts/pipeline_cli/youtube.py::_RedisYoutubeCache`` on the CLI
     side) — bytes get/set with a long sentinel TTL. Falls back to a
     no-op when Redis is unavailable so single-shot dev shells still
     work without the in-process accelerator.
@@ -110,7 +110,7 @@ def _build_youtube_client():
     Lazy-imports ``requests``, ``urllib3``, and ``ytmusicapi`` so the
     web server's startup cost stays low and unrelated routes don't
     pay for unused HTTP machinery. Mirrors
-    ``scripts/pipeline_cli.py::_build_youtube_client``.
+    ``scripts/pipeline_cli/youtube.py::_build_youtube_client``.
 
     Returns a ``(yt_client, session)`` tuple so the caller can close
     the session in a ``finally`` block — without that, every YT route
