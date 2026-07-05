@@ -36,7 +36,7 @@ or Discogs round-trip).
 #### 1.1 Backup the pipeline DB
 
 ```bash
-ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
+ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' \
   > /tmp/cratedigger_backup_pr1_$(date +%Y%m%d_%H%M%S).sql
 ```
 
@@ -373,7 +373,7 @@ standard plan-regen wave on the first 1-2 cycles post-deploy).
 #### 1.1 Backup the pipeline DB
 
 ```bash
-ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
+ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' \
   > /tmp/cratedigger_backup_pr2_$(date +%Y%m%d_%H%M%S).sql
 ```
 
@@ -616,7 +616,7 @@ Deploy date: 2026-05-26.
 #### 1.1 Backup the pipeline DB
 
 ```bash
-ssh doc2 'pg_dump -h 192.168.100.11 -U cratedigger cratedigger' \
+ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' \
   > /tmp/cratedigger_backup_pr3_$(date +%Y%m%d_%H%M%S).sql
 ```
 
