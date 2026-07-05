@@ -1994,6 +1994,15 @@ def get_beets_distance(
     thin adapter that maps the typed ``BeetsDistanceResult`` outcomes
     to HTTP status codes per the CLI ⇄ API symmetry rule.
 
+    ``mbid`` may be an MB release UUID or a bare Discogs numeric release
+    id (#530 — Discogs siblings, e.g. surfaced by the Replace picker
+    against a Discogs-sourced request per #501). Dispatch on the id
+    shape the same way ``browse.py::get_release_group`` does: numeric ⇒
+    Discogs. ``compute_beets_distance`` is source-agnostic (the
+    YouTube resolver already scores Discogs releases through it via the
+    same ``get_release``-shaped callable) — no MB<->Discogs adapter
+    needed.
+
     Status-code mapping:
       * 200 — ``ok`` (distance is in ``response.distance``)
       * 404 — ``download_log_not_found`` / ``request_not_found``
@@ -2013,12 +2022,17 @@ def get_beets_distance(
         h._error("Invalid download_log_id")
         return
 
+    if detect_release_source(mbid) == "discogs":
+        get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
+    else:
+        get_release_fn = lambda m: mb_api.get_release(m, fresh=False)
+
     s = _server()
     result = compute_beets_distance(
         download_log_id,
         mbid,
         pdb=s._db(),
-        mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
+        mb_get_release=get_release_fn,
         cache=_RedisFingerprintCache(),
     )
 
@@ -2102,12 +2116,14 @@ ROUTES: list[RouteRegistration] = [
         classified=True,
     ),
     # /api/beets-distance/<download_log_id>/<mbid> — real beets distance
-    # for one (download_log_id, mbid) pair. See get_beets_distance above.
+    # for one (download_log_id, mbid) pair. mbid may be an MB UUID or a
+    # bare Discogs numeric id (#530). See get_beets_distance above.
     pattern_route(
-        "GET", r"^/api/beets-distance/(\d+)/([a-f0-9-]{36})$",
+        "GET", r"^/api/beets-distance/(\d+)/([a-f0-9-]{36}|\d+)$",
         get_beets_distance,
-        "Real beets match distance for one (download_log_id, mbid) pair; "
-        "refuses cross-release-group comparisons.",
+        "Real beets match distance for one (download_log_id, mbid) pair "
+        "(mbid may be an MB UUID or a Discogs numeric id); refuses "
+        "cross-release-group comparisons.",
         classified=True,
     ),
     pattern_route(

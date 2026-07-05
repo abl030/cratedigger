@@ -349,7 +349,7 @@ def _build_parser() -> tuple[
     p_bd.add_argument("download_log_id", type=int,
                       help="download_log row id (see `pipeline-cli show <req>`)")
     p_bd.add_argument("mbid",
-                      help="Candidate MB release UUID")
+                      help="Candidate release id — MB UUID or Discogs numeric id")
     p_bd.add_argument("--json", action="store_true",
                       help="Print structured JSON instead of text")
 

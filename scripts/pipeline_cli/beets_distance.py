@@ -16,6 +16,12 @@ def cmd_beets_distance(db, args):
     keep them in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface
     symmetry").
 
+    ``args.mbid`` may be an MB release UUID or a bare Discogs numeric
+    release id (#530 — same dispatch as the API route: numeric ⇒
+    Discogs, mirroring ``browse.py::get_release_group``).
+    ``compute_beets_distance`` is source-agnostic; no MB<->Discogs
+    adapter needed.
+
     Exit codes:
       * 0 — ``ok``
       * 2 — ``download_log_not_found``, ``request_not_found``
@@ -27,13 +33,20 @@ def cmd_beets_distance(db, args):
       * 1 — ``distance_failed`` / unknown outcome
     """
     from lib.beets_distance import compute_beets_distance
+    from lib.release_identity import detect_release_source
+    from web import discogs as discogs_api
     from web import mb as mb_api
+
+    if detect_release_source(args.mbid) == "discogs":
+        get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
+    else:
+        get_release_fn = lambda m: mb_api.get_release(m, fresh=False)
 
     result = compute_beets_distance(
         int(args.download_log_id),
         args.mbid,
         pdb=db,
-        mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
+        mb_get_release=get_release_fn,
         cache=None,
     )
 

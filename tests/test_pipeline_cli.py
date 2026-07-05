@@ -2797,6 +2797,51 @@ class TestCmdBeetsDistance(unittest.TestCase):
         self.assertAlmostEqual(payload["distance"], 0.07, places=4)
         self.assertEqual(payload["components"]["album"], 0.0)
 
+    def test_discogs_numeric_id_routes_through_discogs_lookup(self):
+        """A numeric mbid (Discogs sibling) must route through
+        ``discogs_api.get_release``, not ``web.mb.get_release`` — CLI
+        counterpart of the same dispatch fixed in the API route (#530).
+        No new MB<->Discogs adapter: ``compute_beets_distance`` already
+        treats ``release_group_id`` as optional and ``discogs_api.get_release``
+        mirrors ``mb_api.get_release``'s dict shape exactly.
+        """
+        from lib.beets_distance import BeetsDistanceResult
+
+        captured = {}
+
+        def _fake_compute(download_log_id, mbid, *, pdb, mb_get_release,
+                           cache=None, **_kw):
+            captured["mb_get_release"] = mb_get_release
+            return BeetsDistanceResult(
+                outcome="ok", distance=0.05,
+                download_log_id=download_log_id, candidate_mbid=mbid,
+            )
+
+        discogs_release = {
+            "id": "2048516",
+            "title": "Fake Album",
+            "artist_name": "Fake Artist",
+            "artist_id": "999",
+            "release_group_id": None,
+            "tracks": [],
+        }
+        args = SimpleNamespace(download_log_id=100, mbid="2048516", json=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with patch(
+                "lib.beets_distance.compute_beets_distance",
+                side_effect=_fake_compute,
+            ), patch(
+                "web.discogs.get_release",
+                return_value=discogs_release,
+            ) as discogs_get:
+                rc = pipeline_cli.cmd_beets_distance(MagicMock(), args)
+                self.assertIn("mb_get_release", captured)
+                resolved = captured["mb_get_release"]("2048516")
+                discogs_get.assert_called_once_with(2048516, fresh=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(resolved, discogs_release)
+
 
 class TestCmdYoutubeAlbum(unittest.TestCase):
     """``pipeline-cli youtube-album`` wraps
