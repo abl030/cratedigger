@@ -13,17 +13,13 @@ done
 echo "All JS files OK"
 echo ""
 
-# JS unit tests
+# JS unit tests — glob so every tests/test_js_*.mjs on disk runs; a manual
+# list drifted silently before (issue #520: test_js_grouping.mjs,
+# test_js_library.mjs, test_js_release_actions.mjs were never run).
 echo "=== JS unit tests ==="
-node tests/test_js_util.mjs || exit 1
-node tests/test_js_decisions.mjs || exit 1
-node tests/test_js_search_plan.mjs || exit 1
-node tests/test_js_recents.mjs || exit 1
-node tests/test_js_history.mjs || exit 1
-node tests/test_js_pipeline.mjs || exit 1
-node tests/test_js_pipeline_dashboard.mjs || exit 1
-node tests/test_js_wrong_matches.mjs || exit 1
-node tests/test_js_long_tail_console.mjs || exit 1
+for f in tests/test_js_*.mjs; do
+  node "$f" || exit 1
+done
 echo ""
 
 # Dead-code sweep — fails fast on new vulture findings before the slow
