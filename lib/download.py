@@ -11,7 +11,6 @@ lib/slskd_events.py.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 from contextlib import AbstractContextManager
 from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
@@ -26,10 +25,10 @@ from lib.download_processing import (
     CompletionResult,
     Materialized,
     MaterializeFailed,
+    MaterializeGuarded,
     MaterializeResult,
-    _abandon_request_scoped_auto_import,
     _canonical_import_folder_path,
-    _log_post_move_resume_blocked,
+    _evaluate_staged_path_readiness,
     _materialize_processing_dir,
     process_completed_album,
 )
@@ -617,7 +616,25 @@ def _processing_path_ready_for_importer(
     db: DownloadDB,
     ctx: CratediggerContext,
 ) -> bool:
-    """Fail closed before enqueueing a job that cannot resume local files."""
+    """Fail closed before enqueueing a job that cannot resume local files.
+
+    Thin wrapper around the ONE shared staged-path-readiness decision
+    (``lib.download_processing._evaluate_staged_path_readiness``, issue
+    #509) — the same decision ``_materialize_processing_dir`` uses for
+    its own non-canonical branch, so this pre-enqueue gate and the
+    materialize step it precedes can never drift apart again. This
+    wrapper only translates the tagged result into this caller's
+    ``bool`` contract and applies this gate's own, deliberately
+    different reaction to failure: an IMMEDIATE reset to 'wanted', not
+    the grace-windowed retry/reset ``materialize_failure_action``
+    applies when the same tag surfaces later from
+    ``_enqueue_completed_processing``'s own materialize call. That
+    difference is intentional and tested (``test_poll_missing_
+    persisted_current_path_resets_to_wanted``) — this gate exists to
+    fail closed before even attempting a heavier materialize/enqueue,
+    not to duplicate the grace window a first materialize attempt
+    already earned.
+    """
     if state.processing_started_at is None or state.current_path is None:
         return True
 
@@ -630,79 +647,22 @@ def _processing_path_ready_for_importer(
         staging_dir=ctx.cfg.beets_staging_dir,
         slskd_download_dir=ctx.cfg.slskd_download_dir,
     )
-    subprocess_started = state.import_subprocess_started_at is not None
-    if (
-        current_path_location.kind == "request_scoped_auto_import_staged"
-        and subprocess_started
-    ):
-        _abandon_request_scoped_auto_import(
-            entry,
-            request_id=request_id,
-            current_path=state.current_path,
-            current_path_kind=current_path_location.kind,
-            db=db,
-            detail=(
-                "Abandoned interrupted auto-import; queued for redownload"
-            ),
-        )
-        return False
-
-    if not os.path.isdir(state.current_path):
-        # The canonical processing folder may not exist yet. The importer
-        # materializes it from the completed slskd files as its first step.
-        if current_path_location.kind == "canonical":
-            return True
-        if current_path_location.blocks_post_move_retry and subprocess_started:
-            _log_post_move_resume_blocked(
-                entry,
-                current_path=state.current_path,
-                detail=(
-                    "already lives at the request-scoped auto-import "
-                    "staged path but the directory is missing. "
-                    "Automatic retry is disabled because beets may "
-                    "already have consumed the staged folder; manual "
-                    "recovery is required."
-                ),
-            )
-            return False
-        logger.error("Current staged path missing: %s", state.current_path)
-        transitions.finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted(
-                from_status="downloading",
-                attempt_type="download",
-            ),
-        )
-        return False
-
-    staged_album = StagedAlbum.from_entry(entry, default_path=state.current_path)
-    staged_album.bind_import_paths(entry.files)
-    missing_paths: list[str] = []
-    for file in entry.files:
-        import_path = file.import_path
-        if import_path is not None and not os.path.isfile(import_path):
-            missing_paths.append(import_path)
-    if not missing_paths:
+    if current_path_location.kind == "canonical":
+        # The canonical processing folder may not exist yet — the
+        # importer materializes it from the completed slskd files as
+        # its first step. Nothing to check here.
         return True
 
-    if current_path_location.blocks_post_move_retry and subprocess_started:
-        _log_post_move_resume_blocked(
-            entry,
-            current_path=state.current_path,
-            detail=(
-                "already lives at the request-scoped auto-import "
-                f"staged path but tracked files are missing ({', '.join(missing_paths)}). "
-                "Automatic retry is disabled because import may "
-                "already have started; manual recovery is required."
-            ),
-        )
+    staged_album = StagedAlbum.from_entry(entry, default_path=state.current_path)
+    result = _evaluate_staged_path_readiness(
+        entry, staged_album, current_path_location, db,
+    )
+    if isinstance(result, Materialized):
+        return True
+    if isinstance(result, MaterializeGuarded):
         return False
 
-    logger.error(
-        "Current staged path is missing tracked files: %s",
-        ", ".join(missing_paths),
-    )
+    assert isinstance(result, MaterializeFailed)
     transitions.finalize_request(
         db,
         request_id,

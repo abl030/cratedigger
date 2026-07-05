@@ -18,7 +18,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
-from lib.download_recovery import classify_processing_path
+from lib.download_recovery import ProcessingPathLocation, classify_processing_path
 from lib.grab_list import GrabListEntry
 from lib.dispatch import (DispatchOutcome, QualityGateFn,
                           _build_download_info,
@@ -116,7 +116,10 @@ class MaterializeGuarded:
 
 
 MaterializeResult = Materialized | MaterializeFailed | MaterializeGuarded
-"""Return type of ``_materialize_processing_dir``."""
+"""Return type of ``_materialize_processing_dir`` and
+``_evaluate_staged_path_readiness`` (issue #509 — the shared staged-path
+resume decision the former's non-canonical branch delegates to, and
+``lib.download._processing_path_ready_for_importer`` also consumes)."""
 
 
 @dataclass(frozen=True)
@@ -544,6 +547,152 @@ def _abandon_request_scoped_auto_import(
         return False
 
 
+def _evaluate_staged_path_readiness(
+    album_data: GrabListEntry,
+    staged_album: StagedAlbum,
+    current_path_location: ProcessingPathLocation,
+    db: DownloadDB | None,
+) -> MaterializeResult:
+    """Decide whether a NON-canonical staged path is safe to resume.
+
+    The ONE "is this staged /Incoming path safe to resume into the
+    importer" decision (issue #509). Before this, the same checks
+    (missing-dir handling, the ``blocks_post_move_retry``/
+    ``blocks_auto_import_dispatch`` guards, the abandon-and-reset call)
+    were expressed twice: here, and again in
+    ``lib.download._processing_path_ready_for_importer``. The two copies
+    had drifted — the poller's copy was missing the
+    ``blocks_auto_import_dispatch`` guard entirely, and computed
+    subprocess-start evidence as a plain in-memory bool
+    (``state.import_subprocess_started_at is not None``) instead of this
+    module's fail-safe tri-state DB read
+    (``_request_import_subprocess_started`` — ``None`` when ownership is
+    unverifiable, which callers must treat the same as "started").
+
+    Both callers now go through this one function; only their REACTION
+    to the tag still differs, because it's a genuinely different,
+    caller-owned policy rather than a duplicated decision:
+    ``_enqueue_completed_processing`` applies the grace-windowed
+    retry/reset policy in ``materialize_failure_action``, while the
+    poller's own pre-enqueue gate (``_processing_path_ready_for_importer``)
+    resets immediately on ``MaterializeFailed`` — its own long-standing,
+    tested "fail closed before even trying to enqueue" behavior.
+
+    Callers must already have excluded ``current_path_location.kind ==
+    "canonical"`` — that branch performs the real event-stamp/move work
+    in ``_materialize_processing_dir`` and has no equivalent here.
+    """
+    request_id = album_data.db_request_id
+    subprocess_started = _request_import_subprocess_started(db, request_id)
+
+    if current_path_location.kind == "request_scoped_auto_import_staged":
+        if subprocess_started is True:
+            handled = _abandon_request_scoped_auto_import(
+                album_data,
+                request_id=request_id,
+                current_path=staged_album.current_path,
+                current_path_kind=current_path_location.kind,
+                db=db,
+                detail=(
+                    "Abandoned interrupted auto-import; queued for "
+                    "redownload"
+                ),
+            )
+            if handled:
+                return MaterializeFailed(
+                    reason="abandoned_interrupted_auto_import")
+            return MaterializeGuarded(
+                detail="abandon_blocked_release_lock_or_probe_unknown")
+        if subprocess_started is None:
+            _log_post_move_resume_blocked(
+                album_data,
+                current_path=staged_album.current_path,
+                detail=(
+                    "already lives at the request-scoped auto-import "
+                    "staged path but import ownership could not be "
+                    "verified; manual recovery is required."
+                ),
+            )
+            return MaterializeGuarded(
+                detail="ownership_unverifiable_request_scoped_staged")
+
+    if not os.path.isdir(staged_album.current_path):
+        if (
+            current_path_location.blocks_post_move_retry
+            and subprocess_started is not False
+        ):
+            _log_post_move_resume_blocked(
+                album_data,
+                current_path=staged_album.current_path,
+                detail=(
+                    "already lives at the request-scoped auto-import "
+                    "staged path but the directory is missing. "
+                    "Automatic retry is disabled because beets may "
+                    "already have consumed the staged folder; manual "
+                    "recovery is required."
+                ),
+            )
+            return MaterializeGuarded(
+                detail="post_move_dir_missing_resume_blocked")
+        logger.error(f"Current staged path missing: {staged_album.current_path}")
+        return MaterializeFailed(reason="staged_path_missing")
+
+    staged_album.bind_import_paths(album_data.files)
+    missing_paths: list[str] = []
+    for file in album_data.files:
+        import_path = file.import_path
+        assert import_path is not None
+        if not os.path.isfile(import_path):
+            missing_paths.append(import_path)
+    if missing_paths:
+        if (
+            current_path_location.blocks_post_move_retry
+            and subprocess_started is not False
+        ):
+            _log_post_move_resume_blocked(
+                album_data,
+                current_path=staged_album.current_path,
+                detail=(
+                    "already lives at the request-scoped auto-import "
+                    f"staged path but tracked files are missing ({', '.join(missing_paths)}). "
+                    "Automatic retry is disabled because import may "
+                    "already have started; manual recovery is required."
+                ),
+            )
+            return MaterializeGuarded(
+                detail="post_move_files_missing_resume_blocked")
+        logger.error(
+            "Current staged path is missing tracked files: %s",
+            ", ".join(missing_paths),
+        )
+        return MaterializeFailed(reason="staged_path_missing_tracked_files")
+
+    if (
+        current_path_location.blocks_auto_import_dispatch
+        and subprocess_started is not False
+    ):
+        detail = (
+            "already lives at the request-scoped auto-import staged "
+            "path. Automatic retry is disabled to avoid duplicate "
+            "import; manual recovery is required."
+        )
+        if current_path_location.kind == "legacy_shared_staged":
+            detail = (
+                "already lives at the legacy shared staged path. "
+                "Automatic retry is disabled because the path is "
+                "ambiguous across editions; manual recovery is required."
+            )
+        _log_post_move_resume_blocked(
+            album_data,
+            current_path=staged_album.current_path,
+            detail=detail,
+        )
+        return MaterializeGuarded(detail="auto_import_dispatch_blocked_post_move")
+
+    album_data.import_folder = staged_album.current_path
+    return Materialized()
+
+
 def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -581,110 +730,9 @@ def _materialize_processing_dir(
     )
 
     if current_path_location.kind != "canonical":
-        subprocess_started = _request_import_subprocess_started(
-            db, request_id)
-        if current_path_location.kind == "request_scoped_auto_import_staged":
-            if subprocess_started is True:
-                handled = _abandon_request_scoped_auto_import(
-                    album_data,
-                    request_id=request_id,
-                    current_path=staged_album.current_path,
-                    current_path_kind=current_path_location.kind,
-                    db=db,
-                    detail=(
-                        "Abandoned interrupted auto-import; queued for "
-                        "redownload"
-                    ),
-                )
-                if handled:
-                    return MaterializeFailed(
-                        reason="abandoned_interrupted_auto_import")
-                return MaterializeGuarded(
-                    detail="abandon_blocked_release_lock_or_probe_unknown")
-            if subprocess_started is None:
-                _log_post_move_resume_blocked(
-                    album_data,
-                    current_path=staged_album.current_path,
-                    detail=(
-                        "already lives at the request-scoped auto-import "
-                        "staged path but import ownership could not be "
-                        "verified; manual recovery is required."
-                    ),
-                )
-                return MaterializeGuarded(
-                    detail="ownership_unverifiable_request_scoped_staged")
-        if not os.path.isdir(staged_album.current_path):
-            if (
-                current_path_location.blocks_post_move_retry
-                and subprocess_started is not False
-            ):
-                _log_post_move_resume_blocked(
-                    album_data,
-                    current_path=staged_album.current_path,
-                    detail=(
-                        "already lives at the request-scoped auto-import "
-                        "staged path but the directory is missing. "
-                        "Automatic retry is disabled because beets may "
-                        "already have consumed the staged folder; manual "
-                        "recovery is required."
-                    ),
-                )
-                return MaterializeGuarded(
-                    detail="post_move_dir_missing_resume_blocked")
-            logger.error(f"Current staged path missing: {staged_album.current_path}")
-            return MaterializeFailed(reason="staged_path_missing")
-        staged_album.bind_import_paths(album_data.files)
-        missing_paths: list[str] = []
-        for file in album_data.files:
-            import_path = file.import_path
-            assert import_path is not None
-            if not os.path.isfile(import_path):
-                missing_paths.append(import_path)
-        if missing_paths:
-            if (
-                current_path_location.blocks_post_move_retry
-                and subprocess_started is not False
-            ):
-                _log_post_move_resume_blocked(
-                    album_data,
-                    current_path=staged_album.current_path,
-                    detail=(
-                        "already lives at the request-scoped auto-import "
-                        f"staged path but tracked files are missing ({', '.join(missing_paths)}). "
-                        "Automatic retry is disabled because import may "
-                        "already have started; manual recovery is required."
-                    ),
-                )
-                return MaterializeGuarded(
-                    detail="post_move_files_missing_resume_blocked")
-            logger.error(
-                "Current staged path is missing tracked files: %s",
-                ", ".join(missing_paths),
-            )
-            return MaterializeFailed(reason="staged_path_missing_tracked_files")
-        if (
-            current_path_location.blocks_auto_import_dispatch
-            and subprocess_started is not False
-        ):
-            detail = (
-                "already lives at the request-scoped auto-import staged "
-                "path. Automatic retry is disabled to avoid duplicate "
-                "import; manual recovery is required."
-            )
-            if current_path_location.kind == "legacy_shared_staged":
-                detail = (
-                    "already lives at the legacy shared staged path. "
-                    "Automatic retry is disabled because the path is "
-                    "ambiguous across editions; manual recovery is required."
-                )
-            _log_post_move_resume_blocked(
-                album_data,
-                current_path=staged_album.current_path,
-                detail=detail,
-            )
-            return MaterializeGuarded(detail="auto_import_dispatch_blocked_post_move")
-        album_data.import_folder = staged_album.current_path
-        return Materialized()
+        return _evaluate_staged_path_readiness(
+            album_data, staged_album, current_path_location, db,
+        )
 
     # Pre-flight: every file must carry a stamped, on-disk local_path from
     # slskd's DownloadFileComplete event — or already-moved evidence at the
