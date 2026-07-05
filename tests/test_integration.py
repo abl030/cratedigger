@@ -498,7 +498,8 @@ class TestDownloadStatusFlow(unittest.TestCase):
     """Verify download status polling works with DownloadFile instances."""
 
     def test_status_set_on_download_file(self):
-        """slskd_download_status sets .status on DownloadFile instances."""
+        """slskd_download_status sets .status on DownloadFile instances
+        from the bulk snapshot (the only production path — #508)."""
         slskd = FakeSlskdAPI()
         slskd.add_transfer(
             username="user",
@@ -507,7 +508,6 @@ class TestDownloadStatusFlow(unittest.TestCase):
             id="xfer-1",
             state="Completed, Succeeded",
         )
-        ctx = _make_ctx(slskd=slskd)
         f = make_download_file(
             filename="track.flac",
             id="xfer-1",
@@ -515,8 +515,9 @@ class TestDownloadStatusFlow(unittest.TestCase):
             username="user",
             size=100,
         )
+        snapshot = slskd.transfers.get_all_downloads()
 
-        ok = slskd_download_status([f], ctx)
+        ok = slskd_download_status([f], snapshot=snapshot)
 
         self.assertTrue(ok)
         self.assertIsNotNone(f.status)

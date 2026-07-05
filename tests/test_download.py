@@ -42,10 +42,10 @@ def _make_transfer_mock(filename="01 - Track.mp3", username="user1",
                         size=5000000, bytes_transferred=None, last_state=None):
     """Build a mock slskd transfer object with runtime state attributes.
 
-    Use this ONLY for tests that need runtime attributes like status,
-    bytes_transferred, last_state, import_path — these don't exist on
-    the real DownloadFile dataclass. For tests that only need DownloadFile
-    fields, use make_download_file() from tests.helpers instead.
+    Use this ONLY for tests that want a bare MagicMock transfer object
+    (``status``/``bytes_transferred``/``last_state``/``import_path`` are
+    all real ``DownloadFile`` fields as of #468). For tests that only need
+    DownloadFile fields, use make_download_file() from tests.helpers instead.
     """
     f = MagicMock()
     f.filename = filename
@@ -578,41 +578,13 @@ class TestCancelAndDelete(unittest.TestCase):
 
 
 class TestSlskdDownloadStatus(unittest.TestCase):
-
-    def test_populates_status(self):
-        from lib.slskd_transfers import slskd_download_status
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="user1",
-            directory="user1\\Music",
-            filename="01 - Track.mp3",
-            id="file-id-1",
-            state="Completed, Succeeded",
-        )
-        ctx = _make_ctx(slskd=slskd)
-        f = make_download_file(id="file-id-1")
-        ok = slskd_download_status([f], ctx)
-        self.assertTrue(ok)
-        self.assertIsNotNone(f.status)
-        assert f.status is not None
-        self.assertEqual(f.status.state, "Completed, Succeeded")
-        self.assertEqual(slskd.transfers.get_download_calls, [("user1", "file-id-1")])
-
-    def test_error_sets_none(self):
-        from lib.slskd_transfers import slskd_download_status
-        slskd = FakeSlskdAPI()
-        slskd.transfers.get_download_error = Exception("fail")
-        ctx = _make_ctx(slskd=slskd)
-        f = make_download_file(id="file-id-1")
-        ok = slskd_download_status([f], ctx)
-        self.assertFalse(ok)
-        self.assertIsNone(f.status)
+    """slskd_download_status matches locally against a pre-fetched bulk
+    snapshot — issue #508 removed the per-file network fallback (dead:
+    every live caller already passes ``snapshot=cycle_snapshot``)."""
 
     def test_bulk_snapshot_populates_status(self):
         """When snapshot is provided, use match_transfer instead of per-file API."""
         from lib.slskd_transfers import slskd_download_status
-        slskd = FakeSlskdAPI()
-        ctx = _make_ctx(slskd=slskd)
         f = make_download_file(filename="Music\\01 - Track.mp3", username="user1")
         snapshot = [{
             "username": "user1",
@@ -623,21 +595,31 @@ class TestSlskdDownloadStatus(unittest.TestCase):
                 "size": 5000000,
             }]}],
         }]
-        ok = slskd_download_status([f], ctx, snapshot=snapshot)
+        ok = slskd_download_status([f], snapshot=snapshot)
         self.assertTrue(ok)
         self.assertIsNotNone(f.status)
         assert f.status is not None
         self.assertEqual(f.status.state, "Completed, Succeeded")
-        # No per-file API calls should have been made
-        self.assertEqual(slskd.transfers.get_download_calls, [])
 
     def test_bulk_snapshot_file_not_found(self):
         """When snapshot doesn't contain the file, status is None, returns False."""
         from lib.slskd_transfers import slskd_download_status
-        ctx = _make_ctx(slskd=FakeSlskdAPI())
         f = make_download_file(filename="Music\\missing.mp3", username="user1")
         snapshot = [{"username": "user1", "directories": [{"files": []}]}]
-        ok = slskd_download_status([f], ctx, snapshot=snapshot)
+        ok = slskd_download_status([f], snapshot=snapshot)
+        self.assertFalse(ok)
+        self.assertIsNone(f.status)
+
+    def test_malformed_snapshot_entry_sets_none(self):
+        """A snapshot entry with an unexpected shape (e.g. ``directories``
+        not a list of dicts) hits the generic except-Exception branch:
+        status cleared and ok=False. Repointed from the retired
+        per-file-API error test (#508 — that branch is gone)."""
+        from lib.slskd_transfers import slskd_download_status
+        f = make_download_file(filename="Music\\01 - Track.mp3", username="user1")
+        snapshot = [{"username": "user1", "directories": "not-a-list"}]
+        with self.assertLogs("cratedigger", level="ERROR"):
+            ok = slskd_download_status([f], snapshot=snapshot)
         self.assertFalse(ok)
         self.assertIsNone(f.status)
 
@@ -1213,7 +1195,6 @@ class TestRederiveTransferIds(unittest.TestCase):
 
         self.assertEqual(entry.files[0].id, "starr-id")
         self.assertEqual(entry.files[1].id, "odd-id")
-        self.assertEqual(slskd.transfers.get_downloads_calls, [])
 
     def test_terminal_snapshot_sets_file_status(self):
         from lib.slskd_transfers import rederive_transfer_ids

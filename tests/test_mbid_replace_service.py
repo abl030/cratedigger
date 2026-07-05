@@ -282,7 +282,6 @@ class _ServiceCase(unittest.TestCase):
         self.assertEqual(slskd.transfers.enqueue_calls, [])
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
         self.assertEqual(slskd.transfers.get_all_downloads_calls, [])
-        self.assertEqual(slskd.transfers.get_download_calls, [])
         self.assertEqual(slskd.users.directory_calls, [])
         self.assertEqual(slskd.users.status_calls, [])
 

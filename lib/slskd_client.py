@@ -124,11 +124,7 @@ def parse_transfer_snapshot(raw: dict[str, Any]) -> TransferSnapshot | None:
     snapshot shared by every in-flight album: one malformed entry must
     degrade to "no status observed this cycle" for just that one file —
     the same signal already used for "no matching transfer found" — not
-    abort the whole snapshot or poll cycle. Contrast with
-    ``SlskdTransfersApi.get_download``, which decodes strictly (raises):
-    that is a single-item client boundary whose one production call site
-    already sits inside a per-file try/except, so raising there is
-    already contained at the same granularity.
+    abort the whole snapshot or poll cycle.
     """
     try:
         return msgspec.convert(raw, type=TransferSnapshot)
@@ -261,11 +257,6 @@ class SlskdTransfersApi:
             "GET", "/transfers/downloads/",
             params={"includeRemoved": includeRemoved})
         return response.json()
-
-    def get_download(self, username: str, id: str) -> TransferSnapshot:
-        response = self._client._request(
-            "GET", f"/transfers/downloads/{quote(username, safe='')}/{id}")
-        return msgspec.convert(response.json(), type=TransferSnapshot)
 
     def cancel_download(self, username: str, id: str, remove: bool = False) -> bool:
         self._client._request(

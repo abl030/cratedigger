@@ -324,33 +324,6 @@ class TestTransfersEndpoints(SlskdClientTestCase):
         self.assertEqual(
             self.last_request()["query"], {"includeRemoved": ["True"]})
 
-    def test_get_download_returns_typed_transfer_snapshot(self):
-        """#468: get_download() decodes at the client boundary — the
-        single flat transfer object it returns becomes a TransferSnapshot,
-        not a raw dict."""
-        transfer = DOWNLOADS_FIXTURE[0]["directories"][0]["files"][0]
-        self.set_fixture(
-            "GET", "/transfers/downloads/FourTwenty/abc-123", transfer)
-
-        result = self.client.transfers.get_download("FourTwenty", "abc-123")
-
-        self.assertIsInstance(result, TransferSnapshot)
-        self.assertEqual(result.id, transfer["id"])
-        self.assertEqual(result.filename, transfer["filename"])
-        self.assertEqual(result.state, transfer["state"])
-        self.assertEqual(result.bytes_transferred, transfer["bytesTransferred"])
-
-    def test_get_download_wire_type_drift_raises_validation_error(self):
-        # RED-boundary guard per code-quality rules: an int-typed field
-        # arriving as a string must fail loudly at the decode site.
-        transfer = dict(DOWNLOADS_FIXTURE[0]["directories"][0]["files"][0])
-        transfer["size"] = "113325058"
-        self.set_fixture(
-            "GET", "/transfers/downloads/FourTwenty/abc-123", transfer)
-
-        with self.assertRaises(msgspec.ValidationError):
-            self.client.transfers.get_download("FourTwenty", "abc-123")
-
     def test_cancel_download_deletes_with_remove_param(self):
         self.set_fixture("DELETE", "/transfers/downloads/peer/abc", {}, status=204)
 

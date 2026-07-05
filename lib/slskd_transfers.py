@@ -125,27 +125,22 @@ def _delete_completed_payloads(
             pass  # Non-empty (shared with another album) or already gone.
 
 
-def slskd_download_status(downloads: list[Any], ctx: CratediggerContext,
-                          *, snapshot: list[dict[str, Any]] | None = None) -> bool:
-    """Get status of each download file from slskd API.
-
-    When snapshot is provided, matches locally against the pre-fetched bulk
-    download list instead of making per-file API calls.
-    """
+def slskd_download_status(downloads: list[Any], *,
+                          snapshot: list[dict[str, Any]]) -> bool:
+    """Get status of each download file by matching locally against the
+    pre-fetched bulk poll-cycle snapshot (issue #508: every caller already
+    has one — there is no per-file API fallback)."""
     ok = True
     for file in downloads:
         try:
-            if snapshot is not None:
-                transfer = match_transfer(snapshot, file.filename, username=file.username)
-                if transfer is not None:
-                    file.status = parse_transfer_snapshot(transfer)
-                    if file.status is None:
-                        ok = False
-                else:
-                    file.status = None
+            transfer = match_transfer(snapshot, file.filename, username=file.username)
+            if transfer is not None:
+                file.status = parse_transfer_snapshot(transfer)
+                if file.status is None:
                     ok = False
             else:
-                file.status = ctx.slskd.transfers.get_download(file.username, file.id)
+                file.status = None
+                ok = False
         except Exception:
             logger.exception(f"Error getting download status of {file.filename}")
             file.status = None
