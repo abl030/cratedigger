@@ -7,8 +7,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
-import msgspec
-
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
 from lib.quality import SpectralMeasurement, ValidationResult
