@@ -25,9 +25,14 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Directories to skip entirely.
+# Directories to skip entirely. ``.claude`` holds agent git worktrees
+# (``.claude/worktrees/``) — nested checkouts of this repo; without
+# pruning it, ``os.walk`` from REPO_ROOT scans thousands of stale
+# worktree ``.py`` files every run. Same class as the pyright
+# ``.claude/worktrees`` exclude (#520).
 SKIP_DIRS = {
     ".git", "__pycache__", ".pytest_cache", "node_modules", "fixtures",
+    ".claude",
 }
 
 # Files/paths allowed to use `is EnumMember`. Add here with a comment
