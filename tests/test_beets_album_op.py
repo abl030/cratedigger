@@ -252,10 +252,16 @@ class TestBeetOpArgvIsCentralised(unittest.TestCase):
         "tests/test_disambiguation.py",
     })
 
-    # Directories ignored entirely (not Python source we own):
+    # Directories ignored entirely (not Python source we own).
+    # ``.claude`` holds agent git worktrees (``.claude/worktrees/``) —
+    # nested checkouts of this repo. Without pruning it, ``os.walk`` from
+    # REPO_ROOT descends into every stale worktree and flags their copies
+    # of allowlisted files (whose paths aren't in ALLOWED_FILES), failing
+    # this test in a shared checkout. Same class of bug as the pyright
+    # ``.claude/worktrees`` exclude (#520).
     IGNORE_DIRS = {
         ".git", "__pycache__", ".venv", "venv", "result",
-        "node_modules", ".mypy_cache", ".pytest_cache",
+        "node_modules", ".mypy_cache", ".pytest_cache", ".claude",
     }
 
     def test_allowlist_entries_still_exist(self) -> None:
