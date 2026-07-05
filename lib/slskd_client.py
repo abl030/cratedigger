@@ -137,6 +137,110 @@ def parse_transfer_snapshot(raw: dict[str, Any]) -> TransferSnapshot | None:
         return None
 
 
+class DownloadDirectory(msgspec.Struct, rename="camel", frozen=True):
+    """One directory grouping within a downloads-envelope user entry
+    (issue #507): a ``directory`` label plus its file transfers. Reuses
+    ``TransferSnapshot`` for each file — the envelope's per-file shape is
+    identical to the one #468 already modeled at the
+    ``DownloadFile.status`` boundary, so there is no second file-level
+    type to keep in sync."""
+
+    directory: str = ""
+    files: list[TransferSnapshot] = msgspec.field(default_factory=list)
+
+
+class DownloadUser(msgspec.Struct, rename="camel", frozen=True):
+    """One user-group row of ``SlskdTransfersApi.get_all_downloads()`` —
+    the outermost level of the nested user->directories->files envelope
+    (issue #507, the second slice: #468 typed the per-file
+    ``TransferSnapshot`` leaf but deliberately left this envelope
+    untouched, per its own first-slice scope note)."""
+
+    username: str = ""
+    directories: list[DownloadDirectory] = msgspec.field(default_factory=list)
+
+
+def _parse_download_directory(raw: Any) -> DownloadDirectory | None:
+    """Convert one directory entry, salvaging valid files from an entry
+    that also contains malformed ones.
+
+    Each file is decoded independently via ``parse_transfer_snapshot``
+    (the same #468 decoder) so one poison file doesn't drop its
+    siblings — a directory can hold many in-flight files for the same
+    peer, and losing status on all of them because one row is malformed
+    would be a much bigger blast radius than the single file it actually
+    affects.
+    """
+    if not isinstance(raw, dict):
+        logger.warning(
+            "slskd downloads envelope: skipping malformed directory "
+            "entry (type=%s)", type(raw).__name__)
+        return None
+    files: list[TransferSnapshot] = []
+    for file_raw in raw.get("files") or []:
+        parsed = (
+            parse_transfer_snapshot(file_raw)
+            if isinstance(file_raw, dict) else None
+        )
+        if parsed is not None:
+            files.append(parsed)
+        elif not isinstance(file_raw, dict):
+            logger.warning(
+                "slskd downloads envelope: skipping non-dict file entry "
+                "(type=%s)", type(file_raw).__name__)
+    directory = raw.get("directory", "")
+    return DownloadDirectory(
+        directory=directory if isinstance(directory, str) else "",
+        files=files,
+    )
+
+
+def _parse_download_user(raw: Any) -> DownloadUser | None:
+    """Convert one user-group row, salvaging valid directories from a row
+    that also contains malformed ones (issue #507)."""
+    if not isinstance(raw, dict):
+        logger.warning(
+            "slskd downloads envelope: skipping malformed user-group "
+            "row (type=%s)", type(raw).__name__)
+        return None
+    directories: list[DownloadDirectory] = []
+    for dir_raw in raw.get("directories") or []:
+        parsed = _parse_download_directory(dir_raw)
+        if parsed is not None:
+            directories.append(parsed)
+    username = raw.get("username", "")
+    return DownloadUser(
+        username=username if isinstance(username, str) else "",
+        directories=directories,
+    )
+
+
+def parse_downloads_envelope(raw: list[Any]) -> list[DownloadUser]:
+    """Decode the ``get_all_downloads()`` envelope (issue #507): the
+    nested user->directories->files shape ``SlskdTransfersApi
+    .get_all_downloads()`` returns, typed end-to-end so poll/repair code
+    no longer walks raw dicts — #468 typed the per-file
+    ``TransferSnapshot`` leaf but deliberately left this envelope
+    untouched, per its own first-slice scope note.
+
+    Tolerant at every level, mirroring #468's ``parse_transfer_snapshot``
+    tolerance: a malformed file entry is dropped (via that same
+    decoder), a malformed directory or user-group row is dropped and
+    logged. One bad entry anywhere in the tree degrades to "no status
+    this cycle" for just that entry — the same signal already used for
+    "no matching transfer found" (``match_transfer`` returning ``None``)
+    — it never aborts the whole poll cycle for every other in-flight
+    download. This runs inside the 5-minute poll loop against a bulk
+    snapshot shared by every in-flight album.
+    """
+    users: list[DownloadUser] = []
+    for row in raw:
+        parsed = _parse_download_user(row)
+        if parsed is not None:
+            users.append(parsed)
+    return users
+
+
 DOWNLOAD_FILE_COMPLETE = "DownloadFileComplete"
 DOWNLOAD_DIRECTORY_COMPLETE = "DownloadDirectoryComplete"
 
@@ -178,8 +282,10 @@ class SlskdClient:
 
     Method names and return shapes deliberately mirror the retired
     `slskd-api` surface (dict/list returns for the legacy endpoints) so
-    call sites migrate mechanically; the events endpoint — the new wire
-    boundary — returns typed Structs.
+    call sites migrate mechanically. The events endpoint and
+    ``transfers.get_all_downloads()`` are the wire boundaries that have
+    since been typed (issues #146, #468/#507 respectively) — both return
+    typed Structs instead of raw dict/list.
     """
 
     def __init__(
@@ -252,11 +358,11 @@ class SlskdTransfersApi:
         )
         return True
 
-    def get_all_downloads(self, includeRemoved: bool = False) -> list[dict[str, Any]]:
+    def get_all_downloads(self, includeRemoved: bool = False) -> list[DownloadUser]:
         response = self._client._request(
             "GET", "/transfers/downloads/",
             params={"includeRemoved": includeRemoved})
-        return response.json()
+        return parse_downloads_envelope(response.json())
 
     def cancel_download(self, username: str, id: str, remove: bool = False) -> bool:
         self._client._request(
