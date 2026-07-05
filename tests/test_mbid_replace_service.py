@@ -22,6 +22,11 @@ from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
     MbidReplaceService,
     ReplaceResult,
+    REPLACE_REASON_CROSS_PATHWAY_TARGET,
+    REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
+    REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
+    REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
+    REPLACE_REASON_UNRESOLVABLE_TARGET,
     RESULT_MIRROR_UNCONFIGURED,
     RESULT_NOT_FOUND,
     RESULT_REPLACED,
@@ -325,6 +330,9 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
                     f"target_invalid (got {result.outcome})",
                 )
                 self.assertIsNotNone(result.error_message)
+                self.assertEqual(
+                    result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET,
+                )
                 # The MB lookup must NOT have been reached — pre-Phase 0
                 # rejection. We can confirm by checking the request was
                 # never advanced past the validation step (no DB
@@ -385,6 +393,20 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_TARGET_NO_RELEASE_GROUP)
+
+    def test_target_invalid_target_empty_payload(self):
+        """#501 item 2: the target lookup succeeds but returns a falsy
+        payload (distinct from an unresolvable-with-no-RG payload) —
+        REASON: unresolvable_target."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        svc = self._make_service(
+            db, mb_lookup=lambda mbid, *, fresh=False: {},
+        )
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNRESOLVABLE_TARGET)
 
     def test_target_invalid_source_resolve_failure(self):
         db = FakePipelineDB()
@@ -398,6 +420,30 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         svc = self._make_service(db, mb_lookup=fake_lookup)
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR)
+
+    def test_target_invalid_source_no_release_group_after_lazy_backfill(self):
+        """#501 item 2: the source lazy-backfill lookup succeeds but the
+        MB mirror has no release_group_id for it — REASON:
+        source_no_release_group (the MB-arm analog of a masterless
+        Discogs source)."""
+        db = FakePipelineDB()
+        self._seed_old(db, mb_release_group_id=None)
+
+        def fake_lookup(mbid, *, fresh=False):
+            if mbid == OLD_MBID:
+                return {
+                    "id": OLD_MBID, "title": "Old", "artist_name": "X",
+                    "release_group_id": None, "tracks": [],
+                }
+            return _fake_target_payload()
+
+        svc = self._make_service(db, mb_lookup=fake_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(
+            result.reason, REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
+        )
 
     def test_mb_source_lazy_backfill_unexpected_exception_logs_warning(self):
         """#501 item 3: the MB arm gains the Discogs arm's parity — an
@@ -421,6 +467,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
                 42, target_mb_release_id=NEW_MBID,
             )
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR)
         self.assertTrue(
             any("source" in m.lower() for m in cm.output),
             f"expected a warning naming the source lookup, got: {cm.output}",
@@ -443,6 +490,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
                 42, target_mb_release_id=NEW_MBID,
             )
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR)
         self.assertTrue(
             any("target" in m.lower() for m in cm.output),
             f"expected a warning naming the target lookup, got: {cm.output}",
@@ -869,6 +917,7 @@ class TestReplaceDiscogsArm(_ServiceCase):
             42, target_mb_release_id=NEW_DISCOGS_ID,
         )
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR)
         # Source lookup raised first → target lookup never ran.
         self.assertEqual(calls, [OLD_DISCOGS_ID])
         self.assertIsNone(result.new_request_id)
@@ -890,6 +939,7 @@ class TestReplaceDiscogsArm(_ServiceCase):
         svc = self._make_service(db, discogs_lookup=fake_lookup)
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
         self.assertFalse(called["hit"])
 
     def test_mb_source_numeric_target_invalid(self):
@@ -902,6 +952,7 @@ class TestReplaceDiscogsArm(_ServiceCase):
             42, target_mb_release_id=NEW_DISCOGS_ID,
         )
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
 
     def test_masterless_source_other_target_rejected(self):
         """AE1 / R10: a masterless Discogs source rejects any target that
@@ -918,6 +969,9 @@ class TestReplaceDiscogsArm(_ServiceCase):
             42, target_mb_release_id=NEW_DISCOGS_ID,
         )
         self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(
+            result.reason, REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
+        )
         assert result.error_message is not None
         self.assertIn("master", result.error_message)
 
@@ -951,6 +1005,44 @@ class TestReplaceDiscogsArm(_ServiceCase):
         self.assertEqual(
             result.outcome, RESULT_TARGET_RELEASE_GROUP_MISMATCH
         )
+
+    def test_discogs_target_no_master(self):
+        """#501 item 2: the Discogs arm's analog of
+        test_target_invalid_missing_rg — target resolves but has no
+        master. REASON: target_no_release_group (pathway-neutral naming;
+        same reason code as the MB arm's missing-release_group_id case)."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id=NEW_DISCOGS_ID, master=None,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(
+            result.reason, REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
+        )
+
+    def test_discogs_target_empty_payload(self):
+        """#501 item 2: the Discogs arm's analog of
+        test_target_invalid_target_empty_payload — the target lookup
+        succeeds but returns a falsy payload. REASON: unresolvable_target."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+        svc = self._make_service(
+            db, discogs_lookup=lambda rid, *, fresh=False: {},
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNRESOLVABLE_TARGET)
 
     def test_discogs_mirror_unconfigured(self):
         """AE3 / R11: an unconfigured Discogs mirror surfaces its own

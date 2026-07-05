@@ -36,9 +36,10 @@ import logging
 import os
 import shutil
 import socket
-from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 from urllib.error import URLError
+
+import msgspec
 
 
 # MB-mirror transient errors — network blips, timeouts, malformed
@@ -55,6 +56,22 @@ _TRANSIENT_LOOKUP_EXCEPTIONS: tuple[type[BaseException], ...] = (
 
 from lib.config import CratediggerConfig
 from lib.release_identity import detect_release_source, normalize_release_id
+from lib.replace_status import (
+    REPLACE_REASON_CROSS_PATHWAY_TARGET,
+    REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
+    REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
+    REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
+    REPLACE_REASON_UNRESOLVABLE_TARGET,
+    RESULT_MIRROR_UNCONFIGURED,
+    RESULT_NOT_FOUND,
+    RESULT_REPLACED,
+    RESULT_TARGET_COLLISION_REQUEST,
+    RESULT_TARGET_INVALID,
+    RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+    RESULT_TARGET_SAME_AS_CURRENT,
+    RESULT_TRANSIENT,
+    RESULT_WRONG_STATE,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     MbidCollisionError,
@@ -116,24 +133,12 @@ class MbidReplaceDB(
     ) -> int: ...
 
 
-# Result outcome constants.
-RESULT_REPLACED = "replaced"
-RESULT_NOT_FOUND = "not_found"
-RESULT_WRONG_STATE = "wrong_state"
-RESULT_TARGET_INVALID = "target_invalid"
-RESULT_TARGET_RELEASE_GROUP_MISMATCH = "target_release_group_mismatch"
-RESULT_TARGET_SAME_AS_CURRENT = "target_same_as_current"
-RESULT_TARGET_COLLISION_REQUEST = "target_collision_request"
-RESULT_MIRROR_UNCONFIGURED = "mirror_unconfigured"
-RESULT_TRANSIENT = "transient"
-
-
-@dataclass(frozen=True)
-class ReplaceResult:
+class ReplaceResult(msgspec.Struct, frozen=True):
     """Outcome of a single ``replace_request_mbid`` call.
 
-    ``outcome`` is one of the ``RESULT_*`` constants. Other fields are
-    surfaced conditionally:
+    ``outcome`` is one of the ``RESULT_*`` constants (imported from
+    ``lib.replace_status`` and re-exported here — CLI/API/tests import
+    them from this module). Other fields are surfaced conditionally:
 
     - ``new_request_id``: set on ``RESULT_REPLACED``.
     - ``current_status``: set on ``RESULT_TARGET_COLLISION_REQUEST`` so
@@ -143,6 +148,13 @@ class ReplaceResult:
     - ``descendant_request_id``: set on ``RESULT_WRONG_STATE`` when the
       source row is itself already ``status='replaced'`` — so the UI
       can deep-link to "the new request is at /pipeline/{id}".
+    - ``reason``: set on ``RESULT_TARGET_INVALID`` — one of the
+      ``REPLACE_REASON_*`` constants, distinguishing the several distinct
+      rejections that outcome collapses (#501 item 2). ``error_message``
+      stays free-text for operator-facing detail; ``reason`` is the
+      stable code CLI/API/tests assert on. ``msgspec.Struct`` per the
+      wire-boundary rule (CLI ``--json`` output and the HTTP response
+      body both surface every field).
     - ``warnings``: filesystem-cleanup failures that did NOT roll back
       the DB change (R26 non-fatal semantics).
     """
@@ -153,7 +165,8 @@ class ReplaceResult:
     current_status: str | None = None
     descendant_request_id: int | None = None
     error_message: str | None = None
-    warnings: tuple[str, ...] = field(default_factory=tuple)
+    reason: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 # Type aliases for the injectable dependencies.
@@ -318,6 +331,7 @@ class MbidReplaceService:
                     f"not a valid same-pathway target for source "
                     f"({source_source})"
                 ),
+                reason=REPLACE_REASON_CROSS_PATHWAY_TARGET,
             )
 
         if source_mbid == target_mb_release_id:
@@ -348,6 +362,7 @@ class MbidReplaceService:
                         f"source MBID {source_mbid!r} could not be "
                         "resolved: source request has no MB release id"
                     ),
+                    reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
                 )
             # Lazy-backfill: resolve the source MBID's RG fresh.
             src_data, err = self._mb_lookup_or_error(
@@ -369,6 +384,7 @@ class MbidReplaceService:
                         f"source MBID {source_mbid} did not resolve to "
                         "a release group on the MB mirror"
                     ),
+                    reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
                 )
 
         # Pre-check collision against the active row set.
@@ -403,6 +419,7 @@ class MbidReplaceService:
                     f"target MBID {target_mb_release_id} returned empty "
                     "payload from MB mirror"
                 ),
+                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
             )
 
         canonical_mbid = target_data.get("id") or target_mb_release_id
@@ -415,6 +432,7 @@ class MbidReplaceService:
                     f"target MBID {target_mb_release_id} resolved with "
                     "no release_group_id"
                 ),
+                reason=REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
             )
 
         if target_rg != source_rg:
@@ -515,6 +533,7 @@ class MbidReplaceService:
                 error_message=(
                     f"{detail_context} could not be resolved: {exc}"
                 ),
+                reason=REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
             )
         return data, None
 
@@ -565,6 +584,7 @@ class MbidReplaceService:
                         "master; nothing to swap to (only the current "
                         "release is a valid target)"
                     ),
+                    reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
                 )
 
         # Pre-check collision against the raw target id (identity-aware).
@@ -599,6 +619,7 @@ class MbidReplaceService:
                     f"target Discogs id {target_mb_release_id} returned "
                     "empty payload from the mirror"
                 ),
+                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
             )
 
         canonical_id = str(target_data.get("id") or target_mb_release_id)
@@ -611,6 +632,7 @@ class MbidReplaceService:
                     f"target Discogs id {target_mb_release_id} resolved "
                     "with no master"
                 ),
+                reason=REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
             )
 
         if target_master != source_master:
@@ -715,6 +737,7 @@ class MbidReplaceService:
                 error_message=(
                     f"{detail_context} could not be resolved: {exc}"
                 ),
+                reason=REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
             )
         return data, None
 
