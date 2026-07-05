@@ -1484,16 +1484,61 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
             status, _ = self._get(f"/api/beets-distance/100/{self.UUID_A}")
         self.assertEqual(status, 500)
 
-    def test_route_pattern_requires_uuid_shape(self):
-        """The route pattern only matches MBID UUIDs — a malformed
-        MBID (e.g. a Discogs numeric id) doesn't even hit the handler.
-
-        This is a route-table contract: keep the regex strict so we
-        never accidentally compute a distance against a non-MB id.
+    def test_route_pattern_rejects_non_id_shapes(self):
+        """The route pattern matches full MB UUIDs and bare Discogs
+        numeric ids (#530) — a shape that is neither (partial UUID,
+        non-numeric junk) doesn't even hit the handler.
         """
-        # Numeric id (Discogs-shaped) — pattern shouldn't match.
-        status, _ = self._get("/api/beets-distance/100/2048516")
+        status, _ = self._get("/api/beets-distance/100/not-a-real-id")
         self.assertEqual(status, 404)
+
+    def test_discogs_numeric_id_routes_through_discogs_lookup(self):
+        """A numeric candidate id (Discogs sibling — e.g. surfaced by the
+        Replace picker against a Discogs-sourced request per #501) must
+        resolve via ``discogs_api.get_release``, not ``mb_api.get_release``
+        (#530). This mirrors ``browse.py``'s numeric-dispatch idiom and
+        the YouTube resolver's ``discogs_get_release`` seam — no new
+        MB<->Discogs adapter: ``compute_beets_distance`` already treats
+        ``release_group_id`` as optional and ``discogs_api.get_release``
+        mirrors ``mb_api.get_release``'s dict shape exactly.
+        """
+        captured = {}
+
+        def _fake_compute(download_log_id, mbid, *, pdb, mb_get_release,
+                           cache=None, **_kw):
+            captured["mb_get_release"] = mb_get_release
+            return self._Result(
+                outcome="ok",
+                distance=0.05,
+                download_log_id=download_log_id,
+                candidate_mbid=mbid,
+            )
+
+        discogs_release = {
+            "id": "2048516",
+            "title": "Fake Album",
+            "artist_name": "Fake Artist",
+            "artist_id": "999",
+            "release_group_id": None,
+            "tracks": [],
+        }
+        with patch(
+            "lib.beets_distance.compute_beets_distance",
+            side_effect=_fake_compute,
+        ), patch(
+            "web.discogs.get_release",
+            return_value=discogs_release,
+        ) as discogs_get:
+            status, data = self._get("/api/beets-distance/100/2048516")
+            self.assertIn("mb_get_release", captured)
+            resolved = captured["mb_get_release"]("2048516")
+            discogs_get.assert_called_once_with(2048516, fresh=False)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "ok")
+        # The handler's mb_get_release seam must be wired to Discogs,
+        # not MB, for a numeric candidate id.
+        self.assertEqual(resolved, discogs_release)
 
 
 if __name__ == "__main__":
