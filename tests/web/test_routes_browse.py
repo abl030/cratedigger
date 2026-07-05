@@ -586,6 +586,52 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                                 "release detail track (discogs forward)")
         self.assertEqual(data["beets_album_id"], 8)
 
+    @patch("web.routes.browse.discogs_api.get_master_releases")
+    def test_release_group_numeric_id_forwards_to_discogs(self, mock_discogs_master):
+        """#501 item 1: a numeric id in the release-group route is a
+        Discogs master id, not an MB release-group UUID — the route
+        must dispatch to the Discogs master endpoint (mirrors
+        test_release_detail_numeric_id_forwards_to_discogs above) rather
+        than firing a doomed MB lookup."""
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_ids_for_release("21491", [8])
+        beets_db.set_mbid_detail("21491", {})
+        mock_discogs_master.return_value = {
+            "title": "OK Computer",
+            "type": "Album",
+            "first_release_date": "1997",
+            "artist_credit": "Radiohead",
+            "primary_artist_id": "3840",
+            "releases": [
+                {
+                    "id": "21491",
+                    "title": "OK Computer",
+                    "date": "1997",
+                    "country": "Europe",
+                    "status": "Official",
+                    "track_count": 12,
+                    "format": "CD",
+                    "media_count": 1,
+                    "labels": [],
+                },
+            ],
+        }
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.check_beets_library", return_value={"21491"}), \
+                patch("web.server._beets_db", return_value=beets_db), \
+                patch("web.server.check_pipeline",
+                      return_value={"21491": {"id": 42, "status": "wanted"}}):
+            status, data = self._get("/api/release-group/0021491")
+
+        self.assertEqual(status, 200)
+        mock_discogs_master.assert_called_once_with(21491)
+        mock_mb.get_release_group_releases.assert_not_called()
+        _assert_required_fields(self, data, {"releases"},
+                                "release group response (discogs forward)")
+        _assert_required_fields(self, data["releases"][0], self.RELEASE_GROUP_REQUIRED_FIELDS,
+                                "release group release (discogs forward)")
+        self.assertEqual(data["releases"][0]["beets_album_id"], 8)
+
     def test_artist_disambiguate_contract(self):
         fake_releases = [
             {
