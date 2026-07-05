@@ -17,6 +17,7 @@ from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
                     runtime_checkable)
 
 
+from lib import download_processing
 from lib.download_processing import (
     Completed,
     CompletionDeferred,
@@ -30,7 +31,6 @@ from lib.download_processing import (
     _canonical_import_folder_path,
     _evaluate_staged_path_readiness,
     _materialize_processing_dir,
-    process_completed_album,
 )
 from lib.download_recovery import (
     classify_processing_path,
@@ -396,9 +396,16 @@ def _run_completed_processing(
     outer transition flow without going through the full
     ``process_completed_album`` body. Defaults to the real production
     function so callers in ``scripts/importer.py`` are unchanged.
+
+    The default is resolved via the ``download_processing`` module
+    reference (not a from-import binding) so that patching
+    ``lib.download_processing.process_completed_album`` in tests is
+    honored here at call time, regardless of import order (#536).
     """
     _process = (
-        process_album_fn if process_album_fn is not None else process_completed_album
+        process_album_fn
+        if process_album_fn is not None
+        else download_processing.process_completed_album
     )
 
     if state.processing_started_at is None:
