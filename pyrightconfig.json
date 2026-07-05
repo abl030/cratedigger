@@ -8,6 +8,7 @@
     "build",
     "tools/vulture",
     ".pyright-venv",
-    ".nixpkgs-src"
+    ".nixpkgs-src",
+    ".claude/worktrees"
   ]
 }
