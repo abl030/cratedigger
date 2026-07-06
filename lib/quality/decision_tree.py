@@ -33,7 +33,7 @@ def get_decision_tree(
     ``cfg`` drives the thresholds that depend on the runtime rank model.
     When omitted, ``QualityRankConfig.defaults()`` is used so the legacy
     "show the hardcoded defaults" behavior still works. The web route at
-    ``web/routes/pipeline.py:get_pipeline_constants`` passes the live
+    ``web/routes/decisions.py:get_pipeline_constants`` passes the live
     runtime cfg so operators who retune ``mp3_vbr.excellent`` see the
     Decisions tab update in lockstep with ``transcode_detection()``
     (issue #66 follow-up).

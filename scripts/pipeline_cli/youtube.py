@@ -37,7 +37,7 @@ class _RedisYoutubeCache:
     again (review finding #17 — the old ``_NAMESPACE`` wrapper produced
     ``youtube:album:youtube:album:<browse_id>`` keys).
 
-    Mirrors ``_RedisFingerprintCache`` in ``web/routes/pipeline.py`` —
+    Mirrors ``_RedisFingerprintCache`` in ``web/routes/beets_distance.py`` —
     bytes get/set with a long sentinel TTL (cache lives forever absent
     explicit refresh per Key Technical Decisions). Falls back to a
     no-op when Redis isn't available so the CLI works without the

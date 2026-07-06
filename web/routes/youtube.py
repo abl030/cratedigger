@@ -11,7 +11,7 @@ module (``OUTCOME_HTTP_STATUS``) — one source of truth, per the PR #381
 lesson. Do not redefine it locally.
 
 The Redis cache adapter is the same shape as
-``_RedisFingerprintCache`` in ``web/routes/pipeline.py`` — bytes
+``_RedisFingerprintCache`` in ``web/routes/beets_distance.py`` — bytes
 ``get`` / ``set`` with a long-sentinel TTL since the YT response cache
 lives forever absent explicit ``refresh=true``.
 """
@@ -35,6 +35,7 @@ from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 
 log = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class _RedisYoutubeCache:
     again (review finding #17 — the old ``_NAMESPACE`` wrapper produced
     ``youtube:album:youtube:album:<browse_id>`` keys).
 
-    Mirrors ``_RedisFingerprintCache`` in ``web/routes/pipeline.py``
+    Mirrors ``_RedisFingerprintCache`` in ``web/routes/beets_distance.py``
     (and ``scripts/pipeline_cli/youtube.py::_RedisYoutubeCache`` on the CLI
     side) — bytes get/set with a long sentinel TTL. Falls back to a
     no-op when Redis is unavailable so single-shot dev shells still
@@ -151,13 +152,6 @@ def _build_youtube_client():
     session.request = partial(  # type: ignore[method-assign]
         session.request, timeout=(5, 30))
     return YTMusic(requests_session=session, language="en"), session
-
-
-def _server():
-    """Deferred import to avoid circular deps (mirrors the convention
-    used in every other ``web/routes/*.py`` module)."""
-    from web import server
-    return server
 
 
 def _parse_bool(raw: str | None) -> bool:

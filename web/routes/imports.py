@@ -48,6 +48,7 @@ from lib.validation_envelope import (
 )
 from web.routes.pipeline import _serialize_import_job
 from web.routes._registry import RouteRegistration, route
+from web.routes._server_access import _server
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
     build_wrong_match_explorer,
@@ -55,11 +56,6 @@ from web.wrong_match_file_service import (
     source_dirs_from_validation_result,
     target_candidate,
 )
-
-
-def _server():
-    from web import server
-    return server
 
 
 def _row_presence(
@@ -899,7 +895,7 @@ def post_import_preview(h, body: dict) -> None:
 
     try:
         if has_values:
-            from web.routes.pipeline import _runtime_rank_config
+            from web.routes.decisions import _runtime_rank_config
             preview = preview_import_from_values(
                 _preview_values_from_body(body),
                 cfg=_runtime_rank_config(),

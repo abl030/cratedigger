@@ -4,12 +4,7 @@ import msgspec
 
 from lib.disk_coverage_service import disk_coverage
 from web.routes._registry import RouteRegistration, route
-
-
-def _server():
-    """Deferred import to avoid circular deps."""
-    from web import server
-    return server
+from web.routes._server_access import _server
 
 
 def _truthy(params: dict[str, list[str]], key: str) -> bool:

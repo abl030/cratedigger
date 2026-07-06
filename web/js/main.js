@@ -10,7 +10,8 @@ import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, open
 import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter, onPipelineSearchInput } from './pipeline.js';
-import { loadLongTail, setLongTailBand, onLongTailSearchInput, toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail.js';
+import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tail.js';
+import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';

@@ -1,9 +1,12 @@
 /**
- * Unit tests for web/js/long_tail.js's console-state consolidation (#481
- * item 1) — the pure open/close/prune/canStart/settle transition helpers
- * over the single `Map<id, ConsoleState>` that replaced eight parallel
- * module-scoped structures (a token Map, five in-flight guard Sets, a
- * YouTube-result cache Map, and `state.longTail.open`).
+ * Unit tests for web/js/long_tail_console.js's console-state consolidation
+ * (#481 item 1) — the pure open/close/prune/canStart/settle transition
+ * helpers over the single `Map<id, ConsoleState>` that replaced eight
+ * parallel module-scoped structures (a token Map, five in-flight guard
+ * Sets, a YouTube-result cache Map, and `state.longTail.open`).
+ *
+ * Split out of web/js/long_tail.js by #522 along with the console module
+ * itself.
  *
  * Every helper takes the map explicitly, so these tests build their own
  * fresh `Map` per scenario rather than touching the module's real
@@ -13,7 +16,7 @@
  * Run with: node tests/test_js_long_tail_console.mjs
  */
 
-import { __test__ } from '../web/js/long_tail.js';
+import { __test__ } from '../web/js/long_tail_console.js';
 
 const {
   consoleOpen,
@@ -235,6 +238,32 @@ console.log('consoleToken (resolver-settle) vs consoleIsStale (panel-paint)');
     'consoleToken: the current token has moved on from what was captured at fire time');
   assertEqual(consoleIsStale(map, 1, liveToken), false,
     'consoleIsStale: re-reading the CURRENT token (the resolver-settle pattern) is never stale');
+}
+
+// --- checkYoutube: no residual ConsoleState for a row with no identifier ---
+console.log('checkYoutube leaves no residual ConsoleState when mb_release_id is absent (#522)');
+{
+  const { state } = await import('../web/js/state.js');
+  const { checkYoutube, consoleStates: liveConsoleStates } = await import('../web/js/long_tail_console.js');
+
+  // A worklist row with no mb_release_id (e.g. an unresolved legacy row) —
+  // checkYoutube must bail out before ever touching consoleStates, not
+  // create-then-immediately-empty an entry that lingers until the next
+  // consolePrune.
+  state.longTail = { rows: [{ id: 424242, mb_release_id: '' }], band: null, query: '' };
+  assertEqual(liveConsoleStates.has(424242), false,
+    'sanity: no ConsoleState entry exists for this id before calling checkYoutube');
+
+  await checkYoutube(424242);
+  assertEqual(liveConsoleStates.has(424242), false,
+    'checkYoutube must not create a ConsoleState entry for a row with no mb_release_id');
+
+  // Same for an id with no cohort row at all (consoleRow returns null).
+  await checkYoutube(999424242);
+  assertEqual(liveConsoleStates.has(999424242), false,
+    'checkYoutube must not create a ConsoleState entry for an id absent from the cohort');
+
+  state.longTail = { rows: null, band: null, query: '' };
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
