@@ -4729,6 +4729,46 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(row["request_imported_path"],
                          "/mnt/virtio/Music/Beets/Artist/Album")
 
+    def test_get_wrong_matches_keyset_parity(self):
+        """#523 -- fake<->production parity for the widest read projection.
+
+        Seeds the SAME sequence ``_log_rejected`` runs on ``self.db``
+        (real PG) onto a fresh ``FakePipelineDB``, then compares the full
+        21-column wrong-match projection. Reuses
+        ``TestReadProjectionParity._assert_keyset_parity`` -- it is a
+        staticmethod whose first param is the ``TestCase`` instance, so
+        cross-class reuse is safe.
+        """
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        fake_req1 = fake.add_request(
+            mb_release_id="wm-uuid-1", artist_name="Artist 1",
+            album_title="Album 1", source="request")
+
+        self._log_rejected(self.req1, "alice", "/fi/parity-a")
+        fake.log_download(
+            request_id=fake_req1,
+            soulseek_username="alice",
+            outcome="rejected",
+            beets_scenario="high_distance",
+            validation_result=json.dumps({
+                "scenario": "high_distance", "distance": 0.25,
+                "failed_path": "/fi/parity-a",
+            }),
+        )
+
+        real_rows = self.db.get_wrong_matches()
+        fake_rows = fake.get_wrong_matches()
+        self.assertTrue(
+            real_rows, "seeding produced no rows on real PG — "
+            "get_wrong_matches parity would pass vacuously")
+        self.assertTrue(
+            fake_rows, "seeding produced no rows on FakePipelineDB — "
+            "get_wrong_matches parity would pass vacuously")
+        TestReadProjectionParity._assert_keyset_parity(
+            self, real_rows, fake_rows, "get_wrong_matches")
+
 
 @requires_postgres
 class TestBadAudioHashes(unittest.TestCase):
@@ -8605,6 +8645,208 @@ class TestReadProjectionParity(unittest.TestCase):
         self._assert_keyset_parity(
             self, real_rows, fake_rows,
             "get_field_resolutions_for_requests")
+
+    # --- get_wanted_searchable (#523) ----------------------------------------
+
+    def _seed_wanted_searchable_request(
+        self, db: Any, *, mb_release_id: str, generator_id: str,
+    ) -> int:
+        from lib.pipeline_db import SearchPlanItemInput
+
+        rid = db.add_request(
+            "WS Artist", "WS Album", "request", mb_release_id=mb_release_id)
+        db.create_successful_search_plan(
+            request_id=rid, generator_id=generator_id,
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q")])
+        return rid
+
+    def test_get_wanted_searchable_keyset_parity(self):
+        for db in (self.db, self.fake):
+            self._seed_wanted_searchable_request(
+                db, mb_release_id="ws-parity", generator_id="g-parity")
+
+        real_rows = self.db.get_wanted_searchable("g-parity")
+        fake_rows = self.fake.get_wanted_searchable("g-parity")
+        self.assertTrue(
+            real_rows, "seeding produced no rows on real PG — "
+            "get_wanted_searchable parity would pass vacuously")
+        self.assertTrue(
+            fake_rows, "seeding produced no rows on FakePipelineDB — "
+            "get_wanted_searchable parity would pass vacuously")
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "get_wanted_searchable")
+
+    def test_get_wanted_searchable_no_active_plan_empty_branch(self):
+        # A wanted request with no active plan is not execution-eligible
+        # -- both backends must agree on the empty-list contract. This
+        # is the explicit contract being asserted, not the keyset check,
+        # so an empty result here is the expected (non-vacuous) outcome.
+        for db in (self.db, self.fake):
+            db.add_request(
+                "WS Artist", "WS Album (no plan)", "request",
+                mb_release_id="ws-no-plan")
+
+        self.assertEqual(self.db.get_wanted_searchable("g-parity"), [])
+        self.assertEqual(self.fake.get_wanted_searchable("g-parity"), [])
+
+    # --- get_search_summaries_for_requests (#523) ----------------------------
+
+    def _seed_search_summary_request(
+        self, db: Any, *, mb_release_id: str,
+    ) -> int:
+        rid = db.add_request(
+            "Summary Artist", "Summary Album", "request",
+            mb_release_id=mb_release_id)
+        db.log_search(
+            rid, query="q1", outcome="found", result_count=5, elapsed_s=1.0)
+        return rid
+
+    def test_get_search_summaries_for_requests_keyset_parity(self):
+        ids: dict[int, int] = {}
+        for db in (self.db, self.fake):
+            ids[id(db)] = self._seed_search_summary_request(
+                db, mb_release_id="summary-parity-1")
+
+        real_map = self.db.get_search_summaries_for_requests(
+            [ids[id(self.db)]])
+        fake_map = self.fake.get_search_summaries_for_requests(
+            [ids[id(self.fake)]])
+        real_rows = list(real_map.values())
+        fake_rows = list(fake_map.values())
+        self.assertTrue(
+            real_rows, "seeding produced no rows on real PG — "
+            "get_search_summaries_for_requests parity would pass vacuously")
+        self.assertTrue(
+            fake_rows, "seeding produced no rows on FakePipelineDB — "
+            "get_search_summaries_for_requests parity would pass vacuously")
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "get_search_summaries_for_requests")
+
+    def test_get_search_summaries_for_requests_empty_input_contract(self):
+        # Contract: an empty id list short-circuits to {} without a query
+        # on both backends -- not a keyset check, the {} equality IS the
+        # assertion.
+        self.assertEqual(self.db.get_search_summaries_for_requests([]), {})
+        self.assertEqual(self.fake.get_search_summaries_for_requests([]), {})
+
+    # --- get_recent_search_log_for_requests (#523) ---------------------------
+
+    def test_get_recent_search_log_for_requests_keyset_parity(self):
+        ids: dict[int, int] = {}
+        for db in (self.db, self.fake):
+            rid = db.add_request(
+                "RecentLog Artist", "RecentLog Album", "request",
+                mb_release_id="recentlog-parity-1")
+            db.log_search(
+                rid, query="q1", outcome="found", result_count=5,
+                elapsed_s=1.0)
+            ids[id(db)] = rid
+
+        real_map = self.db.get_recent_search_log_for_requests(
+            [ids[id(self.db)]], per_request_limit=5)
+        fake_map = self.fake.get_recent_search_log_for_requests(
+            [ids[id(self.fake)]], per_request_limit=5)
+        real_rows = [row for rows in real_map.values() for row in rows]
+        fake_rows = [row for rows in fake_map.values() for row in rows]
+        self.assertTrue(
+            real_rows, "seeding produced no rows on real PG — "
+            "get_recent_search_log_for_requests parity would pass vacuously")
+        self.assertTrue(
+            fake_rows, "seeding produced no rows on FakePipelineDB — "
+            "get_recent_search_log_for_requests parity would pass vacuously")
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "get_recent_search_log_for_requests")
+
+    # --- list_active_youtube_rescues (#523) ----------------------------------
+
+    def test_list_active_youtube_rescues_keyset_parity(self):
+        for db in (self.db, self.fake):
+            rid = db.add_request(
+                "Rescue Artist", "Rescue Album", "request",
+                mb_release_id="rescue-parity-1")
+            db.insert_youtube_running(
+                request_id=rid, browse_id="MPREb_parity",
+                audio_playlist_id=None,
+                yt_url="https://example.invalid/parity",
+                expected_track_count=2)
+
+        real_rows = self.db.list_active_youtube_rescues()
+        fake_rows = self.fake.list_active_youtube_rescues()
+        self.assertTrue(
+            real_rows, "seeding produced no rows on real PG — "
+            "list_active_youtube_rescues parity would pass vacuously")
+        self.assertTrue(
+            fake_rows, "seeding produced no rows on FakePipelineDB — "
+            "list_active_youtube_rescues parity would pass vacuously")
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "list_active_youtube_rescues")
+
+    def test_list_active_youtube_rescues_empty_branch_parity(self):
+        # Contract: no in-flight rescues -- both return []. This is the
+        # explicit empty contract, not the keyset check.
+        self.assertEqual(self.db.list_active_youtube_rescues(), [])
+        self.assertEqual(self.fake.list_active_youtube_rescues(), [])
+
+    # --- get_youtube_album_mapping (#523, tri-state) -------------------------
+
+    @staticmethod
+    def _youtube_mapping_row(**overrides: Any) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "yt_browse_id": "MPREb_parity",
+            "yt_audio_playlist_id": "OLAK5uy_parity",
+            "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_parity",
+            "yt_year": 2020,
+            "yt_track_count": 10,
+            "album_title": "Parity Album",
+            "album_artist": "Parity Artist",
+            "yt_tracks": [
+                {"title": "Track 1", "video_id": "v1",
+                 "length_seconds": 200, "track_number": 1, "disc_number": 1,
+                 "artists": [{"name": "Artist"}]},
+            ],
+            "distances": [
+                {"mbid": "mb-1", "distance": 0.05, "error": None},
+            ],
+        }
+        row.update(overrides)
+        return row
+
+    def test_get_youtube_album_mapping_keyset_parity(self):
+        for db in (self.db, self.fake):
+            db.upsert_youtube_album_mapping(
+                "rg-parity", "mb", [self._youtube_mapping_row()])
+
+        real_rows = self.db.get_youtube_album_mapping("rg-parity", "mb")
+        fake_rows = self.fake.get_youtube_album_mapping("rg-parity", "mb")
+        self.assertTrue(
+            real_rows, "seeding produced no rows on real PG — "
+            "get_youtube_album_mapping parity would pass vacuously")
+        self.assertTrue(
+            fake_rows, "seeding produced no rows on FakePipelineDB — "
+            "get_youtube_album_mapping parity would pass vacuously")
+        assert real_rows is not None and fake_rows is not None
+        self._assert_keyset_parity(
+            self, real_rows, fake_rows, "get_youtube_album_mapping")
+
+    def test_get_youtube_album_mapping_resolved_empty_branch_parity(self):
+        # Contract: upserting an empty matrix stamps the empty-resolution
+        # marker -- both backends return [] (cache HIT), never None.
+        for db in (self.db, self.fake):
+            db.upsert_youtube_album_mapping("rg-parity-empty", "mb", [])
+
+        self.assertEqual(
+            self.db.get_youtube_album_mapping("rg-parity-empty", "mb"), [])
+        self.assertEqual(
+            self.fake.get_youtube_album_mapping("rg-parity-empty", "mb"), [])
+
+    def test_get_youtube_album_mapping_never_resolved_branch_parity(self):
+        # Contract: an unknown (rg, source) pair is a cache MISS -- None
+        # on both backends, distinct from the resolved-empty [] above.
+        self.assertIsNone(
+            self.db.get_youtube_album_mapping("rg-never-resolved", "mb"))
+        self.assertIsNone(
+            self.fake.get_youtube_album_mapping("rg-never-resolved", "mb"))
 
 
 if __name__ == "__main__":

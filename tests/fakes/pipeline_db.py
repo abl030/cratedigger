@@ -240,6 +240,7 @@ class FakePipelineDB:
         self._youtube_album_mappings: dict[
             tuple[str, str], list[dict[str, Any]],
         ] = {}
+        self._next_youtube_mapping_id = 0
 
     # --- Seeding ---
 
@@ -2285,10 +2286,33 @@ class FakePipelineDB:
         real implementation wraps DELETE + INSERTs in a single transaction;
         the fake just overwrites the dict slot, which is atomic in the
         single-threaded test context.
+
+        Stamps ``id``, ``release_group_identifier``, ``source``, and
+        ``resolved_at`` onto each stored row. Production's SELECT
+        projection (``PipelineDB.get_youtube_album_mapping``) always
+        includes these DB-assigned columns (``id BIGSERIAL PRIMARY KEY``,
+        ``resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`` — migration
+        034) even though callers never pass them into ``rows``. #523's
+        read-projection parity gate surfaced this: the fake previously
+        echoed the input dict verbatim, four keys short of what
+        production's read returns.
         """
+        stored: list[dict[str, Any]] = []
+        for row in rows:
+            self._next_youtube_mapping_id += 1
+            stored_row = copy.deepcopy(row)
+            stored_row["id"] = self._next_youtube_mapping_id
+            stored_row["release_group_identifier"] = release_group_identifier
+            stored_row["source"] = source
+            stored_row.setdefault("yt_audio_playlist_id", None)
+            stored_row.setdefault("yt_year", None)
+            stored_row.setdefault("album_title", None)
+            stored_row.setdefault("album_artist", None)
+            stored_row["resolved_at"] = _utcnow()
+            stored.append(stored_row)
         self._youtube_album_mappings[
             (release_group_identifier, source)
-        ] = [copy.deepcopy(r) for r in rows]
+        ] = stored
 
     # --- Session lifecycle ---
 
@@ -2344,6 +2368,15 @@ class FakePipelineDB:
             "source_path": source_path,
             "reasoning": reasoning,
             "status": status,
+            # Migration 032 — resolver-populated catalog number; migration
+            # 001 — download-time final container format. Neither is part
+            # of ``AddRequestInput`` (production's INSERT column list), so
+            # a freshly-added real row has both NULL until a later UPDATE
+            # populates them. #523 read-projection parity (get_wanted_
+            # searchable's ``ar.*``) surfaced these as missing from the
+            # fake's row shape.
+            "catalog_number": None,
+            "final_format": None,
             "search_attempts": 0,
             "download_attempts": 0,
             "validation_attempts": 0,
