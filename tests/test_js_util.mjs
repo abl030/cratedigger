@@ -7,6 +7,7 @@ import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTi
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
+import { __test__ as longTailConsoleTest } from '../web/js/long_tail_console.js';
 
 let passed = 0;
 let failed = 0;
@@ -1301,8 +1302,8 @@ console.log('long_tail.js __test__');
   state.longTail = { rows: null, band: null, query: '' };
 }
 
-// --- long_tail.js action console pure helpers (U4) ---
-console.log('long_tail.js __test__ (U4 console)');
+// --- long_tail_console.js action console pure helpers (U4) ---
+console.log('long_tail_console.js __test__ (U4 console)');
 {
   const {
     renderUnfindableBody,
@@ -1315,7 +1316,7 @@ console.log('long_tail.js __test__ (U4 console)');
     youtubeHistoryRows,
     youtubeFailureReason,
     PEERS_VISIBLE_CAP,
-  } = longTailTest;
+  } = longTailConsoleTest;
 
   // --- renderUnfindableBody: categorised vs not-yet-categorised ---
   // Categorised → category badge + forensics rollup.
@@ -1548,8 +1549,8 @@ console.log('long_tail.js __test__ (U4 console)');
     'a panel error and other panels\' content coexist (independent-load contract)');
 }
 
-// --- long_tail.js U5 rescue flow pure helpers ---
-console.log('long_tail.js __test__ (U5 rescue flow)');
+// --- long_tail_console.js U5 rescue flow pure helpers ---
+console.log('long_tail_console.js __test__ (U5 rescue flow)');
 {
   const {
     youtubeBestDistance,
@@ -1557,7 +1558,7 @@ console.log('long_tail.js __test__ (U5 rescue flow)');
     rescueOutcomeCopy,
     renderYoutubeBody,
     renderRescueConfirm,
-  } = longTailTest;
+  } = longTailConsoleTest;
 
   // --- youtubeBestDistance: lowest ok distance, ignores non-ok rows ---
   assertEqual(
@@ -1686,8 +1687,8 @@ console.log('long_tail.js __test__ (U5 rescue flow)');
     'renderRescueConfirm wires confirm + cancel buttons');
 }
 
-// --- long_tail.js U6 secondary-action pure helpers ---
-console.log('long_tail.js __test__ (U6 secondary actions)');
+// --- long_tail_console.js U6 secondary-action pure helpers ---
+console.log('long_tail_console.js __test__ (U6 secondary actions)');
 {
   const {
     canAcceptSibling,
@@ -1695,7 +1696,7 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     intentToggleTarget,
     buildAcceptSiblingOptions,
     renderActionsBar,
-  } = longTailTest;
+  } = longTailConsoleTest;
 
   // --- canAcceptSibling: MB-only predicate (KTD7) ---
   assertEqual(
@@ -1810,19 +1811,19 @@ console.log('long_tail.js __test__ (U6 secondary actions)');
     'renderActionsBar: MB row with no release group disables accept-sibling');
 }
 
-// --- long_tail.js #398 / #481 item 1 console-persistence state ---
-console.log('long_tail.js console persistence (#398 / #481 item 1)');
+// --- long_tail_console.js #398 / #481 item 1 console-persistence state ---
+console.log('long_tail_console.js console persistence (#398 / #481 item 1)');
 {
   // Open-console tracking lives in the module-scoped `consoleStates` map
   // (#481 item 1 — no longer on shared state; see tests/test_js_long_tail_console.mjs
   // for the pure open/close/prune/canStart/settle transition coverage).
-  const { consoleStates } = longTailTest;
+  const { consoleStates } = longTailConsoleTest;
   assert(consoleStates instanceof Map,
     'consoleStates is a Map (open-console ids persist across re-renders)');
   // The DOM-side entry points are no-ops outside a browser — must not throw
   // when the module is imported into the Node test runner, and must not
   // fabricate console state for a row nobody opened.
-  const { restoreLongTailConsoles, toggleLongTailDetail } = await import('../web/js/long_tail.js');
+  const { restoreLongTailConsoles, toggleLongTailDetail } = await import('../web/js/long_tail_console.js');
   restoreLongTailConsoles();
   toggleLongTailDetail(1);
   assert(consoleStates.size === 0,

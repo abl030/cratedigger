@@ -4,7 +4,8 @@ import { esc, awstDate, qualityLabel, externalReleaseUrl, sourceLabel, manualRea
 import { renderDownloadHistoryItem } from './history.js';
 import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
-import { loadLongTail, renderLongTailBody, restoreLongTailConsoles } from './long_tail.js';
+import { loadLongTail, renderLongTailBody } from './long_tail.js';
+import { restoreLongTailConsoles } from './long_tail_console.js';
 import { renderPipelineDashboard as renderDashboardCards } from './pipeline_dashboard.js';
 
 /**
