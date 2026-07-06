@@ -11,12 +11,7 @@ the unrelated "wrong-match triage" console in web/routes/imports.py
 import msgspec
 
 from web.routes._registry import RouteRegistration, pattern_route, route
-
-
-def _server():
-    """Deferred import to avoid circular deps."""
-    from web import server
-    return server
+from web.routes._server_access import _server
 
 
 # --- U17: /api/triage HTTP endpoints --------------------------------------

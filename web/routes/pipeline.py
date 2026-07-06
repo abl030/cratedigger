@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 logger = logging.getLogger(__name__)
 
@@ -192,12 +193,6 @@ def _generate_plan_after_add(req_id, *, artist_name, album_title, year,
             "post_pipeline_add: plan generation failed for request %s: %s",
             req_id, exc,
         )
-
-
-def _server():
-    """Deferred import to avoid circular deps."""
-    from web import server
-    return server
 
 
 def _pipeline_log_limit(params: dict[str, list[str]]) -> int:

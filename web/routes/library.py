@@ -6,11 +6,8 @@ from pydantic import BaseModel, Field
 
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
-
-def _server():
-    from web import server
-    return server
 
 def get_beets_search(h, params: dict[str, list[str]]) -> None:
     q = params.get("q", [""])[0].strip()

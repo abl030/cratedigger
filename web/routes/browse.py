@@ -25,20 +25,10 @@ from lib.artist_compare import annotate_in_library, merge_discographies
 from web.library_artist_service import list_library_artist_rows
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
-
-
-def _server():
-    """Lazy import to avoid circular dependency with server.py.
-
-    Returns the server module. All access to mb_api, _db(), _beets_db(),
-    check_beets_library(), check_pipeline() goes through this so that
-    test mocks on web.server.* are respected.
-    """
-    from web import server
-    return server
 
 
 def get_search(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) -> None:

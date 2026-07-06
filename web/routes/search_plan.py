@@ -15,14 +15,9 @@ from pydantic import BaseModel, Field, model_validator
 from lib.quality import CandidateScore
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 logger = logging.getLogger(__name__)
-
-
-def _server():
-    """Deferred import to avoid circular deps."""
-    from web import server
-    return server
 
 
 def get_pipeline_search_plan(

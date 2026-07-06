@@ -35,6 +35,7 @@ from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 
 log = logging.getLogger(__name__)
@@ -151,13 +152,6 @@ def _build_youtube_client():
     session.request = partial(  # type: ignore[method-assign]
         session.request, timeout=(5, 30))
     return YTMusic(requests_session=session, language="en"), session
-
-
-def _server():
-    """Deferred import to avoid circular deps (mirrors the convention
-    used in every other ``web/routes/*.py`` module)."""
-    from web import server
-    return server
 
 
 def _parse_bool(raw: str | None) -> bool:

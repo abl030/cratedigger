@@ -9,12 +9,7 @@ Split from web/routes/pipeline.py (#481 item 3). Wraps
 import msgspec
 
 from web.routes._registry import RouteRegistration, route
-
-
-def _server():
-    """Deferred import to avoid circular deps."""
-    from web import server
-    return server
+from web.routes._server_access import _server
 
 
 def get_pipeline_long_tail(h, params: dict[str, list[str]]) -> None:

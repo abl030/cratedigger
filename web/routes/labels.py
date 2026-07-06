@@ -16,15 +16,10 @@ import msgspec
 from web import discogs as discogs_api
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
-
-
-def _server():
-    """Lazy import to avoid the circular dependency with server.py."""
-    from web import server
-    return server
 
 
 # Auto-flip threshold: if the label's `release_count` exceeds this AND the
