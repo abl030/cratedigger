@@ -132,8 +132,9 @@ def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
         from web.discogs import DiscogsMirrorNotConfigured
 
         # Bypass the 24h meta cache — this write path can persist the
-        # resolved master into the pipeline DB, same rationale as the
-        # add flow's ``fresh=True`` calls above.
+        # resolved master into the pipeline DB, so it must read live
+        # upstream state rather than a possibly-stale cached master
+        # (same rationale as the add flow's ``fresh=True`` calls).
         try:
             discogs_data = discogs_api.get_release(
                 discogs_id_num, fresh=True,
