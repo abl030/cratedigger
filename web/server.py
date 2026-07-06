@@ -57,13 +57,17 @@ from web import overlay as _overlay
 from lib.beets_db import BeetsDB
 from lib.pipeline_db import PipelineDB
 from web.routes import api_index as _api_index_routes
+from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
+from web.routes import decisions as _decisions_routes
 from web.routes import disk_coverage as _disk_coverage_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
 from web.routes import imports as _imports_routes
 from web.routes import long_tail as _long_tail_routes
 from web.routes import pipeline as _pipeline_routes
+from web.routes import pipeline_dashboard as _pipeline_dashboard_routes
+from web.routes import release_identity_routes as _release_identity_routes
 from web.routes import search_plan as _search_plan_routes
 from web.routes import triage as _triage_routes
 from web.routes import youtube as _youtube_routes
@@ -82,11 +86,15 @@ from web.routes._registry import (
 # derived views over this list — not separately maintained structures.
 ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _api_index_routes,
+    _beets_distance_routes,
     _browse_routes,
+    _decisions_routes,
     _disk_coverage_routes,
     _labels_routes,
     _long_tail_routes,
     _pipeline_routes,
+    _pipeline_dashboard_routes,
+    _release_identity_routes,
     _library_routes,
     _imports_routes,
     _search_plan_routes,

@@ -895,7 +895,7 @@ def post_import_preview(h, body: dict) -> None:
 
     try:
         if has_values:
-            from web.routes.pipeline import _runtime_rank_config
+            from web.routes.decisions import _runtime_rank_config
             preview = preview_import_from_values(
                 _preview_values_from_body(body),
                 cfg=_runtime_rank_config(),

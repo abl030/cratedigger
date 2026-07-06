@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Contract tests for the Replace / resolve-rg routes (web/routes/pipeline.py).
+"""Contract tests for the Replace / resolve-rg routes
+(web/routes/release_identity_routes.py), plus the closely-related
+requests-by-rg / active-rgs auxiliary endpoints that stayed in
+web/routes/pipeline.py (#522 — same Replace-picker UI flow).
 
-Split from tests/test_web_server.py (#408). Shared harness in
-tests/web/_harness.py.
+Split from tests/test_web_server.py (#408); renamed from
+test_routes_pipeline_replace.py when web/routes/pipeline.py's
+resolve-rg/replace handlers moved to web/routes/release_identity_routes.py
+(#522). Shared harness in tests/web/_harness.py.
 """
 
 import os

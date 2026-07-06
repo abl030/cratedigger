@@ -11,7 +11,7 @@ module (``OUTCOME_HTTP_STATUS``) — one source of truth, per the PR #381
 lesson. Do not redefine it locally.
 
 The Redis cache adapter is the same shape as
-``_RedisFingerprintCache`` in ``web/routes/pipeline.py`` — bytes
+``_RedisFingerprintCache`` in ``web/routes/beets_distance.py`` — bytes
 ``get`` / ``set`` with a long-sentinel TTL since the YT response cache
 lives forever absent explicit ``refresh=true``.
 """
@@ -65,7 +65,7 @@ class _RedisYoutubeCache:
     again (review finding #17 — the old ``_NAMESPACE`` wrapper produced
     ``youtube:album:youtube:album:<browse_id>`` keys).
 
-    Mirrors ``_RedisFingerprintCache`` in ``web/routes/pipeline.py``
+    Mirrors ``_RedisFingerprintCache`` in ``web/routes/beets_distance.py``
     (and ``scripts/pipeline_cli/youtube.py::_RedisYoutubeCache`` on the CLI
     side) — bytes get/set with a long sentinel TTL. Falls back to a
     no-op when Redis is unavailable so single-shot dev shells still

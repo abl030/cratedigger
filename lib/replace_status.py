@@ -2,7 +2,7 @@
 and its lazy release-group/master resolver (``POST .../resolve-rg``).
 
 Both ``lib/mbid_replace_service.py`` (``ReplaceResult.outcome`` /
-``ReplaceResult.reason``) and ``web/routes/pipeline.py::
+``ReplaceResult.reason``) and ``web/routes/release_identity_routes.py::
 post_pipeline_resolve_rg`` (its bare ``status`` field) express failure
 modes as plain strings. Before this module they were declared
 independently at each call site — a rename of one copy (e.g.
@@ -57,7 +57,7 @@ REPLACE_REASON_TARGET_NO_RELEASE_GROUP = "target_no_release_group"
 REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR = "unexpected_lookup_error"
 
 # POST /api/pipeline/<id>/resolve-rg status vocabulary
-# (web/routes/pipeline.py::post_pipeline_resolve_rg). Two of these
+# (web/routes/release_identity_routes.py::post_pipeline_resolve_rg). Two of these
 # (RESOLVE_STATUS_MIRROR_UNCONFIGURED / RESOLVE_STATUS_TRANSIENT) are
 # deliberately the SAME string values as RESULT_MIRROR_UNCONFIGURED /
 # RESULT_TRANSIENT above — both describe the identical failure mode

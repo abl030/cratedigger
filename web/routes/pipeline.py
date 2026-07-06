@@ -1,10 +1,15 @@
 """Pipeline API route handlers, extracted from server.py.
 
-Core pipeline CRUD, dashboard/decisions, import jobs, and beets-distance.
-Search-plan, triage, long-tail, and the /api/_index self-documentation
-machinery were split out (#481 item 3) into sibling modules:
-``web/routes/search_plan.py``, ``web/routes/triage.py``,
-``web/routes/long_tail.py``, ``web/routes/api_index.py``.
+Core pipeline CRUD, import jobs, and requests-by-rg/active-rgs. Search-plan,
+triage, long-tail, and the /api/_index self-documentation machinery were
+split out (#481 item 3) into sibling modules: ``web/routes/search_plan.py``,
+``web/routes/triage.py``, ``web/routes/long_tail.py``,
+``web/routes/api_index.py``. The dashboard metrics endpoint, the Decisions
+tab (constants/simulate), the beets-distance endpoint, and the
+resolve-rg/replace release-identity endpoints were split out (#522) into
+``web/routes/pipeline_dashboard.py``, ``web/routes/decisions.py``,
+``web/routes/beets_distance.py``, and
+``web/routes/release_identity_routes.py``.
 """
 
 import json
@@ -46,31 +51,13 @@ from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          CandidateScore,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override,
-                         top_candidates,
-                         get_decision_tree)
-from lib.disk_coverage_service import disk_coverage
-from lib.import_preview import ImportPreviewValues, preview_import_from_values
+                         top_candidates)
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.release_cleanup import remove_and_reset_release
-from lib.replace_status import (
-    RESOLVE_STATUS_LOOKUP_FAILED,
-    RESOLVE_STATUS_MASTERLESS,
-    RESOLVE_STATUS_MIRROR_UNCONFIGURED,
-    RESOLVE_STATUS_MISSING_RELEASE_ID,
-    RESOLVE_STATUS_NON_MB_RELEASE_ID,
-    RESOLVE_STATUS_NO_RELEASE_GROUP,
-    RESOLVE_STATUS_NOT_FOUND,
-    RESOLVE_STATUS_RESOLVED,
-    RESOLVE_STATUS_TRANSIENT,
-)
 from lib.util import resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
-from lib.spectral_check import (HF_DEFICIT_SUSPECT, HF_DEFICIT_MARGINAL,
-                                ALBUM_SUSPECT_PCT, MIN_CLIFF_SLICES,
-                                CLIFF_THRESHOLD_DB_PER_KHZ)
 from web import mb as mb_api
 from web import discogs as discogs_api
-from web import cache as cache_api
 from web.wrong_match_file_service import source_dirs_from_validation_result
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
@@ -426,144 +413,6 @@ def get_pipeline_downloading(h, params: dict[str, list[str]]) -> None:
     })
 
 
-def get_pipeline_dashboard(h, params: dict[str, list[str]]) -> None:
-    """Return operational metrics for the Pipeline dashboard subtab."""
-    s = _server()
-    data = s._db().get_pipeline_dashboard_metrics()
-    data["redis"] = cache_api.redis_metrics()
-    data["disk_coverage"] = _dashboard_disk_coverage(s)
-    h._json(data)
-
-
-def _dashboard_disk_coverage(s) -> dict[str, object] | None:
-    """Pipeline-vs-beets coverage block for the dashboard, or None when
-    no beets DB is configured.
-
-    Only ``imported`` claims beets presence, so ``drift_rows`` carries
-    off-disk ``imported`` rows only (a release that vanished from beets
-    is the Lucksmiths-class out-of-band drift signal). Off-disk wanted
-    (not yet acquired), downloading (in flight), and manual (staged for
-    review) rows are lifecycle-normal, not drift."""
-    beets = s._beets_db()
-    if beets is None:
-        return None
-    result = disk_coverage(s._db(), beets, include_rows=True)
-    return {
-        "counts": msgspec.to_builtins(result.counts),
-        "drift_rows": [
-            msgspec.to_builtins(row)
-            for row in (result.off_disk or [])
-            if row.status == "imported"
-        ],
-    }
-
-
-def _runtime_rank_config():
-    """Load the runtime QualityRankConfig from the same config.ini the main
-    cratedigger process reads, so web simulator matches production dispatch."""
-    from lib.config import read_runtime_rank_config  # type: ignore[import-not-found]
-
-    return read_runtime_rank_config()
-
-
-def get_pipeline_constants(h, params: dict[str, list[str]]) -> None:
-    """Return decision tree structure + thresholds for the diagram.
-
-    The runtime rank config is threaded into ``get_decision_tree`` so the
-    transcode-detection threshold displayed in the UI tracks the live
-    ``cfg.mp3_vbr.excellent`` (issue #66 follow-up). Without this, an
-    operator who retuned the gate would see a stale Decisions tab while
-    the actual pipeline ran at the new threshold.
-    """
-    rank_cfg = _runtime_rank_config()
-    tree = get_decision_tree(cfg=rank_cfg)
-    tree["constants"]["HF_DEFICIT_SUSPECT"] = HF_DEFICIT_SUSPECT
-    tree["constants"]["HF_DEFICIT_MARGINAL"] = HF_DEFICIT_MARGINAL
-    tree["constants"]["ALBUM_SUSPECT_PCT"] = ALBUM_SUSPECT_PCT
-    tree["constants"]["MIN_CLIFF_SLICES"] = MIN_CLIFF_SLICES
-    tree["constants"]["CLIFF_THRESHOLD_DB_PER_KHZ"] = CLIFF_THRESHOLD_DB_PER_KHZ
-    # Expose the runtime rank config to the UI so the Decisions tab shows
-    # the configured gate_min_rank, bitrate_metric, and the same-rank
-    # tolerance. The frontend renders these three as labeled badges at
-    # the top of the tab (issue #68).
-    tree["constants"]["rank_gate_min_rank"] = rank_cfg.gate_min_rank.name
-    tree["constants"]["rank_bitrate_metric"] = rank_cfg.bitrate_metric.value
-    tree["constants"]["rank_within_tolerance_kbps"] = (
-        rank_cfg.within_rank_tolerance_kbps)
-    # Expose the runtime audio_check_mode so the simulator presets can
-    # reflect deployments with `[Beets Validation] audio_check = off`.
-    # Without this, the Decisions tab would claim corrupt downloads get
-    # rejected even though run_preimport_gates() skips validation there
-    # (issue #91 codex round 2).
-    from lib.config import read_runtime_config  # type: ignore[import-not-found]
-    tree["constants"]["audio_check_mode"] = read_runtime_config().audio_check_mode
-    h._json(tree)
-
-
-def get_pipeline_simulate(h, params: dict[str, list[str]]) -> None:
-    """Run full_pipeline_decision() with query-string inputs."""
-
-    def _str(key: str) -> str | None:
-        v = params.get(key, [None])[0]
-        return v if v else None
-
-    def _int(key: str) -> int | None:
-        v = _str(key)
-        return int(v) if v else None
-
-    def _bool(key: str) -> bool:
-        v = _str(key)
-        return v in ("true", "1", "yes") if v else False
-
-    # is_vbr defaults to None (not False) so the simulator can tell
-    # "not supplied, derive from is_cbr" apart from "explicit CBR".
-    def _opt_bool(key: str) -> bool | None:
-        v = _str(key)
-        if v is None:
-            return None
-        return v in ("true", "1", "yes")
-
-    preview = preview_import_from_values(
-        ImportPreviewValues(
-            is_flac=_bool("is_flac"),
-            min_bitrate=_int("min_bitrate") or 0,
-            is_cbr=_bool("is_cbr"),
-            is_vbr=_opt_bool("is_vbr"),
-            avg_bitrate=_int("avg_bitrate"),
-            spectral_grade=_str("spectral_grade"),
-            spectral_bitrate=_int("spectral_bitrate"),
-            existing_min_bitrate=_int("existing_min_bitrate"),
-            existing_avg_bitrate=_int("existing_avg_bitrate"),
-            existing_spectral_grade=_str("existing_spectral_grade"),
-            existing_spectral_bitrate=_int("existing_spectral_bitrate"),
-            override_min_bitrate=_int("override_min_bitrate"),
-            existing_format=_str("existing_format"),
-            existing_is_cbr=_bool("existing_is_cbr"),
-            new_format=_str("new_format"),
-            post_conversion_min_bitrate=_int("post_conversion_min_bitrate"),
-            converted_count=_int("converted_count") or 0,
-            verified_lossless=_bool("verified_lossless"),
-            target_format=_str("target_format"),
-            verified_lossless_target=_str("verified_lossless_target"),
-            # Preimport gate inputs (issue #91). Defaults preserve legacy simulator
-            # behavior — a caller that omits these runs the pipeline as if audio
-            # validation passed and the auto path flattened the download.
-            audio_check_mode=_str("audio_check_mode") or "normal",
-            audio_corrupt=_bool("audio_corrupt"),
-            import_mode=_str("import_mode") or "auto",
-            has_nested_audio=_bool("has_nested_audio"),
-            candidate_v0_probe_avg=_int("candidate_v0_probe_avg"),
-            candidate_v0_probe_min=_int("candidate_v0_probe_min"),
-            existing_v0_probe_avg=_int("existing_v0_probe_avg"),
-            candidate_v0_probe_kind=_str("candidate_v0_probe_kind"),
-            existing_v0_probe_kind=_str("existing_v0_probe_kind"),
-            supported_lossless_source=_opt_bool("supported_lossless_source"),
-        ),
-        cfg=_runtime_rank_config(),
-    )
-    h._json(preview.simulation or {})
-
-
 def _build_last_search_payload(
     search_history: list[dict[str, object]],
 ) -> dict[str, object] | None:
@@ -640,311 +489,6 @@ def get_pipeline_detail(h, params: dict[str, list[str]], req_id_str: str) -> Non
         if tracks is not None:
             result["beets_tracks"] = tracks
     h._json(result)
-
-
-def post_pipeline_resolve_rg(h, body: dict, req_id_str: str) -> None:
-    """``POST /api/pipeline/<id>/resolve-rg``.
-
-    Lazy-backfill ``album_requests.mb_release_group_id`` for a single
-    legacy row that was added before the RG field was populated.
-
-    Used by ``web/js/replace_picker.js`` standard-mode when the row has
-    a null RG — the picker calls this endpoint, persists the resolved
-    RG back to the row, then continues into the sibling fetch.
-
-    The persisted side-effect is intentionally idempotent: if the row
-    already has a non-null RG the route returns it untouched (no
-    redundant MB hit because ``get_release(fresh=False)`` is cache-served).
-
-    MB rows resolve the release group via the MB mirror. Discogs rows
-    (numeric ``mb_release_id``) resolve the release's Discogs master
-    instead — the release-group analog (KTD-1) — and persist it into
-    the same ``mb_release_group_id`` column via the same
-    ``update_request_fields`` call the MB branch uses.
-
-    Status-code mapping:
-      * 200 — ``status='resolved'`` (RG/master found; row updated or
-              already set) or ``status='masterless'`` (Discogs release
-              has no master; row left untouched — R2, the picker
-              renders the one-element "nothing to swap to" state
-              instead of an error)
-      * 404 — request id does not exist
-      * 422 — MB lookup returned no release_group_id (the upstream MB
-              release has no RG attached)
-      * 503 — transient mirror error (timeout, network, malformed
-              JSON) — retryable — or ``status='mirror_unconfigured'``
-              when the Discogs mirror isn't configured (R11)
-    """
-    try:
-        request_id = int(req_id_str)
-    except (TypeError, ValueError):
-        h._error("Invalid request id")
-        return
-
-    db = _server()._db()
-    row = db.get_request(request_id)
-    if row is None:
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": RESOLVE_STATUS_NOT_FOUND,
-            "error": f"request {request_id} not found",
-        }, status=404)
-        return
-
-    existing_rg = row.get("mb_release_group_id")
-    if existing_rg:
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": existing_rg,
-            "status": RESOLVE_STATUS_RESOLVED,
-        })
-        return
-
-    mb_release_id = row.get("mb_release_id")
-    if not mb_release_id:
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": RESOLVE_STATUS_MISSING_RELEASE_ID,
-            "error": (
-                f"request {request_id} has no mb_release_id to resolve"
-            ),
-        }, status=422)
-        return
-
-    # Mirror transient errors (network, JSON decode) are retryable, on
-    # either mirror. See
-    # ``lib/mbid_replace_service.py::_TRANSIENT_LOOKUP_EXCEPTIONS`` for
-    # the rationale and the same exception set.
-    import socket as _socket
-    from urllib.error import URLError
-    transient: tuple[type[BaseException], ...] = (
-        URLError, TimeoutError, _socket.timeout, ConnectionError,
-        json.JSONDecodeError,
-    )
-
-    # MB release ids are UUIDs; numeric ids are Discogs-pathway, whose
-    # release-group analog is the Discogs master (KTD-1: the numeric
-    # master id lives in this same column, per the
-    # ``lib/field_resolver_service.py::_looks_numeric`` convention).
-    release_source = detect_release_source(mb_release_id)
-    if release_source == "unknown":
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": RESOLVE_STATUS_NON_MB_RELEASE_ID,
-            "error": (
-                f"request {request_id}.mb_release_id "
-                f"{mb_release_id!r} is neither a MusicBrainz UUID "
-                "nor a numeric Discogs id"
-            ),
-        }, status=422)
-        return
-
-    if release_source == "discogs":
-        discogs_id_num = int(normalize_release_id(mb_release_id))
-
-        from web.discogs import DiscogsMirrorNotConfigured
-
-        # Bypass the 24h meta cache — this write path can persist the
-        # resolved master into the pipeline DB, same rationale as the
-        # add flow's ``fresh=True`` calls above.
-        try:
-            discogs_data = discogs_api.get_release(
-                discogs_id_num, fresh=True,
-            )
-        except DiscogsMirrorNotConfigured as exc:
-            h._json({
-                "request_id": request_id,
-                "mb_release_group_id": None,
-                "status": RESOLVE_STATUS_MIRROR_UNCONFIGURED,
-                "error": f"Discogs mirror not configured: {exc}",
-            }, status=503)
-            return
-        except transient as exc:
-            h._json({
-                "request_id": request_id,
-                "mb_release_group_id": None,
-                "status": RESOLVE_STATUS_TRANSIENT,
-                "error": f"Discogs lookup failed (transient): {exc}",
-            }, status=503)
-            return
-        except Exception as exc:  # noqa: BLE001
-            h._json({
-                "request_id": request_id,
-                "mb_release_group_id": None,
-                "status": RESOLVE_STATUS_LOOKUP_FAILED,
-                "error": (
-                    f"Discogs lookup for {mb_release_id} failed: {exc}"
-                ),
-            }, status=422)
-            return
-
-        master_id = (
-            discogs_data.get("release_group_id")
-            if isinstance(discogs_data, dict) else None
-        )
-        if not master_id:
-            h._json({
-                "request_id": request_id,
-                "mb_release_group_id": None,
-                "status": RESOLVE_STATUS_MASTERLESS,
-            })
-            return
-
-        db.update_request_fields(request_id, mb_release_group_id=master_id)
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": master_id,
-            "status": RESOLVE_STATUS_RESOLVED,
-        })
-        return
-
-    try:
-        data = mb_api.get_release(mb_release_id, fresh=False)
-    except transient as exc:
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": RESOLVE_STATUS_TRANSIENT,
-            "error": f"MB lookup failed (transient): {exc}",
-        }, status=503)
-        return
-    except Exception as exc:  # noqa: BLE001
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": RESOLVE_STATUS_LOOKUP_FAILED,
-            "error": (
-                f"MB lookup for {mb_release_id} failed: {exc}"
-            ),
-        }, status=422)
-        return
-
-    rg_id = (data or {}).get("release_group_id") if isinstance(data, dict) else None
-    if not rg_id:
-        h._json({
-            "request_id": request_id,
-            "mb_release_group_id": None,
-            "status": RESOLVE_STATUS_NO_RELEASE_GROUP,
-            "error": (
-                f"MB release {mb_release_id} has no release_group_id"
-            ),
-        }, status=422)
-        return
-
-    db.update_request_fields(request_id, mb_release_group_id=rg_id)
-    h._json({
-        "request_id": request_id,
-        "mb_release_group_id": rg_id,
-        "status": RESOLVE_STATUS_RESOLVED,
-    })
-
-
-class PipelineReplaceRequest(BaseModel):
-    target_mb_release_id: str = Field(min_length=1)
-
-
-def post_pipeline_replace(h, body: dict, req_id_str: str) -> None:
-    """``POST /api/pipeline/<id>/replace``.
-
-    Supersede the source request with a new row at ``target_mb_release_id``.
-    Counterpart of ``pipeline-cli replace``. Both surfaces wrap
-    ``MbidReplaceService.replace_request_mbid`` — keep them in sync (see
-    ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
-
-    Body: ``{"target_mb_release_id": "<id>"}`` — an MB release UUID or a
-    Discogs numeric release id; must share the source's pathway (MB or
-    Discogs) and release group/master.
-
-    Status-code mapping mirrors the CLI exit codes:
-      * 200 — ``RESULT_REPLACED``
-      * 400 — body validation failure (missing/empty target)
-      * 404 — ``RESULT_NOT_FOUND``
-      * 409 — ``RESULT_WRONG_STATE`` (including supersede race —
-              ``descendant_request_id`` populated so the UI can
-              deep-link the operator to the new request) or
-              ``RESULT_TARGET_COLLISION_REQUEST``
-      * 422 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
-              ``RESULT_TARGET_SAME_AS_CURRENT``
-      * 503 — ``RESULT_TRANSIENT`` (mirror unreachable etc.) or
-              ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
-    """
-    from lib.config import read_runtime_config
-    from lib.mbid_replace_service import (
-        MbidReplaceService,
-        RESULT_MIRROR_UNCONFIGURED,
-        RESULT_NOT_FOUND,
-        RESULT_REPLACED,
-        RESULT_TARGET_COLLISION_REQUEST,
-        RESULT_TARGET_INVALID,
-        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
-        RESULT_TARGET_SAME_AS_CURRENT,
-        RESULT_TRANSIENT,
-        RESULT_WRONG_STATE,
-    )
-
-    try:
-        request_id = int(req_id_str)
-    except (TypeError, ValueError):
-        h._error("Invalid request id")
-        return
-
-    req_body = parse_body(h, body, PipelineReplaceRequest)
-    if req_body is None:
-        return
-    target = req_body.target_mb_release_id.strip()
-    if not target:
-        h._json({
-            "error": "target_mb_release_id must be a non-empty string",
-        }, status=400)
-        return
-
-    db = _server()._db()
-    cfg = read_runtime_config()
-    svc = MbidReplaceService(db=db, config=cfg)
-    result = svc.replace_request_mbid(
-        request_id, target_mb_release_id=target,
-    )
-
-    payload: dict[str, object] = {
-        "outcome": result.outcome,
-        "request_id": result.request_id,
-        "new_request_id": result.new_request_id,
-        "current_status": result.current_status,
-        "descendant_request_id": result.descendant_request_id,
-        "error_message": result.error_message,
-        "reason": result.reason,
-        "warnings": list(result.warnings),
-    }
-    if result.outcome == RESULT_REPLACED:
-        h._json(payload)
-        return
-    if result.outcome == RESULT_NOT_FOUND:
-        payload["error"] = result.error_message or "Not found"
-        h._json(payload, status=404)
-        return
-    if result.outcome in (
-        RESULT_WRONG_STATE,
-        RESULT_TARGET_COLLISION_REQUEST,
-    ):
-        payload["error"] = result.error_message or "Wrong state"
-        h._json(payload, status=409)
-        return
-    if result.outcome in (
-        RESULT_TARGET_INVALID,
-        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
-        RESULT_TARGET_SAME_AS_CURRENT,
-    ):
-        payload["error"] = result.error_message or "Semantic violation"
-        h._json(payload, status=422)
-        return
-    if result.outcome in (RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED):
-        payload["error"] = result.error_message or "Service unavailable; retry"
-        h._json(payload, status=503)
-        return
-    h._error(f"Unknown replace outcome: {result.outcome}", 500)
 
 
 def get_pipeline_requests_by_rg(h, params: dict, rg_id: str) -> None:
@@ -1925,117 +1469,6 @@ def post_pipeline_delete(h, body: dict) -> None:
 
 # ── Route tables ─────────────────────────────────────────────────
 
-class _RedisFingerprintCache:
-    """Adapt ``web/cache.py``'s Redis client to the ``BeetsDistanceCache`` protocol.
-
-    Our fingerprints are msgspec-encoded bytes, while ``web/cache.py``
-    targets JSON-serialisable dicts/lists — so we bypass the JSON
-    wrapping and talk to the Redis client directly. Falls back to a
-    no-op cache when Redis is unavailable so single-call dev shells
-    still work (just without the cached fast-path).
-    """
-
-    def __init__(self) -> None:
-        from web import cache as _cache_mod
-        self._redis = getattr(_cache_mod, "_redis", None)
-
-    def get(self, key: str):
-        if self._redis is None:
-            return None
-        try:
-            raw = self._redis.get(key)  # type: ignore[union-attr]
-        except Exception:
-            return None
-        if raw is None:
-            return None
-        # web/cache.py initialises Redis with ``decode_responses=True``,
-        # so ``get`` returns str. msgspec.json.decode handles bytes;
-        # encoding is cheap.
-        if isinstance(raw, str):
-            return raw.encode("utf-8")
-        return raw
-
-    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
-        if self._redis is None:
-            return
-        try:
-            self._redis.setex(key, ttl_seconds, value)  # type: ignore[union-attr]
-        except Exception:
-            pass
-
-
-_BEETS_DISTANCE_OUTCOME_STATUS: dict[str, int] = {
-    "ok": 200,
-    "download_log_not_found": 404,
-    "request_not_found": 404,
-    "folder_missing": 410,
-    "no_audio": 410,
-    "mb_lookup_failed": 503,
-    "mb_no_release_group": 422,
-    "wrong_release_group": 422,
-    "distance_failed": 500,
-}
-
-
-def get_beets_distance(
-    h, params: dict[str, list[str]],
-    download_log_id_str: str, mbid: str,
-) -> None:
-    """``GET /api/beets-distance/<download_log_id>/<mbid>``.
-
-    Real beets match distance for one ``(download_log_id, mbid)``
-    pair. The service does the heavy lifting (see
-    ``lib/beets_distance.compute_beets_distance``); this handler is a
-    thin adapter that maps the typed ``BeetsDistanceResult`` outcomes
-    to HTTP status codes per the CLI ⇄ API symmetry rule.
-
-    ``mbid`` may be an MB release UUID or a bare Discogs numeric release
-    id (#530 — Discogs siblings, e.g. surfaced by the Replace picker
-    against a Discogs-sourced request per #501). Dispatch on the id
-    shape the same way ``browse.py::get_release_group`` does: numeric ⇒
-    Discogs. ``compute_beets_distance`` is source-agnostic (the
-    YouTube resolver already scores Discogs releases through it via the
-    same ``get_release``-shaped callable) — no MB<->Discogs adapter
-    needed.
-
-    Status-code mapping:
-      * 200 — ``ok`` (distance is in ``response.distance``)
-      * 404 — ``download_log_not_found`` / ``request_not_found``
-      * 410 — ``folder_missing`` / ``no_audio`` (the data the caller
-              wanted to compare against is gone)
-      * 422 — ``mb_no_release_group`` / ``wrong_release_group``
-              (semantic input violations — including the
-              cross-release-group guardrail)
-      * 503 — ``mb_lookup_failed`` (MB mirror transient)
-      * 500 — ``distance_failed`` (unexpected beets error)
-    """
-    from lib.beets_distance import compute_beets_distance
-
-    try:
-        download_log_id = int(download_log_id_str)
-    except (TypeError, ValueError):
-        h._error("Invalid download_log_id")
-        return
-
-    if detect_release_source(mbid) == "discogs":
-        get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
-    else:
-        get_release_fn = lambda m: mb_api.get_release(m, fresh=False)
-
-    s = _server()
-    result = compute_beets_distance(
-        download_log_id,
-        mbid,
-        pdb=s._db(),
-        mb_get_release=get_release_fn,
-        cache=_RedisFingerprintCache(),
-    )
-
-    status = _BEETS_DISTANCE_OUTCOME_STATUS.get(result.outcome, 500)
-    payload = msgspec.to_builtins(result)
-    h._json(payload, status=status)
-
-
 ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/pipeline/log", get_pipeline_log,
@@ -2077,23 +1510,6 @@ ROUTES: list[RouteRegistration] = [
         classified=True,
     ),
     route(
-        "GET", "/api/pipeline/dashboard", get_pipeline_dashboard,
-        "Operational metrics for the dashboard subtab (searches, "
-        "cycles, redis).",
-        classified=True,
-    ),
-    route(
-        "GET", "/api/pipeline/constants", get_pipeline_constants,
-        "Decision tree structure + thresholds for the Decisions diagram.",
-        classified=True,
-    ),
-    route(
-        "GET", "/api/pipeline/simulate", get_pipeline_simulate,
-        "Run the full pipeline decision with query-string inputs "
-        "(simulator).",
-        classified=True,
-    ),
-    route(
         "GET", "/api/import-jobs", get_import_jobs,
         "Recent import-queue jobs filtered by status / request_id.",
         classified=True,
@@ -2108,17 +1524,6 @@ ROUTES: list[RouteRegistration] = [
         "GET", "/api/pipeline/active-rgs", get_pipeline_active_rgs,
         "Distinct release-group IDs held by any non-replaced request "
         "(Replace-button enable set).",
-        classified=True,
-    ),
-    # /api/beets-distance/<download_log_id>/<mbid> — real beets distance
-    # for one (download_log_id, mbid) pair. mbid may be an MB UUID or a
-    # bare Discogs numeric id (#530). See get_beets_distance above.
-    pattern_route(
-        "GET", r"^/api/beets-distance/(\d+)/([a-f0-9-]{36}|\d+)$",
-        get_beets_distance,
-        "Real beets match distance for one (download_log_id, mbid) pair "
-        "(mbid may be an MB UUID or a Discogs numeric id); refuses "
-        "cross-release-group comparisons.",
         classified=True,
     ),
     pattern_route(
@@ -2180,18 +1585,6 @@ ROUTES: list[RouteRegistration] = [
         "POST", "/api/pipeline/delete", post_pipeline_delete,
         "Delete a pipeline request (blocked when a superseding "
         "request exists).",
-        classified=True,
-    ),
-    pattern_route(
-        "POST", r"^/api/pipeline/(\d+)/replace$", post_pipeline_replace,
-        "Supersede the source request with a new row at a different "
-        "release id (MB UUID or Discogs numeric id) in the same "
-        "release group/master, same pathway as the source.",
-        classified=True,
-    ),
-    pattern_route(
-        "POST", r"^/api/pipeline/(\d+)/resolve-rg$", post_pipeline_resolve_rg,
-        "Lazy-backfill mb_release_group_id for a legacy request row.",
         classified=True,
     ),
 ]
