@@ -16,7 +16,11 @@ from lib.import_evidence import (
     ensure_current_evidence_for_action,
     load_current_evidence_for_action,
 )
-from lib.quality import AlbumQualityEvidence, QualityRankConfig
+from lib.quality import (
+    AlbumQualityEvidence,
+    AudioQualityMeasurement,
+    QualityRankConfig,
+)
 from lib.quality_evidence import (
     EvidenceBuildResult,
     snapshot_audio_files,
@@ -68,6 +72,35 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         persisted = self.db.find_album_quality_evidence(
             mb_release_id=evidence.mb_release_id,
             snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_request_current_evidence(42, persisted.id)
+        return persisted.id
+
+    def _persist_lossless_transcode_current_without_v0(self) -> int:
+        stale_evidence = make_album_quality_evidence(
+            mb_release_id="release-1",
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=108,
+                avg_bitrate_kbps=114,
+                median_bitrate_kbps=114,
+                format="Opus",
+                is_cbr=False,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                verified_lossless=False,
+                was_converted_from="flac",
+            ),
+            v0_metric=None,
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(stale_evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=stale_evidence.mb_release_id,
+            snapshot_fingerprint=stale_evidence.snapshot_fingerprint,
         )
         assert persisted is not None and persisted.id is not None
         self.db.set_request_current_evidence(42, persisted.id)
@@ -190,6 +223,75 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         )
         assert result.evidence is not None
         self.assertEqual(result.evidence.measurement.min_bitrate_kbps, 230)
+
+    def test_lossless_transcode_current_evidence_missing_v0_backfills(self):
+        self.db.update_request_fields(
+            42,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128,
+            current_lossless_source_v0_probe_min_bitrate=189,
+            current_lossless_source_v0_probe_avg_bitrate=195,
+            current_lossless_source_v0_probe_median_bitrate=195,
+        )
+        self._persist_lossless_transcode_current_without_v0()
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=108,
+                avg_bitrate_kbps=114,
+                median_bitrate_kbps=114,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.provenance.current_status, "backfilled")
+        self.assertIn(
+            "lossless-source V0 metric is required",
+            result.provenance.fallback_reason or "",
+        )
+        assert result.evidence is not None
+        assert result.evidence.v0_metric is not None
+        self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 195)
+
+    def test_lossless_transcode_current_evidence_missing_v0_fails_closed(self):
+        stale_evidence_id = self._persist_lossless_transcode_current_without_v0()
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_album_path=self.root,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=108,
+                avg_bitrate_kbps=114,
+                median_bitrate_kbps=114,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.provenance.snapshot_guard, "matched")
+        self.assertIn(
+            "lossless-source V0 metric is required",
+            result.provenance.fallback_reason or "",
+        )
+        self.assertEqual(
+            self.db.get_request_current_evidence_id(42),
+            stale_evidence_id,
+        )
 
     def test_stale_current_evidence_is_not_reused_as_preloaded_backfill(self):
         self._persist_current()

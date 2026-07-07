@@ -13,7 +13,12 @@ from typing import Any, Callable
 
 import msgspec
 
-from lib.quality import AlbumQualityEvidence, QualityRankConfig
+from lib.quality import (
+    LOSSLESS_CODECS,
+    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    AlbumQualityEvidence,
+    QualityRankConfig,
+)
 from lib.quality_evidence import (
     EvidenceBuildResult,
     QualityEvidenceDB,
@@ -133,6 +138,7 @@ def ensure_current_evidence_for_action(
 ) -> CurrentEvidenceActionResult:
     """Load or backfill current Beets evidence with action provenance."""
 
+    request_row = db.get_request(request_id)
     existing_id = db.get_request_current_evidence_id(request_id)
     existing = (
         db.load_album_quality_evidence_by_id(existing_id)
@@ -140,12 +146,22 @@ def ensure_current_evidence_for_action(
         else None
     )
     existing_snapshot_stale = False
+    existing_requires_lossless_source_v0 = False
     if existing is not None:
-        errors = existing.policy_incomplete_reasons()
-        if not errors and (
+        existing_requires_lossless_source_v0 = _requires_lossless_source_v0_metric(
+            existing,
+            request_row,
+        )
+        errors = _current_action_incomplete_reasons(
+            existing,
+            request_row,
+            require_lossless_source_v0=existing_requires_lossless_source_v0,
+        )
+        snapshot_matches = (
             current_album_path is None
             or audio_snapshot_matches(current_album_path, existing.files)
-        ):
+        )
+        if not errors and snapshot_matches:
             return CurrentEvidenceActionResult(
                 evidence=existing,
                 provenance=ActionEvidenceProvenance(
@@ -158,14 +174,32 @@ def ensure_current_evidence_for_action(
                     ),
                 )
         existing_snapshot_stale = (
-            current_album_path is not None
-            and not audio_snapshot_matches(current_album_path, existing.files)
+            current_album_path is not None and not snapshot_matches
         )
         fallback_reason = (
             "; ".join(errors)
             if errors
             else "current album files changed since evidence capture"
         )
+        if (
+            errors
+            and existing_requires_lossless_source_v0
+            and not existing_snapshot_stale
+            and not _request_has_current_lossless_source_v0(request_row)
+        ):
+            return CurrentEvidenceActionResult(
+                evidence=None,
+                provenance=ActionEvidenceProvenance(
+                    current_status=CURRENT_STATUS_FAILED,
+                    snapshot_guard=(
+                        SNAPSHOT_GUARD_MATCHED
+                        if current_album_path is not None
+                        else SNAPSHOT_GUARD_NOT_CHECKED
+                    ),
+                    fallback_reason=fallback_reason,
+                    fail_closed=True,
+                ),
+            )
     else:
         fallback_reason = "no current evidence found"
 
@@ -211,16 +245,31 @@ def ensure_current_evidence_for_action(
         )
 
     if backfilled.evidence is not None:
-        if backfill_builder is not None:
-            db.upsert_album_quality_evidence(backfilled.evidence)
-        return CurrentEvidenceActionResult(
-            evidence=backfilled.evidence,
-            provenance=ActionEvidenceProvenance(
-                current_status=CURRENT_STATUS_BACKFILLED,
-                snapshot_guard=SNAPSHOT_GUARD_MATCHED,
-                fallback_reason=fallback_reason,
+        backfilled_errors = _current_action_incomplete_reasons(
+            backfilled.evidence,
+            request_row,
+            require_lossless_source_v0=(
+                existing_requires_lossless_source_v0
+                and not existing_snapshot_stale
             ),
         )
+        if backfilled_errors:
+            backfilled = EvidenceBuildResult(
+                None,
+                "incomplete",
+                "; ".join(backfilled_errors),
+            )
+        else:
+            if backfill_builder is not None:
+                db.upsert_album_quality_evidence(backfilled.evidence)
+            return CurrentEvidenceActionResult(
+                evidence=backfilled.evidence,
+                provenance=ActionEvidenceProvenance(
+                    current_status=CURRENT_STATUS_BACKFILLED,
+                    snapshot_guard=SNAPSHOT_GUARD_MATCHED,
+                    fallback_reason=fallback_reason,
+                ),
+            )
 
     return CurrentEvidenceActionResult(
         evidence=None,
@@ -234,6 +283,60 @@ def ensure_current_evidence_for_action(
             fallback_reason=backfilled.reason or fallback_reason,
             fail_closed=True,
         ),
+    )
+
+
+def _current_action_incomplete_reasons(
+    evidence: AlbumQualityEvidence,
+    request_row: dict[str, Any] | None,
+    *,
+    require_lossless_source_v0: bool = False,
+) -> list[str]:
+    reasons = evidence.policy_incomplete_reasons()
+    if (
+        (require_lossless_source_v0 or _requires_lossless_source_v0_metric(
+            evidence,
+            request_row,
+        ))
+        and not _has_lossless_source_v0_metric(evidence)
+    ):
+        reasons.append(
+            "lossless-source V0 metric is required for converted current evidence"
+        )
+    return reasons
+
+
+def _requires_lossless_source_v0_metric(
+    evidence: AlbumQualityEvidence,
+    request_row: dict[str, Any] | None,
+) -> bool:
+    if _request_has_current_lossless_source_v0(request_row):
+        return True
+    converted_from = (evidence.measurement.was_converted_from or "").lower()
+    return converted_from in LOSSLESS_CODECS
+
+
+def _request_has_current_lossless_source_v0(
+    request_row: dict[str, Any] | None,
+) -> bool:
+    if request_row is None:
+        return False
+    return any(
+        request_row.get(field) is not None
+        for field in (
+            "current_lossless_source_v0_probe_min_bitrate",
+            "current_lossless_source_v0_probe_avg_bitrate",
+            "current_lossless_source_v0_probe_median_bitrate",
+        )
+    )
+
+
+def _has_lossless_source_v0_metric(evidence: AlbumQualityEvidence) -> bool:
+    metric = evidence.v0_metric
+    return (
+        metric is not None
+        and metric.source_lineage == V0_SOURCE_LINEAGE_LOSSLESS_SOURCE
+        and metric.avg_bitrate_kbps is not None
     )
 
 
