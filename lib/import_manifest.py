@@ -79,6 +79,26 @@ def _allocate_leftover_target(src_path: str) -> str:
     return target_path
 
 
+def manifest_trace_summary(files: Iterable["DownloadFile"]) -> str:
+    """One-line disc-coverage summary of a download manifest (log-only).
+
+    Renders ``files=<n> discs={<disk_no>:<count>,...}`` so ``MANIFEST-TRACE``
+    log lines expose, at each lifecycle seam, whether a multi-disc grab is
+    under-covering (issue: partial-disc manifest → false ``untracked_audio``).
+    Purely diagnostic — never influences a decision.
+    """
+    file_list = list(files)
+    counts: dict[Any, int] = {}
+    for file in file_list:
+        key = getattr(file, "disk_no", None)
+        counts[key] = counts.get(key, 0) + 1
+    disc_str = ",".join(
+        f"{key}:{counts[key]}"
+        for key in sorted(counts, key=lambda value: (value is None, value))
+    )
+    return f"files={len(file_list)} discs={{{disc_str}}}"
+
+
 def audio_relative_paths(root: str) -> list[str]:
     """Return relative audio paths under ``root`` in stable order."""
     paths: list[str] = []
