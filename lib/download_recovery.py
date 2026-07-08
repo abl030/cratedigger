@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Literal
 
 from lib.processing_paths import (
+    attempt_fingerprint,
     canonical_processing_path,
     normalize_processing_path,
     path_is_within_root,
@@ -99,12 +100,20 @@ def _recovery_candidates(
     request_id: int,
     staging_dir: str,
     slskd_download_dir: str,
+    attempt_fingerprint: str = "",
 ) -> tuple[ProcessingPathLocation, ...]:
+    # Deliberately NO bare (un-fingerprinted) canonical fallback candidate:
+    # forward-only data assumptions (scope.md). Rows that were mid-download
+    # across the #550-phase-2 deploy window are an operator one-shot at
+    # deploy time (drain or reset the in-flight cohort), not a permanent
+    # compat branch — a bare-path candidate would quietly re-open the
+    # cross-attempt accumulation this refactor exists to kill.
     canonical_path = canonical_processing_path(
         artist=artist,
         title=title,
         year=year,
         slskd_download_dir=slskd_download_dir,
+        attempt_fingerprint=attempt_fingerprint,
     )
     return (
         ProcessingPathLocation(path=canonical_path, kind="canonical"),
@@ -190,6 +199,7 @@ def classify_processing_path(
     request_id: int,
     staging_dir: str,
     slskd_download_dir: str,
+    attempt_fingerprint: str = "",
 ) -> ProcessingPathLocation:
     """Classify a persisted current_path against the active download seam."""
     canonical_path = canonical_processing_path(
@@ -197,6 +207,7 @@ def classify_processing_path(
         title=title,
         year=year,
         slskd_download_dir=slskd_download_dir,
+        attempt_fingerprint=attempt_fingerprint,
     )
     if normalize_processing_path(current_path) == normalize_processing_path(
         canonical_path,
@@ -252,6 +263,7 @@ def resolve_missing_current_path(
     staging_dir: str,
     slskd_download_dir: str,
     has_entries: Callable[[str], bool],
+    attempt_fingerprint: str = "",
 ) -> ResumeRecoveryDecision:
     """Resolve a missing current_path by probing the known recovery locations."""
     candidates = _recovery_candidates(
@@ -261,6 +273,7 @@ def resolve_missing_current_path(
         request_id=request_id,
         staging_dir=staging_dir,
         slskd_download_dir=slskd_download_dir,
+        attempt_fingerprint=attempt_fingerprint,
     )
     return _resolve_recovery_candidates(
         candidates,
@@ -278,6 +291,7 @@ def reconcile_processing_current_path(
     staging_dir: str,
     slskd_download_dir: str,
     has_entries: Callable[[str], bool],
+    attempt_fingerprint: str = "",
 ) -> ResumeRecoveryDecision:
     """Resolve the best local path for a row already in local processing.
 
@@ -294,6 +308,7 @@ def reconcile_processing_current_path(
         request_id=request_id,
         staging_dir=staging_dir,
         slskd_download_dir=slskd_download_dir,
+        attempt_fingerprint=attempt_fingerprint,
     )
     if current_path is None:
         return _resolve_recovery_candidates(
@@ -309,6 +324,7 @@ def reconcile_processing_current_path(
         request_id=request_id,
         staging_dir=staging_dir,
         slskd_download_dir=slskd_download_dir,
+        attempt_fingerprint=attempt_fingerprint,
     )
     if current_location.kind != "canonical" or has_entries(current_location.path):
         return ResumeRecoveryDecision(
@@ -321,6 +337,21 @@ def reconcile_processing_current_path(
         candidates,
         has_entries=has_entries,
     )
+
+
+def _row_files_fingerprint(files: list[object]) -> str:
+    """Fingerprint a raw JSONB ``active_download_state.files`` list.
+
+    Mirrors ``lib.download_processing._attempt_fingerprint_for`` for the
+    typed ``DownloadFile`` side — MUST derive from the same (username,
+    filename) pairs so the repair scanner's classification never
+    disagrees with the runtime poller's (issue #550 phase 2).
+    """
+    return attempt_fingerprint([
+        (str(f.get("username") or ""), str(f.get("filename") or ""))
+        for f in files
+        if isinstance(f, dict)
+    ])
 
 
 def find_blocked_recovery_issues(
@@ -368,6 +399,7 @@ def find_blocked_recovery_issues(
             staging_dir=staging_dir,
             slskd_download_dir=slskd_download_dir,
             has_entries=has_entries,
+            attempt_fingerprint=_row_files_fingerprint(files),
         )
         if recovery_decision.blocked_reason == "multiple_populated_paths":
             rendered_candidates = ", ".join(
@@ -442,6 +474,7 @@ def find_blocked_processing_path_issues(
             staging_dir=staging_dir,
             slskd_download_dir=slskd_download_dir,
             has_entries=has_entries,
+            attempt_fingerprint=_row_files_fingerprint(files),
         )
         if recovery_decision.blocked_reason == "multiple_populated_paths":
             rendered_candidates = ", ".join(

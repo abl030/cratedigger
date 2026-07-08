@@ -1487,6 +1487,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     def test_persists_canonical_current_path_for_fresh_materialization(self):
         """The first local materialization must persist the canonical path to DB."""
         from lib.download_processing import Completed, process_completed_album
+        from lib.processing_paths import attempt_fingerprint
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_db = FakePipelineDB()
@@ -1521,10 +1522,11 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
+            fp = attempt_fingerprint([("user1", "user1\\Music\\01 - Track.mp3")])
             self.assertIsInstance(result, Completed)
             self.assertEqual(
                 fake_db.request(42)["active_download_state"]["current_path"],
-                os.path.join(tmpdir, "downloads", "Artist - Album (2024)"),
+                os.path.join(tmpdir, "downloads", f"Artist - Album (2024) [{fp}]"),
             )
 
     @patch("lib.beets.beets_validate")
@@ -1857,8 +1859,16 @@ class TestEventPathMaterialization(unittest.TestCase):
         cfg.beets_validation_enabled = False
         return album, ctx
 
-    def _moved(self, tmpdir):
-        return os.listdir(os.path.join(tmpdir, "Radiohead - Kid A (2000)"))
+    def _canonical_dir(self, tmpdir, files):
+        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
+        fp = attempt_fingerprint([(f.username, f.filename) for f in files])
+        return canonical_processing_path(
+            artist="Radiohead", title="Kid A", year="2000",
+            slskd_download_dir=tmpdir, attempt_fingerprint=fp,
+        )
+
+    def _moved(self, tmpdir, files):
+        return os.listdir(self._canonical_dir(tmpdir, files))
 
     def test_stamped_file_moves_with_clean_basename(self):
         # slskd placed the file at an arbitrary event-reported location
@@ -1879,7 +1889,7 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             self.assertIsInstance(result, Completed)
             self.assertFalse(os.path.exists(event_path))
-            self.assertEqual(self._moved(tmpdir), [self.FNAME])
+            self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
 
     def test_stamped_forward_slash_remote_path_keeps_basename(self):
         # Destination basename extraction accepts slash-normalized remote
@@ -1908,7 +1918,7 @@ class TestEventPathMaterialization(unittest.TestCase):
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
-            self.assertEqual(self._moved(tmpdir), [self.FNAME])
+            self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
 
     def test_unstamped_file_is_hard_failure(self):
         # No event was ever ingested for this file (pre-bootstrap
@@ -2003,17 +2013,17 @@ class TestEventPathMaterialization(unittest.TestCase):
         from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            dst_dir = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
+            album, ctx = self._album(
+                tmpdir, local_path=os.path.join(tmpdir, "Kid A", self.FNAME))
+            dst_dir = self._canonical_dir(tmpdir, album.files)
             os.makedirs(dst_dir)
             with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
                 fp.write("fake audio")
-            album, ctx = self._album(
-                tmpdir, local_path=os.path.join(tmpdir, "Kid A", self.FNAME))
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
-            self.assertEqual(self._moved(tmpdir), [self.FNAME])
+            self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
 
     def test_unstamped_already_moved_resume_still_skips(self):
         # Even an unstamped file counts as already moved when the
@@ -2021,16 +2031,100 @@ class TestEventPathMaterialization(unittest.TestCase):
         from lib.download_processing import Completed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            dst_dir = os.path.join(tmpdir, "Radiohead - Kid A (2000)")
+            album, ctx = self._album(tmpdir, local_path=None)
+            dst_dir = self._canonical_dir(tmpdir, album.files)
             os.makedirs(dst_dir)
             with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
                 fp.write("fake audio")
-            album, ctx = self._album(tmpdir, local_path=None)
 
             result = process_completed_album(album, [], ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
-            self.assertEqual(self._moved(tmpdir), [self.FNAME])
+            self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
+
+
+class TestAttemptScopedCanonicalFolder(unittest.TestCase):
+    """Issue #550 phase 2: the canonical processing folder must be keyed
+    to the attempt's own manifest, not just artist/title/year.
+
+    Before this fix, two different download attempts for the same
+    artist/title/year (e.g. a retry that grabbed from a different
+    Soulseek user after the first attempt was abandoned) shared the
+    SAME canonical folder. A stale prior attempt's leftover audio
+    silently blended into a fresh attempt's validation scope, producing
+    a false ``untracked_audio`` rejection (#550 defect #2). This test
+    proves a fresh attempt's materialized folder contains ONLY that
+    attempt's own manifest files — never files another attempt placed.
+    """
+
+    def test_materialize_never_blends_files_from_a_different_attempt(self):
+        from lib.download_processing import (
+            Materialized,
+            _canonical_import_folder_path,
+            _materialize_processing_dir,
+        )
+        from lib.staged_album import StagedAlbum
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = os.path.join(tmpdir, "downloads")
+            os.makedirs(download_root)
+
+            # A prior, DIFFERENT attempt (different source user/filename)
+            # already materialized into the bare artist/title/year folder
+            # and left an alien file behind — exactly what the pre-#550p2
+            # canonical folder would have been, regardless of which files
+            # produced it.
+            stale_dir = os.path.join(
+                download_root, "Test Artist - Test Album (2020)")
+            os.makedirs(stale_dir)
+            with open(os.path.join(stale_dir, "alien-track.flac"), "wb") as fp:
+                fp.write(b"alien audio from a different attempt")
+
+            # This attempt's real, event-stamped source file — a
+            # different (username, filename) pair than whatever produced
+            # the stale folder above.
+            source_dir = os.path.join(download_root, "user2", "Music")
+            os.makedirs(source_dir)
+            source_file = os.path.join(source_dir, "01 - Track.flac")
+            with open(source_file, "wb") as fp:
+                fp.write(b"this attempt's real audio")
+
+            stamped = make_download_file(
+                filename="user2\\Music\\01 - Track.flac",
+                file_dir="user2\\Music",
+                username="user2",
+            )
+            stamped.local_path = source_file
+            album = make_grab_list_entry(
+                files=[stamped],
+                artist="Test Artist",
+                title="Test Album",
+                year="2020",
+                mb_release_id="",
+            )
+            ctx = _make_ctx()
+            cfg = cast(Any, ctx.cfg)
+            cfg.slskd_download_dir = download_root
+
+            staged_album = StagedAlbum.from_entry(
+                album,
+                default_path=_canonical_import_folder_path(
+                    album, ctx.cfg.slskd_download_dir),
+            )
+            result = _materialize_processing_dir(album, staged_album, ctx)
+
+            self.assertIsInstance(result, Materialized)
+            # This attempt's own manifest fingerprint must route it to a
+            # folder distinct from the stale one.
+            self.assertNotEqual(staged_album.current_path, stale_dir)
+            validation_scope = os.listdir(staged_album.current_path)
+            self.assertEqual(validation_scope, ["01 - Track.flac"])
+            self.assertNotIn("alien-track.flac", validation_scope)
+            # The stale folder (a different attempt's manifest) is
+            # untouched — proves this isn't accidental cleanup, just
+            # non-collision.
+            self.assertEqual(
+                os.listdir(stale_dir), ["alien-track.flac"])
 
 
 class TestMaterializeFailureAction(unittest.TestCase):
@@ -3189,6 +3283,7 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_active_completion_queues_and_persists_processing_state(self):
         """Completion should leave persisted state for the importer to resume."""
         from lib.download import poll_active_downloads
+        from lib.processing_paths import attempt_fingerprint
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
@@ -3211,8 +3306,10 @@ class TestPollActiveDownloads(unittest.TestCase):
         persisted = self._download_state(fake_db)
         self.assertIsNotNone(persisted["processing_started_at"])
         self.assertIsNotNone(persisted["current_path"])
+        fp = attempt_fingerprint([("user1", "user1\\Music\\01.flac")])
         self.assertTrue(
-            persisted["current_path"].endswith("Test Artist - Test Album (2020)")
+            persisted["current_path"].endswith(
+                f"Test Artist - Test Album (2020) [{fp}]")
         )
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
@@ -3258,27 +3355,30 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_legacy_processing_row_uses_canonical_fallback(self):
         """Legacy mid-processing rows without current_path still resume canonically."""
         from lib.download import poll_active_downloads
-        from lib.processing_paths import canonical_processing_path
+        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             downloads_root = os.path.join(tmpdir, "downloads")
+            files = [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ]
+            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
             canonical_path = canonical_processing_path(
                 artist="Test Artist",
                 title="Test Album",
                 year="2020",
                 slskd_download_dir=downloads_root,
+                attempt_fingerprint=fp,
             )
             os.makedirs(canonical_path)
-            with open(os.path.join(canonical_path, "01.flac"), "w") as fp:
-                fp.write("audio")
+            with open(os.path.join(canonical_path, "01.flac"), "w") as fp_handle:
+                fp_handle.write("audio")
             row = self._make_downloading_row(state_dict={
                 "filetype": "flac",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
+                "files": files,
             })
             ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
@@ -3346,16 +3446,27 @@ class TestPollActiveDownloads(unittest.TestCase):
     ):
         """A stale canonical current_path must recover to the staged location."""
         from lib.download import poll_active_downloads
-        from lib.processing_paths import canonical_processing_path, stage_to_ai_path
+        from lib.processing_paths import (
+            attempt_fingerprint, canonical_processing_path, stage_to_ai_path,
+        )
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             downloads_root = os.path.join(tmpdir, "downloads")
             staging_root = os.path.join(tmpdir, "staging")
+            files = [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ]
+            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
+            # current_path IS the real (fp'd) canonical location — it's
+            # just stale/empty on disk, which is what should trigger the
+            # staged-recovery fallback below.
             canonical_path = canonical_processing_path(
                 artist="Test Artist",
                 title="Test Album",
                 year="2020",
                 slskd_download_dir=downloads_root,
+                attempt_fingerprint=fp,
             )
             staged_path = stage_to_ai_path(
                 artist="Test Artist",
@@ -3365,18 +3476,15 @@ class TestPollActiveDownloads(unittest.TestCase):
                 auto_import=True,
             )
             os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.flac"), "w") as fp:
-                fp.write("audio")
+            with open(os.path.join(staged_path, "01.flac"), "w") as fp_handle:
+                fp_handle.write("audio")
 
             row = self._make_downloading_row(state_dict={
                 "filetype": "flac",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
                 "current_path": canonical_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
+                "files": files,
             })
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
@@ -3430,28 +3538,31 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_legacy_processing_row_blocks_when_canonical_and_legacy_stage_both_exist(self):
         """Split legacy state must not pick one side and requeue the other."""
         from lib.download import poll_active_downloads
+        from lib.processing_paths import attempt_fingerprint
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
+            files = [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ]
+            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
             canonical_path = os.path.join(
-                tmpdir, "downloads", "Test Artist - Test Album (2020)")
+                tmpdir, "downloads", f"Test Artist - Test Album (2020) [{fp}]")
             os.makedirs(canonical_path)
-            with open(os.path.join(canonical_path, "01.flac"), "w") as fp:
-                fp.write("audio")
+            with open(os.path.join(canonical_path, "01.flac"), "w") as fp_handle:
+                fp_handle.write("audio")
 
             staging_root = os.path.join(tmpdir, "staging")
             staged_path = os.path.join(staging_root, "Test Artist", "Test Album")
             os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.flac"), "w") as fp:
-                fp.write("audio")
+            with open(os.path.join(staged_path, "01.flac"), "w") as fp_handle:
+                fp_handle.write("audio")
 
             row = self._make_downloading_row(state_dict={
                 "filetype": "flac",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
+                "files": files,
             })
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
@@ -3491,25 +3602,28 @@ class TestPollActiveDownloads(unittest.TestCase):
     def test_poll_missing_canonical_processing_path_queues_importer(self):
         """Missing canonical path can be pre-materialization, not post-move loss."""
         from lib.download import poll_active_downloads
-        from lib.processing_paths import canonical_processing_path
+        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
+            files = [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000},
+            ]
+            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
             current_path = canonical_processing_path(
                 artist="Test Artist",
                 title="Test Album",
                 year="2020",
                 slskd_download_dir=download_root,
+                attempt_fingerprint=fp,
             )
             row = self._make_downloading_row(state_dict={
                 "filetype": "flac",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
                 "current_path": current_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
+                "files": files,
             })
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
@@ -3545,15 +3659,24 @@ class TestPollActiveDownloads(unittest.TestCase):
         rmtrees the source and repoints current_path in the normal flow).
         """
         from lib.download import poll_active_downloads
-        from lib.processing_paths import canonical_processing_path
+        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
+            files = [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000,
+                 # Unstamped: no event-stamped local_path, so
+                 # materialize cannot recover -> event_path_missing.
+                 "local_path": None},
+            ]
+            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
             canonical_path = canonical_processing_path(
                 artist="Test Artist",
                 title="Test Album",
                 year="2020",
                 slskd_download_dir=download_root,
+                attempt_fingerprint=fp,
             )
             # Dir EXISTS (empty) but the tracked file is absent.
             os.makedirs(canonical_path)
@@ -3562,13 +3685,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
                 "current_path": canonical_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000,
-                     # Unstamped: no event-stamped local_path, so
-                     # materialize cannot recover -> event_path_missing.
-                     "local_path": None},
-                ],
+                "files": files,
             })
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
@@ -3600,17 +3717,24 @@ class TestPollActiveDownloads(unittest.TestCase):
             MaterializeFailed,
             _materialize_processing_dir,
         )
-        from lib.processing_paths import canonical_processing_path
+        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         from lib.quality import ActiveDownloadState
         from lib.staged_album import StagedAlbum
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
+            files = [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000,
+                 "local_path": None},
+            ]
+            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
             canonical_path = canonical_processing_path(
                 artist="Test Artist",
                 title="Test Album",
                 year="2020",
                 slskd_download_dir=download_root,
+                attempt_fingerprint=fp,
             )
             os.makedirs(canonical_path)
             row = self._make_downloading_row(state_dict={
@@ -3618,11 +3742,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
                 "current_path": canonical_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000,
-                     "local_path": None},
-                ],
+                "files": files,
             })
             ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
             cfg = cast(Any, ctx.cfg)
@@ -4080,16 +4200,17 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
-    def test_poll_overlong_album_title_does_not_starve_other_rows(self):
-        """ENAMETOOLONG in canonical-path makedirs must not abort the loop.
+    def test_poll_overlong_album_title_truncates_and_processes(self):
+        """Overlong artist/title now truncates to ext4's 255-byte limit.
 
-        Real failure: a Sade row with 240+ char artist + title produced a
-        canonical path > ext4's 255-byte component limit. ``os.makedirs``
-        raised ``OSError(36)`` which propagated through
-        ``_enqueue_completed_processing`` and killed the per-row for-loop
-        in ``poll_active_downloads``. Because ``get_downloading()`` orders
-        by ``updated_at ASC``, a single poison row starved every later
-        row from getting its import job enqueued.
+        History: a Sade row with 240+ char artist + title produced a
+        canonical path over the 255-byte component limit; os.makedirs
+        raised OSError(36) and (pre-guard) starved later rows. Since the
+        #550-phase-2 fingerprint suffix, canonical_processing_path
+        byte-truncates the base name, so the row now materializes and
+        imports instead of failing. Loop containment for genuinely
+        unexpected per-row exceptions stays pinned by
+        test_poll_continues_after_per_row_unexpected_exception.
         """
         from lib.download import poll_active_downloads
         long_name = "X" * 250
@@ -4127,16 +4248,17 @@ class TestPollActiveDownloads(unittest.TestCase):
             downloading_rows=[poison, healthy], slskd_downloads=[],
         )
 
-        # Must not raise — the poison row's ENAMETOOLONG must be caught
-        # inside _materialize_processing_dir (or by the per-row guard).
         poll_active_downloads(ctx)
 
         self.assertEqual(
             len(fake_db.list_import_jobs(request_id=2)), 1,
-            "Healthy row never got an import job — poison row killed the loop",
+            "Healthy row never got an import job",
         )
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 0)
+        # The overlong row now truncates and processes like any other.
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
+        state = fake_db.request(1)["active_download_state"]
+        folder = state["current_path"].rsplit("/", 1)[-1]
+        self.assertLessEqual(len(folder.encode("utf-8")), 255)
 
     def test_poll_continues_after_per_row_unexpected_exception(self):
         """Belt-and-braces: any unhandled per-row exception must not abort the loop.

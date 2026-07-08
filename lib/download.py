@@ -37,7 +37,7 @@ from lib.download_recovery import (
     reconcile_processing_current_path,
 )
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.processing_paths import directory_has_entries
+from lib.processing_paths import attempt_fingerprint, directory_has_entries
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
                          DownloadDecision,
@@ -660,6 +660,9 @@ def _processing_path_ready_for_importer(
         request_id=request_id,
         staging_dir=ctx.cfg.beets_staging_dir,
         slskd_download_dir=ctx.cfg.slskd_download_dir,
+        attempt_fingerprint=attempt_fingerprint(
+            [(f.username, f.filename) for f in entry.files],
+        ),
     )
     if current_path_location.kind == "canonical":
         # The canonical processing folder may not exist yet — the
@@ -822,6 +825,9 @@ def _poll_one_active_download(
             staging_dir=ctx.cfg.beets_staging_dir,
             slskd_download_dir=ctx.cfg.slskd_download_dir,
             has_entries=directory_has_entries,
+            attempt_fingerprint=attempt_fingerprint(
+                [(f.username, f.filename) for f in state.files],
+            ),
         )
         if recovery_decision.blocked_reason == "multiple_populated_paths":
             rendered_candidates = ", ".join(

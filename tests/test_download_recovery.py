@@ -9,7 +9,7 @@ from lib.download_recovery import (
     reconcile_processing_current_path,
     resolve_missing_current_path,
 )
-from lib.processing_paths import canonical_processing_path
+from lib.processing_paths import attempt_fingerprint, canonical_processing_path
 
 
 class TestClassifyProcessingPath(unittest.TestCase):
@@ -500,6 +500,13 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
         self.assertIn("has no mb_release_id so auto-import cannot resume", issues[0].detail)
 
     def test_skips_stale_canonical_current_path_with_request_scoped_recovery(self):
+        # current_path IS the real (fingerprinted) canonical location for
+        # this row's files — it's just stale/empty on disk, which is what
+        # should trigger the staged-recovery fallback below (#550 phase 2:
+        # the canonical candidate must be keyed to the SAME file set as
+        # the persisted current_path or it never classifies as
+        # "canonical" in the first place).
+        fp = attempt_fingerprint([("user1", "track.flac")])
         issues = find_blocked_processing_path_issues(
             [{
                 "id": 1,
@@ -510,7 +517,9 @@ class TestFindBlockedProcessingPathIssues(unittest.TestCase):
                 "active_download_state": {
                     "filetype": "flac",
                     "processing_started_at": "2026-04-22T00:00:00+00:00",
-                    "current_path": "/tmp/downloads/Test Artist - Test Album (2020)",
+                    "current_path": (
+                        f"/tmp/downloads/Test Artist - Test Album (2020) [{fp}]"
+                    ),
                     "files": [{
                         "username": "user1",
                         "filename": "track.flac",
