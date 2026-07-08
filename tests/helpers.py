@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
+    V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -176,6 +177,175 @@ def make_album_quality_evidence(
         target_format=target_format,
         v0_metric=v0_metric,
         verified_lossless_proof=verified_lossless_proof,
+    )
+
+
+def build_parity_candidate_evidence(
+    *,
+    is_flac: bool,
+    min_bitrate: int,
+    is_cbr: bool,
+    avg_bitrate: int | None = None,
+    spectral_grade: str | None = None,
+    spectral_bitrate: int | None = None,
+    post_conversion_min_bitrate: int | None = None,
+    candidate_v0_probe_avg: int | None = None,
+    candidate_v0_probe_min: int | None = None,
+    native_codec: str = "mp3",
+    native_format: str = "MP3",
+    mb_release_id: str = "mbid-parity-candidate",
+    audio_corrupt: bool = False,
+    folder_layout: str = "flat",
+    audio_file_count: int | None = None,
+    matched_bad_audio_hash_id: int | None = None,
+    matched_bad_audio_hash_path: str | None = None,
+    snapshot_fingerprint: str = "sha256:candidate-fingerprint",
+) -> AlbumQualityEvidence:
+    """Build an ``AlbumQualityEvidence`` candidate row matching the
+    simulator's flat-kwargs shape (post-U2/U3 schema).
+
+    This is the canonical simulator-world → evidence-row mapping. The
+    hand-written parity tests in ``tests/test_quality_classification.py``
+    and the generated parity property in ``tests/test_quality_generated.py``
+    both consume it, so a divergence between the decision twins can never
+    hide behind two different world encodings.
+    """
+    # For a FLAC source post-conversion, the candidate measurement
+    # reflects the V0 output the importer compares against.
+    if is_flac and post_conversion_min_bitrate is not None:
+        fmt = "MP3"
+        container = "flac"
+        codec = "flac"
+        storage_format = "flac"
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=post_conversion_min_bitrate,
+            avg_bitrate_kbps=candidate_v0_probe_avg or post_conversion_min_bitrate,
+            median_bitrate_kbps=candidate_v0_probe_avg or post_conversion_min_bitrate,
+            format=fmt,
+            is_cbr=False,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+            was_converted_from="flac",
+        )
+    elif is_flac:
+        container = codec = "flac"
+        storage_format = "flac"
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=min_bitrate or 900,
+            avg_bitrate_kbps=min_bitrate or 900,
+            median_bitrate_kbps=min_bitrate or 900,
+            format="FLAC",
+            is_cbr=False,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+        )
+    else:
+        container = codec = native_codec
+        if native_codec == "mp3":
+            storage_format = "mp3 v0" if not is_cbr else "mp3 320"
+        else:
+            storage_format = native_format.lower()
+        _avg = avg_bitrate if avg_bitrate is not None else min_bitrate
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=min_bitrate,
+            avg_bitrate_kbps=_avg,
+            median_bitrate_kbps=_avg,
+            format=native_format,
+            is_cbr=is_cbr,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+        )
+
+    v0_metric = None
+    if candidate_v0_probe_avg is not None or candidate_v0_probe_min is not None:
+        v0_metric = AlbumQualityV0Metric(
+            min_bitrate_kbps=candidate_v0_probe_min,
+            avg_bitrate_kbps=candidate_v0_probe_avg,
+            median_bitrate_kbps=candidate_v0_probe_avg,
+            source_lineage=V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+            source_provenance="neutral_album_quality_evidence",
+        )
+
+    files = [AlbumQualityEvidenceFile(
+        relative_path=f"01.{container}",
+        size_bytes=1, mtime_ns=1,
+        extension=container, container=container, codec=codec,
+    )]
+    # ``audio_file_count`` defaults to len(files) for the standard
+    # parity scenarios. Tests covering empty_fileset explicitly pass
+    # ``audio_file_count=0`` and override ``files`` separately.
+    return AlbumQualityEvidence(
+        mb_release_id=mb_release_id,
+        snapshot_fingerprint=snapshot_fingerprint,
+        source_path="/Incoming/auto-import/candidate",
+        measurement=measurement,
+        measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        files=files,
+        codec=codec,
+        container=container,
+        storage_format=storage_format,
+        v0_metric=v0_metric,
+        audio_corrupt=audio_corrupt,
+        folder_layout=folder_layout,
+        audio_file_count=(
+            audio_file_count if audio_file_count is not None else len(files)
+        ),
+        filetype_band=storage_format,
+        matched_bad_audio_hash_id=matched_bad_audio_hash_id,
+        matched_bad_audio_hash_path=matched_bad_audio_hash_path,
+    )
+
+
+def build_parity_current_evidence(
+    *,
+    min_bitrate: int | None,
+    avg_bitrate: int | None = None,
+    format: str = "MP3",
+    is_cbr: bool = False,
+    spectral_grade: str | None = None,
+    spectral_bitrate: int | None = None,
+    mb_release_id: str = "mbid-parity-candidate",
+    v0_metric: AlbumQualityV0Metric | None = None,
+    matched_bad_audio_hash_id: int | None = None,
+    matched_bad_audio_hash_path: str | None = None,
+) -> AlbumQualityEvidence | None:
+    """Build the existing-album evidence row for parity scenarios.
+
+    Returns ``None`` when ``min_bitrate`` is ``None`` — the fresh-request
+    shape where no current album exists.
+    """
+    if min_bitrate is None:
+        return None
+
+    container = format.lower().split()[0]
+    files = [AlbumQualityEvidenceFile(
+        relative_path=f"01.{container}",
+        size_bytes=1, mtime_ns=1,
+        extension=container, container=container, codec=container,
+    )]
+    return AlbumQualityEvidence(
+        mb_release_id=mb_release_id,
+        snapshot_fingerprint="sha256:current-fingerprint",
+        source_path="/Beets/current",
+        measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=min_bitrate,
+            avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
+            median_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
+            format=format,
+            is_cbr=is_cbr,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate,
+        ),
+        measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        files=files,
+        codec=container,
+        container=container,
+        storage_format=format.lower(),
+        audio_file_count=len(files),
+        filetype_band=format.lower(),
+        v0_metric=v0_metric,
+        matched_bad_audio_hash_id=matched_bad_audio_hash_id,
+        matched_bad_audio_hash_path=matched_bad_audio_hash_path,
     )
 
 

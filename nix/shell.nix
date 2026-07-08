@@ -28,9 +28,10 @@ let
   #
   # Dev-only additions:
   #   - vulture: static dead-code finder (scripts/find_dead_code.sh)
+  #   - hypothesis: property-based generated tests (docs/generated-testing.md)
   testPythonEnv = pkgs.python3.withPackages (ps:
     cratedigger.pythonPackages ps
-    ++ [ ps.vulture ]
+    ++ [ ps.vulture ps.hypothesis ]
   );
 in
 pkgs.mkShell {
