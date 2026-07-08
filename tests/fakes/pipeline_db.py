@@ -3943,12 +3943,30 @@ class FakePipelineDB:
             if e.request_id == request_id
         ]
 
+    # Production's ``get_search_plan_stats_history`` SELECTs a NARROW,
+    # hand-listed column set (search_plan.py) — it deliberately excludes
+    # ``candidates`` AND the U11 forensics columns (pre_filter_skip_count,
+    # rejection_reason, result_count_uncapped, query_token_count,
+    # query_distinct_token_count, expected_track_count, matcher_score_top1,
+    # query_template) so inspection stats don't drag the wide row. The
+    # fake MUST mirror that exact projection (#546 W1 parity).
+    _SEARCH_PLAN_STATS_HISTORY_KEYS: tuple[str, ...] = (
+        "id", "request_id", "query", "result_count", "elapsed_s", "outcome",
+        "variant", "final_state", "browse_time_s", "match_time_s",
+        "peers_browsed", "peers_browsed_lazy", "fanout_waves",
+        "plan_id", "plan_item_id", "plan_ordinal", "plan_strategy",
+        "plan_canonical_query_key", "plan_repeat_group",
+        "plan_generator_id", "execution_stage", "attempt_consumed",
+        "cursor_update_status", "stale_reason", "plan_cycle_snapshot",
+        "created_at",
+    )
+
     def get_search_plan_stats_history(
         self, request_id: int,
     ) -> list[dict[str, object]]:
         rows = self.get_search_history(request_id)
         return [
-            {k: v for k, v in row.items() if k != "candidates"}
+            {k: row[k] for k in self._SEARCH_PLAN_STATS_HISTORY_KEYS}
             for row in rows
         ]
 
