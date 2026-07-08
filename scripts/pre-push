@@ -5,11 +5,12 @@
 #
 # Install: ln -sf ../../scripts/pre-push .git/hooks/pre-push
 #
-# Cost: the FIRST run per machine builds the moduleVm (a full NixOS VM
-# boot — several minutes) plus the eval checks and the CLI bundle.
-# Subsequent runs are Nix cache hits unless the relevant inputs changed;
-# a source change re-runs the VM (cratediggerSrc = ./.), which is the
-# point — the tree you push is the tree that booted.
+# Cost: a runtime-source change (lib/, web/, scripts/, harness/,
+# migrations/, the two root .py files) rebuilds the package + moduleVm —
+# ~1 min with KVM. Docs/tests-only pushes reuse the cached VM: the flake
+# filters src to the runtime fileset and the version is content-addressed
+# to it, so the derivation only changes when runtime content does. The
+# tree you push is still the tree that booted.
 #
 # Deliberate escape hatch: `git push --no-verify`.
 set -euo pipefail
@@ -21,13 +22,38 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 # Randomized generated-test burst (issue #548) — fresh entropy on every
 # push, so exploration of the decision/event state spaces accumulates
 # over time. Modules are discovered by pattern (test_*_generated.py); a
-# hand-maintained list would drift (issue #520 lesson). Runs BEFORE the
-# flake check: seconds of fuzz fail faster than minutes of VM boot.
-# A failure prints the shrunk world + a @reproduce_failure blob and is
-# remembered in .hypothesis/ — promote it per docs/generated-testing.md.
-echo "pre-push: generated-test fuzz burst (push profile)..." >&2
-(cd "$REPO_ROOT" && nix-shell --run \
-  "CRATEDIGGER_HYPOTHESIS_PROFILE=push python3 -m unittest discover -s tests -t . -p 'test_*_generated.py'")
+# hand-maintained list would drift (issue #520 lesson). Modules run in
+# PARALLEL, one process each: the burst is CPU-bound and single-threaded
+# per module, so wall-clock is the slowest module, not the sum. The
+# shared .hypothesis/ example database is multi-process safe. Runs
+# BEFORE the flake check: fuzz fails faster than a VM boot.
+# A failed module prints its full output (shrunk world + a
+# @reproduce_failure blob) and is remembered in .hypothesis/ — promote
+# it per docs/generated-testing.md.
+echo "pre-push: generated-test fuzz burst (push profile, sharded)..." >&2
+(cd "$REPO_ROOT" && nix-shell --run '
+  set -euo pipefail
+  logdir=$(mktemp -d)
+  trap "rm -rf $logdir" EXIT
+  pids=(); mods=()
+  for f in tests/test_*_generated.py; do
+    mod=${f%.py}; mod=${mod//\//.}
+    CRATEDIGGER_HYPOTHESIS_PROFILE=push python3 -m unittest "$mod" \
+      > "$logdir/$mod.log" 2>&1 &
+    pids+=($!); mods+=("$mod")
+  done
+  fail=0
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      echo "  ${mods[$i]}: OK" >&2
+    else
+      echo "  ${mods[$i]}: FAILED" >&2
+      cat "$logdir/${mods[$i]}.log" >&2
+      fail=1
+    fi
+  done
+  exit "$fail"
+')
 echo "pre-push: fuzz burst OK" >&2
 
 echo "pre-push: nix flake check (moduleVm + eval guards + CLI bundle)..." >&2
