@@ -122,6 +122,20 @@ def assert_obvious_downgrade_not_accepted(result: SimResult) -> None:
             f"obvious lower-rank lossy candidate accepted: {result!r}")
 
 
+def assert_below_gate_never_stops_search(result: SimResult) -> None:
+    """The archivist invariant at the post-import gate: importing an
+    obviously below-gate file must never end the search. Added after a
+    fault-injection run showed a gate-always-accepts mutant survived the
+    generated tier (the obvious-downgrade guard only covers worlds with an
+    existing album; fresh requests reached the gate unpinned)."""
+    if result.stage3_quality_gate == "accept":
+        raise AssertionError(
+            f"below-gate import was gate-accepted: {result!r}")
+    if not result.keep_searching:
+        raise AssertionError(
+            f"below-gate outcome stopped the search: {result!r}")
+
+
 _PARITY_FIELDS = (
     "imported",
     "keep_searching",
@@ -249,6 +263,32 @@ def obvious_lower_rank_lossy_downloads(draw) -> DownloadScenario:
     )
 
 
+@st.composite
+def below_gate_mp3_downloads(draw) -> DownloadScenario:
+    """MP3 candidates unambiguously below the default gate rank (EXCELLENT).
+
+    MP3-only on purpose: codec-aware ranks can legitimately place low-
+    bitrate Opus at or above the gate, so MP3 ≤128 kbps is the anchor
+    codec/bitrate for 'obviously below gate'."""
+    bitrate = draw(_bitrates(max_value=128))
+    is_cbr = draw(st.booleans())
+    return DownloadScenario(
+        name="generated_below_gate_mp3",
+        is_flac=False,
+        min_bitrate=bitrate,
+        is_cbr=is_cbr,
+        spectral_grade=draw(st.sampled_from(_GRADES)),
+        spectral_bitrate=draw(_optional_bitrates(max_value=128)),
+        new_format="MP3",
+        is_vbr=not is_cbr,
+        avg_bitrate=bitrate,
+    )
+
+
+_FRESH_ALBUM = AlbumState(
+    "generated_fresh_request", None, False, None, None, False, None)
+
+
 _TRANSPARENT_EXISTING_SHAPES = (
     # (min_bitrate, avg_bitrate, is_cbr) — MP3 320 CBR and MP3 V0.
     (320, 320, True),
@@ -292,6 +332,12 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             self, album, download):
         result = simulate(album, download)
         assert_obvious_downgrade_not_accepted(result)
+
+    @given(download=below_gate_mp3_downloads())
+    def test_fresh_request_below_gate_import_never_stops_search(
+            self, download):
+        result = simulate(_FRESH_ALBUM, download)
+        assert_below_gate_never_stops_search(result)
 
 
 # ===========================================================================
@@ -517,6 +563,22 @@ _MOUNTAIN_GOATS_FLUX_WORLD = ParityWorld(
     post_conversion_min_bitrate=198, v0_avg=211, v0_min=198,
     target_format=None, verified_lossless_target=None,
 )
+# Fault-injection pin (2026-07-08 mutation run): dropping the evidence
+# adapter's spectral-override derivation survived the suite AND push
+# entropy tiers — random worlds rarely make the override decisive. This
+# world makes it decisive deterministically: the existing 320 CBR album is
+# flagged likely_transcode at 96 kbps, so its effective quality is 96; a
+# 192 CBR candidate is an upgrade WITH the override and a downgrade
+# without it. The twins can only agree if both derive the override.
+_SPECTRAL_OVERRIDE_DECISIVE_WORLD = ParityWorld(
+    current_min=320, current_avg=320, current_format="MP3",
+    current_is_cbr=True, current_grade="likely_transcode",
+    current_spectral_bitrate=96, current_v0_avg=None,
+    candidate_kind="lossy", min_bitrate=192, is_cbr=True, avg_bitrate=192,
+    grade=None, spectral_bitrate=None, candidate_format="MP3",
+    converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
+    v0_min=None, target_format=None, verified_lossless_target=None,
+)
 _HERETIC_PRIDE_WORLD = ParityWorld(
     current_min=192, current_avg=192, current_format="MP3",
     current_is_cbr=False, current_grade="genuine",
@@ -535,6 +597,7 @@ class TestGeneratedParity(unittest.TestCase):
     @given(world=parity_worlds())
     @example(world=_MOUNTAIN_GOATS_FLUX_WORLD)
     @example(world=_HERETIC_PRIDE_WORLD)
+    @example(world=_SPECTRAL_OVERRIDE_DECISIVE_WORLD)
     def test_decision_twins_agree(self, world):
         sim = _parity_simulator_result(world)
         evidence_result = _parity_evidence_result(world)
@@ -799,6 +862,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_downgrade_checker_trips_on_accept(self):
         with self.assertRaises(AssertionError):
             assert_obvious_downgrade_not_accepted(_planted_bad_import())
+
+    def test_below_gate_checker_trips_on_accepted_import(self):
+        with self.assertRaises(AssertionError):
+            assert_below_gate_never_stops_search(_planted_bad_import())
 
     def test_classification_checker_trips_on_bad_verdict(self):
         # A dict claiming both imported and a reject-stage decision would
