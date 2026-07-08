@@ -16,47 +16,11 @@ from lib.slskd_events import (
     ingest_download_file_events,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
-
-
-def _file_complete_data(
-    *,
-    username: str,
-    filename: str,
-    local_filename: str,
-    transfer_id: str = "t-1",
-    size: int = 1000,
-) -> str:
-    return json.dumps({
-        "version": 0,
-        "localFilename": local_filename,
-        "remoteFilename": filename,
-        "transfer": {
-            "id": transfer_id,
-            "username": username,
-            "filename": filename,
-            "size": size,
-        },
-    })
-
-
-def _state_json(files: list[ActiveDownloadFileState]) -> str:
-    return ActiveDownloadState(
-        filetype="flac",
-        enqueued_at="2026-07-01T00:00:00+00:00",
-        files=files,
-    ).to_json()
-
-
-def _file_state(
-    username: str = "peer1",
-    filename: str = "music\\Artist\\Album\\01 track.flac",
-) -> ActiveDownloadFileState:
-    return ActiveDownloadFileState(
-        username=username,
-        filename=filename,
-        file_dir="music\\Artist\\Album",
-        size=1000,
-    )
+from tests.helpers import (
+    make_active_download_file_state as _file_state,
+    make_active_download_state_json as _state_json,
+    make_file_complete_event_data as _file_complete_data,
+)
 
 
 class SlskdEventIngestCase(unittest.TestCase):

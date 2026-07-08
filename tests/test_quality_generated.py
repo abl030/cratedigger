@@ -51,6 +51,8 @@ from lib.quality import (
     V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
     V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
     VerifiedLosslessProof,
+    classify_full_pipeline_decision,
+    evidence_decision_name,
     full_pipeline_decision_from_evidence,
 )
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
@@ -639,6 +641,51 @@ _EARLY_EXIT_REJECT_VALUES = {
     "preimport_mixed_source": "reject_mixed_source",
 }
 
+_EARLY_EXIT_FACT_NAMES = {
+    "preimport_audio": "audio_corrupt",
+    "preimport_bad_hash": "bad_audio_hash",
+    "preimport_nested": "nested_layout",
+    "preimport_empty_fileset": "empty_fileset",
+    "preimport_mixed_source": "mixed_source",
+}
+
+_VALID_VERDICTS = ("confident_reject", "would_import", "uncertain")
+
+
+def assert_classification_coherent(
+    decision: dict, expected_early_exit_key: str | None) -> None:
+    """The classification layer (cleanup eligibility + dispatch decision
+    name) must be coherent with the decision dict it classifies.
+
+    Added after the fuzz-tier coverage diagnostic showed
+    ``classify_full_pipeline_decision`` / ``evidence_decision_name``
+    (which gate wrong-match folder cleanup) were the one decision-policy
+    layer no generated test reached.
+    """
+    verdict, cleanup_eligible, reason = classify_full_pipeline_decision(decision)
+    name = evidence_decision_name(decision)
+    if verdict not in _VALID_VERDICTS:
+        raise AssertionError(f"unknown classification verdict: {verdict!r}")
+    if not name or not isinstance(name, str):
+        raise AssertionError(f"evidence_decision_name returned {name!r}")
+    if cleanup_eligible and verdict != "confident_reject":
+        raise AssertionError(
+            f"cleanup_eligible without confident_reject: {verdict!r}/{reason!r}")
+    if expected_early_exit_key is not None:
+        fact = _EARLY_EXIT_FACT_NAMES[expected_early_exit_key]
+        if (verdict, cleanup_eligible, reason) != ("confident_reject", True, fact):
+            raise AssertionError(
+                f"integrity fact {fact} classified as "
+                f"({verdict!r}, {cleanup_eligible!r}, {reason!r})")
+        if name != fact:
+            raise AssertionError(
+                f"integrity fact {fact} named {name!r} for dispatch")
+    elif decision.get("imported"):
+        if verdict != "would_import" or cleanup_eligible:
+            raise AssertionError(
+                f"imported decision classified as "
+                f"({verdict!r}, cleanup_eligible={cleanup_eligible!r})")
+
 
 class TestGeneratedEvidenceDecider(unittest.TestCase):
     """Properties of the production decider the simulator can't reach."""
@@ -676,6 +723,15 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         else:
             self.assertIsNone(result["final_status"])
             self.assertFalse(result["keep_searching"])
+
+    @given(candidate=wild_ready_candidate_evidence(),
+           import_mode=st.sampled_from(("auto", "force")))
+    def test_decision_classification_is_coherent(self, candidate, import_mode):
+        facts = AlbumQualityEvidenceDecisionFacts(import_mode=import_mode)
+        result = full_pipeline_decision_from_evidence(
+            candidate, None, facts=facts)
+        assert_classification_coherent(
+            result, _expected_early_exit_key(candidate))
 
     def test_incomplete_evidence_fails_closed(self):
         """Evidence rows below the policy floor must raise, not decide."""
@@ -743,6 +799,27 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_downgrade_checker_trips_on_accept(self):
         with self.assertRaises(AssertionError):
             assert_obvious_downgrade_not_accepted(_planted_bad_import())
+
+    def test_classification_checker_trips_on_bad_verdict(self):
+        # A dict claiming both imported and a reject-stage decision would
+        # classify confident_reject while imported — the checker must trip.
+        bad = {
+            "imported": True,
+            "stage2_import": "downgrade",
+            "stage3_quality_gate": None,
+        }
+        with self.assertRaises(AssertionError):
+            assert_classification_coherent(bad, None)
+
+    def test_classification_checker_trips_on_misnamed_fact(self):
+        # An audio-corrupt early exit whose dict carries the wrong reject
+        # value yields a quality-flavoured name instead of the fact name.
+        bad = {
+            "preimport_audio": "reject_nested",  # planted wrong value
+            "imported": False,
+        }
+        with self.assertRaises(AssertionError):
+            assert_classification_coherent(bad, "preimport_audio")
 
     def test_parity_checker_trips_on_divergence(self):
         sim = _planted_bad_import()

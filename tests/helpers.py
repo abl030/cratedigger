@@ -6,6 +6,7 @@ hand-rolling dicts or dataclass constructors with many fields.
 
 from __future__ import annotations
 
+import json
 import types
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ from unittest.mock import MagicMock, patch
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
     V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
+    ActiveDownloadFileState,
+    ActiveDownloadState,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -347,6 +350,53 @@ def build_parity_current_evidence(
         matched_bad_audio_hash_id=matched_bad_audio_hash_id,
         matched_bad_audio_hash_path=matched_bad_audio_hash_path,
     )
+
+
+def make_file_complete_event_data(
+    *,
+    username: str,
+    filename: str,
+    local_filename: str,
+    transfer_id: str = "t-1",
+    size: int = 1000,
+) -> str:
+    """The JSON ``data`` string of a slskd DownloadFileComplete event,
+    exactly as the live feed emits it (camelCase, nested transfer DTO)."""
+    return json.dumps({
+        "version": 0,
+        "localFilename": local_filename,
+        "remoteFilename": filename,
+        "transfer": {
+            "id": transfer_id,
+            "username": username,
+            "filename": filename,
+            "size": size,
+        },
+    })
+
+
+def make_active_download_file_state(
+    username: str = "peer1",
+    filename: str = "music\\Artist\\Album\\01 track.flac",
+    size: int = 1000,
+) -> ActiveDownloadFileState:
+    return ActiveDownloadFileState(
+        username=username,
+        filename=filename,
+        file_dir=filename.rsplit("\\", 1)[0] if "\\" in filename else "music",
+        size=size,
+    )
+
+
+def make_active_download_state_json(
+    files: list[ActiveDownloadFileState],
+    filetype: str = "flac",
+) -> str:
+    return ActiveDownloadState(
+        filetype=filetype,
+        enqueued_at="2026-07-01T00:00:00+00:00",
+        files=files,
+    ).to_json()
 
 
 def make_evidence(
