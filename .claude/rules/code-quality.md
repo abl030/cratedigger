@@ -126,6 +126,15 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
     state machines, wire or event ingestion), the property + strategy ship
     in the SAME PR as the feature, not as a follow-up. An invariant that
     only lives in prose is not an invariant.
+- **An invariant ships as a PAIR: one deterministic pin AND one generated
+  property — same PR, no exceptions.** The pin proves the exact scenario;
+  the property patrols the world space around it. Finding and defining an
+  invariant and then only pinning it is 90% of the race and then sitting
+  down (lesson: PR #560 shipped the #550-phase-2 isolation invariant with
+  a deterministic pin only; PR #561 had to retrofit the property — which
+  a single-point mutant immediately proved was the load-bearing half).
+  Subagent implementation briefs state the pair requirement verbatim and
+  never offer a deterministic-only alternative.
 - **Every invariant checker owes a known-bad self-test**: a planted
   violating decision/state proving the checker trips. A property that has
   never failed anything is unfalsifiable until proven otherwise. Keep
