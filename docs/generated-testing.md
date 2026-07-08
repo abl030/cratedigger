@@ -12,6 +12,7 @@ bookkeeping, no standing service.
 | `tests/test_quality_generated.py` | the decision twins (`full_pipeline_decision` / `full_pipeline_decision_from_evidence`) | decisions are definitive (totality); raw verified-lossless FLAC never replaced by lossy; transparent lossy never accepts obvious downgrades; **twin parity** over the shared world language; evidence-only integrity facts (corrupt / bad-hash / nested / mixed) always reject in priority order; classification layer (`classify_full_pipeline_decision` / `evidence_decision_name` — cleanup eligibility) coherent with every generated decision; incomplete evidence fails closed |
 | `tests/test_evidence_generated.py` | `ensure_current_evidence_for_action` | converted current evidence requires source V0 (fix `6cf26a4`): never `loaded` without a V0 metric, scalar state backfills, otherwise fail closed |
 | `tests/test_slskd_events_generated.py` | `ingest_download_file_events` (event stamping — the ONLY source of completed-file locations) | stamping oracle (newest decodable event per key in the new-events window, nothing else); totality + exactly-once over wild feeds (dup ids, garbage timestamps, undecodable payloads, pruned/absent cursors, rows leaving `downloading` mid-ingest); duplicate-id invariance (mid-pagination shape) |
+| `tests/test_request_lifecycle_generated.py` | `transitions.finalize_request` + `supersede_request_mbid` driven as a `RuleBasedStateMachine` over random operation sequences | statuses stay in the legal set; `replaced` rows are terminal and byte-frozen; identity (mbid/source/created_at) immutable; every replaced row has exactly one linked descendant; `active_download_state` only on `downloading` rows; the DB guards (claim, downloading→wanted) no-op on ineligible rows |
 
 Every generated module also carries **known-bad self-tests** proving each
 invariant checker trips on a planted violating decision — the RED/GREEN
@@ -102,16 +103,49 @@ unexecuted **decision-policy** branches. (The 2026-07-08 run found exactly
 one: the classification layer, now covered by
 `test_decision_classification_is_coherent`.)
 
+## Qualifying the harness — fault injection
+
+"Does this suite actually constrain the code?" is an empirical question,
+answered the way hardware verification qualifies a testbench: **plant
+mutants in production code and count kills** against the generated tests
+only. How to pick mutants:
+
+- revert a real past bug fix (the strongest single check);
+- break each adapter derivation the parity property claims to pin;
+- flip decision comparisons; remove early-exit guards and readiness gates;
+- for each property, plant the exact violation it claims to catch.
+
+Interpret results per mutant: **killed** = the property works; **killed
+only at push/fuzz entropy** = suite-budget miss, acceptable because the
+pre-push hook runs the entropy tier on every push; **survived all tiers** =
+either a missing invariant (add it, with a known-bad self-test) or a world
+the strategies rarely make decisive (pin the decisive world as an
+`@example`). The mutation driver is an operator/agent one-shot — never
+committed (`.claude/rules/scope.md`); record the kill matrix in the
+issue/PR.
+
+Canonical run (issue #548, 2026-07-08): 13 mutants — including reverting
+fix `6cf26a4`, which the generated lifecycle property killed independently
+of its hand-written regression tests — 10 killed outright, 1 at push-tier
+entropy, 2 survivors fixed in PR #555 (`assert_below_gate_never_stops_search`
+and the `_SPECTRAL_OVERRIDE_DECISIVE_WORLD` parity pin).
+
 ## Writing new generated tests
 
+- **Invariants come first.** New features with a generated-testable surface
+  (pure decisions, lifecycles/state machines, wire or event ingestion)
+  write their policy invariants down in the issue/plan before
+  implementation, and ship the generated properties in the same PR — see
+  `.claude/rules/code-quality.md` § "Testing — Red/Green TDD".
 - Strategies generate anything the **schema** can express — no plausibility
   filters. The V0-evidence bug lived in a state a plausible-worlds-only
   generator would have skipped. If a state is truly impossible, fail-closed
   handling of it is itself the invariant.
 - Invariant checkers are module-level functions so a known-bad self-test
-  can prove each one trips.
+  can prove each one trips. Every checker owes one — a property that has
+  never failed anything is unfalsifiable until proven otherwise.
 - Import `tests._hypothesis_profiles` for the side effect before using
-  `@given` — that is what wires the module into the suite/fuzz tiers.
+  `@given` — that is what wires the module into the suite/push/fuzz tiers.
 - Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.

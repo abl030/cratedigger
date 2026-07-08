@@ -110,8 +110,38 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - Tests owe: at least one RED test that feeds the wrong type at the boundary and asserts `msgspec.ValidationError`. This is the regression guard that makes the boundary worth having.
 
 ## Testing — Red/Green TDD
-- Write tests FIRST (RED), then implement (GREEN)
-- Every new function, dataclass, and decision branch needs test coverage
+
+- **Start every feature by writing its invariants down.** Before
+  implementing, state the policy invariants the feature must uphold, in the
+  issue or plan ("replaced rows are frozen", "the event stamp is the only
+  location source", "a below-gate import never stops the search"). The
+  invariants decide which tests you owe — code follows the tests, tests
+  follow the invariants.
+- Write tests FIRST (RED), then implement (GREEN). This applies to BOTH
+  tiers:
+  - **Standard tests** (unit / seam / orchestration / slice, per the
+    taxonomy below) — RED reproduction or contract first.
+  - **Generated tests** (Hypothesis, `docs/generated-testing.md`) — if the
+    feature has a generated-testable surface (pure decisions, lifecycles /
+    state machines, wire or event ingestion), the property + strategy ship
+    in the SAME PR as the feature, not as a follow-up. An invariant that
+    only lives in prose is not an invariant.
+- **Every invariant checker owes a known-bad self-test**: a planted
+  violating decision/state proving the checker trips. A property that has
+  never failed anything is unfalsifiable until proven otherwise. Keep
+  checkers as module-level functions so the self-test can call them
+  directly (pattern: `TestInvariantCheckersTripOnViolations` in
+  `tests/test_quality_generated.py`).
+- **Qualify the harness by fault injection when in doubt.** "Do these tests
+  actually constrain the code?" is an empirical question: plant mutants in
+  production code (revert a real past fix; break an adapter derivation;
+  flip a decision comparison; remove an early-exit guard; target each
+  property's claimed coverage) and run the relevant tests against each. A
+  surviving mutant is either a missing invariant (add it) or an entropy
+  budget miss (pin the decisive world as an `@example`). The driver is an
+  operator/agent one-shot — never committed (`scope.md`); record the kill
+  matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
+  mutants, incl. reverting fix `6cf26a4`, led to PR #555.
 - Use `nix-shell --run "bash scripts/run_tests.sh"` for full suite
 - Read `/tmp/cratedigger-test-output.txt` instead of re-running the 2-minute suite
 - For single modules during dev: `nix-shell --run "python3 -m unittest tests.<module> -v"`
@@ -205,6 +235,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
 | A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes.py`, `tests/test_fakes.py` |
 | A new `BeetsDB` method | Either (a) an equivalent stub on `FakeBeetsDB` with a self-test in `tests/test_fakes.py::TestFakeBeetsDB`, OR (b) drive the test against a real test SQLite DB if it's a read-only query | `tests/fakes.py`, `tests/test_fakes.py` |
+| A feature with policy invariants (pure decisions, lifecycle / state machine, wire or event ingestion) | Generated properties + strategies in the same PR, each invariant checker with a known-bad self-test; invariants written down FIRST | `tests/_hypothesis_profiles.py`, checker/strategy patterns in `tests/test_*_generated.py`, `docs/generated-testing.md` |
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
 
