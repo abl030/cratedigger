@@ -102,7 +102,16 @@ def canonical_processing_path(
         f"{artist} - {title} ({year})",
     )
     if attempt_fingerprint:
-        import_folder_name = f"{import_folder_name} [{attempt_fingerprint}]"
+        suffix = f" [{attempt_fingerprint}]"
+        # ext4 caps filenames at 255 bytes; a near-limit sanitized name that
+        # fit before must not start failing os.makedirs once suffixed
+        # (codex review r2) — truncate the base on a character boundary.
+        max_base_bytes = 255 - len(suffix.encode("utf-8"))
+        base_bytes = import_folder_name.encode("utf-8")
+        if len(base_bytes) > max_base_bytes:
+            import_folder_name = base_bytes[:max_base_bytes].decode(
+                "utf-8", errors="ignore").rstrip()
+        import_folder_name = f"{import_folder_name}{suffix}"
     return os.path.join(slskd_download_dir, import_folder_name)
 
 

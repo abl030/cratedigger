@@ -4200,16 +4200,17 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
-    def test_poll_overlong_album_title_does_not_starve_other_rows(self):
-        """ENAMETOOLONG in canonical-path makedirs must not abort the loop.
+    def test_poll_overlong_album_title_truncates_and_processes(self):
+        """Overlong artist/title now truncates to ext4's 255-byte limit.
 
-        Real failure: a Sade row with 240+ char artist + title produced a
-        canonical path > ext4's 255-byte component limit. ``os.makedirs``
-        raised ``OSError(36)`` which propagated through
-        ``_enqueue_completed_processing`` and killed the per-row for-loop
-        in ``poll_active_downloads``. Because ``get_downloading()`` orders
-        by ``updated_at ASC``, a single poison row starved every later
-        row from getting its import job enqueued.
+        History: a Sade row with 240+ char artist + title produced a
+        canonical path over the 255-byte component limit; os.makedirs
+        raised OSError(36) and (pre-guard) starved later rows. Since the
+        #550-phase-2 fingerprint suffix, canonical_processing_path
+        byte-truncates the base name, so the row now materializes and
+        imports instead of failing. Loop containment for genuinely
+        unexpected per-row exceptions stays pinned by
+        test_poll_continues_after_per_row_unexpected_exception.
         """
         from lib.download import poll_active_downloads
         long_name = "X" * 250
@@ -4247,16 +4248,17 @@ class TestPollActiveDownloads(unittest.TestCase):
             downloading_rows=[poison, healthy], slskd_downloads=[],
         )
 
-        # Must not raise — the poison row's ENAMETOOLONG must be caught
-        # inside _materialize_processing_dir (or by the per-row guard).
         poll_active_downloads(ctx)
 
         self.assertEqual(
             len(fake_db.list_import_jobs(request_id=2)), 1,
-            "Healthy row never got an import job — poison row killed the loop",
+            "Healthy row never got an import job",
         )
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 0)
+        # The overlong row now truncates and processes like any other.
+        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
+        state = fake_db.request(1)["active_download_state"]
+        folder = state["current_path"].rsplit("/", 1)[-1]
+        self.assertLessEqual(len(folder.encode("utf-8")), 255)
 
     def test_poll_continues_after_per_row_unexpected_exception(self):
         """Belt-and-braces: any unhandled per-row exception must not abort the loop.

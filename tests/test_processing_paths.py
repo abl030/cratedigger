@@ -106,3 +106,31 @@ class TestCanonicalProcessingPathFingerprint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFingerprintSuffixNameLimit(unittest.TestCase):
+    """The fingerprint suffix must never push the folder name past ext4's
+    255-byte filename limit (codex review r2: near-limit names that fit
+    before would MaterializeFailed at os.makedirs forever)."""
+
+    def _name(self, artist: str) -> str:
+        path = canonical_processing_path(
+            artist=artist, title="T", year="2024",
+            slskd_download_dir="/dl",
+            attempt_fingerprint="aabbccdd",
+        )
+        return path.rsplit("/", 1)[-1]
+
+    def test_near_limit_ascii_name_stays_within_255_bytes(self):
+        name = self._name("a" * 250)
+        self.assertLessEqual(len(name.encode("utf-8")), 255)
+        self.assertTrue(name.endswith(" [aabbccdd]"))
+
+    def test_multibyte_name_truncates_on_character_boundary(self):
+        name = self._name("\u97f3" * 120)  # 3 bytes each -> 360 bytes
+        self.assertLessEqual(len(name.encode("utf-8")), 255)
+        self.assertTrue(name.endswith(" [aabbccdd]"))
+
+    def test_short_names_are_untouched(self):
+        self.assertEqual(
+            self._name("Artist"), "Artist - T (2024) [aabbccdd]")
