@@ -22,7 +22,7 @@ from lib.release_identity import detect_release_source, normalize_release_id
 # Module-level DI seam for ``transitions.finalize_request`` — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 # Each module that calls it binds its own copy (same pattern as
-# ``web.routes.pipeline.finalize_request`` / ``harness.import_one.finalize_request``).
+# ``web.routes.pipeline_mutations.finalize_request`` / ``harness.import_one.finalize_request``).
 finalize_request = transitions.finalize_request
 
 VALID_STATUSES = ["wanted", "imported", "manual"]

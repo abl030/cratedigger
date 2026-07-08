@@ -311,7 +311,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["intent"], "lossless")
 
-    @patch("web.routes.pipeline.resolve_failed_path", return_value="/tmp/Test Album")
+    @patch("web.routes.pipeline_mutations.resolve_failed_path", return_value="/tmp/Test Album")
     def test_post_force_import_passes_source_username(self, _mock_resolve):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 

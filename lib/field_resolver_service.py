@@ -1588,7 +1588,7 @@ def resolve_all(
 # === Apply helper — turn a ResolveAllResult into a DB update ============
 #
 # Single canonical implementation of the "result → update_request_fields"
-# mapping. Web (``web/routes/pipeline.py::_resolve_and_update_after_add``)
+# mapping. Web (``web/routes/pipeline_mutations.py::_resolve_and_update_after_add``)
 # and CLI (``scripts/pipeline_cli/album_requests.py::_resolve_and_update_after_add``)
 # previously each carried a near-identical copy. The transient deploy
 # one-shot (``docs/search-plan-iter2-deploy.md`` § 3.2) also benefits —
