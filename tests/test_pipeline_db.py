@@ -8849,5 +8849,52 @@ class TestReadProjectionParity(unittest.TestCase):
             self.fake.get_youtube_album_mapping("rg-never-resolved", "mb"))
 
 
+@requires_postgres
+class TestReadProjectionRegistryParity(unittest.TestCase):
+    """#546 W1 — registry-driven read-projection parity gate.
+
+    ``TestReadProjectionParity`` (above) is the hand-written half: one
+    ``test_*`` method per covered projection. This class is the
+    self-enforcing half — it iterates ``PARITY_REGISTRY`` from
+    ``tests/read_projection_registry.py`` and runs every registered
+    seeder against a fresh real ``PipelineDB`` and a fresh
+    ``FakePipelineDB``, asserting key-set parity for each. Adding a
+    seeder to the registry is all it takes to gate a new mirror; the
+    companion audit (``tests/test_read_projection_audit.py``) forces
+    every ``FakePipelineDB`` read method into the registry, the
+    hand-written coverage, or the allowlist.
+
+    Reuses ``TestReadProjectionParity._assert_keyset_parity`` — a
+    staticmethod whose first argument is the ``TestCase`` instance, so
+    cross-class reuse is safe.
+    """
+
+    def test_every_registered_mirror_has_keyset_parity(self):
+        from tests.fakes import FakePipelineDB
+        from tests.read_projection_registry import PARITY_REGISTRY
+
+        for method_name, seeder in sorted(PARITY_REGISTRY.items()):
+            with self.subTest(method=method_name):
+                real_db = make_db()
+                try:
+                    fake_db = FakePipelineDB()
+                    real_rows = seeder(real_db)
+                    fake_rows = seeder(fake_db)
+                    self.assertTrue(
+                        real_rows,
+                        f"{method_name}: seeder produced no rows on real "
+                        f"PG — parity would pass vacuously; fix the seeder "
+                        f"in tests/read_projection_registry.py")
+                    self.assertTrue(
+                        fake_rows,
+                        f"{method_name}: seeder produced no rows on "
+                        f"FakePipelineDB — parity would pass vacuously; fix "
+                        f"the seeder in tests/read_projection_registry.py")
+                    TestReadProjectionParity._assert_keyset_parity(
+                        self, real_rows, fake_rows, method_name)
+                finally:
+                    real_db.close()
+
+
 if __name__ == "__main__":
     unittest.main()
