@@ -167,19 +167,47 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - No decision logic inline in cratedigger.py — call the pure function, branch on result
 - Every pure function must have direct unit tests (not just tested through integration)
 
-## Pipeline Decision Debugging — Simulator-First TDD
-- When debugging or changing import pipeline behavior (quality gate, backfill, spectral propagation, search tier selection), **always start with the CLI simulator** (`pipeline-cli quality <id>`).
-- Add scenarios to the simulator FIRST that expose the bug or show the expected behavior. The simulator is the test suite for pipeline decisions — if you can't see the problem in the simulator output, you don't understand it yet.
-- Only edit production code once the simulator scenarios clearly show what's wrong and what "right" looks like. The scenarios tell you what code to change.
-- Run the simulator against real albums in the live DB (not mocked state) to verify. Pick albums that represent the edge case: e.g. CBR 320 with no spectral, verified lossless lo-fi, suspect FLAC transcodes.
-- The simulator must show the full rejection cycle: import/reject decision → spectral propagation → backfill decision → next search tiers. Not just the import decision in isolation.
+## Bug Hunting — Generated-First (the house method)
 
-## Pipeline Bug Reproduction — Red/Green on Real Code Paths
-- When a live pipeline bug involves **interactions between components** (spectral propagation → decision function → DB write → rejection), don't just test the pure decision function in isolation — write a unit test that calls the actual orchestration function (e.g. `lib.measurement.measure_preimport_state` + `dispatch_import_from_db`) with mocked state matching the live scenario.
-- **RED first**: reproduce the exact live scenario as a test. Mock up the album state from `pipeline-cli show <id>` (status, spectral fields, min_bitrate). Run the test and confirm it fails with the same symptom as production.
-- **GREEN**: fix the production code, confirm the test passes.
-- **Guard both directions**: add a test for the fixed case AND a test that the original valid behavior still works (e.g. propagation still works when an album IS on disk but lacks spectral data).
-- This catches bugs that pure function tests miss — state mutations, propagation ordering, in-memory corruption before the decision function runs.
+Proven on #550 (2026-07-08): a live production bug that static analysis and
+disk forensics could NOT reproduce was found, reproduced, RCA'd and fixed in
+one session by a generated harness driving the real code path. This is how
+bugs are hunted here — reach for it BEFORE log-trawling, before speculative
+instrumentation, before reading code until a theory falls out.
+
+1. **Write down the invariant the symptom violates** ("the manifest that
+   reaches validation covers every file grabbed"). If you can't state one,
+   you don't understand the symptom yet.
+2. **Probe the cheapest suspicious seam with real production functions**
+   (a throwaway nix-shell heredoc driving e.g. the real matcher over a
+   seeded cache — minutes, not committed).
+3. **Build/extend a generated harness** in `tests/test_*_generated.py`:
+   strategies over the world space (no plausibility filters), the invariant
+   as a checker, REAL production entry points, fakes/leaf-seam stubs only
+   at the allowlisted edges. Let Hypothesis find and shrink the
+   reproduction.
+4. **RED → fix → GREEN** in one PR: the shrunk world becomes a
+   deterministic regression pin, the invariant becomes a permanent
+   property, a must-still-work guard proves the fix doesn't fail-closed
+   legitimate behavior, and a known-bad self-test proves the checker trips.
+5. **Qualify when in doubt** — plant a mutant reverting your fix; the
+   property must kill it.
+
+Tools within the method, for quality-decision bugs specifically:
+
+- **Simulator scenarios** (`pipeline-cli quality <id>`,
+  `tests/test_simulator_scenarios.py`): the flat-kwargs twin is the
+  canonical scenario language — add the failing scenario to the album test
+  set and run the simulator against real albums in the live DB to verify.
+  The simulator must show the full rejection cycle (import/reject →
+  spectral propagation → backfill → next tiers), not the import decision
+  in isolation.
+- **Real-code-path orchestration repros**: when a bug lives in component
+  interactions (propagation → decision → DB write), drive the actual
+  orchestration function (`measure_preimport_state`,
+  `dispatch_import_from_db`) with state matching the live scenario — pure
+  decision tests alone miss state mutations and ordering. Guard both
+  directions: the fixed case AND the still-valid original behavior.
 
 ## Frontend (JavaScript)
 - ES6 modules in `web/js/` — no inline `<script>` in HTML
