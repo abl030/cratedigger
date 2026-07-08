@@ -5,6 +5,31 @@ over large generated state spaces instead of hand-picked examples. They are
 ordinary members of the unittest suite — no separate runner, no seed
 bookkeeping, no standing service.
 
+## Bug hunting — the house method
+
+This is the primary bug-hunting workflow (proven on #550, where a live
+production bug unreproducible by static analysis + disk forensics fell in
+one session): **invariant → probe → generated harness → shrink → fix**.
+
+1. Write down the invariant the symptom violates.
+2. Probe the cheapest suspicious seam with REAL production functions (a
+   throwaway nix-shell heredoc — minutes, never committed).
+3. Build/extend a `tests/test_*_generated.py` harness: strategies over the
+   world space, the invariant as a checker, real entry points, stubs only
+   at allowlisted leaf seams. Hypothesis finds and shrinks the repro.
+4. RED → fix → GREEN in one PR: shrunk world pinned, invariant permanent,
+   must-still-work guard, known-bad self-test.
+5. When in doubt, plant a mutant reverting the fix — the property must
+   kill it.
+
+Case study (#550 defect #1): invariant "an accepted multi-disc grab covers
+every disc with unique transfer identities" → probe showed the real matcher
+cross-matches sibling disc folders → harness drove real `try_multi_enqueue`
+and reproduced `matched=True` with 16 entries / 11 unique files → two-layer
+fix (source exclusion + fail-closed coverage gate) merged with the property
+in PR #557. Full workflow rule: `.claude/rules/code-quality.md` § "Bug
+Hunting — Generated-First".
+
 ## Modules
 
 | Module | Target | Properties |

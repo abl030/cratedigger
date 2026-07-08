@@ -177,9 +177,11 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 
 Browser automation for `music.ablz.au` — per-machine `.mcp.json` (gitignored). Always HTTPS (http times out). `docs/playwright-mcp.md`.
 
-## Debugging quality decisions
+## Hunting bugs — generated-first (the house method)
 
-`pipeline-cli show / quality / debug-download / search-plan show / query` are the diagnostic entry points. Start with the simulator (`pipeline-cli quality <id>`) and add a failing scenario FIRST (`.claude/rules/code-quality.md` § "Simulator-First TDD"). Command reference + triage signals in `docs/debugging-cli.md`.
+**Bugs are hunted with generated tests, not log-trawling.** Write down the invariant the symptom violates, probe the cheapest suspicious seam with real production functions, then build a generated harness (`tests/test_*_generated.py`) that drives the REAL code path over generated worlds and let Hypothesis find + shrink the reproduction — RED → fix → GREEN in one PR, with the shrunk world pinned forever. Proven on #550: a live bug that static analysis and disk forensics could not reproduce fell to this method in one session. Full workflow: `.claude/rules/code-quality.md` § "Bug Hunting — Generated-First" + `docs/generated-testing.md`.
+
+For quality-decision bugs the simulator is the tool within the method: `pipeline-cli show / quality / debug-download / search-plan show / query` are the diagnostic entry points; add the failing scenario to the album test set and verify against real albums in the live DB. Command reference + triage signals in `docs/debugging-cli.md`.
 
 ## Finding dead code
 
