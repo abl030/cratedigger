@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
 from lib.download_recovery import ProcessingPathLocation, classify_processing_path
-from lib.grab_list import GrabListEntry
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.dispatch import (DispatchOutcome, QualityGateFn,
                           _build_download_info,
                           _record_rejection_and_maybe_requeue,
@@ -37,6 +37,7 @@ from lib.import_manifest import (
     tracked_audio_paths_for_downloads,
 )
 from lib.processing_paths import (
+    attempt_fingerprint,
     canonical_processing_path,
     normalize_processing_path,
     normalize_source_dirs,
@@ -249,6 +250,17 @@ def _is_request_scoped_auto_import_path(
     )
 
 
+def _attempt_fingerprint_for(files: list[DownloadFile]) -> str:
+    """Fingerprint this attempt's exact (username, filename) file set.
+
+    Every canonical-folder computation for the same album must derive
+    from this SAME persisted file set — at materialize, at resume
+    classification, and at recovery — or a mismatch classifies the
+    folder as ``external`` and strands it (issue #550 phase 2).
+    """
+    return attempt_fingerprint([(f.username, f.filename) for f in files])
+
+
 def _canonical_import_folder_path(
     album_data: GrabListEntry,
     slskd_download_dir: str,
@@ -258,6 +270,7 @@ def _canonical_import_folder_path(
         title=album_data.title,
         year=album_data.year,
         slskd_download_dir=slskd_download_dir,
+        attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
     )
 
 
@@ -739,6 +752,7 @@ def _materialize_processing_dir(
         request_id=request_id or 0,
         staging_dir=ctx.cfg.beets_staging_dir,
         slskd_download_dir=ctx.cfg.slskd_download_dir,
+        attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
     )
 
     if current_path_location.kind != "canonical":
@@ -1217,6 +1231,7 @@ def _handle_valid_result(
         request_id=request_id or 0,
         staging_dir=ctx.cfg.beets_staging_dir,
         slskd_download_dir=ctx.cfg.slskd_download_dir,
+        attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
     )
 
     if wants_auto_import and not album_data.mb_release_id:
