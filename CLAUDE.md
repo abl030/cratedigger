@@ -162,7 +162,7 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 ### Hooks
 
 - Pre-commit (`ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`): pyright on staged `.py`.
-- Pre-push (`ln -sf ../../scripts/pre-push .git/hooks/pre-push`): `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
+- Pre-push (`ln -sf ../../scripts/pre-push .git/hooks/pre-push`): randomized generated-test burst (push profile, fresh entropy each push — `docs/generated-testing.md`), then `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
 - **Tag convention:** `vYYYY.MM.DD` (suffix `-N`) cut AFTER live verification on doc2.
 
 ### Claude Code commands

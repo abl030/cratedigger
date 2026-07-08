@@ -14,6 +14,22 @@
 # Deliberate escape hatch: `git push --no-verify`.
 set -euo pipefail
 
+# Hooks are installed as .git/hooks symlinks, so BASH_SOURCE points into
+# .git/ — resolve the repo root through git instead (works in worktrees).
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Randomized generated-test burst (issue #548) — fresh entropy on every
+# push, so exploration of the decision/event state spaces accumulates
+# over time. Modules are discovered by pattern (test_*_generated.py); a
+# hand-maintained list would drift (issue #520 lesson). Runs BEFORE the
+# flake check: seconds of fuzz fail faster than minutes of VM boot.
+# A failure prints the shrunk world + a @reproduce_failure blob and is
+# remembered in .hypothesis/ — promote it per docs/generated-testing.md.
+echo "pre-push: generated-test fuzz burst (push profile)..." >&2
+(cd "$REPO_ROOT" && nix-shell --run \
+  "CRATEDIGGER_HYPOTHESIS_PROFILE=push python3 -m unittest discover -s tests -t . -p 'test_*_generated.py'")
+echo "pre-push: fuzz burst OK" >&2
+
 echo "pre-push: nix flake check (moduleVm + eval guards + CLI bundle)..." >&2
 nix flake check
 echo "pre-push: flake check OK" >&2

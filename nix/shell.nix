@@ -29,9 +29,10 @@ let
   # Dev-only additions:
   #   - vulture: static dead-code finder (scripts/find_dead_code.sh)
   #   - hypothesis: property-based generated tests (docs/generated-testing.md)
+  #   - coverage: branch-coverage steering for the fuzz tier (same doc)
   testPythonEnv = pkgs.python3.withPackages (ps:
     cratedigger.pythonPackages ps
-    ++ [ ps.vulture ps.hypothesis ]
+    ++ [ ps.vulture ps.hypothesis ps.coverage ]
   );
 in
 pkgs.mkShell {

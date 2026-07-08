@@ -9,31 +9,37 @@ bookkeeping, no standing service.
 
 | Module | Target | Properties |
 |--------|--------|------------|
-| `tests/test_quality_generated.py` | the decision twins (`full_pipeline_decision` / `full_pipeline_decision_from_evidence`) | decisions are definitive (totality); raw verified-lossless FLAC never replaced by lossy; transparent lossy never accepts obvious downgrades; **twin parity** over the shared world language; evidence-only integrity facts (corrupt / bad-hash / nested / mixed) always reject in priority order; incomplete evidence fails closed |
+| `tests/test_quality_generated.py` | the decision twins (`full_pipeline_decision` / `full_pipeline_decision_from_evidence`) | decisions are definitive (totality); raw verified-lossless FLAC never replaced by lossy; transparent lossy never accepts obvious downgrades; **twin parity** over the shared world language; evidence-only integrity facts (corrupt / bad-hash / nested / mixed) always reject in priority order; classification layer (`classify_full_pipeline_decision` / `evidence_decision_name` — cleanup eligibility) coherent with every generated decision; incomplete evidence fails closed |
 | `tests/test_evidence_generated.py` | `ensure_current_evidence_for_action` | converted current evidence requires source V0 (fix `6cf26a4`): never `loaded` without a V0 metric, scalar state backfills, otherwise fail closed |
+| `tests/test_slskd_events_generated.py` | `ingest_download_file_events` (event stamping — the ONLY source of completed-file locations) | stamping oracle (newest decodable event per key in the new-events window, nothing else); totality + exactly-once over wild feeds (dup ids, garbage timestamps, undecodable payloads, pruned/absent cursors, rows leaving `downloading` mid-ingest); duplicate-id invariance (mid-pagination shape) |
 
 Every generated module also carries **known-bad self-tests** proving each
 invariant checker trips on a planted violating decision — the RED/GREEN
 guarantee that the harness detects what it claims to.
 
-## Two tiers, one knob
+## Three tiers, one knob
 
-`tests/_hypothesis_profiles.py` registers two profiles, selected by
+`tests/_hypothesis_profiles.py` registers three profiles, selected by
 `CRATEDIGGER_HYPOTHESIS_PROFILE`:
 
 - **`suite`** (default) — deterministic (`derandomize=True`, no example
   database), bounded examples. Runs on every `scripts/run_tests.sh`,
   identical on every machine. This is the merge gate.
-- **`fuzz`** — randomized burst for local exploration. Fresh entropy per
-  run, big example budget, local example database (`.hypothesis/`,
+- **`push`** — quick randomized burst (2k examples) that `scripts/pre-push`
+  runs on every `git push`, before the flake check. Fresh entropy per push
+  means exploration accumulates over time with zero operator effort; a
+  push-found failure is remembered in `.hypothesis/` and replays first in
+  dev. Escape hatch, as for the whole hook: `git push --no-verify`.
+- **`fuzz`** — deep randomized burst (20k examples) for local exploration.
+  Fresh entropy per run, local example database (`.hypothesis/`,
   gitignored) so found failures replay first on the next burst,
   `print_blob=True` for exact reproduction.
 
-Run a burst whenever quality policy changes:
+Run a deep burst whenever quality policy changes:
 
 ```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
-    python3 -m unittest tests.test_quality_generated tests.test_evidence_generated -v"
+    python3 -m unittest discover -s tests -t . -p 'test_*_generated.py' -v"
 ```
 
 It is pure and safe: no prod DB, no slskd, no beets, no network; the only
@@ -70,6 +76,31 @@ parity tests use (`tests/helpers.py::build_parity_candidate_evidence` /
 different encodings. The common-language constraints (candidate V0 probes
 only on FLAC candidates, derived `is_vbr`, explicit conversion facts) are
 documented at the strategy definition.
+
+## Coverage steering — measure before generating more
+
+Random generation from a fixed strategy saturates: after the first burst,
+more examples stop buying new behavior. When deciding where the *next*
+property should aim, measure which branches the generated tests actually
+execute (this is the functional-coverage idea from CPU verification —
+steer generation at the holes, don't bookkeep seeds):
+
+```bash
+# Scope --source to the production code the properties target — this
+# example covers the decision twins; use --source=lib to also see
+# lib/slskd_events.py and lib/import_evidence.py (module files need the
+# package dir, not the .py path).
+nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
+    coverage run --branch --source=lib/quality \
+    -m unittest discover -s tests -t . -p 'test_*_generated.py' \
+  && coverage report --show-missing"
+```
+
+Read the misses critically: config parsing, wire helpers, and
+simulator-only shims belong to other tests — the actionable holes are
+unexecuted **decision-policy** branches. (The 2026-07-08 run found exactly
+one: the classification layer, now covered by
+`test_decision_classification_is_coherent`.)
 
 ## Writing new generated tests
 
