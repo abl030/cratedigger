@@ -1170,6 +1170,16 @@ def try_multi_enqueue(
         )
         disk["source"] = (username, directory, match_result.file_dir)
         count_found += 1
+        logger.info(
+            "MANIFEST-TRACE multidisc-match request=%s disc=%s/%s user=%s "
+            "disc_files=%s file_dir=%r",
+            _album_request_id(album),
+            disk["disk_no"],
+            total,
+            username,
+            len(files_to_enqueue),
+            match_result.file_dir,
+        )
     if count_found == total:
         planned_downloads: list[DownloadFile] = []
         for disk in split_release:
@@ -1337,6 +1347,15 @@ def try_multi_enqueue(
                     candidates=tuple(accumulated),
                     pre_filter_skip_count=pre_filter_skips[0],
                 )
+        logger.info(
+            "MANIFEST-TRACE multidisc-enqueue request=%s enqueued_discs=%s/%s "
+            "planned_files=%s accepted_files=%s",
+            _album_request_id(album),
+            enqueued,
+            total,
+            len(planned_downloads),
+            len(all_downloads),
+        )
         if enqueued == total:
             if not _persist_claimed_download_state(claim, all_downloads, ctx):
                 cancel_and_delete(all_downloads, ctx)
@@ -1417,6 +1436,18 @@ def _try_filetype(
 
         if attempt.matched:
             assert attempt.downloads is not None
+            from lib.import_manifest import manifest_trace_summary
+            logger.info(
+                "MANIFEST-TRACE grab-accept request=%s album=%r filetype=%s "
+                "%s release_tracks=%s release_media=%s path=%s",
+                album.db_request_id,
+                album.title,
+                allowed_filetype,
+                manifest_trace_summary(attempt.downloads),
+                getattr(release, "track_count", "?"),
+                len(release.media),
+                "multi" if len(release.media) > 1 else "single",
+            )
             grab_entry = GrabListEntry(
                 album_id=album_id,
                 files=attempt.downloads,

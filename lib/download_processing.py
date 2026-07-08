@@ -30,7 +30,9 @@ from lib.import_evidence import (
     ensure_candidate_evidence_for_action,
 )
 from lib.import_manifest import (
+    audio_relative_paths,
     check_audio_manifest,
+    manifest_trace_summary,
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
 )
@@ -701,6 +703,16 @@ def _materialize_processing_dir(
     """Ensure ``staged_album.current_path`` holds the album's local files."""
     canonical_path = _canonical_import_folder_path(
         album_data, ctx.cfg.slskd_download_dir)
+    logger.info(
+        "MANIFEST-TRACE materialize request=%s %s canonical_exists=%s "
+        "canonical_existing_audio=%s current_path=%s canonical=%r",
+        album_data.db_request_id,
+        manifest_trace_summary(album_data.files),
+        os.path.isdir(canonical_path),
+        len(audio_relative_paths(canonical_path)),
+        staged_album.current_path,
+        canonical_path,
+    )
     db = (ctx.pipeline_db_source._get_db()
           if ctx.pipeline_db_source is not None else None)
     request_id = album_data.db_request_id
@@ -946,6 +958,14 @@ def _process_beets_validation(
     manifest_ok, manifest_detail = _check_staged_audio_manifest(
         album_data,
         staged_album,
+    )
+    logger.info(
+        "MANIFEST-TRACE check request=%s ok=%s %s actual_audio=%s path=%s",
+        album_data.db_request_id,
+        manifest_ok,
+        manifest_trace_summary(album_data.files),
+        len(audio_relative_paths(current_path)),
+        current_path,
     )
     if not manifest_ok:
         return _reject_request_auto_import(

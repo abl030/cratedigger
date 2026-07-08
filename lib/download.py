@@ -241,6 +241,13 @@ def reconstruct_grab_list_entry(
             local_path=f.local_path,
         ))
     year = request.get("year")
+    from lib.import_manifest import manifest_trace_summary
+    logger.info(
+        "MANIFEST-TRACE reconstruct request=%s %s current_path=%s",
+        request["id"],
+        manifest_trace_summary(files),
+        state.current_path,
+    )
     return GrabListEntry(
         album_id=request["id"],
         files=files,
