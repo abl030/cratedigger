@@ -56,10 +56,13 @@ guarantee that the harness detects what it claims to.
   database), bounded examples. Runs on every `scripts/run_tests.sh`,
   identical on every machine. This is the merge gate.
 - **`push`** — quick randomized burst (2k examples) that `scripts/pre-push`
-  runs on every `git push`, before the flake check. Fresh entropy per push
-  means exploration accumulates over time with zero operator effort; a
-  push-found failure is remembered in `.hypothesis/` and replays first in
-  dev. Escape hatch, as for the whole hook: `git push --no-verify`.
+  runs on every `git push`, before the flake check. The generated modules
+  run as parallel single-module processes (wall-clock = slowest module,
+  not the sum; the shared `.hypothesis/` database is multi-process safe).
+  Fresh entropy per push means exploration accumulates over time with
+  zero operator effort; a push-found failure is remembered in
+  `.hypothesis/` and replays first in dev. Escape hatch, as for the whole
+  hook: `git push --no-verify`.
 - **`fuzz`** — deep randomized burst (20k examples) for local exploration.
   Fresh entropy per run, local example database (`.hypothesis/`,
   gitignored) so found failures replay first on the next burst,

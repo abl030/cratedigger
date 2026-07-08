@@ -18,21 +18,39 @@
         inherit system;
         pkgs = import nixpkgs { inherit system; };
       });
+      # Runtime source only — the store path every unit's PYTHONPATH and
+      # the CLI wrappers embed. Docs, tests, examples, tooling and repo
+      # metadata are dev-only: keeping them out of the fileset means a
+      # docs/tests-only commit produces the identical (content-addressed)
+      # src path, so the package and moduleVm stay cache hits on push.
+      runtimeSrc = nixpkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = nixpkgs.lib.fileset.unions [
+          ./cratedigger.py
+          ./album_source.py
+          ./lib
+          ./web
+          ./harness
+          ./scripts
+          ./migrations
+        ];
+      };
+      # Content-addressed version (first 8 chars of runtimeSrc's store
+      # hash): unique per runtime content, deliberately NOT per commit —
+      # a rev-coupled version would invalidate the package + moduleVm on
+      # every push regardless of what changed. Release tags (vYYYY.MM.DD,
+      # U9) record verified states in git itself.
       version = "0-unstable-"
-        + (builtins.substring 0 8 (self.lastModifiedDate or "19700101"))
-        + (if self ? shortRev then "-${self.shortRev}" else "-dirty");
+        + builtins.substring 0 8 (baseNameOf (toString runtimeSrc));
     in {
       devShells = forAllSystems ({ pkgs, ... }: {
         default = import ./nix/shell.nix { inherit pkgs; };
       });
 
-      # Tag-based versions are not readable in pure flake eval, so the
-      # version above is date+rev (sortable, unique per commit); release
-      # tags (vYYYY.MM.DD, U9) record verified states in git itself.
       packages = forAllSystems ({ pkgs, ... }: rec {
         default = import ./nix/wrappers.nix {
           inherit pkgs version;
-          src = ./.;
+          src = runtimeSrc;
         };
         cratedigger = default;
       });
@@ -53,6 +71,10 @@
       # standard trade for closure fidelity.
       nixosModules.default = { config, lib, pkgs, ... }: {
         imports = [ ./nix/module.nix ];
+        # Same filtered source the moduleVm check boots — consumers run
+        # exactly what was verified, and docs/tests-only bumps of the
+        # cratedigger-src input leave the rendered units unchanged.
+        services.cratedigger.src = lib.mkDefault runtimeSrc;
         services.cratedigger.packageSet = lib.mkDefault (import nixpkgs {
           system = pkgs.stdenv.hostPlatform.system;
         });
@@ -70,8 +92,23 @@
         moduleVm = import ./nix/tests/module-vm.nix {
           inherit pkgs system;
           cratediggerModule = self.nixosModules.default;
-          cratediggerSrc = ./.;
+          cratediggerSrc = runtimeSrc;
         };
+
+        # Eval-level guard for the src threading: the exported wrapper must
+        # default services.cratedigger.src to the filtered runtimeSrc (the
+        # same source the moduleVm boots). A regression to the raw module
+        # default (../. — the whole tree) would silently re-couple consumer
+        # closures to docs/tests churn. Pure evaluation, like packageSetPin.
+        runtimeSrcPin = let
+          srcVal = (nixpkgs.lib.nixosSystem {
+            modules = [ self.nixosModules.default {
+              nixpkgs.pkgs = import nixpkgs { inherit system; };
+            } ];
+          }).config.services.cratedigger.src;
+        in
+          assert toString srcVal == toString runtimeSrc;
+          pkgs.runCommand "cratedigger-runtime-src-pin-ok" { } "touch $out";
 
         # Eval-level guard for the packageSet threading. The "consumer" is
         # simulated with a marked nixpkgs instantiation installed as the
