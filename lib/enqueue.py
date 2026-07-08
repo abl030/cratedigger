@@ -1106,13 +1106,28 @@ def try_multi_enqueue(
     eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
     accumulated: list[CandidateScore] = []
     pre_filter_skips: list[int] = [0]
+    # #550 defect #1: a peer's per-disc sibling folders can cross-match —
+    # disc N's tracks strict-accept an EARLIER disc's folder (radio-series
+    # titles restart per disc; a 0.5 filename ratio even tolerates
+    # "Disc 1"/"Disc 2" title differences). Exclude every already-assigned
+    # (username, file_dir) from later discs' candidates so one folder can
+    # never source two discs.
+    used_sources: set[tuple[str, str]] = set()
     for disk in split_release:
         ctx.negative_matches.clear()
         peers_before = ctx.peers_browsed
         waves_before = ctx.fanout_waves
+        remaining_user_dirs = {
+            dirs_username: [
+                dir_name for dir_name in dirs
+                if (dirs_username, dir_name) not in used_sources
+            ]
+            for dirs_username, dirs in user_dirs.items()
+        }
         first_match = next(
             _iter_wave_matches(
-                disk["tracks"], eligible, user_dirs, allowed_filetype, ctx,
+                disk["tracks"], eligible, remaining_user_dirs,
+                allowed_filetype, ctx,
                 accumulated, pre_filter_skips, match_fn=match_fn,
             ),
             None,
@@ -1169,6 +1184,7 @@ def try_multi_enqueue(
                 waves=ctx.fanout_waves - waves_before,
         )
         disk["source"] = (username, directory, match_result.file_dir)
+        used_sources.add((username, match_result.file_dir))
         count_found += 1
         logger.info(
             "MANIFEST-TRACE multidisc-match request=%s disc=%s/%s user=%s "
@@ -1210,6 +1226,29 @@ def try_multi_enqueue(
                 file.disk_no = disk["disk_no"]
                 file.disk_count = disk["disk_count"]
             planned_downloads.extend(disk_planned)
+        # #550 fail-closed coverage gate: every downstream stage (slskd
+        # transfers, observation copying, event stamping, the import
+        # manifest check) keys by (username, filename), so duplicate keys
+        # silently collapse to a partial-disc manifest that validates as
+        # "extra audio, no missing". A grab that cannot prove full unique
+        # coverage is not a grab — keep searching.
+        unique_transfer_keys = {
+            (file.username, file.filename) for file in planned_downloads
+        }
+        if len(unique_transfer_keys) < len(planned_downloads):
+            logger.warning(
+                "MULTI-DISC UNDER-COVERAGE: request=%s planned=%s unique=%s "
+                "— duplicate transfer identities across discs; rejecting "
+                "candidate and continuing search",
+                _album_request_id(album),
+                len(planned_downloads),
+                len(unique_transfer_keys),
+            )
+            return EnqueueAttempt(
+                matched=False,
+                candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skips[0],
+            )
         claim = _claim_initial_download_ownership(
             album,
             planned_downloads,
