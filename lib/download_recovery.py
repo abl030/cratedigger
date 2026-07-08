@@ -102,6 +102,12 @@ def _recovery_candidates(
     slskd_download_dir: str,
     attempt_fingerprint: str = "",
 ) -> tuple[ProcessingPathLocation, ...]:
+    # Deliberately NO bare (un-fingerprinted) canonical fallback candidate:
+    # forward-only data assumptions (scope.md). Rows that were mid-download
+    # across the #550-phase-2 deploy window are an operator one-shot at
+    # deploy time (drain or reset the in-flight cohort), not a permanent
+    # compat branch — a bare-path candidate would quietly re-open the
+    # cross-attempt accumulation this refactor exists to kill.
     canonical_path = canonical_processing_path(
         artist=artist,
         title=title,
