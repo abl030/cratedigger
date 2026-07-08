@@ -153,7 +153,7 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 
 **ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the output file. The suite gates: JS syntax + JS tests, the vulture dead-code sweep, then unittest discovery. `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, and the new-work checklist.
 
-**Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz` on those modules. Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. `docs/generated-testing.md`.
+**Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz` on those modules. Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. **New features start by writing their invariants down, and features with a generated-testable surface ship properties + known-bad self-tests in the same PR** (`.claude/rules/code-quality.md` § Red/Green TDD). When in doubt that the harness constrains anything, qualify it by fault injection. `docs/generated-testing.md`.
 
 ### Skipped tests are an anti-pattern
 
