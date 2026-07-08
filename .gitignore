@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 *.egg-info/
 .mypy_cache/
+# Hypothesis example database (fuzz-tier failure replay; see docs/generated-testing.md)
+.hypothesis/
 .pyright/
 .pyright-venv
 .nixpkgs-src

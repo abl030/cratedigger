@@ -153,6 +153,8 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 
 **ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the output file. The suite gates: JS syntax + JS tests, the vulture dead-code sweep, then unittest discovery. `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, and the new-work checklist.
 
+**Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz` on those modules. Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. `docs/generated-testing.md`.
+
 ### Skipped tests are an anti-pattern
 
 **A test either runs or it doesn't exist.** No skip decorators, no env-gated tests, no "fixtures must be generated first" — every test runs on every `run_tests.sh` in a fresh dev shell. A skipped test is either irrelevant (delete it) or mis-designed (make it run: Nix-provided binaries, synthetic fixtures in `setUp`, or fakes). `tests/test_skip_audit.py` fails the suite on any skip; there is no allowlist. (History: the suite once said `OK (skipped=56)` for months while 56 tests had never executed once.)
