@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from typing import Sequence
@@ -48,17 +50,59 @@ def path_is_within_root(path: str, root: str) -> bool:
         return False
 
 
+def attempt_fingerprint(pairs: Sequence[tuple[str, str]]) -> str:
+    """Short deterministic fingerprint of an attempt's (username, filename) set.
+
+    Mirrors the ``snapshot_fingerprint`` idiom in
+    ``lib/quality_evidence.py``: sort the pairs, JSON-encode with no
+    whitespace, SHA-256 the UTF-8 bytes, and take the first 8 hex chars —
+    enough entropy to distinguish concurrent attempts in a folder name
+    while staying short and readable.
+
+    Order-independent (the pairs are sorted before encoding) and
+    sensitive to every field: a different source user or a different
+    remote path for even one track produces a different fingerprint. The
+    empty set hashes the JSON encoding of ``[]`` (a stable, defined
+    digest), not an error — same documented behavior as
+    ``snapshot_fingerprint``.
+
+    Used to key each download attempt's canonical processing folder to
+    its own manifest (issue #550 phase 2) — see ``canonical_processing_path``.
+    """
+    encoded = json.dumps(
+        sorted(pairs),
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:8]
+
+
 def canonical_processing_path(
     *,
     artist: str,
     title: str,
     year: str,
     slskd_download_dir: str,
+    attempt_fingerprint: str = "",
 ) -> str:
-    """Return the canonical local processing directory for a completed album."""
+    """Return the canonical local processing directory for a completed album.
+
+    When ``attempt_fingerprint`` is non-empty, it is appended as a
+    `` [<fp>]`` suffix so each download attempt (a distinct manifest of
+    (username, filename) pairs) materializes into its own folder — no
+    attempt ever validates against files another attempt placed there
+    (issue #550 phase 2: the canonical folder used to be keyed only on
+    artist/title/year, so a stale prior attempt's leftover audio could
+    silently blend into a fresh attempt's validation scope). Empty (the
+    default) preserves the bare ``"Artist - Title (Year)"`` folder name
+    for callers that classify an already-persisted path rather than
+    compute a fresh one.
+    """
     import_folder_name = sanitize_processing_folder_name(
         f"{artist} - {title} ({year})",
     )
+    if attempt_fingerprint:
+        import_folder_name = f"{import_folder_name} [{attempt_fingerprint}]"
     return os.path.join(slskd_download_dir, import_folder_name)
 
 
