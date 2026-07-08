@@ -67,6 +67,7 @@ from web.routes import imports as _imports_routes
 from web.routes import long_tail as _long_tail_routes
 from web.routes import pipeline as _pipeline_routes
 from web.routes import pipeline_dashboard as _pipeline_dashboard_routes
+from web.routes import pipeline_mutations as _pipeline_mutations_routes
 from web.routes import release_identity_routes as _release_identity_routes
 from web.routes import search_plan as _search_plan_routes
 from web.routes import triage as _triage_routes
@@ -94,6 +95,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _long_tail_routes,
     _pipeline_routes,
     _pipeline_dashboard_routes,
+    _pipeline_mutations_routes,
     _release_identity_routes,
     _library_routes,
     _imports_routes,

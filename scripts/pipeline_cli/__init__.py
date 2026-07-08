@@ -37,7 +37,7 @@ Note on ``finalize_request``: it's a module-level DI seam
 (``finalize_request = transitions.finalize_request``) bound
 independently in BOTH ``album_requests.py`` (retry/cancel/set/set-intent)
 and ``quality.py`` (repair-spectral) — same pattern as
-``web.routes.pipeline.finalize_request`` / ``harness.import_one.finalize_request``.
+``web.routes.pipeline_mutations.finalize_request`` / ``harness.import_one.finalize_request``.
 Patches targeting a specific command's test must patch the module that
 actually calls it (e.g. ``scripts.pipeline_cli.album_requests.finalize_request``),
 not this re-export. This package re-exports the ``album_requests.py``

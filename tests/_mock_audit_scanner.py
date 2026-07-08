@@ -111,7 +111,6 @@ _LEAF_SEAM_PATTERNS = [
     # MusicBrainz / Discogs client objects on the web side
     re.compile(r"^web\.(mb|discogs)\."),
     re.compile(r"^web\.routes\.\w+\.(mb_api|discogs_api)"),
-    re.compile(r"^web\.routes\.pipeline\.mb_api"),
     re.compile(r"^web\.server\.(mb_api|discogs_api|_real_beets_db|check_beets_library|check_pipeline|get_library_artist|_beets_db|mb)"),
     # Notifier helpers — fire-and-forget, no return value to mock meaningfully
     re.compile(r"lib\.util\._meelo_"),
@@ -273,17 +272,17 @@ _LEAF_SEAM_PATTERNS = [
     # function lives in lib.* and is allowlisted there; tests just
     # patch the import binding inside the route module.
     re.compile(r"^web\.routes\.\w+\.resolve_failed_path$"),
-    re.compile(r"^web\.routes\.pipeline\.hash_audio_content$"),
+    re.compile(r"^web\.routes\.pipeline_mutations\.hash_audio_content$"),
     re.compile(r"^web\.routes\.imports\.scan_complete_folder$"),
 
-    # Route-to-transition DI seam. ``web.routes.pipeline.finalize_request``
+    # Route-to-transition DI seam. ``web.routes.pipeline_mutations.finalize_request``
     # is the module-level swap point for ``transitions.finalize_request``;
     # routes call it through this binding so tests can inject a recorder
     # or no-op without monkey-patching ``lib.transitions``. Same shape as
     # the ``web.server.db`` constructor-replacement entry above — this is
     # how route-scope DI is expressed in this codebase, since route
     # handlers are dispatched by URL and don't take dependency kwargs.
-    re.compile(r"^web\.routes\.pipeline\.finalize_request$"),
+    re.compile(r"^web\.routes\.pipeline_mutations\.finalize_request$"),
 
     # Route-to-service DI seam. ``cleanup_all_wrong_matches`` triggers
     # real DB mutations + filesystem deletes via the wrong-match cleanup
@@ -306,7 +305,7 @@ _LEAF_SEAM_PATTERNS = [
     # calling module binds ``finalize_request = transitions.finalize_request``
     # at import time so tests swap the dependency on the route/CLI/harness/
     # dispatch module rather than on ``lib.transitions``. Same shape as
-    # ``web.routes.pipeline.finalize_request`` above — route handlers
+    # ``web.routes.pipeline_mutations.finalize_request`` above — route handlers
     # and CLI subcommands are dispatched without keyword args, so
     # module-attribute swap is the established DI shape in this codebase.
     re.compile(r"^lib\.dispatch\.outcome_actions\.finalize_request$"),
