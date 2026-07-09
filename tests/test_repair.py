@@ -217,7 +217,13 @@ class TestFindOrphanedDownloads(unittest.TestCase):
 
 
 class TestFindSlskdOrphans(unittest.TestCase):
-    """Inverse orphan direction (#278): live slskd transfers no row owns."""
+    """Inverse orphan direction (#278), ledger-positive since #571 PR 3:
+    a live slskd transfer is only ever an orphan when it's IN
+    cratedigger's write-ahead ledger. Unledgered transfers are foreign —
+    counted, never reported as an orphan (C1). Ledgered-but-unbacked
+    transfers are cratedigger's own strays (C2)."""
+
+    FILENAME = "Music\\Album\\01 - Track.flac"
 
     @staticmethod
     def _snapshot(username="peer1", directory="Music\\Album",
@@ -238,38 +244,74 @@ class TestFindSlskdOrphans(unittest.TestCase):
                     "filetype": "flac",
                     "files": [{"username": username, "filename": filename}]}}
 
-    def test_live_unowned_transfer_is_orphan(self):
-        orphans = find_slskd_orphans(self._snapshot(), [])
-        self.assertEqual(len(orphans), 1)
-        self.assertEqual(orphans[0].username, "peer1")
-        self.assertEqual(orphans[0].transfer_id, "t-1")
-        self.assertEqual(orphans[0].filename,
-                         "Music\\Album\\01 - Track.flac")
-        self.assertEqual(orphans[0].state, "InProgress")
+    @staticmethod
+    def _ledgered(*pairs):
+        return set(pairs)
 
-    def test_live_owned_transfer_is_not_orphan(self):
-        orphans = find_slskd_orphans(self._snapshot(), [self._owning_row()])
-        self.assertEqual(orphans, [])
+    def test_live_unledgered_transfer_is_foreign_not_orphan(self):
+        """C1, the flip of the old doctrine: with zero ledger knowledge, a
+        live transfer with no owning row used to be reported as an
+        orphan (and convergence would cancel it — a human's transfer on
+        a shared instance). Now it's foreign: never reported, only
+        counted."""
+        ownership = find_slskd_orphans(self._snapshot(), [], set())
+        self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 1)
+
+    def test_live_ledgered_unbacked_transfer_is_orphan(self):
+        """C2: ledgered AND not backed by a downloading row IS the stray
+        this convergence targets."""
+        ownership = find_slskd_orphans(
+            self._snapshot(), [], self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(len(ownership.orphans), 1)
+        self.assertEqual(ownership.orphans[0].username, "peer1")
+        self.assertEqual(ownership.orphans[0].transfer_id, "t-1")
+        self.assertEqual(ownership.orphans[0].filename, self.FILENAME)
+        self.assertEqual(ownership.orphans[0].state, "InProgress")
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_live_ledgered_backed_transfer_is_not_orphan(self):
+        ownership = find_slskd_orphans(
+            self._snapshot(), [self._owning_row()],
+            self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_backed_but_unledgered_transfer_is_foreign_not_shielded(self):
+        """Priority ordering: ledger membership decides C1 BEFORE the
+        backed check runs. A transfer no ledger row proves cratedigger
+        created is foreign even if it happens to match a downloading
+        row's active_download_state (legacy pre-ledger data, or a stray
+        DB entry) — never reported as an orphan either way."""
+        ownership = find_slskd_orphans(
+            self._snapshot(), [self._owning_row()], set())
+        self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 1)
 
     def test_completed_unowned_transfer_is_not_orphan(self):
-        """Terminal transfers have nothing to cancel —
-        remove_completed_downloads() reaps their UI entries."""
-        orphans = find_slskd_orphans(
-            self._snapshot(state="Completed, Succeeded"), [])
-        self.assertEqual(orphans, [])
+        """Terminal transfers have nothing to cancel — the completed-
+        transfer purge (#571 PR 5) reaps their UI entries. Skipped before
+        classification, so it doesn't even count toward foreign_count."""
+        ownership = find_slskd_orphans(
+            self._snapshot(state="Completed, Succeeded"), [], set())
+        self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 0)
 
     def test_non_downloading_row_does_not_own(self):
         """A replaced row's frozen active_download_state must NOT shield
-        its stranded transfers — that's the exact case this converges."""
-        orphans = find_slskd_orphans(
-            self._snapshot(), [self._owning_row(status="replaced")])
-        self.assertEqual(len(orphans), 1)
+        its stranded, ledgered transfer — that's the exact case this
+        converges (the canonical Replace scenario)."""
+        ownership = find_slskd_orphans(
+            self._snapshot(), [self._owning_row(status="replaced")],
+            self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(len(ownership.orphans), 1)
 
     def test_downloading_row_without_state_owns_nothing(self):
         row = {"id": 1, "status": "downloading",
                "active_download_state": None}
-        orphans = find_slskd_orphans(self._snapshot(), [row])
-        self.assertEqual(len(orphans), 1)
+        ownership = find_slskd_orphans(
+            self._snapshot(), [row], self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(len(ownership.orphans), 1)
 
     def test_processing_phase_row_still_shields_its_transfers(self):
         """A downloading row mid-local-processing owns its files like any
@@ -277,49 +319,65 @@ class TestFindSlskdOrphans(unittest.TestCase):
         row = self._owning_row()
         row["active_download_state"]["processing_started_at"] = (
             "2026-07-03T00:00:00+00:00")
-        orphans = find_slskd_orphans(self._snapshot(), [row])
-        self.assertEqual(orphans, [])
+        ownership = find_slskd_orphans(
+            self._snapshot(), [row], self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(ownership.orphans, [])
 
     def test_username_must_match(self):
-        """Same filename from a different peer is a different transfer."""
-        orphans = find_slskd_orphans(
-            self._snapshot(username="peer2"), [self._owning_row()])
-        self.assertEqual(len(orphans), 1)
-        self.assertEqual(orphans[0].username, "peer2")
+        """Same filename from a different peer is a different transfer —
+        must be ledgered under its OWN (username, filename) key."""
+        ownership = find_slskd_orphans(
+            self._snapshot(username="peer2"), [self._owning_row()],
+            self._ledgered(("peer2", self.FILENAME)))
+        self.assertEqual(len(ownership.orphans), 1)
+        self.assertEqual(ownership.orphans[0].username, "peer2")
 
     def test_queued_state_is_live(self):
-        orphans = find_slskd_orphans(
-            self._snapshot(state="Queued, Remotely"), [])
-        self.assertEqual(len(orphans), 1)
+        ownership = find_slskd_orphans(
+            self._snapshot(state="Queued, Remotely"), [],
+            self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(len(ownership.orphans), 1)
 
     def test_missing_state_treated_as_live(self):
         # state="" is TransferSnapshot's own default — mirrors an entry
         # where slskd omitted the field entirely (issue #507: the
         # envelope's file entries decode through the same Struct).
         snapshot = self._snapshot(state="")
-        orphans = find_slskd_orphans(snapshot, [])
-        self.assertEqual(len(orphans), 1)
-        self.assertEqual(orphans[0].state, "")
+        ownership = find_slskd_orphans(
+            snapshot, [], self._ledgered(("peer1", self.FILENAME)))
+        self.assertEqual(len(ownership.orphans), 1)
+        self.assertEqual(ownership.orphans[0].state, "")
 
     def test_file_without_filename_skipped(self):
         snapshot = self._snapshot(filename="")
-        orphans = find_slskd_orphans(snapshot, [])
-        self.assertEqual(orphans, [])
+        ownership = find_slskd_orphans(snapshot, [], set())
+        self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 0)
 
-    def test_mixed_snapshot_only_live_unowned_reported(self):
+    def test_mixed_snapshot_classifies_orphan_and_foreign_independently(self):
         snapshot = (
-            self._snapshot()  # live, owned below
+            self._snapshot()  # live, ledgered + owned below -> in flight
             + self._snapshot(username="peer2", transfer_id="t-2",
-                             filename="Music\\Other\\02.flac")  # live, unowned
+                             filename="Music\\Other\\02.flac")  # live, ledgered, unbacked -> stray
             + self._snapshot(username="peer3", transfer_id="t-3",
+                             filename="Music\\Foreign\\03.flac")  # live, unledgered -> foreign
+            + self._snapshot(username="peer4", transfer_id="t-4",
                              state="Completed, Errored")  # terminal
         )
-        orphans = find_slskd_orphans(snapshot, [self._owning_row()])
-        self.assertEqual(len(orphans), 1)
-        self.assertEqual(orphans[0].transfer_id, "t-2")
+        ownership = find_slskd_orphans(
+            snapshot, [self._owning_row()],
+            self._ledgered(
+                ("peer1", self.FILENAME),
+                ("peer2", "Music\\Other\\02.flac"),
+            ))
+        self.assertEqual(len(ownership.orphans), 1)
+        self.assertEqual(ownership.orphans[0].transfer_id, "t-2")
+        self.assertEqual(ownership.foreign_count, 1)
 
     def test_empty_snapshot(self):
-        self.assertEqual(find_slskd_orphans([], [self._owning_row()]), [])
+        ownership = find_slskd_orphans([], [self._owning_row()], set())
+        self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 0)
 
 
 class TestSuggestRepair(unittest.TestCase):
