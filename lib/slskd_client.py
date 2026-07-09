@@ -419,11 +419,20 @@ class SlskdSearchesApi:
         responseLimit: int = 100,
         searchTimeout: int = 15000,
     ) -> dict[str, Any]:
-        """Submit a search. slskd requires a client-generated search uuid."""
-        try:
-            search_id = str(uuid.UUID(id)) if id else str(uuid.uuid4())
-        except ValueError:
-            search_id = str(uuid.uuid4())
+        """Submit a search. slskd requires a client-generated search uuid.
+
+        When ``id`` is explicitly passed, it MUST be a valid UUID string
+        and is sent to slskd VERBATIM (as its canonical ``str(uuid.UUID(...))``
+        form) -- no silent fallback to a fresh ``uuid4()`` on a malformed
+        value. This is load-bearing for the search-id write-ahead ledger
+        (issue #576): a caller that already persisted ``id`` in the ledger
+        BEFORE calling this (I2) requires the id actually POSTed to be
+        EXACTLY the ledgered id, or the sweep can never find the search
+        it's supposed to clean up. A ``ValueError`` here means the caller
+        has a bug upstream of the ledger write, not something to paper
+        over. Callers that pass ``id=None`` keep the auto-mint behaviour.
+        """
+        search_id = str(uuid.UUID(id)) if id else str(uuid.uuid4())
         response = self._client._request("POST", "/searches", json_body={
             "id": search_id,
             "fileLimit": fileLimit,
@@ -435,6 +444,18 @@ class SlskdSearchesApi:
             "searchText": searchText,
             "searchTimeout": searchTimeout,
         })
+        return response.json()
+
+    def get_all(self) -> list[dict[str, Any]]:
+        """Return every currently-resident slskd search (``GET /searches``).
+
+        Used by the write-ahead-ledger sweep (issue #576,
+        ``lib.slskd_searches.converge_slskd_searches``) to reconcile
+        ledgered ids against slskd's actual state. Verified live against
+        slskd 0.24.5: each entry carries at least ``id``, ``state``,
+        ``searchText``, and ``startedAt``.
+        """
+        response = self._client._request("GET", "/searches")
         return response.json()
 
     def state(self, id: str, includeResponses: bool = False) -> dict[str, Any]:

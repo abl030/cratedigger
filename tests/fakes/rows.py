@@ -111,6 +111,23 @@ class UserCooldownRow:
 
 
 @dataclass
+class SearchLedgerRow:
+    """One row in slskd_search_ledger (migration 044, issue #576).
+
+    Captured both by ``FakePipelineDB.record_search_id_calls`` (one entry
+    per call, call-recording semantics) and as the underlying ledger table
+    state (``ON CONFLICT DO NOTHING`` semantics — the first insert for a
+    given ``search_id`` sticks; ``mark_search_ids_deleted`` mutates
+    ``deleted_at`` in place on that same instance).
+    """
+    search_id: str
+    purpose: str
+    request_id: int | None
+    created_at: datetime = field(default_factory=_utcnow)
+    deleted_at: datetime | None = None
+
+
+@dataclass
 class FieldResolutionRow:
     """One row in album_request_field_resolutions (migration 030).
 

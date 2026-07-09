@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Sequence, TYPE_CHECKING, TypedDict
@@ -367,10 +368,22 @@ def search_for_album(album, ctx):
     logger.info(f"Searching for album: {query} "
                 f"(from '{artist_name} - {album_title}', "
                 f"variant={variant_tag}, ordinal={plan_execution.plan_ordinal})")
+    # Write-ahead ledger (issue #576, I2): the id must be persisted BEFORE
+    # the POST so a kill at any point after submission still leaves the
+    # sweep something to find and clean up (I1). A DB failure here
+    # deliberately propagates — you cannot POST before the ledger commits,
+    # and DB-down is already cycle-fatal.
+    search_id = str(uuid.uuid4())
+    db.record_search_id(
+        search_id, purpose="plan_search",
+        request_id=getattr(album, "db_request_id", None),
+    )
+    submit_kwargs = _plan_search_submit_kwargs(query, cfg)
+    submit_kwargs["id"] = search_id
     try:
         exec_result = execute_search(
             slskd,
-            submit_kwargs=_plan_search_submit_kwargs(query, cfg),
+            submit_kwargs=submit_kwargs,
             delete=cfg.delete_searches,
         )
     except SearchSubmitError:
@@ -405,12 +418,20 @@ def search_for_album(album, ctx):
     return result
 
 
-def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
+def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client, db):
     """Submit a plan-item search to slskd and return ``(search_id, query, album_id, tag)``.
 
     slskd has a SemaphoreSlim(1,1) on POST /searches — one submission at a
     time. The semaphore releases after the search is queued (~100ms), so we
     submit sequentially but wait for results in parallel.
+
+    Write-ahead ledger (issue #576, I2): every attempt mints its OWN fresh
+    id and ledgers it BEFORE the POST — including retries. A retried
+    attempt is not a resubmission of the same id: slskd's behaviour on a
+    duplicate-id POST is undefined, and a half-created earlier attempt
+    (POST reached slskd, response lost / 5xx-after-create / exhausted
+    retries) is exactly the kind of stray the sweep exists to clean up
+    (I1). Reusing one id across retries would let that stray go unledgered.
 
     Returns ``None`` on submission failure (pre-attempt, non-consuming):
     the caller already has the plan-execution context to record a
@@ -421,6 +442,7 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
+    request_id = getattr(album, "db_request_id", None)
     if not query:
         # Defensive: caller should have caught this, but never submit empty.
         logger.warning(f"Cannot build search query for '{artist_name} - {album_title}'")
@@ -432,10 +454,14 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client):
     # Retry on 429 (rate limit) or 409 (semaphore busy) with backoff.
     # slskd has SemaphoreSlim(1,1) — 409 means another search is still being submitted.
     for attempt in range(6):
+        search_id = str(uuid.uuid4())
+        # A DB failure here deliberately propagates (write-ahead: no POST
+        # before the ledger commits; DB-down is already cycle-fatal).
+        db.record_search_id(search_id, purpose="plan_search", request_id=request_id)
         try:
-            search = slskd_client.searches.search_text(
-                **_plan_search_submit_kwargs(query, search_cfg)
-            )
+            submit_kwargs = _plan_search_submit_kwargs(query, search_cfg)
+            submit_kwargs["id"] = search_id
+            search = slskd_client.searches.search_text(**submit_kwargs)
             return (search["id"], query, album_id, strategy_tag)
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
@@ -942,7 +968,7 @@ def _search_and_queue_parallel(albums, ctx):
             query, plan_execution = selection
             submit_result = _submit_plan_search(
                 album, query, plan_execution.plan_strategy,
-                search_cfg, ctx.slskd,
+                search_cfg, ctx.slskd, db,
             )
             if submit_result is None:
                 # slskd round-trip failed BEFORE search was accepted ->
@@ -1462,6 +1488,21 @@ def main():
         except Exception:
             logger.exception(
                 "DISK-REAP: sweep failed; continuing with the cycle.")
+
+        # --- Phase 0c: slskd search-ledger sweep (issue #576) ---
+        # Delete completed slskd searches whose id is in cratedigger's
+        # write-ahead ledger — heals every leak path a process death can
+        # create (kill/SIGTERM mid-cycle, a submit retry's half-created
+        # earlier attempt, a submit error after slskd already accepted the
+        # POST, a post-accept collection crash). Never touches a search
+        # whose id isn't ledgered (#571 good-citizen doctrine). Best-effort
+        # internally as well — never blocks the cycle.
+        try:
+            from lib.slskd_searches import converge_slskd_searches
+            converge_slskd_searches(_module_ctx)
+        except Exception:
+            logger.exception(
+                "SEARCH-LEDGER: sweep failed; continuing with the cycle.")
 
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:

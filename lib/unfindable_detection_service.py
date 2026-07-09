@@ -413,6 +413,8 @@ def run_artist_probe(
     slskd_client: Any,
     *,
     artist_name: str,
+    db: "_PipelineDBProto",
+    request_id: int | None = None,
     search_timeout_ms: int = 30000,
     response_limit: int = 100,
     file_limit: int = 1000,
@@ -436,6 +438,12 @@ def run_artist_probe(
     harvest rather than an immediate read that could race to empty and
     spuriously report the artist absent).
 
+    Write-ahead ledger (issue #576, I2): mints a fresh search id and
+    records it via ``db.record_search_id`` BEFORE the submit — the daily
+    unattended timer is exactly the kind of process a kill can hit
+    mid-search, and a probe search that leaks is otherwise invisible
+    (there's no per-request row watching it).
+
     Exception contract:
       * A submit failure or a harvest transport error propagates; the caller
         (the service) records ``RESULT_PROBE_FAILED``.
@@ -452,11 +460,17 @@ def run_artist_probe(
     ``poll_sleep`` / ``clock`` are injected for test determinism (forwarded to
     ``execute_search`` as ``sleep_fn`` / ``clock_fn``); production omits them.
     """
+    import uuid
+
     from lib.search_exec import execute_search
+
+    search_id = str(uuid.uuid4())
+    db.record_search_id(search_id, purpose="artist_probe", request_id=request_id)
 
     exec_result = execute_search(
         slskd_client,
         submit_kwargs={
+            "id": search_id,
             "searchText": artist_name,
             "searchTimeout": search_timeout_ms,
             "filterResponses": True,
@@ -503,6 +517,12 @@ class _PipelineDBProto(Protocol):
     def list_unfindable_probe_candidates(
         self, *, limit: int, probe_interval_days: int,
     ) -> list[dict[str, Any]]: ...
+    def record_search_id(
+        self,
+        search_id: str,
+        purpose: str,
+        request_id: int | None,
+    ) -> None: ...
     def record_artist_probe(
         self,
         request_id: int,
@@ -608,6 +628,7 @@ class UnfindableDetectionService:
         try:
             probe = self._probe_runner(
                 self.slskd_client, artist_name=artist_name,
+                db=self.db, request_id=request_id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
