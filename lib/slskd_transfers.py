@@ -934,10 +934,7 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
         ledgered ``attempt_fingerprint`` (``get_owned_attempt_folders``
         + ``canonical_processing_path`` — covers past attempts whose
         request has since left ``downloading``, not just the current
-        one), OR
-    (c) it lies under the ``failed_imports/`` quarantine tree
-        (cratedigger's own tree by construction — Wrong Match cards
-        reference these paths; its lifecycle is untouched by this flip).
+        one).
 
     Anything else — a file this instance never ledgered, a human's own
     download, pre-#571 debris from before migration 045 shipped — is
@@ -949,15 +946,24 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     going forward (``.claude/rules/scope.md`` — that cleanup is not
     product code, see the PR body).
 
-    A ``downloading`` row's CURRENT canonical folder/stamped paths stay
-    protected regardless of ledger ownership or age (retry-safe: an
-    abandoned earlier attempt of the SAME request is ledger-owned but
-    inactive, and IS reap-eligible once aged — the still-live retry's
-    folder never is). Individually removed files' now-empty parent
-    directories are pruned afterward (never a recursive folder
-    ``rmtree`` — CLAUDE.md); an already-empty directory with no positive
-    ownership record stays untouched, however old
-    (``_prune_stale_empty_dirs``).
+    Protection trumps ownership. Two subtrees are unconditionally
+    protected — recognised as cratedigger's own but NEVER reap-eligible,
+    whatever the ledger says and however old the files
+    (``_protected_paths_for_downloading``; the walk prunes them without
+    ever examining their files):
+
+    * the ``failed_imports/`` quarantine tree (cratedigger's own tree
+      by construction — Wrong Match cards reference these paths; its
+      lifecycle is untouched by this flip), and
+    * a ``downloading`` row's CURRENT canonical folder/stamped paths
+      (retry-safe: an abandoned earlier attempt of the SAME request is
+      ledger-owned but inactive, and IS reap-eligible once aged — the
+      still-live retry's folder never is).
+
+    Individually removed files' now-empty parent directories are pruned
+    afterward (never a recursive folder ``rmtree`` — CLAUDE.md); an
+    already-empty directory with no positive ownership record stays
+    untouched, however old (``_prune_stale_empty_dirs``).
 
     Retention/residency ordering (binding, PR #585 review amendment):
     ``prune_transfer_ledger``'s retention window (90 days,
