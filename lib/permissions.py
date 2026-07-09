@@ -10,15 +10,22 @@ other user (abl030) from running beets commands against the library.
 
 Rather than chase the elusive umask-reset through every layer, we:
 
-1. Explicitly `os.umask(0)` at every pipeline entry point (belt-and-suspenders
-   over systemd's `UMask=0000`).
+1. Explicitly `os.umask(0o002)` at every pipeline entry point — the systemd
+   units' `UMask=0000` is a permissive floor; this explicit call is what
+   actually narrows newly-created files/dirs to group-writable.
 2. After a successful import, recursively chmod the imported album dir and
    its parent (artist dir) to guarantee the final on-disk mode regardless of
    which layer dropped the umask.
 
-The final modes (`0o777` for dirs, `0o666` for files) are the values the
-service would have produced under `umask=0`, so this is not looser than the
-intended policy — it just enforces it unconditionally.
+The final dir mode is `0o2775` (setgid + rwxrwxr-x): setgid so every new
+child directory beets creates underneath inherits the library's group
+(rather than the creating process's primary group), and group-writable so
+gid-consumers — media servers like Jellyfin — can write NFO/artwork
+alongside the media without needing to own the files. This is the boundary
+for the non-root service user + group-`users` library layout: a plain
+`0o775` with no setgid bit silently strips setgid on every import and
+defeats the whole design, so `fix_library_modes` re-asserts it unconditionally
+rather than trusting whatever the umask happened to produce.
 """
 from __future__ import annotations
 
@@ -27,34 +34,46 @@ import os
 
 logger = logging.getLogger(__name__)
 
-LIBRARY_DIR_MODE = 0o777
+LIBRARY_DIR_MODE = 0o2775
 
 
 def reset_umask() -> None:
-    """Set the process umask to 0, matching the systemd unit's UMask=0000.
+    """Set the process umask to the group-writable 0o002.
 
     Call this at every pipeline entry point (cratedigger.py main(), import_one.py
     main(), beets_harness.py main()) so subprocesses further down the chain
-    inherit it. Do NOT call this at module-import time — the umask is
-    process-wide and would leak into any code that imports the module.
+    inherit it. The systemd units run with a permissive `UMask=0000` as the
+    floor; this explicit `0o002` (not `0`) is what actually governs the final
+    on-disk mode — group-writable so the shared group can create/write
+    alongside the media, without also handing out world-write. Do NOT call
+    this at module-import time — the umask is process-wide and would leak
+    into any code that imports the module.
     """
-    os.umask(0)
+    os.umask(0o002)
 
 
 def fix_library_modes(path: str) -> None:
     """Recursively chmod a library path's *directories* to LIBRARY_DIR_MODE.
 
     Issue #84 is specifically about directory accessibility — beets is
-    intermittently creating artist/album dirs as 0o755 despite the systemd
-    unit's UMask=0000, which blocks other users from running `beet fetchart`
-    etc. File modes are set by beets' own `shutil.copystat` when it moves
-    tracks in from staging, so we deliberately do NOT touch files here — that
-    would risk broadening file permissions beyond what the source had.
+    intermittently creating artist/album dirs as 0o755 despite the process's
+    group-writable `0o002` umask (`reset_umask`), which blocks other
+    users/services in the group from running `beet fetchart` etc. or
+    writing alongside the media. File modes are set by beets' own
+    `shutil.copystat` when it moves tracks in from staging, so we
+    deliberately do NOT touch files here — that would risk broadening file
+    permissions beyond what the source had.
 
     If `path` is a directory:
       - the directory itself and its immediate parent (typically the artist
-        dir above an album dir) are chmod'd to `LIBRARY_DIR_MODE` (0o777)
+        dir above an album dir) are chmod'd to `LIBRARY_DIR_MODE` (`0o2775` —
+        setgid + group-writable)
       - every descendant directory → `LIBRARY_DIR_MODE`
+
+    This is the belt-and-suspenders guarantee for the setgid/group-writable
+    import boundary: it re-asserts `0o2775` (including the setgid bit) even
+    on empty/intermediate dirs the beets `permissions` plugin's per-item
+    listener doesn't reach, so the bit can never be silently stripped.
 
     Non-existent or non-directory paths are a no-op. Per-entry chmod failures
     are logged and swallowed so one stubborn child cannot block the pass.

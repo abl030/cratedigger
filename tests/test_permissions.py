@@ -10,12 +10,12 @@ from lib.permissions import LIBRARY_DIR_MODE, fix_library_modes, reset_umask
 
 
 class TestResetUmask(unittest.TestCase):
-    def test_sets_umask_to_zero(self):
+    def test_sets_umask_to_group_writable(self):
         prior = os.umask(0o027)
         try:
             reset_umask()
             current = os.umask(0)
-            self.assertEqual(current, 0)
+            self.assertEqual(current, 0o002)
         finally:
             os.umask(prior)
 
@@ -49,6 +49,19 @@ class TestFixLibraryModes(unittest.TestCase):
             self.assertEqual(self._mode(album), LIBRARY_DIR_MODE)
             self.assertEqual(self._mode(artist), LIBRARY_DIR_MODE,
                              "artist (parent) dir must also be chmod'd")
+
+    def test_dir_mode_is_setgid_and_group_writable(self):
+        """The invariant this whole helper exists to guarantee: setgid
+        (0o2000) so child dirs inherit the library group, and 0o775 so
+        gid-consumers (Jellyfin) can write NFO/artwork alongside media. A
+        plain 0o775 with no setgid bit silently defeats the design."""
+        with tempfile.TemporaryDirectory() as root:
+            _, album, _, _ = self._make_tree(root)
+            fix_library_modes(album)
+            mode = self._mode(album)
+            self.assertTrue(mode & 0o2000, "setgid bit must be set")
+            self.assertEqual(mode & 0o775, 0o775, "must be group-writable rwxrwxr-x")
+            self.assertEqual(LIBRARY_DIR_MODE, 0o2775)
 
     def test_recursive_on_subdirs(self):
         with tempfile.TemporaryDirectory() as root:

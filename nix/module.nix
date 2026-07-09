@@ -107,7 +107,7 @@
     chroma.auto = false;
     permissions = {
       file = "0664";
-      dir = "0775";
+      dir = "02775";
     };
     fetchart = {
       auto = true;
@@ -1088,7 +1088,9 @@ in {
         example = "systemctl restart slskd.service";
         description = ''
           Shell command to run when the health check fails. Empty = log and skip
-          the run. The command is invoked as root (or services.cratedigger.user) and
+          the run. The command is invoked as root (the health-check ExecStartPre is
+          "+"-prefixed, so it runs as root even when services.cratedigger.user is
+          non-root — e.g. so `systemctl restart slskd.service` works) and
           retries are attempted for up to a minute after it returns.
         '';
       };
@@ -1433,7 +1435,14 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
+        # slskdHealthCheck is prefixed with "+" so it always runs as root,
+        # regardless of cfg.user: its onFailureCommand (e.g. `systemctl
+        # restart slskd.service`) needs root, and once cfg.user is
+        # non-root a bare ExecStartPre would run as that user and be
+        # unable to restart slskd. preStartScript must NOT get "+" — it
+        # renders config as cfg.user so ownership on the rendered files
+        # matches the service that reads them.
+        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [preStartScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
@@ -1484,13 +1493,14 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        # Same ExecStartPre shape as cratedigger.service: gate on
-        # slskd reachability when the operator has health-check
-        # enabled, then render the config. The detection job hits
-        # slskd just as much as the main loop does, so a slskd
-        # outage should fail the unit fast rather than write
-        # garbage probe-failed rows for every cohort member.
-        ExecStartPre = lib.optional cfg.healthCheck.enable slskdHealthCheck ++ [preStartScript];
+        # Same ExecStartPre shape as cratedigger.service (including the
+        # "+" root-escalation prefix on slskdHealthCheck — see the comment
+        # there): gate on slskd reachability when the operator has
+        # health-check enabled, then render the config. The detection job
+        # hits slskd just as much as the main loop does, so a slskd
+        # outage should fail the unit fast rather than write garbage
+        # probe-failed rows for every cohort member.
+        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [preStartScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;

@@ -38,7 +38,7 @@ class TestImportOneForceFlag(unittest.TestCase):
     """Test that import_one.main() toggles MAX_DISTANCE from the real CLI flag."""
 
     def setUp(self) -> None:
-        # import_one.main() calls reset_umask() (sets umask to 0 for the
+        # import_one.main() calls reset_umask() (sets umask to 0o002 for the
         # subprocess chain, GH #84). Restore so later tests keep their default.
         self._saved_umask = os.umask(0o022)
         os.umask(self._saved_umask)

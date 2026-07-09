@@ -641,10 +641,14 @@ class HarnessImportSession(ImportSession):
 def main():
     import argparse
 
-    # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
-    # Runs inside the Nix beets env where lib/ is not on sys.path, so inline
-    # the single-line policy rather than import the helper.
-    os.umask(0)
+    # Belt-and-suspenders for the group-writable import boundary — see
+    # lib/permissions.py / GH #84. The systemd unit's UMask=0000 is a
+    # permissive floor; this explicit 0o002 (not 0) is what narrows newly
+    # created files/dirs to group-writable so the shared group can write
+    # alongside the media. Runs inside the Nix beets env where lib/ is not
+    # on sys.path, so inline the single-line policy rather than import the
+    # helper.
+    os.umask(0o002)
 
     parser = argparse.ArgumentParser(
         description="Beets interactive import harness — JSON over stdin/stdout"
