@@ -2976,6 +2976,102 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
 
         self.assertEqual(fake_db.update_download_state_calls, [])
 
+    def test_one_rows_write_failure_does_not_abort_remaining_rows(self):
+        """Review finding (issue #564): the per-row guard must cover the
+        WHOLE loop body including the state write — one row's failing
+        write must never abort harvesting the remaining rows, because
+        the purge runs immediately after and would destroy their
+        un-harvested evidence (the I1b failure mode)."""
+        row1 = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        row2 = self._row(2, files=[
+            {"username": "user2", "filename": "user2\\Music\\01.flac",
+             "file_dir": "user2\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        slskd_downloads = [
+            {
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Errored",
+                    "bytesTransferred": 0,
+                    "exception": "Read error: Connection reset by peer",
+                }]}],
+            },
+            {
+                "username": "user2",
+                "directories": [{"directory": "user2\\Music", "files": [{
+                    "filename": "user2\\Music\\01.flac",
+                    "id": "tid-2",
+                    "state": "Completed, Rejected",
+                    "bytesTransferred": 0,
+                    "exception": "Transfer rejected: Banned",
+                }]}],
+            },
+        ]
+        ctx, fake_db = self._ctx([row1, row2], slskd_downloads)
+        fake_db.set_update_download_state_error(
+            1, RuntimeError("UPDATE failed"))
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        # Row 1's write failed — its persisted state is unchanged.
+        state1 = fake_db.request(1)["active_download_state"]
+        self.assertEqual(state1["files"][0]["last_state"], "InProgress")
+        # Row 2 was still harvested despite row 1's failure.
+        state2 = fake_db.request(2)["active_download_state"]
+        self.assertEqual(
+            state2["files"][0]["last_state"], "Completed, Rejected")
+        self.assertEqual(
+            state2["files"][0]["last_exception"], "Transfer rejected: Banned")
+
+    def test_write_goes_through_status_guarded_update(self):
+        """Review finding (issue #564): the harvest write must use the
+        status-guarded update_download_state_if_downloading — a row a
+        concurrent operator action flipped out of 'downloading' between
+        the get_downloading() read and the write is never rewritten."""
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "Completed, Rejected",
+                "bytesTransferred": 0,
+                "exception": "Transfer rejected: Banned",
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        # Simulate the concurrent flip: get_downloading() returns deep
+        # copies, so flipping the stored row's status right after the
+        # read mirrors an operator action landing mid-cycle.
+        original_get_downloading = fake_db.get_downloading
+
+        def get_downloading_then_flip():
+            rows = original_get_downloading()
+            fake_db._requests[1]["status"] = "manual"
+            return rows
+
+        cast(Any, fake_db).get_downloading = get_downloading_then_flip
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        # The guarded write refused: persisted state is unchanged.
+        state = fake_db.request(1)["active_download_state"]
+        self.assertEqual(state["files"][0]["last_state"], "InProgress")
+        self.assertNotIn("last_exception", state["files"][0])
+
     def test_no_downloading_rows_is_a_noop(self):
         ctx, fake_db = self._ctx([], slskd_downloads=[])
         from lib.download import harvest_terminal_transfer_evidence

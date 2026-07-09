@@ -98,6 +98,10 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         self, request_id: int, state_json: str,
     ) -> None: ...
 
+    def update_download_state_if_downloading(
+        self, request_id: int, state_json: str,
+    ) -> bool: ...
+
     def update_download_state_current_path(
         self, request_id: int, current_path: str | None,
     ) -> None: ...
@@ -462,11 +466,18 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     ``processing_started_at`` are skipped — their files already moved to
     local processing and are no longer purely slskd-side transfers.
 
-    Best-effort and silent on the happy path: a snapshot failure, or one
-    row's undecodable ``active_download_state``, skips harvesting for
-    that row/cycle — the purge always still runs regardless (the
-    pre-existing behavior). MUST be called before
-    ``remove_completed_downloads()`` — see the call site in
+    Best-effort and silent on the happy path: a snapshot failure skips
+    the whole pass, and ANY per-row failure (undecodable
+    ``active_download_state``, a matcher error, the state write raising)
+    skips only that row — one row's failure must never abort harvesting
+    the remaining rows, because the purge runs immediately after and an
+    aborted loop would destroy the un-harvested rows' evidence (the I1b
+    failure mode). The purge always still runs regardless (the
+    pre-existing behavior). The write goes through the status-guarded
+    ``update_download_state_if_downloading`` — mirroring the poll path's
+    fresh-status guard — so a row a concurrent operator action just
+    flipped out of ``downloading`` is never rewritten. MUST be called
+    before ``remove_completed_downloads()`` — see the call site in
     ``cratedigger.py``.
     """
     db = ctx.pipeline_db_source._get_db()
@@ -482,35 +493,36 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     harvested = 0
     for row in downloading:
         request_id = row["id"]
-        raw_state = row.get("active_download_state")
-        if not raw_state:
-            continue
         try:
+            raw_state = row.get("active_download_state")
+            if not raw_state:
+                continue
             state = ActiveDownloadState.from_raw(raw_state)
+            if state.processing_started_at is not None:
+                continue
+
+            dirty = False
+            for f in state.files:
+                if f.last_state and f.last_state.startswith("Completed,"):
+                    continue
+                transfer = match_transfer(
+                    snapshot, f.filename, username=f.username)
+                if (transfer is None
+                        or not transfer.state.startswith("Completed,")):
+                    continue
+                f.last_state = transfer.state
+                f.last_exception = transfer.exception or f.last_exception
+                f.bytes_transferred = transfer.bytes_transferred
+                dirty = True
+
+            if dirty and db.update_download_state_if_downloading(
+                    request_id, state.to_json()):
+                harvested += 1
         except Exception:
             logger.warning(
-                "HARVEST: request %s active_download_state is missing "
-                "or undecodable — skipping this row this cycle",
-                request_id, exc_info=True)
+                "HARVEST: request %s could not be harvested — skipping "
+                "this row this cycle", request_id, exc_info=True)
             continue
-        if state.processing_started_at is not None:
-            continue
-
-        dirty = False
-        for f in state.files:
-            if f.last_state and f.last_state.startswith("Completed,"):
-                continue
-            transfer = match_transfer(snapshot, f.filename, username=f.username)
-            if transfer is None or not transfer.state.startswith("Completed,"):
-                continue
-            f.last_state = transfer.state
-            f.last_exception = transfer.exception or f.last_exception
-            f.bytes_transferred = transfer.bytes_transferred
-            dirty = True
-
-        if dirty:
-            db.update_download_state(request_id, state.to_json())
-            harvested += 1
 
     if harvested:
         logger.info(

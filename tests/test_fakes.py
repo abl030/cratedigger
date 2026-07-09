@@ -573,6 +573,34 @@ class TestFakePipelineDB(unittest.TestCase):
         with self.assertRaises(psycopg2.errors.CheckViolation):
             db.log_download(42, outcome="error")
 
+    def test_set_update_download_state_error_raises_and_leaves_row_untouched(self):
+        """Issue #564 review: the injection seam mirrors a psycopg2 error
+        at the UPDATE — raises from BOTH state writers, records the
+        attempt, never mutates the row; other requests are unaffected."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="downloading",
+            active_download_state={"original": True}))
+        db.seed_request(make_request_row(
+            id=2, status="downloading", mb_release_id="mbid-2"))
+        boom = RuntimeError("UPDATE failed")
+        db.set_update_download_state_error(1, boom)
+
+        with self.assertRaises(RuntimeError):
+            db.update_download_state(1, '{"mutated": true}')
+        with self.assertRaises(RuntimeError):
+            db.update_download_state_if_downloading(1, '{"mutated": true}')
+
+        # Row 1 untouched; both attempts recorded.
+        self.assertEqual(
+            db.request(1)["active_download_state"], {"original": True})
+        self.assertEqual(len(db.update_download_state_calls), 2)
+        # Other requests still write normally.
+        self.assertTrue(
+            db.update_download_state_if_downloading(2, '{"ok": true}'))
+        self.assertEqual(
+            db.request(2)["active_download_state"], {"ok": True})
+
     def test_log_download_records_transfer_detail(self):
         """Issue #564 C7: transfer_detail is a first-class field on
         DownloadLogRow, not swallowed into .extra."""
@@ -4018,6 +4046,7 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "assert_log",
             "set_advisory_lock_result",
             "set_cooldown_result",
+            "set_update_download_state_error",
             "queue_execute_results",
             "seed_youtube_album_mapping",
         }
