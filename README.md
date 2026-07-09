@@ -49,14 +49,23 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Async, parallel operation** — searches fan out concurrently; downloads span 5-minute cycles without blocking
 - **Persisted search plans** with escalation (wildcarded queries → exact → per-track) and long-tail "unfindable" triage
 - **Owned beets runtime** — the module ships a pinned beets with the full plugin closure and renders its config; your library's path layout is protected by config invariants tested in a VM on every `nix flake check`
+- **Self-cleaning download workspace** — orphaned files in the slskd download dir are reaped after 7 days (active downloads and review quarantine protected; deletions are per-file with empty-dir pruning, never a folder guess)
 - **Operator surface twice over** — every action exists as both a `pipeline-cli` subcommand and a web API endpoint
 - **User cooldowns, force-import, wrong-match triage, YouTube rescue** for the long tail
+
+## Ownership — read this before running it
+
+Cratedigger assumes it **owns** its two neighbours. Violating either assumption can cost you data.
+
+**Give it a dedicated slskd instance.** The slskd download directory is cratedigger's managed workspace, not storage: it cancels transfers it didn't start, and a disk reaper deletes any file it doesn't recognise once it's a week old, pruning emptied folders. **Anything you park there — manual downloads, temp files, that folder you were going to sort later — will be deleted.** Don't share the instance with your own Soulseek use; spin one up just for cratedigger.
+
+**Use only the shipped beets.** The module pins a beets version and renders its config; `cratedigger-beet` is the one binary that may touch the library. If you're adopting an existing beets library, import it into the pipeline DB (`pipeline-cli add` / the web UI — the pipeline DB is the source of truth) and retire your old beets install. Pointing any other beets version or config at the same library DB can silently migrate the schema or rewrite paths on disk — database corruption and/or data loss.
 
 ## Running it (NixOS)
 
 Cratedigger is a Nix flake with a NixOS module. It deliberately builds its runtime (python env + beets) from **its own flake.lock** — the exact closure its test suite ran against — not your system's nixpkgs.
 
-You need: **NixOS**, **slskd** (`services.slskd` is in nixpkgs), and disk for music. PostgreSQL is provisioned for you.
+You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixpkgs), and disk for music. PostgreSQL is provisioned for you.
 
 ```nix
 {
