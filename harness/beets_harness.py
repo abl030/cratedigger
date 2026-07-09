@@ -218,6 +218,59 @@ def _mbid_swap_event(task, candidate) -> dict | None:
     }
 
 
+def _neutralize_discogs_provider_ids(candidate) -> bool:
+    """Blank the mb_* mirrors of a Discogs candidate's numeric provider ids
+    so beets does not poison mb_albumid / mb_releasegroupid (issue #570).
+
+    Beets core maps AlbumInfo.album_id -> mb_albumid and releasegroup_id ->
+    mb_releasegroupid (Info.MEDIA_FIELD_MAP). The Discogs plugin fills those
+    with NUMERIC Discogs ids, so an un-neutralized apply writes a bare integer
+    into MUSICBRAINZ_ALBUMID and Jellyfin's `new Guid()` throws. The id is
+    preserved in discogs_albumid (a flexattr the plugin already set), which is
+    the layout the rest of cratedigger assumes (duplicate_keys = [mb_albumid,
+    discogs_albumid], lib/beets_album_op.py, lib/beets_db.py).
+
+    We set the mirrors to "" (not None) so beets' item_data KEEPS and APPLIES
+    the empty value, overwriting any previously-poisoned mb_albumid on
+    re-import rather than merely skipping it. item_data / raw_data are
+    @cached_property on beets' Info; if anything read them before we mutated,
+    the cache would hide the change — so we bust both caches to stay
+    order-independent.
+
+    `_apply_decision` is shared by `choose_match` (album; info is an
+    AlbumInfo, whose __init__ always sets both album_id and releasegroup_id)
+    and `choose_item` (singleton; info is a TrackInfo, which has neither
+    attribute). We only blank attributes that already exist on `info`, so
+    the singleton path stays a true no-op — it never ADDS a stray
+    album_id=""/releasegroup_id="" to a TrackInfo that beets would then
+    apply.
+
+    Returns True iff it neutralized a Discogs candidate (i.e. at least one
+    mirror attribute existed and was blanked). MusicBrainz candidates (UUID
+    album_id) and Discogs TrackInfo (neither attribute present) are left
+    untouched.
+    """
+    info = getattr(candidate, "info", None)
+    if info is None:
+        return False
+    if (getattr(info, "data_source", "") or "") != "Discogs":
+        return False
+    blanked = False
+    for attr in ("album_id", "releasegroup_id"):
+        if hasattr(info, attr):
+            setattr(info, attr, "")
+            blanked = True
+    if not blanked:
+        return False
+    # bust beets' @cached_property caches so the neutralized values are what
+    # apply_metadata / find_duplicates consume regardless of prior access.
+    cache = getattr(info, "__dict__", None)
+    if isinstance(cache, dict):
+        cache.pop("item_data", None)
+        cache.pop("raw_data", None)
+    return True
+
+
 def _append_mutation_log(event: dict, log_path: str | None = None) -> None:
     """Append one JSONL event. Never raises — the audit log must not break
     the import itself. Failures are logged to stderr for operator visibility."""
@@ -484,6 +537,8 @@ class HarnessImportSession(ImportSession):
                 ev = _mbid_swap_event(task, task.candidates[idx])
                 if ev is not None:
                     _append_mutation_log(ev)
+                # Keep Discogs numeric ids out of mb_albumid/mb_releasegroupid (#570).
+                _neutralize_discogs_provider_ids(task.candidates[idx])
                 return task.candidates[idx]
             else:
                 _send({
