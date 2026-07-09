@@ -1117,8 +1117,13 @@ def _reject_request_auto_import(
             deferred=True,
         )
 
+    # No unmeasured distance is ever recorded as a number (#550 defect #4).
+    # ``bv_result.distance`` is only non-None when beets actually compared
+    # a candidate; a pre-match reject (e.g. the manifest guard, which fires
+    # before ``beets_validate`` ever runs) has no measurement to report, so
+    # this stays ``None`` rather than fabricating a 0.0 "perfect match".
     failed_result = ValidationResult(
-        distance=bv_result.distance if bv_result.distance is not None else 0.0,
+        distance=bv_result.distance,
         scenario=scenario,
         detail=detail,
         error=error,
@@ -1148,7 +1153,7 @@ def _reject_request_auto_import(
         db,
         request_id,
         dl_info,
-        distance=failed_result.distance if failed_result.distance is not None else 0.0,
+        distance=failed_result.distance,
         scenario=failed_result.scenario or scenario,
         detail=detail,
         error=failed_result.error,

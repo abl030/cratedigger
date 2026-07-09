@@ -94,11 +94,13 @@ def _guard_reject(
     folder choice, not the peer's quality (mirrors ``nested_layout``).
     """
     logger.error("IMPORT GUARD REJECT (%s): path=%s %s", scenario, failed_path, detail)
+    # No beets distance was measured — this guard fires before beets can
+    # even run (#550 defect #4). Record NULL, not a fabricated 0.0.
     _record_rejection_and_maybe_requeue(
         db,
         request_id,
         DownloadInfo(username=source_username),
-        distance=0.0,
+        distance=None,
         scenario=scenario,
         detail=detail,
         error=None,

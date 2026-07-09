@@ -1366,6 +1366,23 @@ class TestDownloadLog(unittest.TestCase):
         self.assertAlmostEqual(history[0]["beets_distance"], 0.08)
         self.assertEqual(history[0]["outcome"], "success")
 
+    def test_log_download_preserves_null_beets_distance(self):
+        """Rule A (test-fidelity.md): a pre-match reject (#550 defect #4)
+        never fabricates a measured distance — ``beets_distance=None``
+        must survive the real PG round-trip, not silently coerce to 0 or
+        any other default."""
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="user456",
+            filetype="mp3",
+            beets_distance=None,
+            beets_scenario="untracked_audio",
+            outcome="rejected",
+        )
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        self.assertIsNone(history[0]["beets_distance"])
+
     def test_multiple_downloads(self):
         self.db.log_download(self.req_id, "user1", "flac", "/tmp/1", outcome="rejected")
         self.db.log_download(self.req_id, "user2", "flac", "/tmp/2", outcome="success",

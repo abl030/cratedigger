@@ -1833,6 +1833,54 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.request(42)["validation_attempts"], 1)
         self.assertEqual(len(db.download_logs), 1)
+        # Must-still-work guard (#550 defect #4 corollary): this reject
+        # reaches _reject_request_auto_import AFTER beets already measured
+        # a real distance (0.05) — that measurement must survive, not get
+        # nulled or replaced.
+        self.assertEqual(db.download_logs[0].beets_distance, 0.05)
+
+    def test_measured_perfect_zero_distance_is_preserved_not_nulled(self):
+        """A genuinely measured 0.0 (perfect match) must persist as 0.0,
+        not be confused for 'unmeasured' and nulled — 0.0 is falsy in
+        Python, so a naive ``if bv_result.distance`` check would silently
+        drop it. Same missing-mbid reject path, distance=0.0 instead."""
+        from lib.download_processing import _handle_valid_result
+        from lib.staged_album import StagedAlbum
+        import tempfile
+
+        album = make_grab_list_entry(
+            files=[make_download_file()],
+            mb_release_id="",
+            db_source="request",
+            db_request_id=42,
+        )
+        bv_result = MagicMock()
+        bv_result.distance = 0.0
+        bv_result.scenario = "strong_match"
+        bv_result.to_json.return_value = '{"valid": true}'
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        ctx = make_ctx_with_fake_db(db)
+        ctx.cfg.beets_distance_threshold = 0.15
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("lib.download_processing.log_validation_result"):
+            import_dir = os.path.join(tmpdir, "Test Artist - Test Album")
+            os.makedirs(import_dir)
+            with open(os.path.join(import_dir, "01 - Track.mp3"), "w",
+                      encoding="utf-8") as fp:
+                fp.write("x")
+
+            _handle_valid_result(
+                album,
+                bv_result,
+                StagedAlbum(current_path=import_dir, request_id=42),
+                ctx,
+            )
+
+        self.assertEqual(len(db.download_logs), 1)
+        self.assertEqual(db.download_logs[0].beets_distance, 0.0)
 
 
 class TestEventPathMaterialization(unittest.TestCase):
@@ -2125,6 +2173,116 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
             # non-collision.
             self.assertEqual(
                 os.listdir(stale_dir), ["alien-track.flac"])
+
+
+class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
+    """Issue #550 defect #4 (request 2812): a reject that fires BEFORE
+    beets ever runs (the manifest guard's ``untracked_audio`` scenario)
+    must never fabricate a measured distance.
+
+    Invariant: no unmeasured distance is ever persisted as a number — a
+    beets distance is only ever recorded when beets validation actually
+    produced a candidate comparison. The Wrong Matches UI treats
+    ``distance 0.0 <= threshold`` as a green, importable candidate; before
+    this fix a pre-match reject wrote a fabricated ``0.0`` and the card
+    rendered green with no evidence and no tracklist.
+    """
+
+    def test_untracked_audio_reject_persists_null_distance_not_fabricated_zero(self):
+        from lib.download_processing import (
+            CompletionDispatched,
+            _canonical_import_folder_path,
+            process_completed_album,
+        )
+        from lib.quality import ValidationResult
+        import msgspec
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_root = os.path.join(tmpdir, "downloads")
+            os.makedirs(download_root)
+
+            source_dir = os.path.join(download_root, "user1", "Music")
+            os.makedirs(source_dir)
+            source_file = os.path.join(source_dir, "01 - Track.mp3")
+            with open(source_file, "wb") as fp:
+                fp.write(b"this attempt's real, tracked audio")
+
+            stamped = make_download_file(
+                filename="user1\\Music\\01 - Track.mp3",
+                file_dir="user1\\Music",
+                username="user1",
+            )
+            stamped.local_path = source_file
+            album = make_grab_list_entry(
+                files=[stamped],
+                artist="Palo Santo Reject",
+                title="Wrong Match Test",
+                year="2026",
+                mb_release_id="test-mbid-2812",
+                db_request_id=2812,
+                db_source="request",
+            )
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=2812, status="downloading",
+                artist_name="Palo Santo Reject",
+                album_title="Wrong Match Test",
+                mb_release_id="test-mbid-2812",
+            ))
+
+            cfg = MagicMock()
+            cfg.slskd_download_dir = download_root
+            cfg.beets_validation_enabled = True
+            cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
+            # An unset MagicMock attribute answers ``__index__()`` with 1,
+            # so a real path is required here — otherwise
+            # ``log_validation_result``'s ``open(cfg.beets_tracking_file,
+            # "a")`` silently reopens fd 1 (the process's real stdout) and
+            # closes it on exit, corrupting output for the rest of the
+            # test process.
+            cfg.beets_tracking_file = os.path.join(tmpdir, "tracking.jsonl")
+
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+            # A leftover untracked audio file already sits in the canonical
+            # destination (e.g. left behind by a prior crashed attempt).
+            # The manifest guard fires BEFORE beets_validate ever runs, so
+            # no beets distance has been — or ever will be — measured for
+            # this reject.
+            canonical_path = _canonical_import_folder_path(album, download_root)
+            os.makedirs(canonical_path, exist_ok=True)
+            with open(os.path.join(canonical_path, "leftover.mp3"), "wb") as fp:
+                fp.write(b"stale leftover audio from a different attempt")
+
+            result = process_completed_album(album, [], ctx, import_job_id=1)
+
+        self.assertIsInstance(result, CompletionDispatched)
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "rejected")
+        self.assertEqual(log.beets_scenario, "untracked_audio")
+
+        # THE regression pin: no fabricated 0.0 default. A pre-match
+        # reject never measured a beets distance, so both persisted sinks
+        # must be NULL, not 0.0.
+        self.assertIsNone(
+            log.beets_distance,
+            "pre-match untracked_audio reject must record NULL "
+            "distance in the download_log.beets_distance column, not a "
+            "fabricated 0.0 (issue #550 defect #4 / request 2812)")
+
+        assert log.validation_result is not None
+        vr = msgspec.json.decode(log.validation_result, type=ValidationResult)
+        self.assertIsNone(
+            vr.distance,
+            "pre-match untracked_audio reject must record NULL "
+            "distance in validation_result JSONB, not a fabricated 0.0 "
+            "(issue #550 defect #4 / request 2812)")
+        # The card must still surface for manual review — get_wrong_matches
+        # keys on validation_result.failed_path.
+        self.assertTrue(vr.failed_path)
 
 
 class TestMaterializeFailureAction(unittest.TestCase):

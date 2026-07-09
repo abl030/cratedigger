@@ -207,7 +207,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         album: str = "Test Album",
         mb_release_id: str | None = "abc-123",
         scenario: str = "high_distance",
-        distance: float = 0.25,
+        distance: float | None = 0.25,
         request_overrides: dict | None = None,
         validation_overrides: dict | None = None,
         log_overrides: dict | None = None,
@@ -376,6 +376,34 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                     self.assertIsInstance(
                         entry[field], expected_type,
                         f"entry.{field}={entry[field]!r} should be {expected_type}")
+
+    def test_untracked_audio_entry_has_null_distance_and_is_not_green(self):
+        """Issue #550 defect #4: a pre-match reject (no beets distance was
+        ever measured) must serialize ``distance: None`` — not a
+        fabricated ``0.0`` the UI would render as a false-green candidate.
+        """
+        self._seed_wrong_match(
+            download_log_id=777, request_id=777, username="u1",
+            failed_path="/fi/untracked-777", distance=None,
+            scenario="untracked_audio", mb_release_id="mb-777",
+        )
+        status, data = self._get("/api/wrong-matches")
+        self.assertEqual(status, 200)
+        group = next(g for g in data["groups"] if g["request_id"] == 777)
+        entry = next(e for e in group["entries"]
+                     if e["download_log_id"] == 777)
+        self.assertIsNone(entry["distance"])
+
+        from lib.validation_envelope import decode_validation_envelope
+        from web.routes.imports import _is_green_distance
+        log_entry = self.db.get_download_log_entry(777)
+        assert log_entry is not None
+        vr = decode_validation_envelope(log_entry["validation_result"])
+        self.assertIsNone(vr.distance)
+        self.assertFalse(
+            _is_green_distance(vr, 180),
+            "a null (unmeasured) distance must never render green",
+        )
 
     def test_entry_surfaces_stored_spectral_and_v0_probe_evidence(self):
         """Covers AE1 — per-candidate stored evidence reaches the row payload.

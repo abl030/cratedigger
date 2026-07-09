@@ -214,7 +214,9 @@ def _dispatch_import_from_db_locked(
         beets_harness_path=cfg.beets_harness_path,
         db=db,
         dl_info=dl_info,
-        distance=0.0,
+        # Force/manual import explicitly bypasses the beets distance
+        # check — no measurement exists to report (#550 defect #4).
+        distance=None,
         scenario="force_import" if force else "manual_import",
         files=files,
         cfg=cfg,

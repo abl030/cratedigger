@@ -75,7 +75,7 @@ def dispatch_import_core(
     beets_harness_path: str,
     db: "PipelineDB",
     dl_info: DownloadInfo,
-    distance: float = 0.0,
+    distance: float | None = None,
     scenario: str = "auto_import",
     files: Sequence[object] | None = None,
     cfg: "CratediggerConfig | None" = None,
@@ -107,8 +107,9 @@ def dispatch_import_core(
         else "MANUAL-IMPORT" if scenario == "manual_import"
         else "AUTO-IMPORT"
     )
+    dist_label = f"{distance:.4f}" if distance is not None else "unmeasured"
     logger.info(f"{mode}: {label} "
-                f"(source=request, dist={distance:.4f})")
+                f"(source=request, dist={dist_label})")
 
     outcome_success = False
     outcome_message = ""
