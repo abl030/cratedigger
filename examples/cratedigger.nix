@@ -53,7 +53,9 @@
 
     # --- Beets: cratedigger owns the package, config, and binary ------
     # `cratedigger-beet` lands on your PATH for manual ops (run it with
-    # sudo — the service runs as root by default).
+    # sudo — the service runs as root by default; see the "Running as a
+    # non-root user" block near the end of this file for the group-`users`
+    # / media-server-friendly alternative).
     beets.config = {
       directory = "/srv/music/library";          # where tagged albums live
       library = "/srv/music/beets-library.db";   # parent dir must exist
@@ -88,8 +90,56 @@
     # };
   };
 
+  # ---------------------------------------------------------------------
+  # Running as a non-root user (recommended for media-server integration)
+  # ---------------------------------------------------------------------
+  # By default (above), cratedigger runs as root — zero-config, since slskd
+  # downloads and the beets library commonly live outside any unprivileged
+  # user's reach. If Jellyfin/Plex/etc. also need to read album art AND
+  # write NFO/artwork into the library, run cratedigger non-root instead
+  # (issue #570). Uncomment and adapt:
+  #
+  # users.users.cratedigger = {
+  #   isSystemUser = true;
+  #   group = "users";                     # shared consumer group (Jellyfin's gid)
+  #   extraGroups = [
+  #     "slskd"           # slskd's download-dir group — reap/move in-flight files
+  #     "cratedigger-ops" # whatever group owns /run/cratedigger-secrets/*
+  #   ];
+  # };
+  #
+  # services.cratedigger.user = "cratedigger";
+  # services.cratedigger.group = "users";
+  #
+  # Give the library roots a setgid layout so new album/artist dirs inherit
+  # the `users` group automatically — plain 0775 strips the setgid bit and
+  # silently breaks this:
+  #
+  # systemd.tmpfiles.rules = [
+  #   "d /srv/music/library 2775 cratedigger users -"
+  #   "d /srv/music/incoming 2775 cratedigger users -"
+  # ];
+  #
+  # For a library tree that already exists, fix it once as an operator
+  # action (not committed config):
+  #   chgrp -R users /srv/music/library
+  #   find /srv/music/library -type d -exec chmod 2775 {} +
+  #   find /srv/music/library -type f -exec chmod 0664 {} +
+  #
+  # The discogsTokenFile above must stay readable by the cratedigger user's
+  # secrets group. A root-owned 0400 token under the state dir can't be
+  # fixed by systemd-tmpfiles once the state dir itself is owned by a
+  # non-root user (tmpfiles refuses with "unsafe path transition") — do a
+  # one-time `chown root:cratedigger-ops` + `chmod 0440` on the token, or
+  # manage it via sops-nix with `owner = "cratedigger"` instead.
+  #
+  # Payoff: gid-`users` media servers (Jellyfin) can both read fetched
+  # album art and write NFO/artwork alongside the media — see
+  # docs/nixos-module.md § "Running non-root + filesystem permissions".
+
   # The staging/library parents must exist; the module manages only its
-  # own state dir.
+  # own state dir. (Swap the mode/owner below to `2775 cratedigger users`
+  # if you enable the non-root block above.)
   systemd.tmpfiles.rules = [
     "d /srv/music 0775 root root -"
     "d /srv/music/incoming 0775 root root -"

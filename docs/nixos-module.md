@@ -15,7 +15,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | Option | Default | Purpose |
 |---|---|---|
 | `enable` | `false` | Master switch |
-| `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. |
+| `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. See "Running non-root + filesystem permissions" below to switch. |
 | `src` | `../.` | Path to cratedigger source tree. Defaults to this flake's repo root. |
 | `packageSet` | cratedigger's own locked nixpkgs (via the flake export) | Package set for the runtime closure. Override = escape hatch, forfeits the tested-closure guarantee. |
 | `beets.package.discogsMirrorUrl` | `null` | When set, build-time-patches the beets discogs plugin to hit this mirror instead of api.discogs.com. |
@@ -68,6 +68,81 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 3b. Renders the beets `config.yaml` into `${stateDir}/beets/` (BEETSDIR) the same way. `import.duplicate_keys.album: [mb_albumid, discogs_albumid]` (the Palo Santo data-loss invariant), the plugin list, and the path templates are fixed literals — NOT options. Only `beets.config.*` (directory, library, fetchart widths, musicbrainz host/https/ratelimit) is operator-tunable. With `beets.package.discogsTokenFile` set, `secrets.yaml` (0400) is materialized next to it and included.
 4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
 5. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
+
+## Running non-root + filesystem permissions
+
+The `user`/`group` table row above defaults to root — zero-config, since slskd downloads and the beets library commonly live outside any unprivileged user's reach. Running non-root is fully supported (issue #570) and is the right shape when other services (Jellyfin, Plex) need to read AND write inside the same library tree.
+
+### The `permissions` plugin + `fix_library_modes`
+
+The rendered beets config enables the built-in `permissions` plugin with `file = "0664"` and `dir = "02775"` (setgid + group-writable) — these are fixed literals in `nix/module.nix`, not module options. Its `art_set` listener (`fix_art`) fixes fetched-art mode on BOTH initial import and a manual `beet fetchart` re-fetch. This exists because beets' own `fetchart` writes art via `mkstemp` (which forces `0600` regardless of umask) and nothing else chmods it afterward — without the plugin, art lands `0600` and a media server reading it as a different user throws `UnauthorizedAccessException` (issue #570 defect 1).
+
+`lib/permissions.py::fix_library_modes` is the post-import belt-and-suspenders pass: `LIBRARY_DIR_MODE = 0o2775`, applied recursively to the imported album/artist dirs and everything the plugin's per-item listener doesn't reach (empty/intermediate dirs beets creates along the way). `reset_umask()` sets the process umask to `0o002` (group-writable) at every pipeline entry point, since a unit's `UMask=0000` alone doesn't reliably survive the subprocess chain down to beets.
+
+**`dir = 02775` (setgid) is load-bearing, not cosmetic.** Plain `0775` strips the setgid bit, so every child album dir beets creates underneath would stop inheriting the library's group — the group-inheritance layout below silently breaks the moment this gets "simplified" to `0775`.
+
+### Switching to a non-root service user
+
+Set `services.cratedigger.user` / `.group` to something other than `"root"`. No module edits are needed: the module already auto-declares the system user (`users.users.${cfg.user}` behind an internal `mkIf (cfg.user != "root")`), and every state-dir tmpfiles rule is keyed on `cfg.user`/`cfg.group`.
+
+A non-root cratedigger needs supplementary group membership for two things root gets for free:
+
+1. **The slskd download directory's group** — the reaper (`reap_disk_orphans`) deletes/moves in-flight downloads via directory-write permission, not file ownership, so it needs write access to that directory's group (typically slskd's own service group).
+2. **The group that owns its runtime secrets** (`/run/cratedigger-secrets/*` — the raw slskd API key, notifier creds) — whichever secrets backend materializes these needs to make them group-readable by cratedigger's group, or add cratedigger's user to the group that owns them.
+
+The pgpass `EnvironmentFile` for `pipelineDb.createLocally` needs no special handling: systemd (PID1, root) reads `EnvironmentFile=` before dropping privileges to `cfg.user`, so a non-root service user never has to read that file itself.
+
+### The group-`users` setgid library layout
+
+Give the library tree a shared consumer group — `users` (gid 100) is the conventional choice, since that's commonly what Jellyfin/Plex containers run as — with setgid directories (`2775`). New album/artist dirs then inherit the group automatically (the setgid bit above), and any gid-100 media server can both READ fetched art and WRITE NFO/artwork alongside the media. This is the #570 "group twin" fix: `root:music-import 0775` dirs (no setgid, root-owned) previously blocked media-server writes outright.
+
+Provision the library roots with a setgid tmpfiles rule:
+
+```nix
+systemd.tmpfiles.rules = [
+  "d /srv/music/library 2775 cratedigger users -"
+];
+```
+
+For a tree that already exists, fix it once — this is an operator action, not committed config (`.claude/rules/scope.md`):
+
+```bash
+chgrp -R users /srv/music/library
+find /srv/music/library -type d -exec chmod 2775 {} +
+find /srv/music/library -type f -exec chmod 0664 {} +
+```
+
+### Caveat: a root-owned secret under a non-root state dir
+
+If a secret file (e.g. `beets.package.discogsTokenFile`) lives UNDER the state dir and the state dir's owner just changed from root to `cfg.user`, systemd-tmpfiles can no longer manage that file's permissions from a rule — it refuses with "unsafe path transition" (a safety check against operating through a non-root-owned parent directory). Since the non-root service's preStart reads the token with a plain `cat`, a stale root-owned `0400` token then fails EVERY unit at startup (`cat: discogs-token: Permission denied`), not just the Discogs pathway.
+
+Fix with a durable one-time `chown root:<secrets-group>` + `chmod 0440` on the token file (the out-of-band-secret pattern), or manage the token via sops-nix with `owner = cfg.user` so sops-nix — not tmpfiles — sets the correct ownership from the start.
+
+### Health check still runs as root
+
+`healthCheck`'s `ExecStartPre` (`slskdHealthCheck`) is `+`-prefixed, so it always runs as root regardless of `services.cratedigger.user` — this is what lets `onFailureCommand` (e.g. `systemctl restart slskd.service`) keep working under a non-root service user. `preStartScript` stays unprefixed, so config rendering happens as the service user.
+
+### Minimal non-root snippet
+
+```nix
+users.users.cratedigger = {
+  isSystemUser = true;
+  group = "users";
+  extraGroups = [ "slskd" "cratedigger-ops" ];  # download-dir group + secrets group
+};
+
+services.cratedigger = {
+  user = "cratedigger";
+  group = "users";
+  # ... slskd / beets / web options unchanged
+};
+
+systemd.tmpfiles.rules = [
+  "d /srv/music/library 2775 cratedigger users -"
+];
+```
+
+See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worked example.
 
 ## Systemd units
 
