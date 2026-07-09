@@ -278,6 +278,36 @@ def _write_ahead_transfer_ledger(
     writer.record_transfer_enqueue(rows)
 
 
+def _stamp_transfer_ids_after_enqueue(
+    username: str,
+    downloads: list[DownloadFile],
+    ctx: CratediggerContext,
+) -> None:
+    """Enqueue-response ownership capture (issue #571 PR 5, T1.5) -- MUST
+    run AFTER the reconciliation poll above resolves each file's transfer
+    id, so the row T1 write-ahead-inserted before the POST gets its
+    ``transfer_id`` filled in as soon as it's knowable.
+
+    This is the PRIMARY capture path; ``lib.slskd_events``'s completion
+    stamping (T2) is the fallback that closes the gap when reconciliation
+    times out before a transfer id is ever seen here (the ``reconciled !=
+    len(downloads)`` case logged above) -- a completion event always
+    carries slskd's own transfer id, so a stamped row's transfer_id ends
+    up durably known one way or the other.
+
+    Same guard as ``_write_ahead_transfer_ledger``: silently skips when
+    no ``ctx.download_ownership`` writer is wired (the legacy/test
+    fallback shape). Files with no reconciled id (``download.id`` falsy)
+    are left for the T2 fallback -- nothing to stamp yet.
+    """
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None:
+        return
+    for download in downloads:
+        if download.id:
+            writer.stamp_transfer_id(username, download.filename, download.id)
+
+
 def slskd_enqueue_with_outcome(
     username: str,
     files: list[dict[str, Any]],
@@ -360,6 +390,7 @@ def slskd_enqueue_with_outcome(
             reconciled,
             len(downloads),
         )
+    _stamp_transfer_ids_after_enqueue(username, downloads, ctx)
     return SlskdEnqueueOutcome(status="accepted", downloads=downloads)
 
 
@@ -638,6 +669,94 @@ def rederive_transfer_ids(
         else:
             logger.debug(f"Transfer not found for {f.filename} from {f.username}")
     return True
+
+
+# === Completed-transfer purge (issue #571 PR 5) ===
+
+
+@dataclass(frozen=True)
+class CompletedPurgeSummary:
+    """Aggregate result of one completed-transfer purge pass.
+
+    ``mutated`` gates the cycle's INFO summary line, matching
+    ``converge_slskd_orphans``'s Phase 0 contract: a pass that removed
+    nothing stays silent unless it also skipped an unstamped row (still
+    worth a log line — it explains why slskd's UI didn't clear).
+    """
+    removed: int = 0
+    unstamped_skipped: int = 0
+    foreign_count: int = 0
+
+    @property
+    def mutated(self) -> bool:
+        return bool(self.removed or self.unstamped_skipped)
+
+
+def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
+    """End-of-cycle sweep (issue #571 PR 5): per-id removal of ledger-
+    owned, completion-stamped completed slskd transfer records.
+
+    Replaces the old bulk ``remove_completed_downloads()`` call (``DELETE
+    /transfers/downloads/all/completed``), which purged EVERY completed
+    transfer record slskd reported — including a human's, on a shared
+    instance. Good-citizen doctrine (#571): a completed record is removed
+    ONLY when it is BOTH (a) present in cratedigger's write-ahead
+    ``slskd_transfer_ledger`` by ``transfer_id`` (proof cratedigger
+    created it — (username, filename) alone is ambiguous across retry
+    attempts, unlike ``converge_slskd_orphans``'s live-transfer case,
+    which never needs cross-attempt disambiguation because a retry's old
+    transfer is already gone from the live snapshot by the time a new one
+    exists) AND (b) its ledger row already carries the T2 completion
+    stamp (P2 ordering constraint: the events feed is the ONLY location
+    source, so removing slskd's own record before the stamp lands would
+    race it — an unstamped owned row is left for a later cycle, never
+    removed this pass). A record absent from the ledger is foreign and is
+    NEVER removed, whatever its state or age — counted only.
+
+    Interplay with issue #550's disk reaper: the old bulk purge destroyed
+    every completed transfer's slskd handle every cycle, which is part of
+    why the disk reaper (filesystem + DB reasoning, no slskd handle
+    needed) had to exist. With per-id stamped-gated removal, a completed
+    transfer keeps its slskd handle until cratedigger's own ledger proves
+    it stamped — strictly better: less state for the reaper to have to
+    reconstruct from disk alone.
+
+    Best-effort: a snapshot failure skips the pass, a per-id removal
+    failure is logged and the remaining removals are still attempted.
+    Returns counts for the cycle summary line.
+    """
+    from lib.repair import find_completed_transfers_to_purge
+
+    downloads = _get_all_downloads_snapshot(
+        ctx.slskd, purpose="completed-transfer purge", include_removed=False)
+    if downloads is None:
+        return CompletedPurgeSummary()
+    db = ctx.pipeline_db_source._get_db()
+    id_sets = db.get_owned_transfer_id_sets()
+    classification = find_completed_transfers_to_purge(
+        downloads, id_sets.stamped, id_sets.unstamped)
+    removed = 0
+    for item in classification.to_remove:
+        try:
+            ctx.slskd.transfers.cancel_download(
+                item.username, item.transfer_id, remove=True)
+            removed += 1
+        except Exception:
+            logger.exception(
+                "COMPLETED-PURGE: failed to remove completed transfer "
+                f"user={item.username!r} file={item.filename!r} "
+                f"id={item.transfer_id} — will retry next cycle")
+    summary = CompletedPurgeSummary(
+        removed=removed,
+        unstamped_skipped=classification.unstamped_count,
+        foreign_count=classification.foreign_count,
+    )
+    if summary.mutated:
+        logger.info(
+            "COMPLETED-PURGE: removed=%d unstamped_skipped=%d foreign=%d",
+            summary.removed, summary.unstamped_skipped,
+            summary.foreign_count)
+    return summary
 
 
 # === Disk orphan reaper (issue #550 defect 3, positive-ownership flip #571) ===

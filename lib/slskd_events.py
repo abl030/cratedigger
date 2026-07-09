@@ -138,14 +138,26 @@ def _collect_new_events(
     return collected, True
 
 
-def _local_paths_from_events(
+@dataclass(frozen=True)
+class _EventCompletionInfo:
+    """One decoded DownloadFileComplete event's payload, keyed by
+    (username, remote filename) — what one ingestion pass needs to stamp
+    both ``active_download_state`` (``local_path``) and the transfer
+    ledger (``local_path`` + ``transfer_id``, issue #571 T2)."""
+
+    local_path: str
+    transfer_id: str
+
+
+def _completion_info_from_events(
     events: list[SlskdRawEvent],
-) -> dict[tuple[str, str], str]:
-    """Map ``(username, remote filename)`` → authoritative local path.
+) -> dict[tuple[str, str], _EventCompletionInfo]:
+    """Map ``(username, remote filename)`` → the newest decodable
+    DownloadFileComplete event's local path + transfer id.
 
     ``events`` is newest-first; the first occurrence of a key wins.
     """
-    local_paths: dict[tuple[str, str], str] = {}
+    info: dict[tuple[str, str], _EventCompletionInfo] = {}
     file_events = 0
     for event in events:
         if event.type != DOWNLOAD_FILE_COMPLETE:
@@ -161,14 +173,17 @@ def _local_paths_from_events(
                 "(event id=%s) — skipping", event.id, exc_info=True)
             continue
         key = (payload.transfer.username, payload.transfer.filename)
-        local_paths.setdefault(key, payload.local_filename)
-    return local_paths
+        info.setdefault(key, _EventCompletionInfo(
+            local_path=payload.local_filename,
+            transfer_id=payload.transfer.id,
+        ))
+    return info
 
 
 def _stamp_local_paths(
     db: Any,
     downloading: list[dict[str, Any]],
-    local_paths: dict[tuple[str, str], str],
+    completion_info: dict[tuple[str, str], _EventCompletionInfo],
 ) -> tuple[int, int]:
     """Write matched local paths into each request's persisted state.
 
@@ -189,10 +204,10 @@ def _stamp_local_paths(
             continue
         row_stamped = 0
         for file_state in state.files:
-            local_path = local_paths.get(
+            info = completion_info.get(
                 (file_state.username, file_state.filename))
-            if local_path is not None and file_state.local_path != local_path:
-                file_state.local_path = local_path
+            if info is not None and file_state.local_path != info.local_path:
+                file_state.local_path = info.local_path
                 row_stamped += 1
         if row_stamped and db.update_download_state_if_downloading(
                 row["id"], state.to_json()):
@@ -205,7 +220,7 @@ def _stamp_local_paths(
 
 def _stamp_transfer_ledger(
     db: Any,
-    local_paths: dict[tuple[str, str], str],
+    completion_info: dict[tuple[str, str], _EventCompletionInfo],
     completed_at: datetime,
 ) -> int:
     """Write-ahead ledger completion stamp (issue #571, T2).
@@ -221,11 +236,17 @@ def _stamp_transfer_ledger(
     pipeline-observed timestamp, not slskd's own event clock), passed by
     the caller so a single pass stamps every matched row with one
     consistent value.
+
+    ``transfer_id`` (issue #571 PR 5, T1.5's fallback) is forwarded from
+    the SAME decoded event — ``stamp_transfer_completion`` COALESCEs it
+    in only when the enqueue-response capture hasn't already set it, so
+    this is always safe to pass even when T1.5 already won the race.
     """
     stamped = 0
-    for (username, filename), local_path in local_paths.items():
+    for (username, filename), info in completion_info.items():
         stamped += db.stamp_transfer_completion(
-            username, filename, local_path, completed_at)
+            username, filename, info.local_path, completed_at,
+            transfer_id=info.transfer_id)
     return stamped
 
 
@@ -312,17 +333,18 @@ def ingest_download_file_events(
     if not new_events:
         return EventIngestResult(outcome="no_new_events", cursor_gap=cursor_gap)
 
-    local_paths = _local_paths_from_events(new_events)
+    completion_info = _completion_info_from_events(new_events)
     files_stamped, requests_updated = (
-        _stamp_local_paths(db, downloading, local_paths)
-        if local_paths
+        _stamp_local_paths(db, downloading, completion_info)
+        if completion_info
         else (0, 0)
     )
-    # T2 (issue #571): same pass, same local_paths map — no second cursor,
-    # no separate scan. One consistent "now" for every row this pass stamps.
+    # T2 (issue #571): same pass, same completion_info map — no second
+    # cursor, no separate scan. One consistent "now" for every row this
+    # pass stamps.
     transfers_stamped = (
-        _stamp_transfer_ledger(db, local_paths, datetime.now(timezone.utc))
-        if local_paths
+        _stamp_transfer_ledger(db, completion_info, datetime.now(timezone.utc))
+        if completion_info
         else 0
     )
 

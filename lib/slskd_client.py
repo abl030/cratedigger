@@ -380,10 +380,6 @@ class SlskdTransfersApi:
         )
         return True
 
-    def remove_completed_downloads(self) -> bool:
-        self._client._request("DELETE", "/transfers/downloads/all/completed")
-        return True
-
 
 class SlskdUsersApi:
     def __init__(self, client: SlskdClient) -> None:

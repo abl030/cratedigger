@@ -22,6 +22,7 @@ class CancelDownloadCall:
     """One slskd cancel_download call captured by FakeSlskdAPI."""
     username: str
     id: str
+    remove: bool = False
 
 
 class FakeSlskdTransfers:
@@ -58,7 +59,8 @@ class FakeSlskdTransfers:
 
     def cancel_download(self, username: str, id: str,
                         remove: bool = False) -> bool:
-        self.cancel_download_calls.append(CancelDownloadCall(username, id))
+        self.cancel_download_calls.append(
+            CancelDownloadCall(username, id, remove=remove))
         if self.cancel_download_error is not None:
             raise self.cancel_download_error
         if not self.cancel_download_result:

@@ -1114,3 +1114,21 @@ class TransferLedgerRow(msgspec.Struct, kw_only=True):
     attempt_fingerprint: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class TransferIdOwnership:
+    """Ledger ``transfer_id`` membership, partitioned by completion stamp
+    (#571 PR 5) -- what ``lib.slskd_transfers.purge_completed_transfers``
+    needs to classify a live completed slskd transfer without a second
+    query per row.
+
+    ``stamped`` -- transfer_ids whose ledger row has ``completed_at`` set
+    (the P2 stamp-before-remove ordering constraint is satisfied; safe to
+    remove). ``unstamped`` -- transfer_ids cratedigger ledgered but whose
+    completion stamp hasn't landed yet (event ingestion hasn't caught up);
+    left for a later cycle, never removed. A transfer_id in neither set is
+    foreign -- never cratedigger's, never touched.
+    """
+    stamped: set[str]
+    unstamped: set[str]
+
+

@@ -448,13 +448,17 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     """Harvest terminal slskd transfer evidence immediately before the
     end-of-cycle purge (issue #564 root cause #3, C3).
 
-    ``cratedigger.py`` calls ``slskd.transfers.remove_completed_downloads()``
-    at the end of every cycle, discarding slskd's per-transfer terminal
-    state — including the ``exception`` reason — for any transfer that
-    completed and errored within the SAME cycle it was enqueued, before
-    the next poll cycle ever observes it. The very next poll then finds
-    no transfer at all and reports a generic "vanished from slskd"
-    timeout with zero evidence.
+    ``cratedigger.py`` calls ``lib.slskd_transfers.purge_completed_transfers``
+    at the end of every cycle, which removes each transfer record it
+    purges from slskd's own history (issue #571 PR 5 flipped this from a
+    bulk ``remove_completed_downloads()`` call to per-id, ledger-owned
+    removal — narrower blast radius, same discard-on-removal effect for
+    the records it DOES take). Any transfer that completed and errored
+    within the SAME cycle it was enqueued, before the next poll cycle
+    ever observes it, would otherwise lose its per-transfer terminal
+    state — including the ``exception`` reason — the moment its record
+    is removed. The very next poll then finds no transfer at all and
+    reports a generic "vanished from slskd" timeout with zero evidence.
 
     This takes one final bulk snapshot and, for every ``downloading`` row
     that hasn't reached local processing yet, stamps any file whose

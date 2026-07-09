@@ -39,6 +39,10 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
 
     def record_transfer_enqueue(self, rows: "list[TransferLedgerRow]") -> None: ...
 
+    def stamp_transfer_id(
+        self, username: str, filename: str, transfer_id: str,
+    ) -> int: ...
+
     def close(self) -> None: ...
 
 
@@ -175,5 +179,21 @@ class DownloadOwnershipWriter:
         db = self._open_db()
         try:
             db.record_transfer_enqueue(rows)
+        finally:
+            self._close_db(db)
+
+    def stamp_transfer_id(
+        self, username: str, filename: str, transfer_id: str,
+    ) -> int:
+        """Enqueue-response ownership write (issue #571 PR 5, T1.5) using
+        a fresh DB handle -- same worker-safety rationale as
+        ``record_transfer_enqueue``. Called right after
+        ``slskd_enqueue_with_outcome`` reconciles a POST's transfer id,
+        so the row T1 just inserted carries it before the purge flip ever
+        needs to match a completed transfer back to its ledger row.
+        """
+        db = self._open_db()
+        try:
+            return db.stamp_transfer_id(username, filename, transfer_id)
         finally:
             self._close_db(db)

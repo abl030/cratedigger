@@ -4,6 +4,7 @@ import unittest
 
 from lib.repair import (
     OrphanInfo,
+    find_completed_transfers_to_purge,
     find_inconsistencies,
     find_orphaned_downloads,
     find_slskd_orphans,
@@ -377,6 +378,111 @@ class TestFindSlskdOrphans(unittest.TestCase):
     def test_empty_snapshot(self):
         ownership = find_slskd_orphans([], [self._owning_row()], set())
         self.assertEqual(ownership.orphans, [])
+        self.assertEqual(ownership.foreign_count, 0)
+
+
+class TestFindCompletedTransfersToPurge(unittest.TestCase):
+    """Completed-transfer purge classification (#571 PR 5): a live
+    COMPLETED transfer is only ever removable when its ``transfer_id`` is
+    BOTH ledger-owned AND completion-stamped (P1 good-citizen, P2 stamp-
+    before-remove). Matching is by transfer_id, never (username,
+    filename) — a retried file's completed and in-flight attempts can
+    share that pair."""
+
+    FILENAME = "Music\\Album\\01 - Track.flac"
+
+    @staticmethod
+    def _snapshot(username="peer1", directory="Music\\Album",
+                  filename="Music\\Album\\01 - Track.flac",
+                  transfer_id="t-1", state="Completed, Succeeded"):
+        return [make_download_user(username=username, directories=[
+            make_download_directory(directory=directory, files=[
+                make_transfer_snapshot(
+                    filename=filename, id=transfer_id, state=state),
+            ]),
+        ])]
+
+    def test_stamped_owned_transfer_is_removable(self):
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(), {"t-1"}, set())
+        self.assertEqual(len(ownership.to_remove), 1)
+        self.assertEqual(ownership.to_remove[0].username, "peer1")
+        self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
+        self.assertEqual(ownership.to_remove[0].filename, self.FILENAME)
+        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_unstamped_owned_transfer_is_left_for_a_later_cycle(self):
+        """P2: ledger-owned but not yet completion-stamped -- never
+        removed this pass, counted only."""
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(), set(), {"t-1"})
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.unstamped_count, 1)
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_foreign_completed_transfer_is_never_removed(self):
+        """P1: absent from both sets entirely -- a human's completed
+        download on a shared instance."""
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(), set(), set())
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.foreign_count, 1)
+
+    def test_live_non_terminal_transfer_is_skipped_entirely(self):
+        """This classifier only ever reasons about completed records --
+        the disjoint half of find_slskd_orphans' live-transfer scope.
+        Even a stamped-owned id doesn't count if the transfer hasn't
+        reached a terminal state (shouldn't happen in practice, but the
+        classifier must not misreport it either way)."""
+        ownership = find_completed_transfers_to_purge(
+            self._snapshot(state="InProgress"), {"t-1"}, set())
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.unstamped_count, 0)
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_transfer_id_disambiguates_retried_attempts(self):
+        """The brief's exact scenario: two completed records share the
+        SAME (username, filename) -- a retried file -- but only one
+        transfer_id is stamped-owned. (username, filename) matching alone
+        would be ambiguous; transfer_id matching is not."""
+        snapshot = (
+            self._snapshot(transfer_id="t-old", state="Completed, Cancelled")
+            + self._snapshot(transfer_id="t-new", state="Completed, Succeeded")
+        )
+        ownership = find_completed_transfers_to_purge(
+            snapshot, {"t-new"}, set())
+        self.assertEqual(len(ownership.to_remove), 1)
+        self.assertEqual(ownership.to_remove[0].transfer_id, "t-new")
+
+    def test_completed_transfer_with_no_id_is_skipped(self):
+        snapshot = self._snapshot(transfer_id="")
+        ownership = find_completed_transfers_to_purge(snapshot, set(), set())
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.foreign_count, 0)
+
+    def test_mixed_snapshot_classifies_all_three_tiers_independently(self):
+        snapshot = (
+            self._snapshot()  # stamped-owned -> removable
+            + self._snapshot(username="peer2", transfer_id="t-2",
+                             filename="Music\\Other\\02.flac")  # unstamped-owned
+            + self._snapshot(username="peer3", transfer_id="t-3",
+                             filename="Music\\Foreign\\03.flac")  # foreign
+            + self._snapshot(username="peer4", transfer_id="t-4",
+                             state="InProgress")  # live, not our concern
+        )
+        ownership = find_completed_transfers_to_purge(
+            snapshot, {"t-1"}, {"t-2"})
+        self.assertEqual(len(ownership.to_remove), 1)
+        self.assertEqual(ownership.to_remove[0].transfer_id, "t-1")
+        self.assertEqual(ownership.unstamped_count, 1)
+        self.assertEqual(ownership.foreign_count, 1)
+
+    def test_empty_snapshot(self):
+        ownership = find_completed_transfers_to_purge([], {"t-1"}, {"t-2"})
+        self.assertEqual(ownership.to_remove, [])
+        self.assertEqual(ownership.unstamped_count, 0)
         self.assertEqual(ownership.foreign_count, 0)
 
 

@@ -1,21 +1,30 @@
 """slskd transfer write-ahead ownership ledger (issue #571 good-citizen
 doctrine, migration 045).
 
-The seven methods this mixin adds:
+The methods this mixin adds:
 
 * ``record_transfer_enqueue`` -- write-ahead batch INSERT, called BEFORE
   ``ctx.slskd.transfers.enqueue(...)`` (T1). This is what makes the
   future reaper/convergence flips able to prove ownership: a process
   death at ANY point after the POST still leaves a durable row.
+* ``stamp_transfer_id`` -- enqueue-response write (T1.5, issue #571 PR 5):
+  called right after ``slskd_enqueue_with_outcome`` reconciles a POST's
+  transfer id, stamping it onto the row T1 just inserted.
 * ``stamp_transfer_completion`` -- event-ingestion write: T2. Called from
   the SAME pass ``lib/slskd_events.py`` already stamps
   ``active_download_state`` from (issue #146), matching ledger rows by
-  the same (username, remote filename) key.
+  the same (username, remote filename) key. Also COALESCEs ``transfer_id``
+  in from the completion event when T1.5 hasn't set it yet (a reconciled-
+  timeout fallback -- see ``transfer_id`` parameter below) -- never
+  clobbers an already-known value.
 * ``get_owned_transfers`` / ``get_owned_transfer_keys`` /
-  ``get_owned_local_paths`` -- read surface shaped for what the
-  reaper/convergence flips need: full rows for forensic inspection, the
-  bare "is this (username, filename) mine?" membership set the #571 PR 3
-  convergence flip consumes each cycle, and "is this local_path mine?".
+  ``get_owned_transfer_id_sets`` / ``get_owned_local_paths`` -- read
+  surface shaped for what the reaper/convergence/purge flips need: full
+  rows for forensic inspection, the bare "is this (username, filename)
+  mine?" membership set the #571 PR 3 convergence flip consumes each
+  cycle, the stamped/unstamped ``transfer_id`` membership sets the #571
+  PR 5 completed-transfer purge consumes each cycle, and "is this
+  local_path mine?".
 * ``get_owned_attempt_folders`` -- read surface for the disk-reaper
   flip (issue #571 PR 4): "which canonical processing folders are
   mine?", joined to each ledgered attempt's request identity so the
@@ -36,7 +45,7 @@ import msgspec
 import psycopg2.extras
 
 from lib.pipeline_db._core import _PipelineDBBase
-from lib.pipeline_db._shared import TransferLedgerRow
+from lib.pipeline_db._shared import TransferIdOwnership, TransferLedgerRow
 
 # Requests still active (in-flight) can't be pruned regardless of age --
 # a future reaper/convergence flip may still need the ledger row while
@@ -77,12 +86,55 @@ class _TransferLedgerMixin(_PipelineDBBase):
                 values,
             )
 
+    def stamp_transfer_id(
+        self,
+        username: str,
+        filename: str,
+        transfer_id: str,
+    ) -> int:
+        """Enqueue-response write (T1.5, issue #571 PR 5): stamp
+        ``transfer_id`` onto the newest not-yet-id-stamped ledger row for
+        ``(username, filename)``.
+
+        Called right after ``slskd_enqueue_with_outcome`` reconciles a
+        POST's accepted files against a fresh downloads snapshot -- the
+        SAME (username, filename) key ``stamp_transfer_completion``
+        matches on. Tie-break mirrors that method's: newest row with
+        ``transfer_id IS NULL`` wins, so a retried file (T1 mints a fresh
+        row) always gets the id captured for THIS attempt, never an
+        older still-open one.
+
+        Returns 1 if a row was stamped, 0 if no ledgered row matched (an
+        unledgered/foreign transfer, or every matching row already has a
+        transfer_id) -- never raises for a miss. Per-attempt data races
+        with completion stamping are resolved the same way: whichever
+        write lands first sticks (``stamp_transfer_completion`` COALESCEs
+        rather than overwriting), so calling this after a completion has
+        already arrived is a safe no-op, not a corruption.
+        """
+        cur = self._execute(
+            """
+            UPDATE slskd_transfer_ledger
+            SET transfer_id = %s
+            WHERE id = (
+                SELECT id FROM slskd_transfer_ledger
+                WHERE username = %s AND filename = %s AND transfer_id IS NULL
+                ORDER BY enqueued_at DESC
+                LIMIT 1
+            )
+            """,
+            (transfer_id, username, filename),
+        )
+        return cur.rowcount
+
     def stamp_transfer_completion(
         self,
         username: str,
         filename: str,
         local_path: str,
         completed_at: datetime,
+        *,
+        transfer_id: str | None = None,
     ) -> int:
         """Event-ingestion write (T2): stamp ``local_path``/``completed_at``
         onto the newest not-yet-stamped ledger row for
@@ -98,6 +150,15 @@ class _TransferLedgerMixin(_PipelineDBBase):
         stamp for that key (unless a NEWER un-stamped attempt exists, in
         which case that is the correct row to stamp).
 
+        ``transfer_id`` (issue #571 PR 5, T2 fallback) is COALESCEd in --
+        it fills the column only when T1.5 (``stamp_transfer_id``) hasn't
+        already captured it (a reconciliation timeout at enqueue time),
+        and never overwrites an existing value even when the caller
+        passes a different one. Every completion event carries slskd's
+        own transfer id, so this closes the gap T1.5 alone can leave: by
+        the time a row is completion-stamped, its transfer_id is
+        durably known one way or the other.
+
         Returns 1 if a row was stamped, 0 if no ledgered row matched
         (an unledgered/foreign transfer, or every matching row was
         already stamped) -- never raises for a miss.
@@ -105,7 +166,8 @@ class _TransferLedgerMixin(_PipelineDBBase):
         cur = self._execute(
             """
             UPDATE slskd_transfer_ledger
-            SET local_path = %s, completed_at = %s
+            SET local_path = %s, completed_at = %s,
+                transfer_id = COALESCE(transfer_id, %s)
             WHERE id = (
                 SELECT id FROM slskd_transfer_ledger
                 WHERE username = %s AND filename = %s AND completed_at IS NULL
@@ -113,7 +175,7 @@ class _TransferLedgerMixin(_PipelineDBBase):
                 LIMIT 1
             )
             """,
-            (local_path, completed_at, username, filename),
+            (local_path, completed_at, transfer_id, username, filename),
         )
         return cur.rowcount
 
@@ -164,6 +226,28 @@ class _TransferLedgerMixin(_PipelineDBBase):
             "SELECT username, filename FROM slskd_transfer_ledger",
         )
         return {(r["username"], r["filename"]) for r in cur.fetchall()}
+
+    def get_owned_transfer_id_sets(self) -> TransferIdOwnership:
+        """Ledger ``transfer_id`` membership, split by completion stamp --
+        the completed-transfer purge's (#571 PR 5) "is this live
+        completed transfer mine, and has its completion stamp landed
+        yet?" lookup in one query.
+
+        Purpose-shaped like ``get_owned_transfer_keys``: only rows with a
+        known ``transfer_id`` are relevant (a row still awaiting BOTH
+        T1.5 and T2 contributes nothing to either set -- correctly so,
+        since the purge matches live transfers by id).
+        """
+        cur = self._execute(
+            "SELECT transfer_id, completed_at FROM slskd_transfer_ledger "
+            "WHERE transfer_id IS NOT NULL",
+        )
+        stamped: set[str] = set()
+        unstamped: set[str] = set()
+        for row in cur.fetchall():
+            target = stamped if row["completed_at"] is not None else unstamped
+            target.add(row["transfer_id"])
+        return TransferIdOwnership(stamped=stamped, unstamped=unstamped)
 
     def get_owned_local_paths(self) -> set[str]:
         """Every completion-stamped ``local_path`` in the ledger -- the

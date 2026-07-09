@@ -53,6 +53,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanItemProvenance, SearchPlanItemRow,
                              SearchPlanMetadataSnapshot,
                              SearchPlanProvenance, SearchPlanRow,
+                             TransferIdOwnership,
                              TransferLedgerRow,
                              WantedReconciliationCandidate)
 from lib.quality import (
@@ -152,6 +153,8 @@ class FakePipelineDB:
         self._transfer_ledger: dict[int, FakeTransferLedgerRow] = {}
         self._transfer_ledger_next_id: int = 1
         self.record_transfer_enqueue_calls: list[TransferLedgerRow] = []
+        # #571 PR 5, T1.5: (username, filename, transfer_id) per call.
+        self.stamp_transfer_id_calls: list[tuple[str, str, str]] = []
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
         # Call-count tracking for the bad-audio-hash gate. Tests that
@@ -4253,15 +4256,38 @@ class FakePipelineDB:
                 attempt_fingerprint=row.attempt_fingerprint,
             )
 
+    def stamp_transfer_id(
+        self, username: str, filename: str, transfer_id: str,
+    ) -> int:
+        """Enqueue-response write (T1.5, issue #571 PR 5) -- mirrors the
+        real UPDATE ... WHERE transfer_id IS NULL ORDER BY enqueued_at
+        DESC LIMIT 1."""
+        self.stamp_transfer_id_calls.append((username, filename, transfer_id))
+        candidates = [
+            r for r in self._transfer_ledger.values()
+            if r.username == username and r.filename == filename
+            and r.transfer_id is None
+        ]
+        if not candidates:
+            return 0
+        newest = max(candidates, key=lambda r: r.enqueued_at)
+        newest.transfer_id = transfer_id
+        return 1
+
     def stamp_transfer_completion(
         self,
         username: str,
         filename: str,
         local_path: str,
         completed_at: datetime,
+        *,
+        transfer_id: str | None = None,
     ) -> int:
         """Stamp the newest not-yet-stamped row for (username, filename) --
-        mirrors the real UPDATE ... ORDER BY enqueued_at DESC LIMIT 1."""
+        mirrors the real UPDATE ... ORDER BY enqueued_at DESC LIMIT 1.
+        ``transfer_id`` (issue #571 PR 5, T2 fallback) is COALESCEd in --
+        set only when the row doesn't already carry one, mirroring the
+        real ``COALESCE(transfer_id, %s)``."""
         candidates = [
             r for r in self._transfer_ledger.values()
             if r.username == username and r.filename == filename
@@ -4272,6 +4298,8 @@ class FakePipelineDB:
         newest = max(candidates, key=lambda r: r.enqueued_at)
         newest.local_path = local_path
         newest.completed_at = completed_at
+        if newest.transfer_id is None:
+            newest.transfer_id = transfer_id
         return 1
 
     def get_owned_transfers(
@@ -4303,6 +4331,19 @@ class FakePipelineDB:
             (r.username, r.filename)
             for r in self._transfer_ledger.values()
         }
+
+    def get_owned_transfer_id_sets(self) -> TransferIdOwnership:
+        """Mirrors the real SELECT transfer_id, completed_at ... WHERE
+        transfer_id IS NOT NULL -- (issue #571 PR 5) split by completion
+        stamp for the completed-transfer purge."""
+        stamped: set[str] = set()
+        unstamped: set[str] = set()
+        for r in self._transfer_ledger.values():
+            if r.transfer_id is None:
+                continue
+            target = stamped if r.completed_at is not None else unstamped
+            target.add(r.transfer_id)
+        return TransferIdOwnership(stamped=stamped, unstamped=unstamped)
 
     def get_owned_local_paths(self) -> set[str]:
         return {
