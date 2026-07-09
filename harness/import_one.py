@@ -1512,9 +1512,10 @@ def main():
     global _import_total_start  # noqa: PLW0603
     _import_total_start = time.monotonic()
 
-    # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
-    # Done in main() (not at module import) so importing this module for tests
-    # doesn't leak a zero umask into the test process.
+    # Belt-and-suspenders for the group-writable import boundary (umask 0o002) —
+    # see lib/permissions.py / GH #84. Done in main() (not at module import) so
+    # importing this module for tests doesn't leak the process umask into the
+    # test process.
     reset_umask()
 
     parser = argparse.ArgumentParser(description="One-shot beets import for a single album")
@@ -2199,7 +2200,9 @@ def main():
 
     # --- Force library modes ---
     # Guards against any subprocess layer that dropped umask and created
-    # 0o755 dirs despite the systemd unit's UMask=0000 — see GH #84.
+    # non-setgid / non-group-writable dirs — post-import belt-and-suspenders
+    # that enforces LIBRARY_DIR_MODE (0o2775, setgid + group-writable) on every
+    # album/artist dir, covering dirs the beets permissions plugin misses. GH #84.
     fix_library_modes(album_path)
     _log_timing("postflight_verification", stage_start)
 

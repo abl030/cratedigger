@@ -272,11 +272,18 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         ``fix_library_modes`` (lib/permissions.py) deliberately touches
         directories only, never files, so the ``permissions`` plugin (its
         ``art_set -> fix_art`` listener) is what covers both initial import
-        AND manual ``beet fetchart`` re-fetches."""
+        AND manual ``beet fetchart`` re-fetches.
+
+        ``dir`` is ``02775`` (setgid + group-writable), not a plain
+        ``0775`` — setgid so child dirs beets creates underneath inherit
+        the library group, group-writable so gid-consumers (Jellyfin) can
+        write alongside the media. This mirrors ``lib.permissions.
+        LIBRARY_DIR_MODE`` (``0o2775``); a bare ``0775`` here would leave
+        beets itself stripping the setgid bit on every import."""
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn("permissions", self.PRODUCTION_PLUGINS.split())
         self.assertIn(
-            'permissions = {\n      file = "0664";\n      dir = "0775";\n    };',
+            'permissions = {\n      file = "0664";\n      dir = "02775";\n    };',
             text,
         )
 
