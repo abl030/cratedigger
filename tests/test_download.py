@@ -2676,6 +2676,146 @@ class TestCaptureDownloadProgress(unittest.TestCase):
         self.assertEqual(state.last_progress_at, now.isoformat())
 
 
+def _fail_file(*, last_state=None, last_exception=None):
+    from tests.helpers import make_download_file
+    f = make_download_file()
+    f.last_state = last_state
+    f.last_exception = last_exception
+    return f
+
+
+class TestSummarizeFileFailures(unittest.TestCase):
+    """Pure unit tests for summarize_file_failures() — issue #564 C5."""
+
+    def test_no_files_returns_none(self):
+        from lib.download import summarize_file_failures
+        self.assertIsNone(summarize_file_failures([]))
+
+    CASES = [
+        (
+            "no evidence at all",
+            [_fail_file()],
+            None,
+        ),
+        (
+            "only succeeded state contributes nothing",
+            [_fail_file(last_state="Completed, Succeeded")],
+            None,
+        ),
+        (
+            "non-terminal state without exception contributes nothing",
+            [_fail_file(last_state="InProgress")],
+            None,
+        ),
+        (
+            "single exception",
+            [_fail_file(last_exception="Transfer rejected: Banned")],
+            "1× 'Transfer rejected: Banned'",
+        ),
+        (
+            "terminal state fallback when no exception",
+            [_fail_file(last_state="Completed, Errored")],
+            "1× 'Completed, Errored'",
+        ),
+        (
+            "exception preferred over terminal state",
+            [_fail_file(last_state="Completed, Errored",
+                        last_exception="Read error: Connection reset by peer")],
+            "1× 'Read error: Connection reset by peer'",
+        ),
+        (
+            "same reason counted across files",
+            [_fail_file(last_exception="Transfer rejected: Banned"),
+             _fail_file(last_exception="Transfer rejected: Banned")],
+            "2× 'Transfer rejected: Banned'",
+        ),
+        (
+            "mixed reasons sorted by count desc then alphabetically",
+            [_fail_file(last_exception="Transfer rejected: File not shared."),
+             _fail_file(last_exception="Transfer rejected: File not shared."),
+             _fail_file(last_exception="Read error: Connection reset by peer")],
+            "2× 'Transfer rejected: File not shared.', "
+            "1× 'Read error: Connection reset by peer'",
+        ),
+        (
+            "tie broken alphabetically",
+            [_fail_file(last_exception="Zed reason"),
+             _fail_file(last_exception="Alpha reason")],
+            "1× 'Alpha reason', 1× 'Zed reason'",
+        ),
+        (
+            "one file with evidence, others without, still summarized",
+            [_fail_file(),
+             _fail_file(last_state="Completed, Succeeded"),
+             _fail_file(last_exception="Transfer rejected: Banned")],
+            "1× 'Transfer rejected: Banned'",
+        ),
+    ]
+
+    def test_summary_table(self):
+        from lib.download import summarize_file_failures
+        for desc, files, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(summarize_file_failures(files), expected)
+
+
+class TestVanishedTimeoutReason(unittest.TestCase):
+    """Pure unit tests for _vanished_timeout_reason() — issue #564 C5/I2."""
+
+    def test_no_evidence_claims_never_observed(self):
+        from lib.download import _vanished_timeout_reason
+        reason = _vanished_timeout_reason([_fail_file()])
+        self.assertEqual(
+            reason,
+            "transfers vanished from slskd before any status was "
+            "observed (slskd restart?)")
+
+    def test_evidence_names_last_observed_summary(self):
+        from lib.download import _vanished_timeout_reason
+        reason = _vanished_timeout_reason(
+            [_fail_file(last_exception="Transfer rejected: Banned")])
+        self.assertEqual(
+            reason,
+            "transfers no longer in slskd — last observed: "
+            "1× 'Transfer rejected: Banned'")
+
+    def test_never_observed_phrase_only_appears_without_evidence(self):
+        from lib.download import _vanished_timeout_reason
+        with_evidence = _vanished_timeout_reason(
+            [_fail_file(last_state="Completed, Errored")])
+        without_evidence = _vanished_timeout_reason([_fail_file()])
+        self.assertNotIn("before any status was observed", with_evidence)
+        self.assertIn("before any status was observed", without_evidence)
+
+
+class TestEnrichTimeoutReason(unittest.TestCase):
+    """Pure unit tests for _enrich_timeout_reason() — issue #564 C5/I2."""
+
+    def test_no_evidence_leaves_reason_unchanged(self):
+        from lib.download import _enrich_timeout_reason
+        reason = _enrich_timeout_reason("all 3 files errored", [_fail_file()])
+        self.assertEqual(reason, "all 3 files errored")
+
+    def test_appends_summary_when_evidence_exists(self):
+        from lib.download import _enrich_timeout_reason
+        reason = _enrich_timeout_reason(
+            "all 1 files errored",
+            [_fail_file(last_exception="Transfer rejected: Banned")])
+        self.assertEqual(
+            reason,
+            "all 1 files errored — 1× 'Transfer rejected: Banned'")
+
+    def test_does_not_duplicate_summary_already_embedded(self):
+        """The vanished-branch reason already embeds the summary inline
+        -- the generic append must not repeat it."""
+        from lib.download import _enrich_timeout_reason, _vanished_timeout_reason
+        files = [_fail_file(last_exception="Transfer rejected: Banned")]
+        vanished_reason = _vanished_timeout_reason(files)
+        enriched = _enrich_timeout_reason(vanished_reason, files)
+        self.assertEqual(enriched, vanished_reason)
+        self.assertEqual(enriched.count("Transfer rejected: Banned"), 1)
+
+
 class TestHarvestTerminalTransferEvidence(unittest.TestCase):
     """Test harvest_terminal_transfer_evidence() — issue #564 root cause
     #3 / C3: the pre-purge harvest that stamps terminal slskd transfer
@@ -3391,7 +3531,13 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         fake_db.assert_log(self, 0, outcome="timeout")
         log = fake_db.download_logs[0]
-        self.assertEqual(log.error_message, "all 2 files errored")
+        # Issue #564 C5: the generic reason is now enriched with the real
+        # per-file evidence instead of staying a bare "all N files
+        # errored" — the exact fix for this test's own reproduction.
+        self.assertEqual(
+            log.error_message,
+            "all 2 files errored — 1× 'Completed, Errored', "
+            "1× 'Completed, Rejected'")
         self.assertNotEqual(log.error_message, "all transfers vanished from slskd")
         self.assertEqual(log.filetype, "m4a")
         self.assertEqual(log.soulseek_username, "elgoognplus")

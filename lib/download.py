@@ -291,6 +291,70 @@ def _restored_terminal_status(
 
 # === Async download polling ===
 
+def summarize_file_failures(files: list[DownloadFile]) -> str | None:
+    """Compose a deterministic, human-readable summary of per-file
+    download failures (issue #564 C5) — the evidence a download-timeout
+    message names instead of a generic "vanished"/"errored" verdict.
+
+    Per file, prefers ``last_exception`` (slskd's real per-transfer
+    failure reason); falls back to a terminal ``last_state`` (any state
+    starting ``"Completed,"`` other than ``"Completed, Succeeded"``).
+    Files with no exception and no terminal-error state (still in
+    progress, or genuinely never observed) contribute nothing.
+
+    Returns ``None`` when no file carries any evidence at all — callers
+    use that to distinguish "genuinely never observed" from "observed
+    and failed" (I2).
+
+    Deterministic ordering: most common reason first, ties broken
+    alphabetically, so the composed message never varies cycle to cycle
+    for the same evidence set.
+    """
+    counts: dict[str, int] = {}
+    for f in files:
+        reason = f.last_exception
+        if not reason:
+            state = f.last_state
+            if (state and state.startswith("Completed,")
+                    and state != "Completed, Succeeded"):
+                reason = state
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+    if not counts:
+        return None
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{count}× '{reason}'" for reason, count in ordered)
+
+
+def _vanished_timeout_reason(files: list[DownloadFile]) -> str:
+    """Compose the reason for the "transfers vanished from slskd" timeout
+    path (issue #564 C5/I2): names the last observed evidence when any
+    exists (persisted from a prior cycle's poll or pre-purge harvest),
+    and claims nothing was ever observed only when that's actually true.
+    """
+    summary = summarize_file_failures(files)
+    if summary:
+        return f"transfers no longer in slskd — last observed: {summary}"
+    return (
+        "transfers vanished from slskd before any status was observed "
+        "(slskd restart?)")
+
+
+def _enrich_timeout_reason(reason: str, files: list[DownloadFile]) -> str:
+    """Append the per-file failure-evidence summary to a timeout reason
+    (issue #564 C5), unless it's already embedded — the vanished-timeout
+    reason above already names the same evidence inline, so this stays a
+    no-op for that caller while still enriching every
+    ``decide_download_action``-derived reason (whose strings are
+    UNCHANGED — simulator scenarios depend on them; this is where the
+    enrichment happens instead).
+    """
+    summary = summarize_file_failures(files)
+    if summary and summary not in reason:
+        return f"{reason} — {summary}"
+    return reason
+
+
 def _timeout_album(
     entry: GrabListEntry,
     request_id: int,
@@ -305,6 +369,7 @@ def _timeout_album(
                     if f.status and f.status.state == "Completed, Succeeded")
 
     dl_info = _build_download_info(entry)
+    reason = _enrich_timeout_reason(reason, entry.files)
 
     logger.info(f"DOWNLOAD TIMEOUT: {entry.artist} - {entry.title} "
                 f"({completed}/{total} files done, reason={reason})")
@@ -1023,7 +1088,8 @@ def _poll_one_active_download(
                 request_id,
             )
             return
-        _timeout_album(entry, request_id, "all transfers vanished from slskd", ctx)
+        _timeout_album(
+            entry, request_id, _vanished_timeout_reason(entry.files), ctx)
         return
 
     # Mark files with vanished transfers as errored. Preserve restored
