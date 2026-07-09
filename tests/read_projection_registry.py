@@ -36,6 +36,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
+
 
 # A seeder takes a db (real ``PipelineDB`` or ``FakePipelineDB``), seeds
 # identical state, calls ONE read method, and returns the projected rows
@@ -345,12 +347,12 @@ def _seed_get_active_import_job_for_request(db: Any) -> "list[dict[str, Any]]":
 
 # --- youtube_album_mappings projection ------------------------------------
 
-def _youtube_mapping_row(**overrides: Any) -> "dict[str, Any]":
+def _youtube_mapping_row(**overrides: Any) -> PersistedYoutubeRow:
     """The upsert-row shape from
     ``TestReadProjectionParity._youtube_mapping_row`` — duplicated here
     because the registry module can't reach that test-class staticmethod.
     """
-    row: "dict[str, Any]" = {
+    fields: "dict[str, Any]" = {
         "yt_browse_id": "MPREb_parity",
         "yt_audio_playlist_id": "OLAK5uy_parity",
         "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_parity",
@@ -359,14 +361,16 @@ def _youtube_mapping_row(**overrides: Any) -> "dict[str, Any]":
         "album_title": "Parity Album",
         "album_artist": "Parity Artist",
         "yt_tracks": [
-            {"title": "Track 1", "video_id": "v1", "length_seconds": 200,
-             "track_number": 1, "disc_number": 1,
-             "artists": [{"name": "Artist"}]},
+            PersistedTrack(
+                title="Track 1", video_id="v1", length_seconds=200,
+                track_number=1, disc_number=1,
+                artists=[{"name": "Artist"}],
+            ),
         ],
-        "distances": [{"mbid": "mb-1", "distance": 0.05, "error": None}],
+        "distances": [PersistedDistance(mbid="mb-1", distance=0.05)],
     }
-    row.update(overrides)
-    return row
+    fields.update(overrides)
+    return PersistedYoutubeRow(**fields)
 
 
 def _seed_find_youtube_album_mapping_for_release(
@@ -376,7 +380,7 @@ def _seed_find_youtube_album_mapping_for_release(
         "rg-find-parity", "mb",
         [_youtube_mapping_row(
             yt_browse_id="MPREb_find",
-            distances=[{"mbid": "mb-find-1", "distance": 0.05, "error": None}],
+            distances=[PersistedDistance(mbid="mb-find-1", distance=0.05)],
         )])
     return _one(db.find_youtube_album_mapping_for_release(
         source="mb", release_id="mb-find-1", browse_id="MPREb_find"))

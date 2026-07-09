@@ -15,13 +15,19 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import msgspec
 import psycopg2
 
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 from tests.helpers import make_album_quality_evidence
-from lib.pipeline_db import DownloadLogOutcome  # noqa: E402
+from lib.pipeline_db import (  # noqa: E402
+    DownloadLogOutcome,
+    PersistedDistance,
+    PersistedTrack,
+    PersistedYoutubeRow,
+)
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -7137,8 +7143,8 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def _row(self, **overrides: Any) -> dict[str, Any]:
-        row: dict[str, Any] = {
+    def _row(self, **overrides: Any) -> PersistedYoutubeRow:
+        fields: dict[str, Any] = {
             "yt_browse_id": "MPREb_abc",
             "yt_audio_playlist_id": "OLAK5uy_abc",
             "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_abc",
@@ -7149,16 +7155,18 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             "album_title": "Test Album",
             "album_artist": "Test Album Artist",
             "yt_tracks": [
-                {"title": "Track 1", "video_id": "v1",
-                 "length_seconds": 200, "track_number": 1, "disc_number": 1,
-                 "artists": [{"name": "Artist"}]},
+                PersistedTrack(
+                    title="Track 1", video_id="v1", length_seconds=200,
+                    track_number=1, disc_number=1,
+                    artists=[{"name": "Artist"}],
+                ),
             ],
             "distances": [
-                {"mbid": "mb-1", "distance": 0.05, "error": None},
+                PersistedDistance(mbid="mb-1", distance=0.05),
             ],
         }
-        row.update(overrides)
-        return row
+        fields.update(overrides)
+        return PersistedYoutubeRow(**fields)
 
     def test_get_returns_none_when_pair_never_resolved(self):
         # Distinction matters: ``None`` = "never resolved" (cache MISS),
@@ -7218,18 +7226,21 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             got[0]["distances"][0]["mbid"], "mb-1")
 
     def test_upsert_round_trip_preserves_every_field(self):
-        """Rule A (``.claude/rules/test-fidelity.md``): every key in the
-        input dict must round-trip through real PostgreSQL.
+        """Rule A (``.claude/rules/test-fidelity.md``): every field of the
+        typed ``PersistedYoutubeRow`` payload must round-trip through real
+        PostgreSQL.
 
         Round 2 P0-1: ``album_title`` (and now ``album_artist``) were
         silently dropped because the INSERT column list didn't include
         them and ``psycopg2.extras.execute_values`` ignores extra dict
         keys. The Fake-based test stored the dict verbatim and never
-        flagged the divergence. This test does — if a future field
-        drifts between the row dict and the INSERT column list, the
-        for-loop below fails naming the offending key.
+        flagged the divergence. #546 W3 made the column list itself
+        DERIVE from ``msgspec.structs.fields(PersistedYoutubeRow)`` so
+        this class of bug can no longer be expressed — this test iterates
+        the SAME derived field list and fails naming the offending field
+        if a future drift somehow reappears.
         """
-        rows_in = [self._row(
+        row_in = self._row(
             yt_browse_id="MPREb_roundtrip",
             yt_audio_playlist_id="OLAK5uy_roundtrip",
             yt_url="https://music.youtube.com/playlist?list=OLAK5uy_roundtrip",
@@ -7237,15 +7248,18 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             yt_track_count=12,
             album_title="The Roundtrip Sessions",
             album_artist="Various Artists",
-        )]
-        self.db.upsert_youtube_album_mapping("rg-rt", "mb", rows_in)
+        )
+        self.db.upsert_youtube_album_mapping("rg-rt", "mb", [row_in])
         rows_out = self.db.get_youtube_album_mapping("rg-rt", "mb")
         assert rows_out is not None
         self.assertEqual(len(rows_out), 1)
-        for key in rows_in[0]:
+        for f in msgspec.structs.fields(PersistedYoutubeRow):
+            expected = getattr(row_in, f.name)
+            if f.name in ("yt_tracks", "distances"):
+                expected = msgspec.to_builtins(expected)
             self.assertEqual(
-                rows_out[0].get(key), rows_in[0][key],
-                msg=f"field {key} was dropped at the PG boundary",
+                rows_out[0].get(f.name), expected,
+                msg=f"field {f.name} was dropped at the PG boundary",
             )
 
     def test_get_orders_rows_by_yt_browse_id(self):
@@ -7346,8 +7360,8 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
             self._row(
                 yt_browse_id="MPREb_discogs",
                 distances=[
-                    {"mbid": "12345", "distance": 0.05, "error": None},
-                    {"mbid": "67890", "distance": 0.25, "error": None},
+                    PersistedDistance(mbid="12345", distance=0.05),
+                    PersistedDistance(mbid="67890", distance=0.25),
                 ],
             )
         ])
@@ -8791,8 +8805,8 @@ class TestReadProjectionParity(unittest.TestCase):
     # --- get_youtube_album_mapping (#523, tri-state) -------------------------
 
     @staticmethod
-    def _youtube_mapping_row(**overrides: Any) -> dict[str, Any]:
-        row: dict[str, Any] = {
+    def _youtube_mapping_row(**overrides: Any) -> PersistedYoutubeRow:
+        fields: dict[str, Any] = {
             "yt_browse_id": "MPREb_parity",
             "yt_audio_playlist_id": "OLAK5uy_parity",
             "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_parity",
@@ -8801,16 +8815,18 @@ class TestReadProjectionParity(unittest.TestCase):
             "album_title": "Parity Album",
             "album_artist": "Parity Artist",
             "yt_tracks": [
-                {"title": "Track 1", "video_id": "v1",
-                 "length_seconds": 200, "track_number": 1, "disc_number": 1,
-                 "artists": [{"name": "Artist"}]},
+                PersistedTrack(
+                    title="Track 1", video_id="v1", length_seconds=200,
+                    track_number=1, disc_number=1,
+                    artists=[{"name": "Artist"}],
+                ),
             ],
             "distances": [
-                {"mbid": "mb-1", "distance": 0.05, "error": None},
+                PersistedDistance(mbid="mb-1", distance=0.05),
             ],
         }
-        row.update(overrides)
-        return row
+        fields.update(overrides)
+        return PersistedYoutubeRow(**fields)
 
     def test_get_youtube_album_mapping_keyset_parity(self):
         for db in (self.db, self.fake):

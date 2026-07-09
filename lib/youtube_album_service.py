@@ -49,6 +49,7 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance as _default_distance_fn,
 )
+from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
 from lib.release_identity import detect_release_source, normalize_release_id
 
 
@@ -327,74 +328,14 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
 # Persisted JSONB shapes — wire-boundary structs for the durable cache.
 # ---------------------------------------------------------------------------
 #
-# ``youtube_album_mappings.yt_tracks`` and ``.distances`` are JSONB
-# columns. Per the wire-boundary rule in ``.claude/rules/code-quality.md``,
-# anything that crosses JSON gets a typed Struct and validates at the
-# decode site — we cannot rely on Pyright seeing into ``dict.get()``.
-# ``msgspec.convert`` is the read-side detector for malformed rows.
-
-
-class PersistedTrack(msgspec.Struct, kw_only=True):
-    """One persisted track inside ``yt_tracks`` JSONB.
-
-    ``video_id`` is used by the YT rescue ingest audit trail to persist
-    the exact per-track videos selected from the resolver row.
-    """
-
-    title: Optional[str] = None
-    artists: Optional[list[dict[str, Any]]] = None
-    length_seconds: Optional[float] = None
-    track_number: Optional[int] = None
-    disc_number: Optional[int] = None
-    video_id: Optional[str] = None
-
-
-class PersistedDistance(msgspec.Struct, kw_only=True):
-    """One persisted per-pair distance inside ``distances`` JSONB."""
-
-    mbid: Optional[str] = None
-    outcome: Optional[str] = None
-    distance: Optional[float] = None
-    components: Optional[dict[str, float]] = None
-    matched_tracks: Optional[int] = None
-    total_local_tracks: Optional[int] = None
-    total_mb_tracks: Optional[int] = None
-    extra_local_tracks: Optional[int] = None
-    extra_mb_tracks: Optional[int] = None
-    error_message: Optional[str] = None
-
-
-class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
-    """One persisted row in ``youtube_album_mappings``.
-
-    Outer columns (``id``, ``release_group_identifier``, ``source``,
-    ``resolved_at``) aren't carried here — the read path
-    (``get_youtube_album_mapping``) keys by
-    ``(release_group_identifier, source)`` so those fields are
-    redundant. JSONB columns are decoded via ``msgspec.convert``;
-    everything else is row metadata.
-    """
-
-    # Required-on-the-wire fields: the writer always populates them
-    # (round 2 maintainability-2). Declaring them ``str``/``int`` makes
-    # ``msgspec.convert`` reject malformed JSONB rows at the wire seam
-    # rather than silently producing default-valued objects downstream.
-    yt_browse_id: str
-    yt_url: str
-    yt_track_count: int
-    # Genuinely optional: ``yt_audio_playlist_id`` and ``yt_year`` are
-    # documented NULLable in migration 034.
-    yt_audio_playlist_id: Optional[str] = None
-    yt_year: Optional[int] = None
-    # Album-level facts persisted alongside the row so the cache
-    # rehydration in ``_rows_to_youtube_releases`` produces SyntheticItem
-    # values structurally identical to the fresh-resolve path. Both are
-    # nullable to allow legacy rows written before migration 036 (none
-    # in production yet, but the column is nullable per the migration).
-    album_title: Optional[str] = None
-    album_artist: Optional[str] = None
-    yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list)
-    distances: list[PersistedDistance] = msgspec.field(default_factory=list)
+# ``PersistedTrack`` / ``PersistedDistance`` / ``PersistedYoutubeRow`` live
+# in ``lib.pipeline_db`` (moved there in #546 W3) because
+# ``PipelineDB.upsert_youtube_album_mapping`` derives its INSERT column
+# list from ``msgspec.structs.fields(PersistedYoutubeRow)`` at runtime —
+# the DB layer needs the type. This module is the producer (the resolver
+# builds the rows) and a read-hydrator (``_rows_to_youtube_releases``
+# decodes cached rows via ``msgspec.convert``), so the names stay bound
+# here via this import.
 
 
 # Type aliases for clarity.
@@ -432,7 +373,7 @@ class YoutubeResolverDB(Protocol):
         self,
         release_group_identifier: str,
         source: str,
-        rows: list[dict[str, Any]],
+        rows: list[PersistedYoutubeRow],
     ) -> None: ...
 
 
@@ -748,7 +689,7 @@ def resolve_youtube_album(
     # break early and persist the partial matrix we have. Deadline
     # status is attached to ``error_message`` at the final return below.
     youtube_releases: list[ResolvedYoutubeRelease] = []
-    persistable_rows: list[dict[str, Any]] = []
+    persistable_rows: list[PersistedYoutubeRow] = []
 
     for browse_id, album_resp in yt_album_responses.items():
         if _deadline_breached():
@@ -793,7 +734,7 @@ def resolve_youtube_album(
         # Pair by index rather than track number because YT payloads may
         # carry duplicate or zero-indexed trackNumber values. The synth
         # list was built from the same input order immediately above.
-        persistable_tracks: list[dict[str, Any]] = []
+        persistable_tracks: list[PersistedTrack] = []
         raw_tracks = album_resp.get("tracks") or []
         for idx, si in enumerate(synth_items):
             raw_track = raw_tracks[idx] if idx < len(raw_tracks) else {}
@@ -802,20 +743,20 @@ def resolve_youtube_album(
                 if isinstance(raw_track, dict)
                 else None
             )
-            persistable_tracks.append({
-                "title": si.title,
-                "artists": [{"name": si.artist}],
-                "length_seconds": si.length,
-                "track_number": si.track,
-                "disc_number": si.disc,
-                "video_id": video_id if isinstance(video_id, str) else None,
-            })
-        persistable_rows.append({
-            "yt_browse_id": browse_id,
-            "yt_audio_playlist_id": album_resp.get("audioPlaylistId"),
-            "yt_url": yt_url,
-            "yt_year": year,
-            "yt_track_count": yt_rel.track_count,
+            persistable_tracks.append(PersistedTrack(
+                title=si.title,
+                artists=[{"name": si.artist}],
+                length_seconds=si.length,
+                track_number=si.track,
+                disc_number=si.disc,
+                video_id=video_id if isinstance(video_id, str) else None,
+            ))
+        persistable_rows.append(PersistedYoutubeRow(
+            yt_browse_id=browse_id,
+            yt_audio_playlist_id=album_resp.get("audioPlaylistId"),
+            yt_url=yt_url,
+            yt_year=year,
+            yt_track_count=yt_rel.track_count,
             # ``album_title`` + ``album_artist`` are persisted per row so
             # the cache-fallback ``_rows_to_youtube_releases`` rehydrates
             # ``SyntheticItem.album`` and ``SyntheticItem.albumartist``
@@ -824,25 +765,25 @@ def resolve_youtube_album(
             # ``albumartist=per-track-artist`` (round 2 maintainability-5
             # — the Various Artists case). Both stored at row scope
             # (not per track) since they are album-level facts.
-            "album_title": album_title,
-            "album_artist": album_artist,
-            "yt_tracks": persistable_tracks,
-            "distances": [
-                {
-                    "mbid": d.mbid,
-                    "outcome": d.outcome,
-                    "distance": d.distance,
-                    "components": d.components,
-                    "matched_tracks": d.matched_tracks,
-                    "total_local_tracks": d.total_local_tracks,
-                    "total_mb_tracks": d.total_mb_tracks,
-                    "extra_local_tracks": d.extra_local_tracks,
-                    "extra_mb_tracks": d.extra_mb_tracks,
-                    "error_message": d.error_message,
-                }
+            album_title=album_title,
+            album_artist=album_artist,
+            yt_tracks=persistable_tracks,
+            distances=[
+                PersistedDistance(
+                    mbid=d.mbid,
+                    outcome=d.outcome,
+                    distance=d.distance,
+                    components=d.components,
+                    matched_tracks=d.matched_tracks,
+                    total_local_tracks=d.total_local_tracks,
+                    total_mb_tracks=d.total_mb_tracks,
+                    extra_local_tracks=d.extra_local_tracks,
+                    extra_mb_tracks=d.extra_mb_tracks,
+                    error_message=d.error_message,
+                )
                 for d in distances
             ],
-        })
+        ))
 
     # Step 11: persist + return.
     pdb.upsert_youtube_album_mapping(rg_id, source_label, persistable_rows)

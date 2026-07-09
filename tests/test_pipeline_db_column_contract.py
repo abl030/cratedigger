@@ -25,12 +25,15 @@ import os
 import sys
 import unittest
 
+import msgspec
+
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
 from lib.pipeline_db import (
     AddRequestInput,
     BadAudioHashInput,
+    PersistedYoutubeRow,
     PipelineDB,
     RequestSpectralStateUpdate,
     RequestV0ProbeStateUpdate,
@@ -49,6 +52,11 @@ TEST_DSN = os.environ.get("TEST_DB_DSN")
 def _dataclass_columns(struct_cls) -> set[str]:
     """A flat write dataclass whose field names ARE column names."""
     return {f.name for f in dataclasses.fields(struct_cls)}
+
+
+def _struct_columns(struct_cls) -> set[str]:
+    """A flat write ``msgspec.Struct`` whose field names ARE column names."""
+    return {f.name for f in msgspec.structs.fields(struct_cls)}
 
 
 def _spectral_update_columns() -> set[str]:
@@ -74,6 +82,8 @@ CONTRACTS: list[tuple[str, str, set[str]]] = [
     ("BadAudioHashInput", "bad_audio_hashes", _dataclass_columns(BadAudioHashInput)),
     ("RequestSpectralStateUpdate", "album_requests", _spectral_update_columns()),
     ("RequestV0ProbeStateUpdate", "album_requests", _v0_update_columns()),
+    ("PersistedYoutubeRow", "youtube_album_mappings",
+     _struct_columns(PersistedYoutubeRow)),
 ]
 
 
@@ -116,6 +126,20 @@ class TestWritePayloadColumnContract(unittest.TestCase):
         for label, _table, cols in CONTRACTS:
             with self.subTest(payload=label):
                 self.assertTrue(cols, f"{label} resolved to no columns")
+
+    def test_bogus_struct_field_is_caught_by_the_subset_check(self) -> None:
+        """Known-bad self-test: a synthetic ``msgspec.Struct`` with one
+        bogus field NOT on ``youtube_album_mappings`` must be reported by
+        the subset check as missing — proves the guard has teeth rather
+        than vacuously passing every payload."""
+        class _BogusYoutubeRow(msgspec.Struct, kw_only=True):
+            yt_browse_id: str = ""
+            definitely_not_a_real_column: str = ""
+
+        table_cols = self._table_columns("youtube_album_mappings")
+        bogus_cols = _struct_columns(_BogusYoutubeRow)
+        missing = bogus_cols - table_cols
+        self.assertEqual(missing, {"definitely_not_a_real_column"})
 
 
 if __name__ == "__main__":
