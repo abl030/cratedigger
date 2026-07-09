@@ -171,7 +171,7 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
             candidates=[],
         )
 
-        def accepted_without_id(*, username, files, file_dir, ctx):
+        def accepted_without_id(*, username, files, file_dir, ctx, **_ledger_kwargs):
             return SlskdEnqueueOutcome(status="accepted", downloads=[
                 DownloadFile(
                     filename=files[0]["filename"],
@@ -263,7 +263,7 @@ class TestAmbiguousEnqueueReasonPropagationSlice(unittest.TestCase):
             candidates=[],
         )
 
-        def ambiguous_outcome(*, username, files, file_dir, ctx):
+        def ambiguous_outcome(*, username, files, file_dir, ctx, **_ledger_kwargs):
             return SlskdEnqueueOutcome(
                 status="unknown",
                 reason="Soulseek.DownloadEnqueueException: File not shared.",

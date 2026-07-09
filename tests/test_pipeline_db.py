@@ -27,6 +27,7 @@ from lib.pipeline_db import (  # noqa: E402
     PersistedDistance,
     PersistedTrack,
     PersistedYoutubeRow,
+    TransferLedgerRow,
 )
 
 
@@ -63,6 +64,7 @@ def make_db():
         "plex_added_at_pins",  # migration 040
         "slskd_event_cursor",  # migration 041
         "slskd_search_ledger",  # migration 044
+        "slskd_transfer_ledger",  # migration 045
         "album_tracks",
         "album_requests",
     ]:
@@ -8586,6 +8588,243 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
             {k: v for k, v in r.items() if k != "created_at"} for r in rows
         ]
         self.assertEqual(strip(real_rows), strip(fake_rows))
+
+
+@requires_postgres
+class TestTransferLedgerRoundTrip(unittest.TestCase):
+    """Rule A round-trip for the slskd transfer write-ahead ownership
+    ledger (migration 045, issue #571)."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed_request(self, status: str = "wanted") -> int:
+        return self.db.add_request(
+            artist_name="Artist", album_title="Album",
+            source="request", status=status)
+
+    def test_get_owned_transfers_empty_before_any_record(self):
+        self.assertEqual(self.db.get_owned_transfers(), [])
+
+    def test_record_transfer_enqueue_round_trip_preserves_every_field(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=rid, username="peer0",
+                filename="Music\\Artist\\Album\\01.flac",
+                attempt_fingerprint="abcd1234"),
+        ])
+
+        rows = self.db.get_owned_transfers(request_id=rid)
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["request_id"], rid)
+        self.assertEqual(row["username"], "peer0")
+        self.assertEqual(
+            row["filename"], "Music\\Artist\\Album\\01.flac")
+        self.assertEqual(row["attempt_fingerprint"], "abcd1234")
+        self.assertIsNone(row["transfer_id"])
+        self.assertIsNone(row["local_path"])
+        self.assertIsNone(row["completed_at"])
+        self.assertIsNotNone(row["enqueued_at"])
+
+    def test_record_transfer_enqueue_null_attempt_fingerprint_round_trips(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=rid, username="peer0", filename="a.flac"),
+        ])
+        row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.assertIsNone(row["attempt_fingerprint"])
+
+    def test_record_transfer_enqueue_writes_one_row_per_file(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="c.flac"),
+        ])
+        self.assertEqual(len(self.db.get_owned_transfers(request_id=rid)), 3)
+
+    def test_record_transfer_enqueue_empty_list_does_not_raise(self):
+        self.db.record_transfer_enqueue([])
+        self.assertEqual(self.db.get_owned_transfers(), [])
+
+    def test_stamp_transfer_completion_stamps_matching_row(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        completed_at = datetime.now(timezone.utc)
+
+        stamped = self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
+
+        self.assertEqual(stamped, 1)
+        row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.assertEqual(row["local_path"], "/downloads/complete/a.flac")
+        self.assertIsNotNone(row["completed_at"])
+
+    def test_stamp_transfer_completion_unledgered_pair_returns_zero(self):
+        stamped = self.db.stamp_transfer_completion(
+            "foreign-peer", "foreign.flac", "/downloads/x",
+            datetime.now(timezone.utc))
+        self.assertEqual(stamped, 0)
+
+    def test_stamp_transfer_completion_reprocessing_is_idempotent(self):
+        """T2 kill-safety: replaying the SAME completion event twice must
+        not corrupt state or stamp a second (older/unrelated) row."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        completed_at = datetime.now(timezone.utc)
+
+        first = self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", completed_at)
+        second = self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", completed_at)
+
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)  # the row is no longer "open"
+        rows = self.db.get_owned_transfers(request_id=rid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["local_path"], "/downloads/a.flac")
+
+    def test_stamp_transfer_completion_prefers_newest_open_row(self):
+        """Tie-break pin: a retried file mints a fresh ledger row (T1);
+        the completion event must stamp the NEWEST open row for the key,
+        not an older still-open attempt."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        old_row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc) - timedelta(minutes=10), old_row["id"]))
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/newest.flac", datetime.now(timezone.utc))
+
+        rows = self.db.get_owned_transfers(request_id=rid)
+        stamped = [r for r in rows if r["completed_at"] is not None]
+        self.assertEqual(len(stamped), 1)
+        self.assertNotEqual(stamped[0]["id"], old_row["id"])
+        self.assertEqual(stamped[0]["local_path"], "/downloads/newest.flac")
+
+    def test_get_owned_local_paths_only_returns_stamped_rows(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
+        ])
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+
+        self.assertEqual(self.db.get_owned_local_paths(), {"/downloads/a.flac"})
+
+    def _backdate(self, request_id: int, days: int) -> None:
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s",
+            (datetime.now(timezone.utc) - timedelta(days=days), request_id),
+        )
+
+    def test_prune_transfer_ledger_removes_old_terminal_rows(self):
+        rid = self._seed_request(status="imported")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self._backdate(rid, days=200)
+
+        removed = self.db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.db.get_owned_transfers(request_id=rid), [])
+
+    def test_prune_transfer_ledger_keeps_active_request_rows_regardless_of_age(self):
+        rid = self._seed_request(status="downloading")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self._backdate(rid, days=200)
+
+        removed = self.db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(self.db.get_owned_transfers(request_id=rid)), 1)
+
+    def test_prune_transfer_ledger_keeps_rows_inside_retention(self):
+        rid = self._seed_request(status="imported")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        removed = self.db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 0)
+
+    def test_prune_transfer_ledger_treats_missing_request_as_inactive(self):
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=999999, username="p0", filename="a.flac"),
+        ])
+        self._backdate(999999, days=200)
+
+        removed = self.db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 1)
+
+    def test_fake_parity_on_identical_state(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        rid = self._seed_request()
+        fake.seed_request({"id": rid, "status": "wanted"})
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=rid, username="p0", filename="a.flac",
+                    attempt_fingerprint="fp1"),
+            ])
+        real_rows = self.db.get_owned_transfers(request_id=rid)
+        fake_rows = fake.get_owned_transfers(request_id=rid)
+        strip = lambda rows: [
+            {k: v for k, v in r.items() if k not in ("id", "enqueued_at")}
+            for r in rows
+        ]
+        self.assertEqual(strip(real_rows), strip(fake_rows))
+
+    def test_get_owned_local_paths_fake_parity(self):
+        """#546 W1 read-projection parity for get_owned_local_paths (a
+        set[str], not a row projection — compared directly rather than
+        via _assert_keyset_parity)."""
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        rid = self._seed_request()
+        fake.seed_request({"id": rid, "status": "wanted"})
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+                TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
+            ])
+            db.stamp_transfer_completion(
+                "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+
+        self.assertEqual(
+            self.db.get_owned_local_paths(), fake.get_owned_local_paths())
 
 
 @requires_postgres

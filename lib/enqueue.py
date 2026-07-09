@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence, ca
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
 from lib.download import build_active_download_state
+from lib.processing_paths import attempt_fingerprint
 from lib.slskd_transfers import (
     SlskdEnqueueOutcome,
     cancel_and_delete,
@@ -707,18 +708,33 @@ def _enqueue_with_claim_outcome(
     file_dir: str,
     ctx: CratediggerContext,
 ) -> SlskdEnqueueOutcome:
+    # T1 (issue #571): the attempt fingerprint is computed from the WHOLE
+    # attempt's planned file set (claim.entry.files) -- not just this
+    # call's `files` (a per-disc/per-user subset in multi-disc) -- so
+    # every ledger row from every disc's enqueue call carries the same
+    # fingerprint, matching what canonical_processing_path derives later
+    # from the same full manifest (issue #550 phase 2).
+    attempt_fp = (
+        attempt_fingerprint(
+            [(f.username, f.filename) for f in claim.entry.files])
+        if claim.entry.files else None
+    )
     if claim.claimed:
         return slskd_enqueue_with_outcome(
             username=username,
             files=files,
             file_dir=file_dir,
             ctx=ctx,
+            request_id=claim.request_id,
+            attempt_fp=attempt_fp,
         )
     downloads = slskd_do_enqueue(
         username=username,
         files=files,
         file_dir=file_dir,
         ctx=ctx,
+        request_id=claim.request_id,
+        attempt_fp=attempt_fp,
     )
     if downloads is None:
         return SlskdEnqueueOutcome(status="unknown")

@@ -1504,6 +1504,20 @@ def main():
             logger.exception(
                 "SEARCH-LEDGER: sweep failed; continuing with the cycle.")
 
+        # --- Phase 0d: slskd transfer-ledger prune (issue #571) ---
+        # Every production enqueue call site now write-ahead ledgers the
+        # (username, filename) it is about to POST to slskd (migration
+        # 045) — this is ONLY the bounded-retention prune of that
+        # bookkeeping table; it never touches slskd or disk state. The
+        # convergence/reaper/purge flips that will actually CONSULT the
+        # ledger to prove ownership are separate follow-up PRs.
+        try:
+            from lib.slskd_transfer_ledger import prune_transfer_ledger_cycle
+            prune_transfer_ledger_cycle(_module_ctx)
+        except Exception:
+            logger.exception(
+                "TRANSFER-LEDGER: prune failed; continuing with the cycle.")
+
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
             phase1_future = pool.submit(_run_phase1)

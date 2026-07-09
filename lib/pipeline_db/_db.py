@@ -10,6 +10,7 @@ from lib.pipeline_db.dashboard import _DashboardMixin
 from lib.pipeline_db.plex_pins import _PlexPinsMixin
 from lib.pipeline_db.misc import _MiscMixin
 from lib.pipeline_db.search_ledger import _SearchLedgerMixin
+from lib.pipeline_db.transfer_ledger import _TransferLedgerMixin
 
 
 class PipelineDB(
@@ -24,6 +25,7 @@ class PipelineDB(
     _PlexPinsMixin,
     _MiscMixin,
     _SearchLedgerMixin,
+    _TransferLedgerMixin,
 ):
     """PostgreSQL-backed pipeline database.
 

@@ -16,6 +16,7 @@ from lib.pipeline_db import (
     PersistedYoutubeRow,
     PipelineDB,
     RequestSpectralStateUpdate,
+    TransferLedgerRow,
 )
 from lib.quality import SpectralMeasurement, ValidationResult
 from tests.fakes import (
@@ -5738,6 +5739,153 @@ class TestFakePipelineDBSearchLedger(unittest.TestCase):
         self.assertNotIn("sid-old", db._search_ledger)
         self.assertIn("sid-recent", db._search_ledger)
         self.assertIn("sid-undeleted", db._search_ledger)
+
+
+class TestFakePipelineDBTransferLedger(unittest.TestCase):
+    """Self-tests for the slskd transfer write-ahead ownership ledger
+    stubs (migration 045, issue #571)."""
+
+    def test_record_transfer_enqueue_appears_in_owned_transfers(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=42, username="peer0", filename="Music\\a.flac",
+                attempt_fingerprint="abcd1234"),
+        ])
+        rows = db.get_owned_transfers(request_id=42)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["request_id"], 42)
+        self.assertEqual(rows[0]["username"], "peer0")
+        self.assertEqual(rows[0]["filename"], "Music\\a.flac")
+        self.assertEqual(rows[0]["attempt_fingerprint"], "abcd1234")
+        self.assertIsNone(rows[0]["local_path"])
+        self.assertIsNone(rows[0]["completed_at"])
+        self.assertEqual(len(db.record_transfer_enqueue_calls), 1)
+
+    def test_record_transfer_enqueue_empty_list_is_a_noop(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([])  # must not raise
+        self.assertEqual(db.get_owned_transfers(), [])
+
+    def test_record_transfer_enqueue_writes_one_row_per_file(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="b.flac"),
+        ])
+        self.assertEqual(len(db.get_owned_transfers(request_id=1)), 2)
+
+    def test_stamp_transfer_completion_stamps_matching_row(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        completed_at = datetime.now(timezone.utc)
+        stamped = db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
+        self.assertEqual(stamped, 1)
+        row = db.get_owned_transfers(request_id=1)[0]
+        self.assertEqual(row["local_path"], "/downloads/complete/a.flac")
+        self.assertEqual(row["completed_at"], completed_at)
+
+    def test_stamp_transfer_completion_unledgered_pair_is_a_noop(self):
+        db = FakePipelineDB()
+        stamped = db.stamp_transfer_completion(
+            "foreign-peer", "foreign.flac", "/downloads/x",
+            datetime.now(timezone.utc))
+        self.assertEqual(stamped, 0)
+        self.assertEqual(db.get_owned_local_paths(), set())
+
+    def test_stamp_transfer_completion_prefers_newest_open_row(self):
+        # Two retries for the same (username, filename): only the newest
+        # not-yet-stamped row gets the completion stamp.
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        old_id = next(iter(db._transfer_ledger))
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(timezone.utc) - timedelta(minutes=10))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        completed_at = datetime.now(timezone.utc)
+        db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
+        rows = db.get_owned_transfers(request_id=1)
+        stamped_rows = [r for r in rows if r["completed_at"] is not None]
+        self.assertEqual(len(stamped_rows), 1)
+        self.assertNotEqual(stamped_rows[0]["id"], old_id)
+
+    def test_get_owned_local_paths_only_returns_stamped_rows(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="b.flac"),
+        ])
+        db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+        self.assertEqual(db.get_owned_local_paths(), {"/downloads/a.flac"})
+
+    def test_prune_transfer_ledger_keeps_active_request_rows(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="downloading"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        old_id = next(iter(db._transfer_ledger))
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(timezone.utc) - timedelta(days=200))
+
+        removed = db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 0)
+        self.assertIn(old_id, db._transfer_ledger)
+
+    def test_prune_transfer_ledger_removes_old_terminal_rows(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="imported"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        old_id = next(iter(db._transfer_ledger))
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(timezone.utc) - timedelta(days=200))
+
+        removed = db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn(old_id, db._transfer_ledger)
+
+    def test_prune_transfer_ledger_keeps_rows_inside_retention(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="imported"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+
+        removed = db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 0)
+
+    def test_prune_transfer_ledger_treats_missing_request_as_inactive(self):
+        # A request_id whose row no longer exists (hard-deleted elsewhere)
+        # can never come back to wanted/downloading -- prunable.
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=999, username="p0", filename="a.flac"),
+        ])
+        old_id = next(iter(db._transfer_ledger))
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(timezone.utc) - timedelta(days=200))
+
+        removed = db.prune_transfer_ledger(
+            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+
+        self.assertEqual(removed, 1)
 
 
 class TestFakeSlskdEvents(unittest.TestCase):

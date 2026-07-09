@@ -515,7 +515,7 @@ class TestEnqueueFailureTracking(unittest.TestCase):
 
         enqueue_calls: list[str] = []
 
-        def fake_enqueue(*, username, files, file_dir, ctx):
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
             enqueue_calls.append(username)
             if username == users[0]:
                 raise RuntimeError("transient slskd hiccup")
@@ -664,7 +664,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         # regardless. Assert in the test body instead.
         observed: dict[str, Any] = {}
 
-        def fake_enqueue(*, username, files, file_dir, ctx):
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
             row = db.request(1)
             observed["status"] = row["status"]
             observed["state"] = json.loads(row["active_download_state"])
@@ -1229,7 +1229,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
 
         enqueue_calls = 0
 
-        def fake_enqueue(*, username, files, file_dir, ctx):
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 1:
@@ -1305,7 +1305,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
 
         enqueue_calls = 0
 
-        def fake_enqueue(*, username, files, file_dir, ctx):
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
@@ -1433,7 +1433,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
 
         enqueue_calls = 0
 
-        def fake_enqueue(*, username, files, file_dir, ctx):
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
@@ -1513,7 +1513,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
 
         enqueue_calls = 0
 
-        def fake_enqueue(*, username, files, file_dir, ctx):
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
@@ -1540,6 +1540,131 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         state = json.loads(state_raw) if isinstance(state_raw, str) else state_raw
         self.assertEqual(len(state["files"]), 2)
         self.assertEqual(db.status_history, [(1, "downloading")])
+
+
+class TestTransferLedgerThroughRealEnqueuePath(unittest.TestCase):
+    """T1 integration slice (issue #571): drives try_enqueue /
+    try_multi_enqueue end-to-end WITHOUT patching
+    slskd_enqueue_with_outcome — the real write-ahead seam runs against a
+    real FakeSlskdAPI, proving the ledger row lands through the actual
+    orchestration (wave matching, claim, enqueue), not just at the
+    choke-point function in isolation."""
+
+    def test_try_enqueue_writes_a_ledger_row_for_the_real_seam(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        file_dir = "Music\\u00\\Album"
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "u00",
+            "directories": [{
+                "directory": file_dir,
+                "files": [{"filename": f"{file_dir}\\01.flac", "id": "tid-1"}],
+            }],
+        }])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        results = {"u00": {"flac": [file_dir]}}
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
+
+        self.assertTrue(attempt.matched)
+        rows = db.get_owned_transfers(request_id=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["username"], "u00")
+        self.assertEqual(rows[0]["filename"], f"{file_dir}\\01.flac")
+        self.assertIsNotNone(rows[0]["attempt_fingerprint"])
+
+    def test_try_multi_enqueue_shares_one_attempt_fingerprint_across_discs(self):
+        """The attempt fingerprint is computed ONCE from the whole
+        multi-disc manifest (claim.entry.files) — every disc's ledger
+        row must carry the SAME value, matching what
+        canonical_processing_path later derives from the same manifest
+        (issue #550 phase 2)."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[
+            {
+                "username": "u00",
+                "directories": [{
+                    "directory": "u00\\Music",
+                    "files": [{"filename": "u00\\Music\\d1.flac", "id": "tid-d1"}],
+                }],
+            },
+            {
+                "username": "u01",
+                "directories": [{
+                    "directory": "u01\\Music",
+                    "files": [{"filename": "u01\\Music\\d2.flac", "id": "tid-d2"}],
+                }],
+            },
+        ])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == "u00":
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": "u00\\Music",
+                        "files": [{"filename": "d1.flac", "size": 111}],
+                    },
+                    file_dir="u00\\Music",
+                    candidates=[],
+                )
+            if disc_no == 2 and username == "u01":
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": "u01\\Music",
+                        "files": [{"filename": "d2.flac", "size": 222}],
+                    },
+                    file_dir="u01\\Music",
+                    candidates=[],
+                )
+            return _nomatch()
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
+
+        self.assertTrue(attempt.matched)
+        rows = db.get_owned_transfers(request_id=1)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {r["username"] for r in rows}, {"u00", "u01"})
+        fingerprints = {r["attempt_fingerprint"] for r in rows}
+        self.assertEqual(
+            len(fingerprints), 1,
+            f"expected one shared attempt_fingerprint across discs, got {fingerprints!r}")
+        self.assertIsNotNone(next(iter(fingerprints)))
 
 
 # ---------------------------------------------------------------------------

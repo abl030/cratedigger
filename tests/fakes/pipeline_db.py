@@ -53,6 +53,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              SearchPlanItemProvenance, SearchPlanItemRow,
                              SearchPlanMetadataSnapshot,
                              SearchPlanProvenance, SearchPlanRow,
+                             TransferLedgerRow,
                              WantedReconciliationCandidate)
 from lib.quality import (
     AlbumQualityEvidence,
@@ -75,6 +76,7 @@ from tests.fakes.cursors import FakeCursor
 from tests.fakes.rows import (
     DenylistEntry,
     DownloadLogRow,
+    FakeTransferLedgerRow,
     FieldResolutionRow,
     SearchLedgerRow,
     SearchLogRow,
@@ -144,6 +146,12 @@ class FakePipelineDB:
         # DO NOTHING semantics — see ``record_search_id``.
         self._search_ledger: dict[str, SearchLedgerRow] = {}
         self.record_search_id_calls: list[SearchLedgerRow] = []
+        # slskd transfer write-ahead ownership ledger (migration 045,
+        # issue #571). Keyed by an auto-incrementing fake id, mirroring
+        # the real BIGSERIAL primary key.
+        self._transfer_ledger: dict[int, FakeTransferLedgerRow] = {}
+        self._transfer_ledger_next_id: int = 1
+        self.record_transfer_enqueue_calls: list[TransferLedgerRow] = []
         self.denylist: list[DenylistEntry] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
         # Call-count tracking for the bad-audio-hash gate. Tests that
@@ -4223,6 +4231,93 @@ class FakePipelineDB:
         ]
         for search_id in to_remove:
             del self._search_ledger[search_id]
+        return len(to_remove)
+
+    # --- slskd transfer write-ahead ownership ledger (migration 045,
+    # issue #571) ---
+
+    def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None:
+        """Write-ahead batch insert -- mirrors the real INSERT's "one row
+        per input row, always appended" semantics (no dedup, unlike the
+        search ledger's ON CONFLICT DO NOTHING -- there is no natural key
+        here, every enqueue is a fresh row)."""
+        self.record_transfer_enqueue_calls.extend(rows)
+        for row in rows:
+            fake_id = self._transfer_ledger_next_id
+            self._transfer_ledger_next_id += 1
+            self._transfer_ledger[fake_id] = FakeTransferLedgerRow(
+                id=fake_id,
+                request_id=row.request_id,
+                username=row.username,
+                filename=row.filename,
+                attempt_fingerprint=row.attempt_fingerprint,
+            )
+
+    def stamp_transfer_completion(
+        self,
+        username: str,
+        filename: str,
+        local_path: str,
+        completed_at: datetime,
+    ) -> int:
+        """Stamp the newest not-yet-stamped row for (username, filename) --
+        mirrors the real UPDATE ... ORDER BY enqueued_at DESC LIMIT 1."""
+        candidates = [
+            r for r in self._transfer_ledger.values()
+            if r.username == username and r.filename == filename
+            and r.completed_at is None
+        ]
+        if not candidates:
+            return 0
+        newest = max(candidates, key=lambda r: r.enqueued_at)
+        newest.local_path = local_path
+        newest.completed_at = completed_at
+        return 1
+
+    def get_owned_transfers(
+        self, request_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = list(self._transfer_ledger.values())
+        if request_id is not None:
+            rows = [r for r in rows if r.request_id == request_id]
+        rows.sort(key=lambda r: r.enqueued_at)
+        return [
+            {
+                "id": r.id,
+                "request_id": r.request_id,
+                "username": r.username,
+                "filename": r.filename,
+                "transfer_id": r.transfer_id,
+                "attempt_fingerprint": r.attempt_fingerprint,
+                "enqueued_at": r.enqueued_at,
+                "local_path": r.local_path,
+                "completed_at": r.completed_at,
+            }
+            for r in rows
+        ]
+
+    def get_owned_local_paths(self) -> set[str]:
+        return {
+            r.local_path for r in self._transfer_ledger.values()
+            if r.local_path is not None
+        }
+
+    def prune_transfer_ledger(self, older_than: datetime) -> int:
+        """Mirrors the real DELETE ... WHERE enqueued_at < older_than AND
+        request not currently active (wanted/downloading); a request_id
+        with no matching row (hard-deleted elsewhere) counts as inactive."""
+        active_statuses = ("wanted", "downloading")
+        to_remove = []
+        for fake_id, row in self._transfer_ledger.items():
+            if row.enqueued_at >= older_than:
+                continue
+            request = self._requests.get(row.request_id)
+            status = request.get("status") if request is not None else None
+            if status in active_statuses:
+                continue
+            to_remove.append(fake_id)
+        for fake_id in to_remove:
+            del self._transfer_ledger[fake_id]
         return len(to_remove)
 
     # --- User cooldowns ---

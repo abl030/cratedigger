@@ -37,6 +37,7 @@ from lib.pipeline_db import (
     PipelineDB,
     RequestSpectralStateUpdate,
     RequestV0ProbeStateUpdate,
+    TransferLedgerRow,
 )
 from lib.quality import SpectralMeasurement, V0ProbeEvidence
 
@@ -84,6 +85,8 @@ CONTRACTS: list[tuple[str, str, set[str]]] = [
     ("RequestV0ProbeStateUpdate", "album_requests", _v0_update_columns()),
     ("PersistedYoutubeRow", "youtube_album_mappings",
      _struct_columns(PersistedYoutubeRow)),
+    ("TransferLedgerRow", "slskd_transfer_ledger",
+     _struct_columns(TransferLedgerRow)),
 ]
 
 

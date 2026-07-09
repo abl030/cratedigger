@@ -455,5 +455,99 @@ class TestRecentCompletionPaths(SlskdEventIngestCase):
         self.assertEqual(recent.directories, {})
 
 
+class TestTransferLedgerStamping(SlskdEventIngestCase):
+    """T2 pin (issue #571): the transfer ledger is stamped in the SAME
+    ingestion pass, from the SAME (username, remote filename) events,
+    that already stamps ``active_download_state``."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00.0000000Z")
+
+    def test_ledgered_pair_gets_stamped_in_the_same_pass(self):
+        from lib.pipeline_db import TransferLedgerRow
+
+        self.seed_downloading()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer1",
+                filename="music\\Artist\\Album\\01 track.flac"),
+        ])
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.transfers_stamped, 1)
+        rows = self.db.get_owned_transfers(request_id=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["local_path"], "/dl/Album/01 track.flac")
+        self.assertIsNotNone(rows[0]["completed_at"])
+        # Same pass, same key -- active_download_state is ALSO stamped.
+        self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
+
+    def test_unledgered_pair_stamps_nothing_and_invents_no_row(self):
+        self.seed_downloading()
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.transfers_stamped, 0)
+        self.assertEqual(self.db.get_owned_transfers(), [])
+        # A foreign/unledgered pair doesn't block active_download_state
+        # stamping — the two writes are independent.
+        self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
+
+    def test_reprocessing_the_same_event_window_is_idempotent(self):
+        from lib.pipeline_db import TransferLedgerRow
+
+        self.seed_downloading()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer1",
+                filename="music\\Artist\\Album\\01 track.flac"),
+        ])
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+        first = self.ingest()
+        self.assertEqual(first.transfers_stamped, 1)
+
+        # The cursor advanced past ev-1; a second pass over the SAME feed
+        # sees no new events and re-stamps nothing.
+        second = self.ingest()
+
+        self.assertEqual(second.outcome, "no_new_events")
+        self.assertEqual(second.transfers_stamped, 0)
+        rows = self.db.get_owned_transfers(request_id=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["local_path"], "/dl/Album/01 track.flac")
+
+
 if __name__ == "__main__":
     unittest.main()
