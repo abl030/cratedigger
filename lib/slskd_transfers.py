@@ -538,20 +538,32 @@ def _get_all_downloads_snapshot(
 
 
 def converge_slskd_orphans(ctx: CratediggerContext) -> int:
-    """Phase 0 convergence (#278): cancel live slskd transfers no
-    ``downloading`` row owns.
+    """Phase 0 convergence (#278; ledger-positive since #571 PR 3): cancel
+    live slskd transfers cratedigger created but no longer owns.
 
     Operator actions that supersede a downloading request (Replace is the
     canonical one — see CLAUDE.md invariant 7) deliberately leave its
     in-flight slskd transfers running; this is the convergence that reaps
     them. Runs once per cycle, before Phase 1/Phase 2 start, while nothing
-    is enqueuing — so a live transfer without an owner is genuinely
-    orphaned, not mid-write. The slskd snapshot is taken BEFORE the DB
-    read: a transfer enqueued after the snapshot can't appear in it, so
-    ordering alone rules out false orphans.
+    is enqueuing — so a live transfer without a backing ``downloading``
+    row is genuinely stranded, not mid-write. The slskd snapshot is taken
+    BEFORE the DB read: a transfer enqueued after the snapshot can't
+    appear in it, so ordering alone still rules out false strays on the
+    "backed" side of the check. (It buys nothing on the ledger side — a
+    fresh write-ahead row from a mid-flight enqueue makes that transfer
+    MORE ledgered, never less, so it can only turn a would-be stray into
+    correctly-still-in-flight, never the other way.)
+
+    Good-citizen doctrine (#571): a live transfer is cancelled ONLY when
+    it is BOTH (a) present in cratedigger's write-ahead
+    ``slskd_transfer_ledger`` (proof cratedigger created it — see
+    ``lib.repair.find_slskd_orphans`` for the full classification) AND
+    (b) not currently backed by a ``downloading`` row. A transfer absent
+    from the ledger is foreign — on a shared slskd instance that may be a
+    human's — and is NEVER cancelled, whatever its state or age.
 
     Best-effort: a snapshot failure skips the pass, a cancel failure is
-    logged and the remaining orphans are still attempted. Returns the
+    logged and the remaining strays are still attempted. Returns the
     number of transfers successfully cancelled.
     """
     from lib.repair import find_slskd_orphans
@@ -562,7 +574,9 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
     if downloads is None:
         return 0
     db = ctx.pipeline_db_source._get_db()
-    orphans = find_slskd_orphans(downloads, db.get_downloading())
+    ownership = find_slskd_orphans(
+        downloads, db.get_downloading(), db.get_owned_transfer_keys())
+    orphans = ownership.orphans
     cancelled = 0
     for orphan in orphans:
         try:
@@ -570,18 +584,19 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
                 orphan.username, orphan.transfer_id)
             cancelled += 1
             logger.warning(
-                "SLSKD ORPHAN: cancelled unowned transfer "
+                "SLSKD ORPHAN: cancelled ledger-owned stray transfer "
                 f"user={orphan.username!r} file={orphan.filename!r} "
                 f"state={orphan.state!r} id={orphan.transfer_id}")
         except Exception:
             logger.exception(
-                "SLSKD ORPHAN: failed to cancel unowned transfer "
+                "SLSKD ORPHAN: failed to cancel ledger-owned stray transfer "
                 f"user={orphan.username!r} file={orphan.filename!r} "
                 f"id={orphan.transfer_id} — will retry next cycle")
     if orphans:
         logger.info(
             f"SLSKD ORPHAN: convergence cancelled {cancelled}/{len(orphans)} "
-            "unowned live transfer(s)")
+            f"ledger-owned stray transfer(s); {ownership.foreign_count} "
+            "foreign live transfer(s) left untouched")
     return cancelled
 
 
@@ -903,8 +918,8 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     downloads cratedigger can PROVE it created, once they've aged past
     the grace window.
 
-    ``converge_slskd_orphans`` above only cancels LIVE unowned transfers —
-    it deliberately skips ``Completed*`` states — and
+    ``converge_slskd_orphans`` above only cancels LIVE ledger-owned stray
+    transfers — it deliberately skips ``Completed*`` states — and
     ``remove_completed_downloads()`` purges slskd's completed-transfer
     records at the end of every cycle, so a stranded completed folder has
     no slskd handle left to reason from. This reaper reasons from

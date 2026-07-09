@@ -4296,6 +4296,14 @@ class FakePipelineDB:
             for r in rows
         ]
 
+    def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
+        """Mirrors the real SELECT username, filename -- an unordered
+        membership set over ALL ledger rows, stamped or not."""
+        return {
+            (r.username, r.filename)
+            for r in self._transfer_ledger.values()
+        }
+
     def get_owned_local_paths(self) -> set[str]:
         return {
             r.local_path for r in self._transfer_ledger.values()

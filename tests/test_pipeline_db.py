@@ -8654,6 +8654,27 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.record_transfer_enqueue([])
         self.assertEqual(self.db.get_owned_transfers(), [])
 
+    def test_get_owned_transfer_keys_empty_before_any_record(self):
+        self.assertEqual(self.db.get_owned_transfer_keys(), set())
+
+    def test_get_owned_transfer_keys_reflects_all_rows_stamped_or_not(self):
+        """#571 PR 3 convergence membership set: keys appear after
+        record, include stamped AND unstamped rows, and duplicate
+        retries collapse into one key."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p1", filename="b.flac"),
+        ])
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/complete/a.flac",
+            datetime.now(timezone.utc))
+
+        self.assertEqual(
+            self.db.get_owned_transfer_keys(),
+            {("p0", "a.flac"), ("p1", "b.flac")})
+
     def test_stamp_transfer_completion_stamps_matching_row(self):
         rid = self._seed_request()
         self.db.record_transfer_enqueue([

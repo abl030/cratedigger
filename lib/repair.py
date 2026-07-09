@@ -5,8 +5,11 @@ Originally extracted verbatim from the monolithic ``lib/quality.py`` (issue
 quality-decision logic; refreshed to also carry ``SlskdOrphanTransfer`` /
 ``find_slskd_orphans`` (issue #278, the inverse orphan direction — live
 slskd transfers no downloading row owns); relocated to this top-level
-module (issue #512). Pure moves both times: every definition here is
-AST-identical to its prior incarnation.
+module (issue #512). ``find_slskd_orphans`` was flipped to ledger-positive
+ownership (issue #571 PR 3): a live transfer is only ever reported as an
+orphan when it's IN cratedigger's write-ahead ledger — never merely
+"unowned" by a downloading row, which used to risk cancelling a human's
+transfer on a shared slskd instance.
 """
 
 from __future__ import annotations
@@ -107,24 +110,46 @@ def find_orphaned_downloads(
 
 @dataclass(frozen=True)
 class SlskdOrphanTransfer:
-    """A live slskd transfer that no downloading request owns (#278)."""
+    """A live, ledger-owned slskd transfer with no owning ``downloading``
+    row — a cratedigger-created stray (#278, ledger-positive since #571
+    PR 3)."""
     username: str
     transfer_id: str
     filename: str
     state: str
 
 
+@dataclass(frozen=True)
+class SlskdTransferOwnership:
+    """Full ownership classification of the live slskd transfer snapshot
+    (#571 good-citizen flip, PR 3) — the single helper both
+    ``converge_slskd_orphans`` and the read-only ``scripts/repair.py``
+    report consume, so the two never classify foreign-vs-stray
+    differently.
+
+    ``orphans`` — ledger-owned strays (C2): cratedigger's own, ripe to
+    cancel. ``foreign_count`` — live transfers absent from the ledger
+    entirely (C1): never touched, counted here only so callers can
+    report how many other-owned transfers share the instance.
+    """
+    orphans: list[SlskdOrphanTransfer]
+    foreign_count: int
+
+
 def find_slskd_orphans(
     downloads: list[DownloadUser],
     db_rows: list[dict[str, Any]],
-) -> list[SlskdOrphanTransfer]:
-    """Detect live slskd transfers no downloading row owns. Pure — no I/O.
+    ledgered: set[tuple[str, str]],
+) -> SlskdTransferOwnership:
+    """Classify live slskd transfers against ledger ownership (#571
+    good-citizen flip). Pure — no I/O.
 
-    The inverse direction of ``find_orphaned_downloads``: operator actions
-    (Replace being the canonical one) abandon a downloading request's
-    ``active_download_state`` without cancelling its in-flight slskd
-    transfers, leaving each transfer to complete into the slskd download
-    dir with no owner.
+    AMENDMENT (PR #585 review, binding): an open ``slskd_transfer_ledger``
+    row is NOT itself evidence a transfer is still live — retries mint a
+    fresh row per (username, filename) and orphan rows stay open until
+    prune. This function therefore starts from the LIVE slskd snapshot
+    (``downloads``) and checks ledger membership for each entry; it never
+    walks the ledger and asks "is this still in slskd".
 
     Args:
         downloads: slskd ``transfers.get_all_downloads()`` snapshot
@@ -132,16 +157,44 @@ def find_slskd_orphans(
             ``lib.slskd_client.parse_downloads_envelope`` (issue #507).
         db_rows: album_requests rows (must include status,
             active_download_state).
+        ledgered: ``(username, filename)`` pairs present in
+            ``slskd_transfer_ledger`` — cratedigger's write-ahead record
+            of every transfer it ever enqueued
+            (``lib.pipeline_db.transfer_ledger.get_owned_transfers``).
 
-    Ownership is strictly ``status='downloading'`` rows — a replaced row's
-    frozen ``active_download_state`` must NOT shield its stranded
-    transfers, since reaping those is the point of this convergence.
-    Transfers in a terminal state (``Completed, *``) are skipped: there is
-    nothing to cancel, and ``remove_completed_downloads()`` already reaps
-    their UI entries at end of cycle. A missing state is treated as live
-    so an unowned transfer never dodges convergence by omitting it.
+    A live, non-terminal transfer classifies as exactly one of:
+
+      * **FOREIGN (C1)** — ``(username, filename)`` absent from
+        ``ledgered``. Cratedigger never created it (a human sharing the
+        slskd instance, most likely); it is NEVER reported as an orphan,
+        whatever its state or age. Rolled into ``foreign_count`` only.
+      * **owned STRAY (C2, returned in ``orphans``)** — ledgered, but NOT
+        backed by any currently-``downloading`` row's
+        ``active_download_state``. Cratedigger created it and no longer
+        has a claim: the classic Replace-abandons-transfer case, and
+        also a ledgered transfer whose row already self-healed back to
+        ``wanted`` after a failed cancel attempt (still a stray — the
+        ledger row, not the request's current status, proves creation).
+      * **still in flight** — ledgered AND backed by a ``downloading``
+        row. Reported nowhere; this is the common case every cycle.
+
+    Ownership backing is strictly ``status='downloading'`` rows — a
+    replaced row's frozen ``active_download_state`` must NOT shield its
+    stranded transfers, since reaping those is the point of this
+    convergence. Transfers in a terminal state (``Completed, *``) are
+    skipped entirely: there is nothing to cancel, and the completed-
+    transfer purge is its own convergence (#571 PR 5). A missing state
+    string is treated as live so a stray never dodges convergence by
+    omitting it.
+
+    A ledger row that has since been pruned (``prune_transfer_ledger``,
+    T3 — old AND its request inactive) is indistinguishable here from a
+    transfer that was never ledgered: it becomes FOREIGN, never reaped by
+    this convergence. Accepted: prune only fires well past any transfer's
+    legitimate lifetime, and the safe direction of that miss is "leave it
+    alone", never "delete a human's transfer".
     """
-    owned: set[tuple[str, str]] = set()
+    backed: set[tuple[str, str]] = set()
     for row in db_rows:
         if row["status"] != "downloading":
             continue
@@ -149,9 +202,10 @@ def find_slskd_orphans(
         if not state:
             continue
         for f in state.get("files", []):
-            owned.add((f.get("username"), f.get("filename")))
+            backed.add((f.get("username"), f.get("filename")))
 
     orphans: list[SlskdOrphanTransfer] = []
+    foreign_count = 0
     for user_group in downloads:
         username = user_group.username
         for directory in user_group.directories:
@@ -162,7 +216,11 @@ def find_slskd_orphans(
                 filename = transfer.filename
                 if not filename:
                     continue
-                if (username, filename) in owned:
+                key = (username, filename)
+                if key not in ledgered:
+                    foreign_count += 1
+                    continue
+                if key in backed:
                     continue
                 orphans.append(SlskdOrphanTransfer(
                     username=username,
@@ -170,7 +228,7 @@ def find_slskd_orphans(
                     filename=filename,
                     state=transfer_state,
                 ))
-    return orphans
+    return SlskdTransferOwnership(orphans=orphans, foreign_count=foreign_count)
 
 
 def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:

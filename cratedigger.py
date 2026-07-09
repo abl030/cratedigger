@@ -1509,10 +1509,10 @@ def main():
         # (username, filename) it is about to POST to slskd (migration
         # 045) — this is ONLY the bounded-retention prune of that
         # bookkeeping table; it never touches slskd or disk state itself.
-        # The disk reaper above (Phase 0b) now consults this ledger to
-        # prove file ownership; converge_slskd_orphans/
-        # remove_completed_downloads flipping to the same doctrine are
-        # separate follow-up PRs. The prune window (90d) must strictly
+        # The convergence (Phase 0) and disk reaper (Phase 0b) above both
+        # consult this ledger to prove ownership;
+        # remove_completed_downloads flipping to the same doctrine is a
+        # separate follow-up PR. The prune window (90d) must strictly
         # exceed the reaper's own age threshold — see
         # reap_disk_orphans' docstring.
         try:
