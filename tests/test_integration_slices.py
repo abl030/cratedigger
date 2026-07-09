@@ -415,7 +415,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
     _check_quality_gate_core, quality_gate_decision, apply_transition.
     """
 
-    def _run_dispatch(self, ir, beets_info, request_overrides=None, cfg=None):
+    def _run_dispatch(self, ir, beets_info, request_overrides=None, cfg=None,
+                      distance: "float | None" = 0.05):
         """Dispatch an import and return the FakePipelineDB state."""
         from lib.dispatch import dispatch_import_core
 
@@ -447,7 +448,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                     beets_harness_path=_HARNESS,
                     db=db,  # type: ignore[arg-type]
                     dl_info=dl_info,
-                    distance=0.05,
+                    distance=distance,
                     scenario="strong_match",
                     files=[MagicMock(username="user1",
                                      filename="01 - Track.mp3")],
@@ -458,6 +459,33 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         return db
+
+    def test_import_with_unmeasured_distance_records_null(self):
+        """#550 defect #4: dispatch with distance=None (the production
+        force/manual hot path since entry_points passes None) runs the full
+        slice — including the 'unmeasured' log-label guard in
+        dispatch_import_core — and persists NULL, not a fabricated 0.0, in
+        both sinks (album_requests.beets_distance via _do_mark_done and the
+        download_log.beets_distance column)."""
+        ir = make_import_result(decision="import", new_min_bitrate=245)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=245,
+            avg_bitrate_kbps=245, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+
+        # Stale non-None value proves the write actively NULLs the column
+        # rather than the assertion passing on the seed default.
+        db = self._run_dispatch(
+            ir, beets_info, distance=None,
+            request_overrides={"beets_distance": 0.31})
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(
+            row["beets_distance"],
+            "an unmeasured (None) dispatch distance must persist as NULL "
+            "on the request row, not a fabricated number")
+        db.assert_log(self, 0, outcome="success", beets_distance=None)
 
     def test_import_quality_accept(self):
         """VBR 245kbps → quality gate accepts → imported, override cleared."""
@@ -1276,6 +1304,10 @@ class TestForceImportSlice(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42, status="manual", mb_release_id="mbid-123",
             min_bitrate=180, current_spectral_bitrate=128,
+            # Stale distance from a prior auto-import attempt: the force
+            # import (which bypasses the distance check, so no measurement
+            # exists) must overwrite this with NULL (#550 defect #4).
+            beets_distance=0.31,
         ))
         # Track rows satisfy the force/manual untracked-audio guard.
         db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
@@ -1350,7 +1382,14 @@ class TestForceImportSlice(unittest.TestCase):
         self.assertTrue(result.success)
         row = db.request(42)
         self.assertEqual(row["status"], "imported")
-        db.assert_log(self, 0, outcome="force_import")
+        # #550 defect #4: force import bypasses the beets distance check —
+        # no measurement exists, so the write is NULL (was a fabricated
+        # 0.0), overwriting the stale 0.31 seeded above.
+        self.assertIsNone(
+            row["beets_distance"],
+            "a successful force import has no measured beets distance and "
+            "must record NULL on the request row, not a fabricated number")
+        db.assert_log(self, 0, outcome="force_import", beets_distance=None)
 
     def test_force_import_imported_path_reflects_beets_destination(self):
         """Issue #93 was reported against force-import specifically:

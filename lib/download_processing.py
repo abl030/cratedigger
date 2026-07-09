@@ -1357,7 +1357,7 @@ def _handle_valid_result(
                 beets_harness_path=ctx.cfg.beets_harness_path,
                 db=pdb,
                 dl_info=dl_info,
-                distance=bv_result.distance if bv_result.distance is not None else 0.0,
+                distance=bv_result.distance,
                 scenario=bv_result.scenario or "auto_import",
                 files=album_data.files,
                 cfg=ctx.cfg,
