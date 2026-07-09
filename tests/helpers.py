@@ -541,8 +541,18 @@ def make_download_file(
     sampleRate: int | None = 44100,
     bitDepth: int | None = None,
     isVariableBitRate: bool | None = None,
+    last_state: str | None = None,
+    last_exception: str | None = None,
+    bytes_transferred: int | None = None,
+    retry: int | None = None,
 ) -> DownloadFile:
-    """Build a real DownloadFile with sensible defaults."""
+    """Build a real DownloadFile with sensible defaults.
+
+    ``last_state``/``last_exception``/``bytes_transferred``/``retry`` are
+    the persisted poll-state fields (issue #564) — default ``None`` like
+    ``DownloadFile`` itself; pass overrides for scenarios that need
+    pre-seeded failure evidence.
+    """
     return DownloadFile(
         filename=filename,
         id=id,
@@ -553,6 +563,10 @@ def make_download_file(
         sampleRate=sampleRate,
         bitDepth=bitDepth,
         isVariableBitRate=isVariableBitRate,
+        last_state=last_state,
+        last_exception=last_exception,
+        bytes_transferred=bytes_transferred,
+        retry=retry,
     )
 
 

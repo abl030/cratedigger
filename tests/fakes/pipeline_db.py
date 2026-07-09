@@ -3682,6 +3682,9 @@ class FakePipelineDB:
             "error_message": entry.error_message,
             "validation_result": entry.validation_result,
             "import_result": entry.import_result,
+            # Migration 043 — per-file failure detail audit blob (issue
+            # #564 C7).
+            "transfer_detail": entry.transfer_detail,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
             # Migration 037 — source discriminator + YT JSONB. Mirrors

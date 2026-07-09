@@ -2678,10 +2678,7 @@ class TestCaptureDownloadProgress(unittest.TestCase):
 
 def _fail_file(*, last_state=None, last_exception=None):
     from tests.helpers import make_download_file
-    f = make_download_file()
-    f.last_state = last_state
-    f.last_exception = last_exception
-    return f
+    return make_download_file(last_state=last_state, last_exception=last_exception)
 
 
 class TestSummarizeFileFailures(unittest.TestCase):
