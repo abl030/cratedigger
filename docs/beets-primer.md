@@ -94,13 +94,26 @@ plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missi
 | `fromfilename` | Guesses metadata from filenames when tags are missing | — |
 | `ftintitle` | Moves "feat." from artist to title field | — |
 | `the` | Handles "The" prefix in artist names | — |
-| `permissions` | Sets imported file/art mode to 0664 and dir mode to 0775 | Yes |
+| `permissions` | Sets imported file/art mode to 0664 and dir mode to 02775 (setgid) | Yes |
 
 `permissions` exists so media servers (Jellyfin) can read album art: beets'
-native `fetchart` writes art via `mkstemp` (forces 0600) then renames it into
-place, and nothing else chmods it. `fix_library_modes` (`lib/permissions.py`)
-only touches directories, never files, so this plugin covers both initial
-import and manual `beet fetchart` re-fetches (issue #570 defect 1).
+native `fetchart` writes art via `mkstemp` (forces 0600 regardless of umask)
+then renames it into place, and nothing else chmods it — without the plugin,
+art lands 0600 and Jellyfin throws `UnauthorizedAccessException` trying to
+read it. Its `art_set` listener (`fix_art`) fixes the mode on BOTH initial
+import and a manual `beet fetchart` re-fetch (issue #570 defect 1).
+
+`dir: 02775` is setgid, not plain `0775` — that bit is load-bearing: it's
+what lets every child album dir beets creates underneath inherit the
+library's group, which is what makes it safe to run the library group-owned
+by a shared consumer group (e.g. `users`) so media servers can both read art
+and write NFO/artwork alongside it. `fix_library_modes` (`lib/permissions.py`)
+only touches directories, never files — it's the post-import
+belt-and-suspenders pass that re-asserts `02775` on dirs the plugin's
+per-item listener misses (empty/intermediate dirs), and `reset_umask()` sets
+the process umask to `0o002` (group-writable) at every pipeline entry point.
+Full non-root + setgid recipe: `docs/nixos-module.md` § "Running non-root +
+filesystem permissions".
 
 ### Cover Art Config
 
@@ -254,6 +267,24 @@ The harness communicates over stdin/stdout using newline-delimited JSON (NDJSON)
 Candidate ordering is **NOT stable** between beets runs. MB mirror updates, timing, and internal sorting change the order. Using `candidate_index` has caused wrong imports in the past. Always find the candidate whose `album_id` matches your target MB release ID.
 
 The harness supports both `candidate_id` (preferred) and `candidate_index` (legacy). The `candidate_id` field matches against `candidate.info.album_id`.
+
+### Discogs matches keep their id in `discogs_albumid`, never `mb_albumid`
+
+beets' native `discogs` plugin sets `AlbumInfo.album_id`/`releasegroup_id` to
+**numeric** Discogs ids, and beets core maps `album_id -> mb_albumid`. Left
+alone, a Discogs import would write a bare integer into `mb_albumid` and the
+`MUSICBRAINZ_ALBUMID` file tag — downstream MusicBrainz taggers choke on it
+(Jellyfin does `new Guid(tag)`, which throws `FormatException` and aborts the
+whole album's metadata fetch).
+
+The harness neutralizes this at apply time
+(`harness/beets_harness.py::_neutralize_discogs_provider_ids`, called from
+`_apply_decision`): for a chosen **Discogs** candidate it blanks
+`album_id`/`releasegroup_id` before beets writes anything, so `mb_albumid`/
+`mb_releasegroupid` end up empty and the release id lives ONLY in
+`discogs_albumid`. MusicBrainz matches (UUID `album_id`) are untouched — this
+is the layout the rest of Cratedigger already assumes (`duplicate_keys =
+[mb_albumid, discogs_albumid]`, `lib/beets_db.py`) (issue #570).
 
 ### The album_imported Event
 

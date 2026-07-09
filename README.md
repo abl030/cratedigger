@@ -48,7 +48,7 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Quality upgrade system** — automatically re-queues albums when better sources appear (CBR → lossless → verified target format)
 - **Async, parallel operation** — searches fan out concurrently; downloads span 5-minute cycles without blocking
 - **Persisted search plans** with escalation (wildcarded queries → exact → per-track) and long-tail "unfindable" triage
-- **Owned beets runtime** — the module ships a pinned beets with the full plugin closure and renders its config; your library's path layout is protected by config invariants tested in a VM on every `nix flake check`
+- **Owned beets runtime** — the module ships a pinned beets with the full plugin closure and renders its config; your library's path layout is protected by config invariants tested in a VM on every `nix flake check`; imported files and fetched art land group-readable (`0664`) so media servers can read album art directly
 - **Self-cleaning download workspace** — orphaned files in the slskd download dir are reaped after 7 days (active downloads and review quarantine protected; deletions are per-file with empty-dir pruning, never a folder guess)
 - **Operator surface twice over** — every action exists as both a `pipeline-cli` subcommand and a web API endpoint
 - **User cooldowns, force-import, wrong-match triage, YouTube rescue** for the long tail
@@ -103,7 +103,7 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
 }
 ```
 
-A complete, commented version of this (including slskd itself) is [`examples/cratedigger.nix`](examples/cratedigger.nix). Misconfigurations fail at eval time with messages that name the option to set. The module runs as root by default (Soulseek downloads and the library live outside any service user's home) — override `services.cratedigger.user` if you've arranged permissions.
+A complete, commented version of this (including slskd itself) is [`examples/cratedigger.nix`](examples/cratedigger.nix). Misconfigurations fail at eval time with messages that name the option to set. The module runs as root by default — zero-config, since Soulseek downloads and the library live outside any service user's home. To run non-root instead, set `services.cratedigger.user`/`.group`, put that user in the slskd download directory's group and whatever group owns its runtime secrets, and give the library a setgid group-`users` layout (`2775` dirs) so media servers can both read album art and write metadata alongside it. Full recipe: [docs/nixos-module.md § "Running non-root + filesystem permissions"](docs/nixos-module.md#running-non-root--filesystem-permissions); worked example in [`examples/cratedigger.nix`](examples/cratedigger.nix).
 
 `cratedigger-beet` lands on your PATH as the canonical beets binary for the managed library (run it with sudo). The operator CLI is also available without installing anything:
 

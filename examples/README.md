@@ -7,7 +7,7 @@ and adapt paths, hostnames, and secrets handling.
 
 | File | What it stands up |
 |---|---|
-| [`cratedigger.nix`](cratedigger.nix) | Cratedigger itself — the minimal working consumer config. Start here. |
+| [`cratedigger.nix`](cratedigger.nix) | Cratedigger itself — the minimal working consumer config. Start here; also shows the non-root + group-`users` setgid pattern for media-server integration. |
 | [`musicbrainz-mirror.nix`](musicbrainz-mirror.nix) | A local MusicBrainz mirror (upstream musicbrainz-docker under podman). Optional — cratedigger works against public MB, just slower. |
 | [`discogs-mirror.nix`](discogs-mirror.nix) | The Discogs mirror (Rust JSON API over PostgreSQL, loaded from the monthly CC0 dumps). Optional — without it, Discogs browse is off and MB browse carries the UI. |
 
