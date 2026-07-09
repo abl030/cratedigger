@@ -7,8 +7,16 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+import msgspec
+
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.pipeline_db import PipelineDB, RequestSpectralStateUpdate
+from lib.pipeline_db import (
+    PersistedDistance,
+    PersistedTrack,
+    PersistedYoutubeRow,
+    PipelineDB,
+    RequestSpectralStateUpdate,
+)
 from lib.quality import SpectralMeasurement, ValidationResult
 from tests.fakes import (
     FakeBeetsDB,
@@ -2032,24 +2040,26 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
     produced.
     """
 
-    def _row(self, **overrides: Any) -> dict[str, Any]:
-        row = {
+    def _row(self, **overrides: Any) -> PersistedYoutubeRow:
+        fields: dict[str, Any] = {
             "yt_browse_id": "MPREb_abc",
             "yt_audio_playlist_id": "OLAK5uy_abc",
             "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_abc",
             "yt_year": 2020,
             "yt_track_count": 10,
             "yt_tracks": [
-                {"title": "Track 1", "video_id": "v1",
-                 "length_seconds": 200, "track_number": 1, "disc_number": 1,
-                 "artists": [{"name": "Artist"}]},
+                PersistedTrack(
+                    title="Track 1", video_id="v1", length_seconds=200,
+                    track_number=1, disc_number=1,
+                    artists=[{"name": "Artist"}],
+                ),
             ],
             "distances": [
-                {"mbid": "mb-1", "distance": 0.05, "error": None},
+                PersistedDistance(mbid="mb-1", distance=0.05),
             ],
         }
-        row.update(overrides)
-        return row
+        fields.update(overrides)
+        return PersistedYoutubeRow(**fields)
 
     def test_get_returns_none_when_pair_never_resolved(self):
         # Distinction matters: ``None`` = "never resolved" (cache MISS),
@@ -2151,8 +2161,12 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
         )
 
     def test_seed_helper_populates_state(self):
+        # ``seed_youtube_album_mapping`` is a fake-only backdoor that
+        # bypasses ``upsert`` and stores raw stored-shape dicts directly —
+        # convert the Struct via msgspec so this test still shares the
+        # same fixture row as the upsert-path tests above.
         db = FakePipelineDB()
-        rows = [self._row(yt_browse_id="MPREb_seed")]
+        rows = [msgspec.to_builtins(self._row(yt_browse_id="MPREb_seed"))]
 
         db.seed_youtube_album_mapping("rg-1", "mb", rows)
 
@@ -2184,8 +2198,8 @@ class TestFakePipelineDBYoutubeAlbumMappings(unittest.TestCase):
             self._row(
                 yt_browse_id="MPREb_discogs",
                 distances=[
-                    {"mbid": "12345", "distance": 0.05, "error": None},
-                    {"mbid": "67890", "distance": 0.25, "error": None},
+                    PersistedDistance(mbid="12345", distance=0.05),
+                    PersistedDistance(mbid="67890", distance=0.25),
                 ],
             )
         ])

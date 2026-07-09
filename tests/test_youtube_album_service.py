@@ -25,6 +25,7 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance,
 )
+from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
 from lib.youtube_album_service import (
     OUTCOME_EXIT_CODE,
     OUTCOME_HTTP_STATUS,
@@ -1256,28 +1257,31 @@ class TestSpeculativePreWidenCacheLookup(unittest.TestCase):
     def _seeded_pdb(self, rg: str, source: str) -> FakePipelineDB:
         pdb = FakePipelineDB()
         pdb.upsert_youtube_album_mapping(rg, source, [
-            {
-                "yt_browse_id": "MPREb-cached",
-                "yt_audio_playlist_id": "OLAK5uy-cached",
-                "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy-cached",
-                "yt_year": 1996,
-                "yt_track_count": 2,
-                "yt_tracks": [
-                    {"title": "Intro", "artists": [{"name": "Dr. Octagon"}],
-                     "length_seconds": 60.0, "track_number": 1,
-                     "disc_number": 1, "video_id": "vid-a"},
-                    {"title": "3000", "artists": [{"name": "Dr. Octagon"}],
-                     "length_seconds": 180.0, "track_number": 2,
-                     "disc_number": 1, "video_id": "vid-b"},
+            PersistedYoutubeRow(
+                yt_browse_id="MPREb-cached",
+                yt_audio_playlist_id="OLAK5uy-cached",
+                yt_url="https://music.youtube.com/playlist?list=OLAK5uy-cached",
+                yt_year=1996,
+                yt_track_count=2,
+                yt_tracks=[
+                    PersistedTrack(
+                        title="Intro", artists=[{"name": "Dr. Octagon"}],
+                        length_seconds=60.0, track_number=1,
+                        disc_number=1, video_id="vid-a"),
+                    PersistedTrack(
+                        title="3000", artists=[{"name": "Dr. Octagon"}],
+                        length_seconds=180.0, track_number=2,
+                        disc_number=1, video_id="vid-b"),
                 ],
-                "distances": [
-                    {"mbid": MB_REL_A, "outcome": "ok", "distance": 0.05,
-                     "components": {"tracks": 0.05}, "matched_tracks": 2,
-                     "total_local_tracks": 2, "total_mb_tracks": 2,
-                     "extra_local_tracks": 0, "extra_mb_tracks": 0,
-                     "error_message": None},
+                distances=[
+                    PersistedDistance(
+                        mbid=MB_REL_A, outcome="ok", distance=0.05,
+                        components={"tracks": 0.05}, matched_tracks=2,
+                        total_local_tracks=2, total_mb_tracks=2,
+                        extra_local_tracks=0, extra_mb_tracks=0,
+                        error_message=None),
                 ],
-            },
+            ),
         ])
         return pdb
 

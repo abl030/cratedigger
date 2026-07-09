@@ -994,3 +994,96 @@ class YoutubeInFlightError(Exception):
         self.existing_download_log_id = existing_download_log_id
 
 
+# ---------------------------------------------------------------------------
+# YouTube album-mapping persisted JSONB shapes (moved from
+# lib/youtube_album_service.py, #546 W3) — wire-boundary structs for the
+# durable ``youtube_album_mappings`` cache.
+# ---------------------------------------------------------------------------
+#
+# ``youtube_album_mappings.yt_tracks`` and ``.distances`` are JSONB
+# columns. Per the wire-boundary rule in ``.claude/rules/code-quality.md``,
+# anything that crosses JSON gets a typed Struct and validates at the
+# decode site — we cannot rely on Pyright seeing into ``dict.get()``.
+# ``msgspec.convert`` is the read-side detector for malformed rows.
+#
+# These live in the DB layer (not the service layer that produces and
+# consumes them) because ``upsert_youtube_album_mapping`` derives its
+# INSERT column list from ``msgspec.structs.fields(PersistedYoutubeRow)``
+# at runtime — the DB layer needs the type to do that, and the DB layer
+# importing UP from the service layer would be a layering violation /
+# import cycle. ``lib.youtube_album_service`` imports these back from
+# ``lib.pipeline_db``.
+
+
+class PersistedTrack(msgspec.Struct, kw_only=True):
+    """One persisted track inside ``yt_tracks`` JSONB.
+
+    ``video_id`` is used by the YT rescue ingest audit trail to persist
+    the exact per-track videos selected from the resolver row.
+    """
+
+    title: Optional[str] = None
+    artists: Optional[list[dict[str, Any]]] = None
+    length_seconds: Optional[float] = None
+    track_number: Optional[int] = None
+    disc_number: Optional[int] = None
+    video_id: Optional[str] = None
+
+
+class PersistedDistance(msgspec.Struct, kw_only=True):
+    """One persisted per-pair distance inside ``distances`` JSONB."""
+
+    mbid: Optional[str] = None
+    outcome: Optional[str] = None
+    distance: Optional[float] = None
+    components: Optional[dict[str, float]] = None
+    matched_tracks: Optional[int] = None
+    total_local_tracks: Optional[int] = None
+    total_mb_tracks: Optional[int] = None
+    extra_local_tracks: Optional[int] = None
+    extra_mb_tracks: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
+    """One persisted row in ``youtube_album_mappings``.
+
+    Outer columns (``id``, ``release_group_identifier``, ``source``,
+    ``resolved_at``) aren't carried here — the read path
+    (``get_youtube_album_mapping``) keys by
+    ``(release_group_identifier, source)`` so those fields are
+    redundant. JSONB columns are decoded via ``msgspec.convert``;
+    everything else is row metadata.
+
+    Every OTHER field name IS a ``youtube_album_mappings`` column name;
+    ``upsert_youtube_album_mapping`` derives the INSERT column list
+    directly from these fields (``msgspec.structs.fields``), so a field
+    can never silently drift from the SQL (the ``album_title`` class of
+    bug migration 036 fixed — a column present in the payload but
+    missing from the hand-written INSERT). The fields-are-a-subset-of-
+    columns invariant is enforced at test time by
+    ``tests/test_pipeline_db_column_contract.py``.
+    """
+
+    # Required-on-the-wire fields: the writer always populates them
+    # (round 2 maintainability-2). Declaring them ``str``/``int`` makes
+    # ``msgspec.convert`` reject malformed JSONB rows at the wire seam
+    # rather than silently producing default-valued objects downstream.
+    yt_browse_id: str
+    yt_url: str
+    yt_track_count: int
+    # Genuinely optional: ``yt_audio_playlist_id`` and ``yt_year`` are
+    # documented NULLable in migration 034.
+    yt_audio_playlist_id: Optional[str] = None
+    yt_year: Optional[int] = None
+    # Album-level facts persisted alongside the row so the cache
+    # rehydration in ``_rows_to_youtube_releases`` produces SyntheticItem
+    # values structurally identical to the fresh-resolve path. Both are
+    # nullable to allow legacy rows written before migration 036 (none
+    # in production yet, but the column is nullable per the migration).
+    album_title: Optional[str] = None
+    album_artist: Optional[str] = None
+    yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list)
+    distances: list[PersistedDistance] = msgspec.field(default_factory=list)
+
+

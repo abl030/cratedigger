@@ -44,6 +44,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
                              PLAN_STATUS_ACTIVE, PLAN_STATUS_FAILED_DETERMINISTIC,
                              PLAN_STATUS_FAILED_TRANSIENT,
                              PLAN_STATUS_SUPERSEDED,
+                             PersistedYoutubeRow,
                              RequestSpectralStateUpdate,
                              SEARCH_LOG_STAGE_ACCEPTED,
                              SEARCH_LOG_STAGE_PRE_ATTEMPT,
@@ -2278,7 +2279,7 @@ class FakePipelineDB:
         self,
         release_group_identifier: str,
         source: str,
-        rows: list[dict[str, Any]],
+        rows: list[PersistedYoutubeRow],
     ) -> None:
         """Atomically replace the matrix for ``(release_group_identifier, source)``.
 
@@ -2287,20 +2288,21 @@ class FakePipelineDB:
         the fake just overwrites the dict slot, which is atomic in the
         single-threaded test context.
 
-        Stamps ``id``, ``release_group_identifier``, ``source``, and
-        ``resolved_at`` onto each stored row. Production's SELECT
-        projection (``PipelineDB.get_youtube_album_mapping``) always
-        includes these DB-assigned columns (``id BIGSERIAL PRIMARY KEY``,
-        ``resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`` — migration
-        034) even though callers never pass them into ``rows``. #523's
-        read-projection parity gate surfaced this: the fake previously
-        echoed the input dict verbatim, four keys short of what
-        production's read returns.
+        Converts each ``PersistedYoutubeRow`` to the stored read-shape dict
+        via ``msgspec.to_builtins`` and stamps ``id``,
+        ``release_group_identifier``, ``source``, and ``resolved_at`` onto
+        each stored row. Production's SELECT projection
+        (``PipelineDB.get_youtube_album_mapping``) always includes these
+        DB-assigned columns (``id BIGSERIAL PRIMARY KEY``, ``resolved_at
+        TIMESTAMPTZ NOT NULL DEFAULT NOW()`` — migration 034) even though
+        callers never pass them into ``rows``. #523's read-projection
+        parity gate surfaced this: the fake previously echoed the input
+        dict verbatim, four keys short of what production's read returns.
         """
         stored: list[dict[str, Any]] = []
         for row in rows:
             self._next_youtube_mapping_id += 1
-            stored_row = copy.deepcopy(row)
+            stored_row: dict[str, Any] = msgspec.to_builtins(row)
             stored_row["id"] = self._next_youtube_mapping_id
             stored_row["release_group_identifier"] = release_group_identifier
             stored_row["source"] = source

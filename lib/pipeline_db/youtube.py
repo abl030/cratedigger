@@ -1,5 +1,6 @@
 """YouTube rescue-ingest queue and album-mapping cache."""
 from typing import Any, Optional
+import msgspec
 import psycopg2
 import psycopg2.extras
 
@@ -12,10 +13,17 @@ from lib.import_queue import (
 )
 
 from lib.pipeline_db._shared import (
+    PersistedYoutubeRow,
     YoutubeInFlightError,
 )
 
 from lib.pipeline_db._core import _PipelineDBBase
+
+
+# The two JSONB columns on ``youtube_album_mappings`` — every other
+# ``PersistedYoutubeRow`` field is a scalar column, passed through via
+# ``getattr``.
+_YT_JSONB_COLUMNS = frozenset({"yt_tracks", "distances"})
 
 
 class _YoutubeMixin(_PipelineDBBase):
@@ -467,16 +475,24 @@ class _YoutubeMixin(_PipelineDBBase):
         self,
         release_group_identifier: str,
         source: str,
-        rows: list[dict[str, Any]],
+        rows: list[PersistedYoutubeRow],
     ) -> None:
         """Atomically replace the matrix for ``(release_group_identifier, source)``.
 
         Runs DELETE + INSERTs in a single transaction so a concurrent
         reader never observes a mid-replace partial state. Partial updates
-        are not supported — refresh always replaces (R14). Each row must
-        carry: ``yt_browse_id``, ``yt_audio_playlist_id`` (optional),
-        ``yt_url``, ``yt_year`` (optional), ``yt_track_count``,
-        ``yt_tracks`` (JSONB), ``distances`` (JSONB).
+        are not supported — refresh always replaces (R14).
+
+        The per-row INSERT column list is DERIVED from
+        ``msgspec.structs.fields(PersistedYoutubeRow)`` — a payload field
+        can never silently drift from the SQL, the ``album_title`` class
+        of bug migration 036 fixed (the hand-listed INSERT column list
+        omitted a field ``psycopg2.extras.execute_values`` then silently
+        dropped). Two outer columns (``release_group_identifier``,
+        ``source``) are prepended; the two JSONB columns (``yt_tracks``,
+        ``distances``) are wrapped in ``psycopg2.extras.Json`` via
+        ``msgspec.to_builtins``, everything else passes through via
+        ``getattr``.
 
         When ``rows`` is empty, also writes a marker row into
         ``youtube_album_empty_resolutions`` so the next
@@ -487,6 +503,9 @@ class _YoutubeMixin(_PipelineDBBase):
         is non-empty (a later resolve that found albums supersedes the
         empty flag).
         """
+        field_names = [f.name for f in msgspec.structs.fields(PersistedYoutubeRow)]
+        columns = ["release_group_identifier", "source", *field_names]
+        col_sql = ", ".join(columns)
         with self._atomic():
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
@@ -499,32 +518,23 @@ class _YoutubeMixin(_PipelineDBBase):
                     (release_group_identifier, source),
                 )
                 if rows:
+                    values = []
+                    for row in rows:
+                        row_values: list[Any] = [
+                            release_group_identifier, source,
+                        ]
+                        for name in field_names:
+                            value = getattr(row, name)
+                            if name in _YT_JSONB_COLUMNS:
+                                value = psycopg2.extras.Json(
+                                    msgspec.to_builtins(value))
+                            row_values.append(value)
+                        values.append(tuple(row_values))
                     psycopg2.extras.execute_values(
                         cur,
-                        """
-                        INSERT INTO youtube_album_mappings
-                            (release_group_identifier, source, yt_browse_id,
-                             yt_audio_playlist_id, yt_url, yt_year,
-                             yt_track_count, album_title, album_artist,
-                             yt_tracks, distances)
-                        VALUES %s
-                        """,
-                        [
-                            (
-                                release_group_identifier,
-                                source,
-                                row["yt_browse_id"],
-                                row.get("yt_audio_playlist_id"),
-                                row["yt_url"],
-                                row.get("yt_year"),
-                                row["yt_track_count"],
-                                row.get("album_title"),
-                                row.get("album_artist"),
-                                psycopg2.extras.Json(row["yt_tracks"]),
-                                psycopg2.extras.Json(row["distances"]),
-                            )
-                            for row in rows
-                        ],
+                        f"INSERT INTO youtube_album_mappings ({col_sql}) "
+                        f"VALUES %s",
+                        values,
                     )
                     # A non-empty resolve supersedes any prior empty marker.
                     cur.execute(
