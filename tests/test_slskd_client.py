@@ -434,6 +434,50 @@ class TestSearchesEndpoints(SlskdClientTestCase):
         assert response is not None
         self.assertEqual(response.status_code, 429)
 
+    def test_search_text_explicit_id_sent_verbatim(self):
+        # Issue #576: the search-id write-ahead ledger requires the id
+        # actually POSTed to be EXACTLY the id the caller already
+        # persisted — no silent divergence.
+        given_id = "ba10680e-2f65-11f1-8e15-bc24117f4304"
+        self.set_fixture("POST", "/searches", {**SEARCH_STATE_FIXTURE, "id": given_id})
+
+        search = self.client.searches.search_text(searchText="x", id=given_id)
+
+        self.assertEqual(search["id"], given_id)
+        self.assertEqual(self.last_request()["body"]["id"], given_id)
+
+    def test_search_text_malformed_explicit_id_raises(self):
+        # Pre-#576 this silently fell back to a fresh uuid4() — exactly
+        # the divergence that would break the ledger's write-ahead
+        # invariant (I2). It must now raise instead of paper over a bug
+        # upstream of the ledger write.
+        with self.assertRaises(ValueError):
+            self.client.searches.search_text(searchText="x", id="not-a-uuid")
+
+    def test_search_text_none_id_still_auto_mints(self):
+        # Callers that pass id=None (unledgered ad hoc searches) keep the
+        # auto-mint behaviour.
+        self.set_fixture("POST", "/searches", SEARCH_STATE_FIXTURE)
+
+        search = self.client.searches.search_text(searchText="x")
+
+        self.assertEqual(search["id"], SEARCH_STATE_FIXTURE["id"])
+        posted_id = self.last_request()["body"]["id"]
+        self.assertTrue(posted_id)
+
+    def test_get_all_returns_search_list(self):
+        # Issue #576: the sweep's GET /searches read.
+        fixture = [
+            SEARCH_STATE_FIXTURE,
+            {**SEARCH_STATE_FIXTURE, "id": "other-id", "state": "InProgress"},
+        ]
+        self.set_fixture("GET", "/searches", fixture)
+
+        searches = self.client.searches.get_all()
+
+        self.assertEqual(searches, fixture)
+        self.assertEqual(self.last_request()["method"], "GET")
+
 
 class TestApplicationEndpoint(SlskdClientTestCase):
     def test_version(self):

@@ -62,6 +62,7 @@ def make_db():
         "youtube_album_empty_resolutions",  # migration 035
         "plex_added_at_pins",  # migration 040
         "slskd_event_cursor",  # migration 041
+        "slskd_search_ledger",  # migration 044
         "album_tracks",
         "album_requests",
     ]:
@@ -8479,6 +8480,111 @@ class TestSlskdEventCursorRoundTrip(unittest.TestCase):
         assert real is not None and mirrored is not None
         strip = lambda c: {k: v for k, v in c.items() if k != "updated_at"}
         self.assertEqual(strip(real), strip(mirrored))
+
+
+class TestSearchLedgerRoundTrip(unittest.TestCase):
+    """Rule A round-trip for the slskd search-id write-ahead ledger
+    (migration 044, issue #576)."""
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_get_unswept_search_ids_empty_before_any_record(self):
+        self.assertEqual(
+            self.db.get_unswept_search_ids(
+                older_than=datetime.now(timezone.utc) + timedelta(seconds=1)),
+            [])
+
+    def test_record_round_trip_preserves_every_field(self):
+        self.db.record_search_id("sid-rt-1", "plan_search", 4321)
+
+        rows = self.db.get_unswept_search_ids(
+            older_than=datetime.now(timezone.utc) + timedelta(seconds=1))
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["search_id"], "sid-rt-1")
+        self.assertEqual(row["purpose"], "plan_search")
+        self.assertEqual(row["request_id"], 4321)
+        self.assertIsNotNone(row["created_at"])
+
+    def test_record_search_id_with_null_request_id_round_trips(self):
+        # artist_probe callers may have no request context.
+        self.db.record_search_id("sid-rt-null", "artist_probe", None)
+
+        rows = self.db.get_unswept_search_ids(
+            older_than=datetime.now(timezone.utc) + timedelta(seconds=1))
+
+        self.assertEqual(rows[0]["request_id"], None)
+
+    def test_get_unswept_search_ids_excludes_rows_inside_grace_window(self):
+        self.db.record_search_id("sid-fresh", "plan_search", 1)
+
+        rows = self.db.get_unswept_search_ids(
+            older_than=datetime.now(timezone.utc) - timedelta(hours=1))
+
+        self.assertEqual(rows, [])
+
+    def test_record_search_id_conflict_does_not_raise(self):
+        # ON CONFLICT DO NOTHING — ids are unique by construction, but a
+        # second insert for the same id must be a harmless no-op.
+        self.db.record_search_id("sid-dup", "plan_search", 1)
+        self.db.record_search_id("sid-dup", "plan_search", 1)  # must not raise
+        cur = self.db._execute(
+            "SELECT COUNT(*) AS n FROM slskd_search_ledger WHERE search_id = %s",
+            ("sid-dup",))
+        self.assertEqual(cur.fetchone()["n"], 1)
+
+    def test_mark_search_ids_deleted_removes_from_unswept(self):
+        self.db.record_search_id("sid-a", "plan_search", 1)
+        self.db.record_search_id("sid-b", "plan_search", 2)
+
+        self.db.mark_search_ids_deleted(["sid-a"])
+
+        rows = self.db.get_unswept_search_ids(
+            older_than=datetime.now(timezone.utc) + timedelta(seconds=1))
+        self.assertEqual([r["search_id"] for r in rows], ["sid-b"])
+        cur = self.db._execute(
+            "SELECT deleted_at FROM slskd_search_ledger WHERE search_id = %s",
+            ("sid-a",))
+        self.assertIsNotNone(cur.fetchone()["deleted_at"])
+
+    def test_mark_search_ids_deleted_empty_list_is_a_noop(self):
+        self.db.mark_search_ids_deleted([])  # must not raise / not query
+
+    def test_prune_search_ledger_removes_only_old_deleted_rows(self):
+        self.db.record_search_id("sid-old", "plan_search", 1)
+        self.db.record_search_id("sid-undeleted", "plan_search", 2)
+        self.db.mark_search_ids_deleted(["sid-old"])
+        self.db._execute(
+            "UPDATE slskd_search_ledger SET deleted_at = %s WHERE search_id = %s",
+            (datetime.now(timezone.utc) - timedelta(days=10), "sid-old"))
+
+        removed = self.db.prune_search_ledger(
+            deleted_before=datetime.now(timezone.utc) - timedelta(days=7))
+
+        self.assertEqual(removed, 1)
+        cur = self.db._execute(
+            "SELECT search_id FROM slskd_search_ledger ORDER BY search_id")
+        self.assertEqual(
+            [r["search_id"] for r in cur.fetchall()], ["sid-undeleted"])
+
+    def test_fake_parity_on_identical_state(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        for db in (self.db, fake):
+            db.record_search_id("sid-parity", "plan_search", 99)
+        cutoff = datetime.now(timezone.utc) + timedelta(seconds=1)
+        real_rows = self.db.get_unswept_search_ids(older_than=cutoff)
+        fake_rows = fake.get_unswept_search_ids(older_than=cutoff)
+        strip = lambda rows: [
+            {k: v for k, v in r.items() if k != "created_at"} for r in rows
+        ]
+        self.assertEqual(strip(real_rows), strip(fake_rows))
 
 
 @requires_postgres

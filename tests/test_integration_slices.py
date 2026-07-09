@@ -3491,7 +3491,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         same coverage; if a future refactor regressed the kwarg only on the
         parallel path, the existing serial test would not catch it.
         """
-        from tests.fakes import FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(search_response_limit=2500)
         slskd = FakeSlskdAPI()
@@ -3501,7 +3501,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         album = self._make_album(request_id=1, mb_release_id="mbid-p")
 
         submit = self._cratedigger._submit_plan_search(
-            album, "Wiggles Album", "default", cfg, slskd,
+            album, "Wiggles Album", "default", cfg, slskd, FakePipelineDB(),
         )
         self.assertIsNotNone(submit)
         # responseLimit was forwarded to slskd at the wire boundary on the

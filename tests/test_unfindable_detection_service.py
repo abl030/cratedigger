@@ -327,6 +327,9 @@ class TestRunArtistProbe(unittest.TestCase):
     contract (match_count sourcing, best-effort delete) can't drift.
     """
 
+    def setUp(self) -> None:
+        self.db = FakePipelineDB()
+
     def _noop(self, _s: float) -> None:
         return None
 
@@ -343,7 +346,8 @@ class TestRunArtistProbe(unittest.TestCase):
             response_count=42,
         )
         probe = run_artist_probe(
-            slskd, artist_name="Russian Winters", poll_sleep=self._noop,
+            slskd, artist_name="Russian Winters", db=self.db,
+            request_id=7, poll_sleep=self._noop,
         )
         self.assertEqual(probe.match_count, 42)
         self.assertTrue(probe.artist_observed)
@@ -353,6 +357,11 @@ class TestRunArtistProbe(unittest.TestCase):
         self.assertNotIn("maximumPeerQueueLength", call.kwargs)
         # delete_after defaults True.
         self.assertEqual(slskd.searches.delete_calls, [1])
+        # Issue #576 I2: the ledger write happened, tagged for this probe.
+        self.assertEqual(len(self.db.record_search_id_calls), 1)
+        ledgered = self.db.record_search_id_calls[0]
+        self.assertEqual(ledgered.purpose, "artist_probe")
+        self.assertEqual(ledgered.request_id, 7)
 
     def test_delete_failure_still_returns_probe_result(self) -> None:
         """A failed cleanup DELETE must not fail the probe (pre-#466 the probe
@@ -369,7 +378,7 @@ class TestRunArtistProbe(unittest.TestCase):
 
         slskd.searches.delete = _boom  # type: ignore[method-assign]
         probe = run_artist_probe(
-            slskd, artist_name="Nobody", poll_sleep=self._noop,
+            slskd, artist_name="Nobody", db=self.db, poll_sleep=self._noop,
         )
         self.assertEqual(probe.match_count, 0)
         self.assertFalse(probe.artist_observed)
@@ -390,7 +399,7 @@ class TestRunArtistProbe(unittest.TestCase):
         slskd.searches.state = _boom_state  # type: ignore[method-assign]
         with self.assertRaises(ProbeDegradedError):
             run_artist_probe(
-                slskd, artist_name="Flaky", poll_sleep=self._noop,
+                slskd, artist_name="Flaky", db=self.db, poll_sleep=self._noop,
             )
 
     def test_watchdog_fired_raises_probe_degraded(self) -> None:
@@ -418,7 +427,7 @@ class TestRunArtistProbe(unittest.TestCase):
         slskd.searches.state = _state  # type: ignore[method-assign]
         with self.assertRaises(ProbeDegradedError):
             run_artist_probe(
-                slskd, artist_name="Wedged", poll_sleep=self._noop,
+                slskd, artist_name="Wedged", db=self.db, poll_sleep=self._noop,
                 clock=lambda: clock["t"],
             )
         # The watchdog still cancelled the search on slskd's side.

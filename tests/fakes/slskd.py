@@ -181,6 +181,7 @@ class FakeSlskdSearches:
         self.responses_calls: list[Any] = []
         self.delete_calls: list[Any] = []
         self.stop_calls: list[Any] = []
+        self.get_all_calls: int = 0
         self.search_text_error: Exception | None = None
         # Per-search override: id -> Exception. Raised from stop() / state()
         # for that search id. Used to drive the "stop() raises" / "state()
@@ -263,8 +264,22 @@ class FakeSlskdSearches:
             SearchTextCall(search_text=text, kwargs=copy.deepcopy(kwargs)))
         if self.search_text_error is not None:
             raise self.search_text_error
+        explicit_id = kwargs.get("id")
         if self.search_text_id_sequence:
+            # Pre-existing test convenience: a configured sequence lets a
+            # test pick a friendly, readable id for correlation — takes
+            # priority over an explicit id so the many callers that pin
+            # fixtures via ``add_search(search_id=42)`` +
+            # ``search_text_id_sequence=[42]`` don't have to track every
+            # real caller's ledgered uuid.
             search_id = self.search_text_id_sequence.pop(0)
+        elif explicit_id is not None:
+            # Mirror production (issue #576): with no sequence override,
+            # an explicitly-passed id is sent verbatim — a ledgered
+            # caller's id must be the id actually used. Exercised by the
+            # search-ledger orchestration tests, which deliberately leave
+            # the sequence unset.
+            search_id = explicit_id
         else:
             search_id = self._next_auto_id
             self._next_auto_id += 1
@@ -274,6 +289,7 @@ class FakeSlskdSearches:
             "state": "Completed",
             "responses": [],
         })
+        self._searches[search_id]["search_text"] = text
         return {"id": search_id}
 
     def _maybe_apply_post_stop_flip(self, cfg: dict[str, Any]) -> None:
@@ -335,6 +351,25 @@ class FakeSlskdSearches:
 
     def delete(self, search_id: Any) -> None:
         self.delete_calls.append(search_id)
+        # Mirror slskd semantics (issue #576 test-fidelity fix): a
+        # deleted search is actually gone, not just recorded as called.
+        # Pre-fix, ``get_all()`` (below) would still report a "deleted"
+        # search as present — masking a sweep bug that never actually
+        # confirmed a delete.
+        self._searches.pop(search_id, None)
+
+    def get_all(self) -> list[dict[str, Any]]:
+        """Mirror ``GET /searches`` (issue #576): every resident search."""
+        self.get_all_calls += 1
+        return [
+            {
+                "id": search_id,
+                "state": cfg["state"],
+                "searchText": cfg.get("search_text", ""),
+                "startedAt": cfg.get("started_at", ""),
+            }
+            for search_id, cfg in self._searches.items()
+        ]
 
 
 class FakeSlskdEvents:

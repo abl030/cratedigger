@@ -135,6 +135,12 @@ ALLOWLIST: dict[str, str] = {
         "round-trip via get_download_log_entry; tested in TestYoutubeIngestDownloadLog",
     "update_youtube_terminal":
         "round-trip via get_download_log_entry; tested in TestYoutubeIngestDownloadLog",
+    "record_search_id":
+        "round-trip via get_unswept_search_ids (the ledger's only reader); "
+        "tested in TestSearchLedgerRoundTrip::test_record_round_trip_preserves_every_field",
+    "mark_search_ids_deleted":
+        "round-trip via raw SELECT on slskd_search_ledger + get_unswept "
+        "exclusion; tested in TestSearchLedgerRoundTrip",
 }
 
 
