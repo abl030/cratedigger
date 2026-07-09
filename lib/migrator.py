@@ -103,6 +103,61 @@ def _applied_versions(conn) -> set[int]:
         return {row[0] for row in cur.fetchall()}
 
 
+def missing_migration_versions(applied: set[int], shipped: set[int]) -> list[int]:
+    """Shipped migration versions not yet recorded as applied, sorted ascending.
+
+    Pure set difference — the decision half of the fail-loud startup schema
+    gate (:func:`assert_schema_current`).
+    """
+    return sorted(shipped - applied)
+
+
+class SchemaBehindError(RuntimeError):
+    """Raised when the DB is missing one or more shipped migrations.
+
+    Startup gate for units that use ``Wants=`` (not ``Requires=``) on
+    ``cratedigger-db-migrate.service`` — see nix/module.nix. Those units
+    can start concurrently with (or before) a migrate run, so they must
+    verify schema currency themselves rather than relying on systemd
+    ordering to guarantee it.
+    """
+
+    def __init__(self, missing_versions: list[int]):
+        self.missing_versions = missing_versions
+        super().__init__(
+            "Pipeline DB schema is behind: missing migration version(s) "
+            f"{missing_versions}. Run cratedigger-db-migrate.service (or "
+            "apply_migrations()) before starting this service."
+        )
+
+
+def assert_schema_current(dsn: str, migrations_dir: str | None = None) -> None:
+    """Raise :class:`SchemaBehindError` if the DB at ``dsn`` is missing any
+    shipped migration.
+
+    Read-only: never creates the tracking table or applies anything — that
+    is ``apply_migrations``'s job. A missing ``schema_migrations`` table
+    counts as every shipped migration being missing (a fresh DB the
+    migrator has never touched), not as a pass.
+    """
+    target_dir = migrations_dir or DEFAULT_MIGRATIONS_DIR
+    shipped = {m.version for m in discover_migrations(target_dir)}
+
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        conn.autocommit = True
+        try:
+            applied = _applied_versions(conn)
+        except psycopg2.errors.UndefinedTable:
+            applied = set()
+    finally:
+        conn.close()
+
+    missing = missing_migration_versions(applied, shipped)
+    if missing:
+        raise SchemaBehindError(missing)
+
+
 def apply_migrations(
     dsn: str,
     migrations_dir: str | None = None,

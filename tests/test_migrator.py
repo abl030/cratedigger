@@ -9,6 +9,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
@@ -19,8 +20,11 @@ import psycopg2  # noqa: E402
 from lib.migrator import (  # noqa: E402
     DEFAULT_MIGRATIONS_DIR,
     Migration,
+    SchemaBehindError,
     apply_migrations,
+    assert_schema_current,
     discover_migrations,
+    missing_migration_versions,
 )
 
 TEST_DSN: str = os.environ.get("TEST_DB_DSN") or ""
@@ -3186,6 +3190,127 @@ class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
         assert latest_values is not None, (
             "no migration defines download_log_outcome_check")
         self.assertEqual(DOWNLOAD_LOG_OUTCOMES, latest_values)
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud schema gate (deploy-kill-migrate-wants fix).
+#
+# cratedigger.service and cratedigger-unfindable.service dropped their
+# Requires= edge on cratedigger-db-migrate.service (nix/module.nix) so a
+# switch-time migrate restart can no longer SIGTERM a mid-flight cycle
+# (systemd Requires= stop-propagation). Losing Requires= loses the "a
+# failed/behind migration blocks the app from starting" guarantee, so
+# ``assert_schema_current`` re-provides it as a fail-loud startup check
+# both units call. ``missing_migration_versions`` is the pure decision;
+# its generated-property half lives in tests/test_migrator_generated.py
+# per the code-quality.md PAIR rule.
+# ---------------------------------------------------------------------------
+
+class TestMissingMigrationVersions(unittest.TestCase):
+    """Pure set-difference decision — deterministic pin half of the PAIR."""
+
+    CASES: list[tuple[str, set[int], set[int], list[int]]] = [
+        ("current -- fully applied", {1, 2, 3}, {1, 2, 3}, []),
+        ("one behind", {1, 2}, {1, 2, 3}, [3]),
+        ("several behind, nothing applied", set(), {1, 2, 3}, [1, 2, 3]),
+        ("applied ahead of shipped -- extra applied is not \"missing\"",
+         {1, 2, 3, 4}, {1, 2, 3}, []),
+        ("nothing shipped, nothing applied", set(), set(), []),
+    ]
+
+    def test_missing_migration_versions(self):
+        for desc, applied, shipped, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    missing_migration_versions(applied, shipped), expected)
+
+
+def _maintenance_dsn() -> str:
+    """DSN for the 'postgres' maintenance DB on TEST_DSN's own ephemeral
+    cluster -- used to CREATE/DROP a throwaway database with no tracking
+    table for TestAssertSchemaCurrent.test_raises_when_tracking_table_missing.
+    """
+    parts = urllib.parse.urlsplit(TEST_DSN)
+    return urllib.parse.urlunsplit(parts._replace(path="/postgres"))
+
+
+def _create_fresh_database(name: str) -> str:
+    conn = psycopg2.connect(_maintenance_dsn())
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP DATABASE IF EXISTS {name}")
+        cur.execute(f"CREATE DATABASE {name}")
+    conn.close()
+    parts = urllib.parse.urlsplit(TEST_DSN)
+    return urllib.parse.urlunsplit(parts._replace(path=f"/{name}"))
+
+
+def _drop_database(name: str) -> None:
+    conn = psycopg2.connect(_maintenance_dsn())
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP DATABASE IF EXISTS {name}")
+    conn.close()
+
+
+@requires_postgres
+class TestAssertSchemaCurrent(unittest.TestCase):
+    """Real-PG round trip for the fail-loud startup gate (Rule A: a fake
+    can't tell a missing tracking table from an empty one)."""
+
+    _TEST_VERSION_FLOOR = 9100  # Distinct floor from TestApplyMigrations' 9000s.
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.migrations_dir = self._tmp.name
+
+    def tearDown(self):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM schema_migrations WHERE version >= %s",
+                (self._TEST_VERSION_FLOOR,),
+            )
+        conn.close()
+
+    def _write_migration(self, version: int, name: str, sql: str) -> None:
+        path = os.path.join(self.migrations_dir, f"{version:03d}_{name}.sql")
+        with open(path, "w") as f:
+            f.write(sql)
+
+    def test_passes_when_fully_applied(self):
+        # conftest.py already applied every shipped migration against
+        # TEST_DSN at session start.
+        assert_schema_current(TEST_DSN)  # must not raise
+
+    def test_raises_with_missing_versions_when_behind(self):
+        self._write_migration(9101, "gate_a", "SELECT 1;")
+        self._write_migration(9102, "gate_b", "SELECT 1;")
+        apply_migrations(TEST_DSN, self.migrations_dir)  # applies both
+
+        # A third migration in the same directory, never applied.
+        self._write_migration(9103, "gate_c", "SELECT 1;")
+
+        with self.assertRaises(SchemaBehindError) as ctx:
+            assert_schema_current(TEST_DSN, self.migrations_dir)
+        self.assertEqual(ctx.exception.missing_versions, [9103])
+
+    def test_raises_when_tracking_table_missing(self):
+        """A fresh DB the migrator never touched -- everything is missing,
+        never a silent pass."""
+        db_name = "cratedigger_test_migrator_gate_freshdb"
+        fresh_dsn = _create_fresh_database(db_name)
+        try:
+            with self.assertRaises(SchemaBehindError) as ctx:
+                assert_schema_current(fresh_dsn)
+            shipped = {
+                m.version for m in discover_migrations(DEFAULT_MIGRATIONS_DIR)
+            }
+            self.assertEqual(set(ctx.exception.missing_versions), shipped)
+        finally:
+            _drop_database(db_name)
 
 
 if __name__ == "__main__":

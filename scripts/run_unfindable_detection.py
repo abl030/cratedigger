@@ -32,6 +32,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.config import read_runtime_config  # noqa: E402
+from lib.migrator import SchemaBehindError, assert_schema_current  # noqa: E402
 from lib.slskd_client import SlskdClient  # noqa: E402
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB  # noqa: E402
 from lib.unfindable_detection_service import (  # noqa: E402
@@ -102,6 +103,21 @@ def main() -> int:
             "(host_url=%r, api_key=<%s>); aborting",
             cfg.slskd_host_url,
             "present" if cfg.resolved_slskd_api_key() else "missing",
+        )
+        return 2
+
+    # Fail-loud schema gate. cratedigger-unfindable.service uses Wants=, not
+    # Requires=, on cratedigger-db-migrate.service (nix/module.nix) -- see
+    # cratedigger.py::main() for the identical gate and its rationale.
+    try:
+        assert_schema_current(args.dsn)
+    except SchemaBehindError as exc:
+        logger.error(
+            "unfindable_detection: Pipeline DB schema is behind: missing "
+            "migration version(s) %s. Refusing to run against an "
+            "un-migrated schema -- run cratedigger-db-migrate.service "
+            "first.",
+            exc.missing_versions,
         )
         return 2
 

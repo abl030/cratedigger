@@ -1395,9 +1395,21 @@ in {
       };
     };
 
-    # Schema migrator. RemainAfterExit=true so cratedigger / cratedigger-web can
-    # require us without re-running on every cycle. Idempotent — fast no-op
-    # when schema is already current.
+    # Schema migrator. RemainAfterExit=true so cratedigger-web (and the other
+    # long-running/Requires= units below) can require us without re-running
+    # on every cycle. Idempotent — fast no-op when schema is already current.
+    # The two timer-driven, restartIfChanged=false units (cratedigger,
+    # cratedigger-unfindable) deliberately do NOT require us: this unit's
+    # ExecStart store path changes on every code deploy, so it restarts on
+    # every switch, and systemd Requires= propagates that restart as a
+    # SIGTERM to anything requiring it — killing a mid-flight cycle even
+    # though the app code didn't change. Those two use Wants=+After= instead
+    # and gate on schema currency themselves at startup
+    # (lib.migrator.assert_schema_current) so a failed/behind migration still
+    # blocks them from running. Long-running units that already
+    # restartIfChanged=true on deploy (importer, preview worker, web,
+    # youtube-ingest) keep Requires= — the propagated restart is harmless for
+    # them.
     systemd.services.cratedigger-db-migrate = {
       description = "Apply Cratedigger pipeline DB schema migrations";
       wantedBy = ["multi-user.target"];
@@ -1420,8 +1432,7 @@ in {
     systemd.services.cratedigger = {
       description = "Cratedigger — Soulseek download pipeline";
       after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
-      wants = redisServiceUnits;
-      requires = ["cratedigger-db-migrate.service"];
+      wants = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
       restartIfChanged = false;
       # Deliberately exclude pythonEnv from PATH: the python interpreter is
       # invoked via absolute path inside the wrappers, and every beets
@@ -1485,7 +1496,7 @@ in {
     systemd.services.cratedigger-unfindable = {
       description = "Cratedigger unfindable detection oneshot";
       after = ["cratedigger-db-migrate.service" "network.target"];
-      requires = ["cratedigger-db-migrate.service"];
+      wants = ["cratedigger-db-migrate.service"];
       restartIfChanged = false;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq];
       serviceConfig = {
