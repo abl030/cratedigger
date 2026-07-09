@@ -5827,6 +5827,24 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
         self.assertEqual(db.get_owned_local_paths(), {"/downloads/a.flac"})
 
+    def test_get_owned_transfer_keys_empty_before_any_record(self):
+        self.assertEqual(FakePipelineDB().get_owned_transfer_keys(), set())
+
+    def test_get_owned_transfer_keys_reflects_all_rows_stamped_or_not(self):
+        # Membership, not completion state: stamped and unstamped rows
+        # both contribute, and duplicate retries collapse into one key.
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=2, username="p1", filename="b.flac"),
+        ])
+        db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+        self.assertEqual(
+            db.get_owned_transfer_keys(),
+            {("p0", "a.flac"), ("p1", "b.flac")})
+
     def test_prune_transfer_ledger_keeps_active_request_rows(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="downloading"))

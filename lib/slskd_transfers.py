@@ -574,11 +574,8 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
     if downloads is None:
         return 0
     db = ctx.pipeline_db_source._get_db()
-    ledgered = {
-        (row["username"], row["filename"])
-        for row in db.get_owned_transfers()
-    }
-    ownership = find_slskd_orphans(downloads, db.get_downloading(), ledgered)
+    ownership = find_slskd_orphans(
+        downloads, db.get_downloading(), db.get_owned_transfer_keys())
     orphans = ownership.orphans
     cancelled = 0
     for orphan in orphans:

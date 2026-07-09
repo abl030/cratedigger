@@ -186,11 +186,8 @@ def _collect_issues(
         # Report-only — nothing here ever cancels a transfer; the SAME
         # helper production convergence uses, so this report can't
         # classify foreign-vs-stray differently than the real sweep.
-        ledgered = {
-            (row["username"], row["filename"])
-            for row in db.get_owned_transfers()
-        }
-        ownership = find_slskd_orphans(downloads, rows, ledgered)
+        ownership = find_slskd_orphans(
+            downloads, rows, db.get_owned_transfer_keys())
         slskd_orphans = ownership.orphans
         slskd_foreign_count = ownership.foreign_count
 

@@ -1,7 +1,7 @@
 """slskd transfer write-ahead ownership ledger (issue #571 good-citizen
 doctrine, migration 045).
 
-The five methods this mixin adds:
+The six methods this mixin adds:
 
 * ``record_transfer_enqueue`` -- write-ahead batch INSERT, called BEFORE
   ``ctx.slskd.transfers.enqueue(...)`` (T1). This is what makes the
@@ -11,9 +11,11 @@ The five methods this mixin adds:
   the SAME pass ``lib/slskd_events.py`` already stamps
   ``active_download_state`` from (issue #146), matching ledger rows by
   the same (username, remote filename) key.
-* ``get_owned_transfers`` / ``get_owned_local_paths`` -- read surface
-  shaped for what the future reaper/convergence flips will need: "is
-  this (username, filename) mine?" and "is this local_path mine?".
+* ``get_owned_transfers`` / ``get_owned_transfer_keys`` /
+  ``get_owned_local_paths`` -- read surface shaped for what the
+  reaper/convergence flips need: full rows for forensic inspection, the
+  bare "is this (username, filename) mine?" membership set the #571 PR 3
+  convergence flip consumes each cycle, and "is this local_path mine?".
 * ``prune_transfer_ledger`` -- T3: keeps the table bounded by
   hard-deleting rows that are both old AND whose request is no longer
   active (``wanted``/``downloading``).
@@ -141,6 +143,22 @@ class _TransferLedgerMixin(_PipelineDBBase):
                 """,
             )
         return [dict(r) for r in cur.fetchall()]
+
+    def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
+        """Every ``(username, filename)`` pair in the ledger -- the
+        convergence flip's "is this live transfer mine?" membership set
+        (#571 PR 3).
+
+        Purpose-shaped: callers only need an unordered key set, so this
+        skips ``get_owned_transfers``'s 9-column projection and ``ORDER
+        BY enqueued_at`` (wasteful every 5-min cycle). Includes stamped
+        and unstamped rows alike -- ledger membership, not completion
+        state, is what proves cratedigger created a transfer.
+        """
+        cur = self._execute(
+            "SELECT username, filename FROM slskd_transfer_ledger",
+        )
+        return {(r["username"], r["filename"]) for r in cur.fetchall()}
 
     def get_owned_local_paths(self) -> set[str]:
         """Every completion-stamped ``local_path`` in the ledger -- the

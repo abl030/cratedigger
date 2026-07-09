@@ -520,6 +520,10 @@ ALLOWLIST: "dict[str, str]" = {
         "int | None FK scalar — no row projection",
     "get_import_job_candidate_evidence_id":
         "int | None FK scalar — no row projection",
+    "get_owned_transfer_keys":
+        "set[tuple[str,str]] (username, filename) membership keys — "
+        "scalar set, no row projection; fake<->PG semantics pinned by "
+        "mirrored tests in test_fakes.py + test_pipeline_db.py",
     "get_recent_successful_uploader":
         "str | None username — scalar, no row projection",
     "get_request_current_evidence_id":
