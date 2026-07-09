@@ -1690,6 +1690,23 @@ class TestFakeSlskdAPI(unittest.TestCase):
         self.assertIn("isPrivileged", result)
         self.assertIsInstance(result["isPrivileged"], bool)
 
+    def test_add_transfer_can_carry_exception_reason(self):
+        """Issue #564: seeded transfers can carry slskd's real failure
+        reason so poll/harvest tests can drive it through the same
+        parse_downloads_envelope() decode production uses."""
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="user1", directory="user1\\Music",
+            filename="user1\\Music\\01.flac", id="tid-1",
+            state="Completed, Rejected",
+            exception="Transfer rejected: Banned",
+        )
+
+        downloads = slskd.transfers.get_all_downloads(includeRemoved=True)
+
+        snap = downloads[0].directories[0].files[0]
+        self.assertEqual(snap.exception, "Transfer rejected: Banned")
+
 
 class TestFakeSlskdSearches(unittest.TestCase):
     """Self-test for the FakeSlskdSearches stub introduced in U5."""

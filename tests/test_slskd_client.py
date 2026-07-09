@@ -542,8 +542,9 @@ class TestTransferSnapshot(unittest.TestCase):
 
     def test_unknown_fields_are_ignored(self):
         # slskd's real Transfer DTO carries fields we don't model
-        # (direction, averageSpeed, placeInQueue, exception, ...) — these
-        # must not trip decoding.
+        # (direction, averageSpeed, placeInQueue, ...) — these must not
+        # trip decoding. ``exception`` IS modeled (issue #564) but a
+        # ``None`` value for it must still decode cleanly.
         raw = {
             "id": "t1", "username": "u", "filename": "f.flac",
             "state": "InProgress", "direction": "Download",
@@ -554,6 +555,40 @@ class TestTransferSnapshot(unittest.TestCase):
 
         assert snap is not None
         self.assertEqual(snap.id, "t1")
+        self.assertIsNone(snap.exception)
+
+    def test_decodes_exception_field(self):
+        # Issue #564 root cause #1: slskd's real per-transfer failure
+        # reason lives here and was previously discarded entirely.
+        raw = {
+            "id": "t1", "username": "u", "filename": "f.flac",
+            "state": "Completed, Rejected",
+            "exception": "Transfer rejected: Banned",
+        }
+
+        snap = parse_transfer_snapshot(raw)
+
+        assert snap is not None
+        self.assertEqual(snap.exception, "Transfer rejected: Banned")
+
+    def test_exception_wrong_type_raises_validation_error(self):
+        # RED-boundary guard per code-quality rules: an int-typed
+        # exception field must fail loudly at the strict decode site.
+        raw = {"id": "t1", "filename": "f.flac", "state": "InProgress",
+               "exception": 12345}
+
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(raw, type=TransferSnapshot)
+
+    def test_exception_wrong_type_degrades_to_none_via_parse_transfer_snapshot(self):
+        # The tolerant wrapper must degrade this to "no status observed"
+        # for just this entry (issue #564), not raise into the poll loop.
+        raw = {"id": "t1", "filename": "f.flac", "state": "InProgress",
+               "exception": 12345}
+
+        snap = parse_transfer_snapshot(raw)
+
+        self.assertIsNone(snap)
 
     def test_missing_fields_default(self):
         # A bare match-lookup style entry (only filename/id) still decodes —
