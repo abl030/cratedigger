@@ -2,7 +2,7 @@
 """Generated tests for the slskd transfer write-ahead ownership ledger
 (issue #571, migration 045).
 
-Two properties over generated worlds:
+Three properties over generated worlds:
 
 1. **T1 (write-ahead ownership)** — for worlds with an ownership context
    (a real ``request_id`` AND a wired ``download_ownership`` writer), the
@@ -16,11 +16,23 @@ Two properties over generated worlds:
    past the retention cutoff AND its request is not currently
    wanted/downloading; a request_id with no matching row (hard-deleted
    elsewhere) counts as inactive.
+3. **TS1 (transfer_id capture, issue #571 PR 5)** — over any sequence of
+   T1.5 (``stamp_transfer_id``) and T2 (``stamp_transfer_completion``
+   with ``transfer_id=``) capture calls for one ledger row, the row's
+   final ``transfer_id`` is whichever value the FIRST call in the
+   sequence carried — every later call either finds ``transfer_id``
+   already non-NULL (a no-op) or, for a later completion call, finds
+   ``completed_at`` already non-NULL (a full no-op). This is what makes
+   the per-id completed-transfer purge's ownership proof durable
+   regardless of which capture path (enqueue-response or the completion
+   event) wins the race.
 
 The deterministic pins for these same invariants live in
-``tests/test_download.py::TestTransferLedgerWriteAheadOrdering`` (T1) and
+``tests/test_download.py::TestTransferLedgerWriteAheadOrdering`` (T1 +
+T1.5), ``tests/test_slskd_events.py::TestTransferLedgerStamping`` (T2 +
+TS1's event-fallback wiring), and
 ``tests/test_pipeline_db.py::TestTransferLedgerRoundTrip`` /
-``tests/test_fakes.py::TestFakePipelineDBTransferLedger`` (T3).
+``tests/test_fakes.py::TestFakePipelineDBTransferLedger`` (T3, TS1).
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
@@ -278,9 +290,95 @@ class TestGeneratedTransferLedgerPrune(unittest.TestCase):
         assert_prune_matches_oracle(rows, survivors_after)
 
 
+# --- TS1: transfer_id capture, first-known-wins (issue #571 PR 5) ------
+
+
+@dataclass(frozen=True)
+class CaptureOp:
+    kind: str  # "stamp_id" | "stamp_completion"
+    transfer_id: str
+
+
+@st.composite
+def capture_op_sequences(draw) -> tuple[CaptureOp, ...]:
+    op_count = draw(st.integers(min_value=0, max_value=5))
+    ops = []
+    for i in range(op_count):
+        kind = draw(st.sampled_from(("stamp_id", "stamp_completion")))
+        # Distinct-looking ids per position so a wrong final value is
+        # never accidentally right.
+        ops.append(CaptureOp(kind=kind, transfer_id=f"tid-{i}"))
+    return tuple(ops)
+
+
+def _run_capture_sequence(ops: tuple[CaptureOp, ...]) -> FakePipelineDB:
+    """Drive the REAL production write methods (via FakePipelineDB,
+    proven at parity with real PG by the round-trip pins in
+    tests/test_pipeline_db.py) over one generated capture-op sequence for
+    a single ledgered (username, filename) row -- no retries, so ledger
+    row identity never ambiguous."""
+    db = FakePipelineDB()
+    db.record_transfer_enqueue([
+        TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+    ])
+    for op in ops:
+        if op.kind == "stamp_id":
+            db.stamp_transfer_id("p0", "a.flac", op.transfer_id)
+        else:
+            db.stamp_transfer_completion(
+                "p0", "a.flac", "/downloads/a.flac",
+                datetime.now(timezone.utc), transfer_id=op.transfer_id)
+    return db
+
+
+def expected_final_transfer_id(ops: tuple[CaptureOp, ...]) -> str | None:
+    """TS1 invariant: the final transfer_id is whichever value the FIRST
+    op in the sequence carried (write-ahead leaves it NULL; the first
+    capture call -- either path -- always finds the row still open and
+    writes; every later call finds no matching row left to touch)."""
+    return ops[0].transfer_id if ops else None
+
+
+def assert_transfer_id_capture_matches_oracle(
+    ops: tuple[CaptureOp, ...], actual: str | None,
+) -> None:
+    """TS1 checker (module-level for the known-bad self-test)."""
+    expected = expected_final_transfer_id(ops)
+    if expected != actual:
+        raise AssertionError(
+            f"final transfer_id diverged: expected={expected!r} "
+            f"actual={actual!r} ops={ops!r}")
+
+
+class TestGeneratedTransferIdCapture(unittest.TestCase):
+    """TS1 property: first-known-wins over generated capture-op
+    sequences, through the REAL stamp_transfer_id / stamp_transfer_
+    completion write methods."""
+
+    @given(ops=capture_op_sequences())
+    def test_first_known_transfer_id_wins(self, ops):
+        db = _run_capture_sequence(ops)
+
+        rows = db.get_owned_transfers(request_id=1)
+        self.assertEqual(len(rows), 1)
+        assert_transfer_id_capture_matches_oracle(ops, rows[0]["transfer_id"])
+
+
 class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: each checker must trip on a planted
     violating world/state."""
+
+    def test_transfer_id_capture_checker_trips_when_a_later_id_clobbers(self):
+        ops = (
+            CaptureOp(kind="stamp_id", transfer_id="tid-0"),
+            CaptureOp(kind="stamp_completion", transfer_id="tid-1"),
+        )
+        with self.assertRaises(AssertionError):
+            assert_transfer_id_capture_matches_oracle(ops, "tid-1")
+
+    def test_transfer_id_capture_checker_trips_on_empty_ops_with_a_value(self):
+        with self.assertRaises(AssertionError):
+            assert_transfer_id_capture_matches_oracle((), "tid-invented")
 
     def test_write_ahead_checker_trips_when_post_precedes_ledger(self):
         world = EnqueueWorld(

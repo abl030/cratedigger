@@ -9,7 +9,12 @@ module (issue #512). ``find_slskd_orphans`` was flipped to ledger-positive
 ownership (issue #571 PR 3): a live transfer is only ever reported as an
 orphan when it's IN cratedigger's write-ahead ledger — never merely
 "unowned" by a downloading row, which used to risk cancelling a human's
-transfer on a shared slskd instance.
+transfer on a shared slskd instance. ``find_completed_transfers_to_purge``
+(issue #571 PR 5) is the same doctrine applied to COMPLETED transfers,
+matched by ``transfer_id`` rather than (username, filename) — a retried
+file's completed and in-flight attempts share the same (username,
+filename) pair, so only the per-id ledger stamp disambiguates which
+specific completed record cratedigger may remove.
 """
 
 from __future__ import annotations
@@ -229,6 +234,99 @@ def find_slskd_orphans(
                     state=transfer_state,
                 ))
     return SlskdTransferOwnership(orphans=orphans, foreign_count=foreign_count)
+
+
+@dataclass(frozen=True)
+class CompletedTransferToRemove:
+    """A live COMPLETED slskd transfer cratedigger may remove (#571 PR 5):
+    ledger-owned by ``transfer_id`` AND its ledger row already carries
+    the T2 completion stamp."""
+    username: str
+    transfer_id: str
+    filename: str
+
+
+@dataclass(frozen=True)
+class CompletedTransferOwnership:
+    """Full ownership classification of the live COMPLETED slskd transfer
+    snapshot (#571 PR 5) — mirrors ``SlskdTransferOwnership``'s live-
+    transfer classification, one tier down (stamped vs. unstamped
+    ownership, since a completed record additionally needs the P2
+    stamp-before-remove ordering constraint).
+
+    ``to_remove`` — stamped-owned records (P2 satisfied): safe to remove
+    this pass. ``unstamped_count`` — ledger-owned records whose
+    completion stamp hasn't landed yet (event ingestion hasn't caught up):
+    left for a later cycle, counted only. ``foreign_count`` — records
+    absent from the ledger entirely: never cratedigger's, counted only.
+    """
+    to_remove: list[CompletedTransferToRemove]
+    unstamped_count: int
+    foreign_count: int
+
+
+def find_completed_transfers_to_purge(
+    downloads: list[DownloadUser],
+    stamped_owned_ids: set[str],
+    unstamped_owned_ids: set[str],
+) -> CompletedTransferOwnership:
+    """Classify live COMPLETED slskd transfers for the #571 PR 5 purge.
+    Pure — no I/O.
+
+    Args:
+        downloads: slskd ``transfers.get_all_downloads(includeRemoved=
+            False)`` snapshot (username → directories → files groups),
+            already decoded via ``lib.slskd_client.parse_downloads_
+            envelope`` (issue #507).
+        stamped_owned_ids: ``transfer_id`` values from cratedigger's
+            write-ahead ``slskd_transfer_ledger`` whose row already
+            carries the T2 completion stamp
+            (``lib.pipeline_db.transfer_ledger.get_owned_transfer_id_
+            sets``).
+        unstamped_owned_ids: ``transfer_id`` values ledgered but not yet
+            completion-stamped.
+
+    A live transfer that hasn't reached a ``Completed*`` state is skipped
+    entirely — this classifier only ever reasons about completed records,
+    the disjoint half of ``find_slskd_orphans``' live-transfer scope
+    (that function explicitly skips ``Completed*`` states; this one
+    handles nothing else). A completed transfer with no ``id`` at all
+    (never observed in production, but tolerated defensively) is skipped
+    — there is no transfer_id to classify it by.
+
+    Matching is by ``transfer_id``, NOT (username, filename): a retried
+    file's completed AND in-flight attempts can share the same (username,
+    filename) pair, so only the per-id ledger stamp proves cratedigger
+    created THIS SPECIFIC completed record, not merely some attempt at
+    the same file.
+    """
+    to_remove: list[CompletedTransferToRemove] = []
+    unstamped_count = 0
+    foreign_count = 0
+    for user_group in downloads:
+        username = user_group.username
+        for directory in user_group.directories:
+            for transfer in directory.files:
+                if not transfer.state.startswith("Completed"):
+                    continue
+                transfer_id = transfer.id
+                if not transfer_id:
+                    continue
+                if transfer_id in stamped_owned_ids:
+                    to_remove.append(CompletedTransferToRemove(
+                        username=username,
+                        transfer_id=transfer_id,
+                        filename=transfer.filename,
+                    ))
+                elif transfer_id in unstamped_owned_ids:
+                    unstamped_count += 1
+                else:
+                    foreign_count += 1
+    return CompletedTransferOwnership(
+        to_remove=to_remove,
+        unstamped_count=unstamped_count,
+        foreign_count=foreign_count,
+    )
 
 
 def find_inconsistencies(db_rows: list[dict[str, Any]]) -> list[OrphanInfo]:

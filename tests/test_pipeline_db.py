@@ -8741,6 +8741,119 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertNotEqual(stamped[0]["id"], old_row["id"])
         self.assertEqual(stamped[0]["local_path"], "/downloads/newest.flac")
 
+    # --- transfer_id capture (T1.5 + T2 fallback, issue #571 PR 5) -----
+
+    def test_stamp_transfer_id_stamps_newest_untransfer_id_stamped_row(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        stamped = self.db.stamp_transfer_id("p0", "a.flac", "tid-1")
+
+        self.assertEqual(stamped, 1)
+        row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.assertEqual(row["transfer_id"], "tid-1")
+
+    def test_stamp_transfer_id_unledgered_pair_returns_zero(self):
+        stamped = self.db.stamp_transfer_id(
+            "foreign-peer", "foreign.flac", "tid-x")
+        self.assertEqual(stamped, 0)
+
+    def test_stamp_transfer_id_prefers_newest_open_row(self):
+        """Same tie-break as stamp_transfer_completion: a retried file
+        mints a fresh ledger row (T1); the enqueue-response capture must
+        stamp the NEWEST id-less row for the key."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        old_row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc) - timedelta(minutes=10), old_row["id"]))
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        self.db.stamp_transfer_id("p0", "a.flac", "tid-newest")
+
+        rows = self.db.get_owned_transfers(request_id=rid)
+        stamped = [r for r in rows if r["transfer_id"] is not None]
+        self.assertEqual(len(stamped), 1)
+        self.assertNotEqual(stamped[0]["id"], old_row["id"])
+        self.assertEqual(stamped[0]["transfer_id"], "tid-newest")
+
+    def test_stamp_transfer_completion_coalesces_transfer_id_when_missing(self):
+        """T2 fallback: when T1.5's enqueue-response capture never ran
+        (reconciliation timeout), the completion event's own transfer_id
+        fills the column."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-from-event")
+
+        row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.assertEqual(row["transfer_id"], "tid-from-event")
+
+    def test_stamp_transfer_completion_does_not_clobber_existing_transfer_id(self):
+        """T1.5 already won the race -- the completion event's transfer_id
+        (even if it somehow differed) must never overwrite it."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self.db.stamp_transfer_id("p0", "a.flac", "tid-from-enqueue")
+
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-from-event")
+
+        row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.assertEqual(row["transfer_id"], "tid-from-enqueue")
+
+    def test_stamp_transfer_completion_with_no_transfer_id_leaves_it_null(self):
+        """Existing callers that don't pass transfer_id (none in
+        production after this PR, but the parameter is optional) must not
+        regress to a non-NULL sentinel."""
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+
+        row = self.db.get_owned_transfers(request_id=rid)[0]
+        self.assertIsNone(row["transfer_id"])
+
+    def test_get_owned_transfer_id_sets_empty_before_any_record(self):
+        result = self.db.get_owned_transfer_id_sets()
+        self.assertEqual(result.stamped, set())
+        self.assertEqual(result.unstamped, set())
+
+    def test_get_owned_transfer_id_sets_partitions_by_completion_stamp(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
+            TransferLedgerRow(request_id=rid, username="p0", filename="c.flac"),
+        ])
+        self.db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        self.db.stamp_transfer_id("p0", "b.flac", "tid-b")
+        # c.flac never gets a transfer_id at all -- absent from both sets.
+        self.db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+
+        result = self.db.get_owned_transfer_id_sets()
+
+        self.assertEqual(result.stamped, {"tid-a"})
+        self.assertEqual(result.unstamped, {"tid-b"})
+
     def test_get_owned_local_paths_only_returns_stamped_rows(self):
         rid = self._seed_request()
         self.db.record_transfer_enqueue([

@@ -1472,10 +1472,10 @@ def main():
 
         # --- Phase 0b: on-disk orphan reaper (issue #550 defect 3, flipped
         # to positive ledger ownership by issue #571) ---
-        # Completed-but-unconsumed downloads have no slskd-side handle:
-        # the convergence above only cancels LIVE transfers, and
-        # remove_completed_downloads() purges slskd's completed-transfer
-        # records at the end of every cycle. This reaper reasons from
+        # Completed-but-unconsumed downloads may have no slskd-side
+        # handle: the convergence above only cancels LIVE transfers, and
+        # the end-of-cycle purge removes stamped-owned completed records
+        # (#571 PR 5). This reaper reasons from
         # filesystem + DB state instead — and only ever deletes a file it
         # can positively prove it created (the write-ahead transfer
         # ledger, migration 045, or a currently-downloading row's active
@@ -1509,10 +1509,9 @@ def main():
         # (username, filename) it is about to POST to slskd (migration
         # 045) — this is ONLY the bounded-retention prune of that
         # bookkeeping table; it never touches slskd or disk state itself.
-        # The convergence (Phase 0) and disk reaper (Phase 0b) above both
-        # consult this ledger to prove ownership;
-        # remove_completed_downloads flipping to the same doctrine is a
-        # separate follow-up PR. The prune window (90d) must strictly
+        # The convergence (Phase 0), disk reaper (Phase 0b), and the
+        # end-of-cycle completed-transfer purge all consult this ledger
+        # to prove ownership. The prune window (90d) must strictly
         # exceed the reaper's own age threshold — see
         # reap_disk_orphans' docstring.
         try:
@@ -1563,13 +1562,13 @@ def main():
                 logger.exception("Phase 1 (poll downloads) failed — continuing to cleanup")
 
         # --- Pre-purge terminal transfer evidence harvest (issue #564) ---
-        # remove_completed_downloads() below discards slskd's per-transfer
-        # terminal state (including the failure reason) for anything that
-        # completed/errored within THIS cycle before the next poll cycle
-        # ever observes it. This harvest takes one last snapshot and
-        # stamps that evidence into active_download_state first. MUST
-        # stay ordered before the purge — best-effort, never blocks the
-        # cycle (the purge still runs even if the harvest fails).
+        # The completed-transfer purge below discards slskd's per-transfer
+        # terminal state (including the failure reason) for anything it
+        # removes this cycle before the next poll cycle ever observes it.
+        # This harvest takes one last snapshot and stamps that evidence
+        # into active_download_state first. MUST stay ordered before the
+        # purge — best-effort, never blocks the cycle (the purge still
+        # runs even if the harvest fails).
         try:
             from lib.download import harvest_terminal_transfer_evidence
             harvest_terminal_transfer_evidence(_module_ctx)
@@ -1578,8 +1577,21 @@ def main():
                 "HARVEST: pre-purge evidence harvest failed; continuing "
                 "with the cycle.")
 
-        # Clean up completed transfer UI entries
-        slskd.transfers.remove_completed_downloads()
+        # --- Completed-transfer purge (issue #571 PR 5) ---
+        # Per-id removal of ledger-owned, completion-stamped completed
+        # slskd transfer records — replaces the old bulk
+        # remove_completed_downloads() call, which purged every completed
+        # record including a human's, on a shared instance. MUST stay
+        # ordered after the harvest above, for the same reason the old
+        # bulk call did: the harvest's snapshot must land in
+        # active_download_state before any of these records are removed.
+        # Best-effort — never blocks the cycle.
+        try:
+            from lib.slskd_transfers import purge_completed_transfers
+            purge_completed_transfers(_module_ctx)
+        except Exception:
+            logger.exception(
+                "COMPLETED-PURGE: sweep failed; continuing with the cycle.")
 
         elapsed = time.time() - cycle_start
         from lib.cycle_summary import format_cycle_summary

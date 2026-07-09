@@ -548,6 +548,67 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["local_path"], "/dl/Album/01 track.flac")
 
+    def test_completion_event_transfer_id_fills_a_missing_ledger_id(self):
+        """T2 fallback (issue #571 PR 5): when T1.5's enqueue-response
+        capture never ran (reconciliation timeout), the SAME completion
+        event that stamps local_path also fills transfer_id — the
+        event's own transfer.id, decoded in the same pass."""
+        from lib.pipeline_db import TransferLedgerRow
+
+        self.seed_downloading()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer1",
+                filename="music\\Artist\\Album\\01 track.flac"),
+        ])
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac",
+                    transfer_id="tid-from-event")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        self.ingest()
+
+        row = self.db.get_owned_transfers(request_id=1)[0]
+        self.assertEqual(row["transfer_id"], "tid-from-event")
+
+    def test_completion_event_never_clobbers_an_already_captured_transfer_id(self):
+        """T1.5 already won the race (enqueue-response reconciliation
+        succeeded) -- the completion event's transfer_id, even if it
+        somehow differed, must never overwrite the earlier capture."""
+        from lib.pipeline_db import TransferLedgerRow
+
+        self.seed_downloading()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer1",
+                filename="music\\Artist\\Album\\01 track.flac"),
+        ])
+        self.db.stamp_transfer_id(
+            "peer1", "music\\Artist\\Album\\01 track.flac", "tid-from-enqueue")
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac",
+                    transfer_id="tid-from-event")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        self.ingest()
+
+        row = self.db.get_owned_transfers(request_id=1)[0]
+        self.assertEqual(row["transfer_id"], "tid-from-enqueue")
+
 
 if __name__ == "__main__":
     unittest.main()

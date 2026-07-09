@@ -341,10 +341,16 @@ class TestTransfersEndpoints(SlskdClientTestCase):
         self.assertEqual(req["method"], "DELETE")
         self.assertEqual(req["query"], {"remove": ["False"]})
 
-    def test_remove_completed_downloads(self):
-        self.set_fixture("DELETE", "/transfers/downloads/all/completed", {}, status=204)
+    def test_cancel_download_forwards_remove_true(self):
+        """#571 PR 5: purge_completed_transfers calls cancel_download with
+        remove=True to remove a completed transfer's record — the query
+        param must actually reach slskd, not silently default False."""
+        self.set_fixture("DELETE", "/transfers/downloads/peer/abc", {}, status=204)
 
-        self.assertTrue(self.client.transfers.remove_completed_downloads())
+        self.assertTrue(self.client.transfers.cancel_download(
+            username="peer", id="abc", remove=True))
+        req = self.last_request()
+        self.assertEqual(req["query"], {"remove": ["True"]})
 
 
 class TestUsersEndpoints(SlskdClientTestCase):

@@ -5817,6 +5817,87 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         self.assertEqual(len(stamped_rows), 1)
         self.assertNotEqual(stamped_rows[0]["id"], old_id)
 
+    # --- transfer_id capture (T1.5 + T2 fallback, issue #571 PR 5) -----
+
+    def test_stamp_transfer_id_stamps_matching_row(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        stamped = db.stamp_transfer_id("p0", "a.flac", "tid-1")
+        self.assertEqual(stamped, 1)
+        row = db.get_owned_transfers(request_id=1)[0]
+        self.assertEqual(row["transfer_id"], "tid-1")
+        self.assertEqual(db.stamp_transfer_id_calls, [("p0", "a.flac", "tid-1")])
+
+    def test_stamp_transfer_id_unledgered_pair_is_a_noop(self):
+        db = FakePipelineDB()
+        stamped = db.stamp_transfer_id("foreign-peer", "foreign.flac", "tid-x")
+        self.assertEqual(stamped, 0)
+
+    def test_stamp_transfer_id_prefers_newest_open_row(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        old_id = next(iter(db._transfer_ledger))
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(timezone.utc) - timedelta(minutes=10))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.stamp_transfer_id("p0", "a.flac", "tid-newest")
+        rows = db.get_owned_transfers(request_id=1)
+        stamped_rows = [r for r in rows if r["transfer_id"] is not None]
+        self.assertEqual(len(stamped_rows), 1)
+        self.assertNotEqual(stamped_rows[0]["id"], old_id)
+        self.assertEqual(stamped_rows[0]["transfer_id"], "tid-newest")
+
+    def test_stamp_transfer_completion_coalesces_transfer_id_when_missing(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-from-event")
+        row = db.get_owned_transfers(request_id=1)[0]
+        self.assertEqual(row["transfer_id"], "tid-from-event")
+
+    def test_stamp_transfer_completion_does_not_clobber_existing_transfer_id(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.stamp_transfer_id("p0", "a.flac", "tid-from-enqueue")
+        db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
+            transfer_id="tid-from-event")
+        row = db.get_owned_transfers(request_id=1)[0]
+        self.assertEqual(row["transfer_id"], "tid-from-enqueue")
+
+    def test_get_owned_transfer_id_sets_empty_before_any_record(self):
+        result = FakePipelineDB().get_owned_transfer_id_sets()
+        self.assertEqual(result.stamped, set())
+        self.assertEqual(result.unstamped, set())
+
+    def test_get_owned_transfer_id_sets_partitions_by_completion_stamp(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="b.flac"),
+            TransferLedgerRow(request_id=1, username="p0", filename="c.flac"),
+        ])
+        db.stamp_transfer_id("p0", "a.flac", "tid-a")
+        db.stamp_transfer_id("p0", "b.flac", "tid-b")
+        db.stamp_transfer_completion(
+            "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
+
+        result = db.get_owned_transfer_id_sets()
+
+        self.assertEqual(result.stamped, {"tid-a"})
+        self.assertEqual(result.unstamped, {"tid-b"})
+
     def test_get_owned_local_paths_only_returns_stamped_rows(self):
         db = FakePipelineDB()
         db.record_transfer_enqueue([
