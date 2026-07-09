@@ -36,6 +36,8 @@ ssh doc2 'sudo systemctl status cratedigger-db-migrate.service --no-pager | head
 ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 5"'
 ```
 
+6. After live verification + tag of a non-trivial series: run the **post-ship reflection** (`.claude/rules/deploy.md` § "Post-ship reflection") — mine your own session context for the debt this work surfaced (deferred review findings, things fixed twice, duplication the series introduced, audits that could catch review findings for free), de-dupe against open issues, and file ONE covering issue (pattern: #573, #590) or state that nothing clears the bar.
+
 ## Database migrations
 
 Schema is managed by versioned files in `migrations/NNN_name.sql`. The `cratedigger-db-migrate.service` oneshot unit runs the migrator (`scripts/migrate_db.py`) on every switch (fleet-update or break-glass rebuild) because `restartIfChanged = true`. `cratedigger-web.service` (and the other long-running workers) `requires` it, so a failed migration blocks them from starting. `cratedigger.service` and `cratedigger-unfindable.service` are timer-driven with `restartIfChanged = false`, so they only `wants`+`after` it (a `requires` edge would let the migrate unit's every-deploy restart SIGTERM a mid-flight cycle) and instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`).
