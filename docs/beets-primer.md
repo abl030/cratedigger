@@ -74,7 +74,7 @@ match:
     original_year: true
 
 # Active plugins
-plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline
+plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions
 ```
 
 ### Active Plugins
@@ -94,6 +94,13 @@ plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missi
 | `fromfilename` | Guesses metadata from filenames when tags are missing | — |
 | `ftintitle` | Moves "feat." from artist to title field | — |
 | `the` | Handles "The" prefix in artist names | — |
+| `permissions` | Sets imported file/art mode to 0664 and dir mode to 0775 | Yes |
+
+`permissions` exists so media servers (Jellyfin) can read album art: beets'
+native `fetchart` writes art via `mkstemp` (forces 0600) then renames it into
+place, and nothing else chmods it. `fix_library_modes` (`lib/permissions.py`)
+only touches directories, never files, so this plugin covers both initial
+import and manual `beet fetchart` re-fetches (issue #570 defect 1).
 
 ### Cover Art Config
 

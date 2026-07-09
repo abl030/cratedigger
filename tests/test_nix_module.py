@@ -246,7 +246,8 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
 
     PRODUCTION_PLUGINS = (
         "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
-        "info missing duplicates edit fromfilename ftintitle the inline"
+        "info missing duplicates edit fromfilename ftintitle the inline "
+        "permissions"
     )
 
     def test_duplicate_keys_is_a_literal_under_import(self) -> None:
@@ -261,6 +262,23 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
     def test_plugin_list_is_fixed_and_contains_musicbrainz(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn(f'plugins = "{self.PRODUCTION_PLUGINS}";', text)
+
+    def test_permissions_plugin_configured_with_media_server_friendly_modes(
+        self,
+    ) -> None:
+        """Issue #570 defect 1: beets' native ``fetchart`` writes album art
+        via ``mkstemp`` (forces 0600) then renames it into place — nothing
+        else chmods it, so art is unreadable by media servers.
+        ``fix_library_modes`` (lib/permissions.py) deliberately touches
+        directories only, never files, so the ``permissions`` plugin (its
+        ``art_set -> fix_art`` listener) is what covers both initial import
+        AND manual ``beet fetchart`` re-fetches."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("permissions", self.PRODUCTION_PLUGINS.split())
+        self.assertIn(
+            'permissions = {\n      file = "0664";\n      dir = "0775";\n    };',
+            text,
+        )
 
     def test_config_yaml_rendered_atomically_into_beetsdir(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
