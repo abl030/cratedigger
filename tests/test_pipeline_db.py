@@ -1455,6 +1455,42 @@ class TestDownloadLog(unittest.TestCase):
         self.assertEqual(by_id[yt_id]["source"], "youtube")
         self.assertEqual(by_id[yt_id]["request_source"], "request")
 
+    def test_log_download_round_trip_preserves_transfer_detail(self):
+        """Rule A (test-fidelity.md): migration 043's transfer_detail
+        JSONB column must actually preserve what log_download writes —
+        a real-PG round trip, not the fake's verbatim dict storage."""
+        from lib.quality import FileFailureDetail
+        detail = [
+            FileFailureDetail(
+                username="user1",
+                filename="user1\\Music\\01.flac",
+                last_state="Completed, Errored",
+                last_exception="Read error: Connection reset by peer",
+                bytes_transferred=1234,
+                retry_count=2,
+            ),
+            FileFailureDetail(
+                username="user1",
+                filename="user1\\Music\\02.flac",
+            ),
+        ]
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="user1",
+            filetype="flac",
+            outcome="timeout",
+            error_message="all 2 files errored",
+            transfer_detail=msgspec.to_builtins(detail),
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        round_tripped = history[0]["transfer_detail"]
+        self.assertEqual(
+            round_tripped,
+            [msgspec.to_builtins(d) for d in detail],
+        )
+
 
 @requires_postgres
 class TestSearchLog(unittest.TestCase):

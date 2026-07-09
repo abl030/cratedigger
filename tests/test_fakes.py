@@ -573,6 +573,20 @@ class TestFakePipelineDB(unittest.TestCase):
         with self.assertRaises(psycopg2.errors.CheckViolation):
             db.log_download(42, outcome="error")
 
+    def test_log_download_records_transfer_detail(self):
+        """Issue #564 C7: transfer_detail is a first-class field on
+        DownloadLogRow, not swallowed into .extra."""
+        db = FakePipelineDB()
+        detail = [
+            {"username": "user1", "filename": "01.flac",
+             "last_state": "Completed, Errored",
+             "last_exception": "Read error: Connection reset by peer",
+             "bytes_transferred": 0, "retry_count": 2},
+        ]
+        db.log_download(42, outcome="timeout", transfer_detail=detail)
+
+        self.assertEqual(db.download_logs[0].transfer_detail, detail)
+
     def test_assert_log_passes(self):
         db = FakePipelineDB()
         log_id = db.log_download(42, outcome="success", soulseek_username="user1")

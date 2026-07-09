@@ -1236,12 +1236,13 @@ class FakePipelineDB:
                      existing_v0_probe_min_bitrate: int | None = None,
                      existing_v0_probe_avg_bitrate: int | None = None,
                      existing_v0_probe_median_bitrate: int | None = None,
+                     transfer_detail: Any = None,
                      **extra: Any) -> int:
         """Record a download_log row.
 
         Every parameter name matches ``PipelineDB.log_download`` exactly
         — the contract test in ``test_fakes.py`` enforces this. Only
-        the 11 "first-class" fields land on ``DownloadLogRow``; the
+        the 12 "first-class" fields land on ``DownloadLogRow``; the
         remaining named fields plus any test-only ``**extra`` merge into
         ``.extra`` so ``assert_log`` can still introspect them.
         """
@@ -1306,6 +1307,7 @@ class FakePipelineDB:
             error_message=error_message,
             validation_result=validation_result,
             import_result=import_result,
+            transfer_detail=transfer_detail,
             id=new_log_id,
             extra=auxiliary,
         ))

@@ -40,6 +40,10 @@ class LogEntry:
     error_message: Optional[str] = None
     import_result: Optional[Any] = None
     validation_result: Optional[Any] = None
+    # Per-file failure detail audit blob (issue #564 C7, migration 043) —
+    # a list of FileFailureDetail dicts behind a download-timeout row's
+    # composed error_message summary. Not currently rendered; audit-only.
+    transfer_detail: Optional[Any] = None
 
     # download quality
     filetype: Optional[str] = None

@@ -183,6 +183,28 @@ class ActiveDownloadFileState(msgspec.Struct, omit_defaults=True):
     local_path: str | None = None
 
 
+class FileFailureDetail(msgspec.Struct):
+    """One file's failure detail, audited on a download-timeout
+    ``download_log`` row (issue #564 C7).
+
+    Wire boundary: ``download_log.transfer_detail`` JSONB (migration
+    043). ``summarize_file_failures`` (``lib/download.py``) already
+    composes a deduplicated, human-readable summary for the operator-
+    facing ``error_message`` column; this Struct is the full per-file
+    detail behind that summary — which peer, which file, the exact
+    terminal state/exception, bytes transferred, and retry count —
+    queryable without re-deriving it from ``active_download_state``
+    history that no longer exists once the request self-heals back to
+    ``wanted``.
+    """
+    username: str
+    filename: str
+    last_state: str | None = None
+    last_exception: str | None = None
+    bytes_transferred: int = 0
+    retry_count: int = 0
+
+
 class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     """State persisted to DB for an album being actively downloaded.
 

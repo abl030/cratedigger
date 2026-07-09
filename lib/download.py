@@ -16,6 +16,7 @@ from contextlib import AbstractContextManager
 from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
                     runtime_checkable)
 
+import msgspec
 
 from lib import download_processing
 from lib.download_processing import (
@@ -41,6 +42,7 @@ from lib.processing_paths import attempt_fingerprint, directory_has_entries
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
                          DownloadDecision,
+                         FileFailureDetail,
                          decide_download_action,
                          extract_usernames)
 from lib import transitions
@@ -108,6 +110,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         filetype: str | None = None,
         outcome: DownloadLogOutcome | None = None,
         error_message: str | None = None,
+        transfer_detail: Any = None,
     ) -> int: ...
 
     def enqueue_import_job(
@@ -326,6 +329,24 @@ def summarize_file_failures(files: list[DownloadFile]) -> str | None:
     return ", ".join(f"{count}× '{reason}'" for reason, count in ordered)
 
 
+def _file_failure_details(files: list[DownloadFile]) -> list[FileFailureDetail]:
+    """Per-file failure detail behind the composed timeout summary
+    (issue #564 C7) — the full audit record (one entry per tracked
+    file, not only the ones with evidence) persisted to
+    ``download_log.transfer_detail``."""
+    return [
+        FileFailureDetail(
+            username=f.username,
+            filename=f.filename,
+            last_state=f.last_state,
+            last_exception=f.last_exception,
+            bytes_transferred=f.bytes_transferred or 0,
+            retry_count=f.retry or 0,
+        )
+        for f in files
+    ]
+
+
 def _vanished_timeout_reason(files: list[DownloadFile]) -> str:
     """Compose the reason for the "transfers vanished from slskd" timeout
     path (issue #564 C5/I2): names the last observed evidence when any
@@ -370,6 +391,7 @@ def _timeout_album(
 
     dl_info = _build_download_info(entry)
     reason = _enrich_timeout_reason(reason, entry.files)
+    transfer_detail = msgspec.to_builtins(_file_failure_details(entry.files))
 
     logger.info(f"DOWNLOAD TIMEOUT: {entry.artist} - {entry.title} "
                 f"({completed}/{total} files done, reason={reason})")
@@ -381,6 +403,7 @@ def _timeout_album(
         filetype=dl_info.filetype,
         outcome="timeout",
         error_message=reason,
+        transfer_detail=transfer_detail,
     )
     for username in extract_usernames(entry.files):
         if db.check_and_apply_cooldown(username):
