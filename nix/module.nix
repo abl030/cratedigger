@@ -404,6 +404,7 @@
     [Jellyfin]
     url = ${cfg.notifiers.jellyfin.url}
     token_file = ${toString cfg.notifiers.jellyfin.tokenFile}
+    path_map = ${cfg.notifiers.jellyfin.pathMap}
 
     [Logging]
     level = ${cfg.logging.level}
@@ -1072,6 +1073,18 @@ in {
         tokenFile = mkOption {
           type = types.nullOr types.path;
           default = null;
+        };
+        pathMap = mkOption {
+          type = types.str;
+          default = "";
+          example = "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets";
+          description = ''
+            local:remote path remap for the "Recently Added" DateCreated pin
+            (issue #574) — the prefix swap from the beets library path on
+            this host to the path Jellyfin's music library sees the same
+            files at. Required for the pin to locate albums in Jellyfin;
+            the plain scan notifier works without it.
+          '';
         };
       };
     };

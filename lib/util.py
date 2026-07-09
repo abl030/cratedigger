@@ -606,23 +606,29 @@ FetchXml = Callable[..., ET.Element]
 PutFn = Callable[..., int]
 
 
-def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | None:
-    """Translate a beets ``imported_path`` to the absolute path Plex stores in
-    ``Media.Part.file`` — the join key for locating an album in Plex.
+def _notifier_container_path(
+    imported_path: str,
+    *,
+    beets_directory: str | None,
+    path_map: str | None,
+) -> str | None:
+    """Translate a beets ``imported_path`` to the absolute path a media
+    server sees on its side of a ``local_prefix:container_prefix`` remap —
+    the join key for locating an album in Plex/Jellyfin.
 
     Mirrors the absolutize + path_map transform in ``trigger_plex_scan``. Kept
-    as a separate function deliberately: ``trigger_plex_scan`` has a documented
-    five-week silent-failure history (see
+    separate from that function deliberately: ``trigger_plex_scan`` has a
+    documented five-week silent-failure history (see
     ``docs/solutions/runtime-errors/plex-partial-scan-silent-200.md``) and is
     not refactored here to avoid regressing it. Returns ``None`` when the
-    result is not absolute (Plex can't match a relative path)."""
+    result is not absolute (a media server can't match a relative path)."""
     if not imported_path:
         return None
     out = imported_path
-    if not os.path.isabs(out) and cfg.beets_directory:
-        out = os.path.join(cfg.beets_directory, out)
-    if cfg.plex_path_map:
-        local_prefix, container_prefix = cfg.plex_path_map.split(":", 1)
+    if not os.path.isabs(out) and beets_directory:
+        out = os.path.join(beets_directory, out)
+    if path_map:
+        local_prefix, container_prefix = path_map.split(":", 1)
         if out.startswith(local_prefix):
             out = container_prefix + out[len(local_prefix):]
         elif not os.path.isabs(out):
@@ -630,11 +636,19 @@ def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | 
     return out if os.path.isabs(out) else None
 
 
-def _plex_urlopen(req: "urllib.request.Request", timeout: int = 15) -> Any:
-    """urlopen with a verify-then-unverified SSL fallback. The homelab Plex
-    reverse proxy can present a cert that fails default verification from the
-    cratedigger host; the pin must still read/write, so fall back to an
-    unverified context (LAN-local, best-effort) rather than silently failing."""
+def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | None:
+    """The path Plex stores in ``Media.Part.file`` for a beets album folder."""
+    return _notifier_container_path(
+        imported_path, beets_directory=cfg.beets_directory,
+        path_map=cfg.plex_path_map)
+
+
+def _urlopen_ssl_fallback(req: "urllib.request.Request", timeout: int = 15) -> Any:
+    """urlopen with a verify-then-unverified SSL fallback. The homelab
+    Plex/Jellyfin reverse proxies can present a cert that fails default
+    verification from the cratedigger host; the pin must still read/write, so
+    fall back to an unverified context (LAN-local, best-effort) rather than
+    silently failing."""
     import ssl
     try:
         return urllib.request.urlopen(req, timeout=timeout)
@@ -652,7 +666,7 @@ def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> ET.El
     params["X-Plex-Token"] = cfg.resolved_plex_token() or ""
     url = f"{cfg.plex_url}{path}?{urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "application/xml"})
-    with _plex_urlopen(req) as resp:
+    with _urlopen_ssl_fallback(req) as resp:
         return ET.fromstring(resp.read())
 
 
@@ -663,7 +677,7 @@ def _plex_put(cfg: "CratediggerConfig", path: str, **params: str) -> int:
     params["X-Plex-Token"] = cfg.resolved_plex_token() or ""
     url = f"{cfg.plex_url}{path}?{urlencode(params)}"
     req = urllib.request.Request(url, method="PUT")
-    with _plex_urlopen(req) as resp:
+    with _urlopen_ssl_fallback(req) as resp:
         return resp.status
 
 
@@ -811,6 +825,195 @@ def trigger_jellyfin_scan(cfg: CratediggerConfig) -> None:
             logger.info("JELLYFIN: triggered full library refresh")
     except Exception as e:
         logger.warning(f"JELLYFIN: scan trigger failed: {e}")
+
+
+# === Jellyfin DateCreated pin (read + edit) ===
+#
+# Read/edit half of the Jellyfin "Recently Added" pin feature (migration 046,
+# issue #574). The capture/reconcile orchestration lives in
+# lib/jellyfin_pin_service.py; these functions are the thin, testable Jellyfin
+# client it drives. Verified against Jellyfin 10.11 (2026-07-10): item update
+# is POST /Items/{id} with the FULL dto from GET /Items/{id}?userId=… — a
+# partial body wipes the omitted metadata fields, so the setter always
+# round-trips the fetched dto with only DateCreated changed.
+
+
+@dataclass(frozen=True)
+class JellyfinAlbumRef:
+    """A located Jellyfin MusicAlbum: its item id and current ``DateCreated``
+    (ISO-8601 string, stored verbatim), plus name/artist for logging."""
+    item_id: str
+    date_created: str
+    name: str = ""
+    artist: str = ""
+
+
+@dataclass(frozen=True)
+class JellyfinItemRef:
+    """An album child (Audio item): item id and current ``DateCreated``."""
+    item_id: str
+    date_created: str
+
+
+JsonGetFn = Callable[..., Any]
+JsonPostFn = Callable[[str, Any], int]
+
+
+def _jellyfin_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | None:
+    """The path Jellyfin stores as a MusicAlbum's ``Path`` for a beets album
+    folder (Jellyfin sees the library through its own mount, e.g.
+    ``/mnt/fuse/Media/Music/Beets/...`` for ``/mnt/virtio/Music/Beets/...``)."""
+    return _notifier_container_path(
+        imported_path, beets_directory=cfg.beets_directory,
+        path_map=cfg.jellyfin_path_map)
+
+
+def _jellyfin_get_json(cfg: "CratediggerConfig", path: str, **params: str) -> Any:
+    """Thin urllib GET → decoded Jellyfin JSON. Network leaf seam."""
+    from urllib.parse import urlencode
+    url = f"{cfg.jellyfin_url}{path}"
+    if params:
+        url += f"?{urlencode(params)}"
+    req = urllib.request.Request(url, headers={
+        "X-Emby-Token": cfg.resolved_jellyfin_token() or "",
+        "Accept": "application/json",
+    })
+    with _urlopen_ssl_fallback(req) as resp:
+        return json.loads(resp.read())
+
+
+def _jellyfin_post_json(cfg: "CratediggerConfig", path: str, payload: Any) -> int:
+    """Thin urllib POST of a JSON body → HTTP status. Network leaf seam."""
+    req = urllib.request.Request(
+        f"{cfg.jellyfin_url}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "X-Emby-Token": cfg.resolved_jellyfin_token() or "",
+            "Content-Type": "application/json",
+        })
+    with _urlopen_ssl_fallback(req) as resp:
+        return resp.status
+
+
+def jellyfin_find_album_by_path(
+    cfg: "CratediggerConfig",
+    imported_path: str,
+    *,
+    get_json: JsonGetFn | None = None,
+) -> JellyfinAlbumRef | None:
+    """Locate the Jellyfin MusicAlbum whose ``Path`` is ``imported_path``'s
+    album folder (translated through ``jellyfin_path_map``).
+
+    Narrows candidates by album-title search then artist search (Jellyfin has
+    no path-filter API — an unfiltered recursive /Items sweep is too slow to
+    be a fallback), and confirms each candidate by exact ``Path`` equality —
+    the authoritative join, resilient to the extension change an upgrade
+    causes. Returns ``None`` when Jellyfin has no album there (e.g. a
+    genuinely-new album not yet scanned). Transport/parse failures raise to
+    the caller, which treats Jellyfin work as non-fatal."""
+    if not cfg.jellyfin_url:
+        return None
+    container = _jellyfin_container_path(cfg, imported_path)
+    if not container:
+        return None
+    get: JsonGetFn = get_json or (lambda path, **p: _jellyfin_get_json(cfg, path, **p))
+    artist, album = _parse_artist_album(imported_path)
+    target = container.rstrip("/")
+
+    def _candidates() -> Iterator[dict[str, Any]]:
+        if album:
+            doc = get("/Items", recursive="true",
+                      includeItemTypes="MusicAlbum", searchTerm=album,
+                      fields="Path,DateCreated", limit="50")
+            yield from doc.get("Items", [])
+        if artist:
+            adoc = get("/Items", recursive="true",
+                       includeItemTypes="MusicArtist", searchTerm=artist,
+                       limit="10")
+            for a in adoc.get("Items", []):
+                aid = a.get("Id")
+                if not aid:
+                    continue
+                doc = get("/Items", recursive="true",
+                          includeItemTypes="MusicAlbum", albumArtistIds=aid,
+                          fields="Path,DateCreated", limit="200")
+                yield from doc.get("Items", [])
+
+    seen: set[str] = set()
+    for it in _candidates():
+        iid = it.get("Id")
+        if not iid or iid in seen:
+            continue
+        seen.add(iid)
+        if (it.get("Path") or "").rstrip("/") != target:
+            continue
+        return JellyfinAlbumRef(
+            item_id=iid,
+            date_created=it.get("DateCreated") or "",
+            name=it.get("Name") or "",
+            artist=it.get("AlbumArtist") or "",
+        )
+    return None
+
+
+def jellyfin_get_album_children(
+    cfg: "CratediggerConfig",
+    album_item_id: str,
+    *,
+    get_json: JsonGetFn | None = None,
+) -> list[JellyfinItemRef]:
+    """The Audio items under a Jellyfin album — the rows whose ``DateCreated``
+    actually drives the 'Recently Added'/Latest ordering. Transport failures
+    raise to the caller."""
+    get: JsonGetFn = get_json or (lambda path, **p: _jellyfin_get_json(cfg, path, **p))
+    doc = get("/Items", parentId=album_item_id, includeItemTypes="Audio",
+              fields="DateCreated", limit="2000")
+    out: list[JellyfinItemRef] = []
+    for it in doc.get("Items", []):
+        iid = it.get("Id")
+        if not iid:
+            continue
+        out.append(JellyfinItemRef(
+            item_id=iid, date_created=it.get("DateCreated") or ""))
+    return out
+
+
+def jellyfin_set_date_created(
+    cfg: "CratediggerConfig",
+    item_id: str,
+    date_created: str,
+    *,
+    get_json: JsonGetFn | None = None,
+    post_json: JsonPostFn | None = None,
+) -> bool:
+    """Set an item's ``DateCreated`` to ``date_created`` (ISO-8601 string).
+
+    Fetches the item's full dto (Jellyfin's update endpoint REPLACES the item
+    metadata — omitted fields are wiped, so a partial body is data loss) and
+    posts it back with only DateCreated changed. Jellyfin only stamps
+    ``DateCreated`` at item creation, so the restored value survives future
+    scans without a Plex-style field lock. Returns ``True`` on HTTP 200/204.
+
+    The single-item GET needs a userId in Jellyfin 10.11; any user works for
+    reading the dto, so the first user on the server is used."""
+    if not cfg.jellyfin_url:
+        return False
+    get: JsonGetFn = get_json or (lambda path, **p: _jellyfin_get_json(cfg, path, **p))
+    post: JsonPostFn = post_json or (
+        lambda path, payload: _jellyfin_post_json(cfg, path, payload))
+    users = get("/Users")
+    if not isinstance(users, list) or not users:
+        logger.warning("JELLYFIN PIN: /Users returned no users; cannot edit items")
+        return False
+    user_id = users[0].get("Id")
+    dto = get(f"/Items/{item_id}", userId=str(user_id))
+    if not isinstance(dto, dict) or not dto.get("Id"):
+        logger.warning("JELLYFIN PIN: item %s dto fetch returned no item", item_id)
+        return False
+    dto["DateCreated"] = date_created
+    status = post(f"/Items/{item_id}", dto)
+    return status in (200, 204)
 
 
 # === Validation logging ===

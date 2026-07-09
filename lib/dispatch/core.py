@@ -739,6 +739,22 @@ def dispatch_import_core(
                         logger.exception(
                             "PLEX PIN: capture wiring failed (non-fatal)")
                     _trigger_plex(cfg, ir.postflight.imported_path)
+                    # Same capture-before-refresh dance for Jellyfin
+                    # (migration 046, issue #574): snapshot the album's
+                    # DateCreated + item ids while the pre-upgrade items
+                    # still exist, so the reconciler can restore the date
+                    # once the rescan re-stamps them. No-op for
+                    # genuinely-new albums and when Jellyfin is
+                    # unconfigured; best-effort.
+                    try:
+                        from lib.jellyfin_pin_service import (
+                            capture_jellyfin_date_created_pin,
+                        )
+                        capture_jellyfin_date_created_pin(
+                            cfg, db, ir.postflight.imported_path, request_id)
+                    except Exception:
+                        logger.exception(
+                            "JELLYFIN PIN: capture wiring failed (non-fatal)")
                     _trigger_jellyfin(cfg)
                 if action.cleanup and _should_cleanup_path(scenario, action):
                     # Issue #89: force/manual paths pass the user's

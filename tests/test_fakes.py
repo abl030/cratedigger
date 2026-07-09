@@ -564,6 +564,43 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.plex_added_at_pins[0]["status"], "done")
         self.assertEqual(db.plex_added_at_pins[0]["reconciled_at"], now)
 
+    def test_jellyfin_date_created_pin_add_get_pending_and_mark(self):
+        """The fake mirrors migration-046 semantics: monotonic ids, pending
+        filtered by status + captured_before cutoff, mark moves it terminal."""
+        db = FakePipelineDB()
+        now = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="Muse/2026 - The Wow! Signal",
+            original_date_created="2026-04-26T18:31:04.4425337Z",
+            album_item_id="alb-1",
+            children_item_ids=["tr-1", "tr-2"],
+            request_id=8812,
+        )
+        self.assertEqual(pin_id, 1)
+        # Force a deterministic capture time in the past, then read pending.
+        db.jellyfin_date_created_pins[0]["captured_at"] = now - timedelta(minutes=10)
+        pending = db.get_pending_jellyfin_date_created_pins(
+            captured_before=now, limit=100)
+        self.assertEqual(len(pending), 1)
+        row = pending[0]
+        self.assertEqual(row["original_date_created"], "2026-04-26T18:31:04.4425337Z")
+        self.assertEqual(row["album_item_id"], "alb-1")
+        self.assertEqual(row["children_item_ids"], ["tr-1", "tr-2"])
+        self.assertEqual(row["request_id"], 8812)
+        self.assertEqual(row["status"], "pending")
+        # A cutoff before the capture excludes the pin (settle-window guard).
+        self.assertEqual(
+            db.get_pending_jellyfin_date_created_pins(
+                captured_before=now - timedelta(hours=1), limit=100),
+            [])
+        # Marking terminal removes it from pending.
+        db.mark_jellyfin_date_created_pin(pin_id, status="expired", reconciled_at=now)
+        self.assertEqual(
+            db.get_pending_jellyfin_date_created_pins(captured_before=now, limit=100),
+            [])
+        self.assertEqual(db.jellyfin_date_created_pins[0]["status"], "expired")
+        self.assertEqual(db.jellyfin_date_created_pins[0]["reconciled_at"], now)
+
     def test_log_download_rejects_non_canonical_outcome(self):
         """Mirror of download_log_outcome_check — the fake must reject
         exactly what production rejects (test-fidelity Rule A/B; the
