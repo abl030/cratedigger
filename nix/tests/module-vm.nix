@@ -189,6 +189,17 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl show -p Wants cratedigger.service | grep -q cratedigger-db-migrate.service")
     machine.fail("systemctl show -p Requires cratedigger.service | grep -q cratedigger-db-migrate.service")
 
+    # Counterpart pins: the long-running workers restart on switch anyway
+    # (restartIfChanged=true), so they MUST keep the hard Requires= gate --
+    # for them it's harmless AND it's their only "failed migration blocks
+    # start" guarantee (they have no assert_schema_current startup gate).
+    # A future edit flipping one of these to Wants= would silently lose
+    # that guarantee. (youtube-ingest's identical pin lives in its U7
+    # block further down.)
+    machine.succeed("systemctl show -p Requires cratedigger-web.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Requires cratedigger-importer.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Requires cratedigger-import-preview-worker.service | grep -q cratedigger-db-migrate.service")
+
     # Peer auth by construction (KTD5): the socket DSN carries no
     # password, and none exists in the rendered config or unit files.
     machine.succeed("grep -q 'dsn = postgresql:///root?host=/run/postgresql' /var/lib/cratedigger/config.ini")
