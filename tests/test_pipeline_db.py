@@ -8866,6 +8866,78 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(
             self.db.get_owned_local_paths(), fake.get_owned_local_paths())
 
+    def test_get_owned_attempt_folders_round_trip_preserves_identity(self):
+        rid = self.db.add_request(
+            artist_name="Sigur Rós", album_title="Ágætis byrjun",
+            source="request", status="imported", year=1999)
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=rid, username="p0",
+                filename="p0\\Tonlist\\01.flac",
+                attempt_fingerprint="abcd1234"),
+        ])
+
+        folders = self.db.get_owned_attempt_folders()
+
+        self.assertEqual(len(folders), 1)
+        entry = folders[0]
+        self.assertEqual(entry["request_id"], rid)
+        self.assertEqual(entry["attempt_fingerprint"], "abcd1234")
+        self.assertEqual(entry["artist_name"], "Sigur Rós")
+        self.assertEqual(entry["album_title"], "Ágætis byrjun")
+        self.assertEqual(entry["year"], 1999)
+
+    def test_get_owned_attempt_folders_excludes_null_fingerprint(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self.assertEqual(self.db.get_owned_attempt_folders(), [])
+
+    def test_get_owned_attempt_folders_dedupes_multi_file_attempt(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=rid, username="p0", filename="a.flac",
+                attempt_fingerprint="fp1"),
+            TransferLedgerRow(
+                request_id=rid, username="p0", filename="b.flac",
+                attempt_fingerprint="fp1"),
+        ])
+        self.assertEqual(len(self.db.get_owned_attempt_folders()), 1)
+
+    def test_get_owned_attempt_folders_drops_hard_deleted_request(self):
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=rid, username="p0", filename="a.flac",
+                attempt_fingerprint="fp1"),
+        ])
+        self.db._execute(
+            "DELETE FROM album_requests WHERE id = %s", (rid,))
+
+        self.assertEqual(self.db.get_owned_attempt_folders(), [])
+
+    def test_get_owned_attempt_folders_fake_parity(self):
+        """#546 W1 read-projection parity."""
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        rid = self._seed_request()
+        fake.seed_request({
+            "id": rid, "status": "wanted",
+            "artist_name": "Artist", "album_title": "Album", "year": None})
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=rid, username="p0", filename="a.flac",
+                    attempt_fingerprint="fp1"),
+            ])
+
+        self.assertEqual(
+            self.db.get_owned_attempt_folders(),
+            fake.get_owned_attempt_folders())
+
 
 @requires_postgres
 class TestReadProjectionParity(unittest.TestCase):
