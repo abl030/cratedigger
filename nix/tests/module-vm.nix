@@ -37,7 +37,8 @@ let
     plugins = cfg["plugins"].split()
     expected = (
         "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
-        "info missing duplicates edit fromfilename ftintitle the inline"
+        "info missing duplicates edit fromfilename ftintitle the inline "
+        "permissions"
     ).split()
     assert plugins == expected, plugins
 
@@ -279,7 +280,8 @@ pkgs.testers.nixosTest {
     loaded = {p.strip() for p in plugins_line.split(":", 1)[1].split(",")}
     for plugin in (
         "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
-        "info missing duplicates edit fromfilename ftintitle the inline"
+        "info missing duplicates edit fromfilename ftintitle the inline "
+        "permissions"
     ).split():
         assert plugin in loaded, f"plugin {plugin} not loaded: {version_out}"
     # Tokenless/stranger posture: config loads without crash or prompt.

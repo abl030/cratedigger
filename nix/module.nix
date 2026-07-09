@@ -103,8 +103,12 @@
         original_year = true;
       };
     };
-    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline";
+    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
     chroma.auto = false;
+    permissions = {
+      file = "0664";
+      dir = "0775";
+    };
     fetchart = {
       auto = true;
       minwidth = bc.fetchart.minwidth;
