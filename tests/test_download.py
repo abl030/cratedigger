@@ -705,6 +705,17 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         err.response = SimpleNamespace(text=body)  # type: ignore[attr-defined]
         return err
 
+    def _make_http_error(self, body: str, status_code: int = 500) -> Exception:
+        """Build a ``requests.HTTPError`` with a full response (body +
+        status code) for the enqueue-failure reason-extraction tests."""
+        from types import SimpleNamespace
+        import requests
+
+        err = requests.HTTPError(f"{status_code} Server Error")
+        err.response = SimpleNamespace(  # type: ignore[attr-defined]
+            text=body, status_code=status_code)
+        return err
+
     def test_offline_http_error_body_returns_rejected(self):
         """The canonical slskd response body 'User pooyork appears to be
         offline' must be classified as rejected — the safety net that
@@ -722,6 +733,22 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
 
         self.assertEqual(outcome.status, "rejected")
         self.assertIsNone(outcome.downloads)
+
+    def test_offline_http_error_carries_offline_reason(self):
+        """Issue #564 C4: the offline classification carries a stable,
+        human-readable reason regardless of the raw response body text."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_offline_http_error(
+            "User pooyork appears to be offline")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "pooyork", [{"filename": "track.flac", "size": 1}],
+                "pooyork\\Music", ctx)
+
+        self.assertEqual(outcome.reason, "peer appears to be offline")
 
     def test_offline_http_error_case_insensitive(self):
         """Body match must tolerate slskd-version body casing variants."""
@@ -752,6 +779,54 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
 
         self.assertEqual(outcome.status, "unknown")
 
+    def test_non_offline_http_error_carries_response_body_as_reason(self):
+        """Issue #564 C4: the real slskd body (e.g. a
+        DownloadEnqueueException message) is the reason, not the
+        discarded default."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_http_error(
+            "Soulseek.DownloadEnqueueException: File not shared.")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(
+            outcome.reason,
+            "Soulseek.DownloadEnqueueException: File not shared.")
+
+    def test_html_error_body_falls_back_to_status_code_message(self):
+        """An HTML error page body isn't a usable reason — fall back to a
+        generic HTTP-status message."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_http_error(
+            "<html><body>502 Bad Gateway</body></html>", status_code=502)
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.reason, "slskd enqueue failed (HTTP 502)")
+
+    def test_overlong_error_body_falls_back_to_status_code_message(self):
+        """An implausibly long body isn't a short exception message —
+        fall back rather than storing a huge blob."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_http_error(
+            "x" * 600, status_code=500)
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.reason, "slskd enqueue failed (HTTP 500)")
+
     def test_http_error_with_no_response_returns_unknown(self):
         """Defensive: HTTPError without an attached response should not
         crash — fall through to unknown."""
@@ -765,6 +840,7 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
                 "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
 
         self.assertEqual(outcome.status, "unknown")
+        self.assertEqual(outcome.reason, "synthetic — no .response")
 
     def test_connection_error_returns_unknown(self):
         """Generic non-HTTPError exceptions (network drop, etc.) stay in
@@ -787,6 +863,7 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
                 "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
 
         self.assertEqual(outcome.status, "unknown")
+        self.assertEqual(outcome.reason, "dropped")
 
     def test_falsy_enqueue_response_still_returns_rejected(self):
         """Regression guard: when slskd-api ever returns falsy (rather
