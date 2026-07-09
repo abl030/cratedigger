@@ -62,6 +62,7 @@ def make_db():
         "youtube_album_mappings",  # migration 034
         "youtube_album_empty_resolutions",  # migration 035
         "plex_added_at_pins",  # migration 040
+        "jellyfin_date_created_pins",  # migration 046
         "slskd_event_cursor",  # migration 041
         "slskd_search_ledger",  # migration 044
         "slskd_transfer_ledger",  # migration 045
@@ -287,6 +288,88 @@ class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
         # this is the reconciler's settle-window guard.
         past = datetime.now(timezone.utc) - timedelta(hours=1)
         rows = db.get_pending_plex_added_at_pins(captured_before=past, limit=100)
+        self.assertEqual([r for r in rows if r["id"] == pin_id], [])
+
+
+@requires_postgres
+class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
+    """Rule A round-trip for the Jellyfin DateCreated pin store (migration
+    046). Every field the writer persists must read back unchanged through
+    real PG — a FakePipelineDB pass alone can't catch a column dropped at the
+    SQL seam, and children_item_ids crosses the JSONB boundary."""
+
+    def test_add_pin_round_trips_every_field(self):
+        # Read back via a raw SELECT (not the getter) so the assertion targets
+        # exactly what PG preserved — the strongest Rule A form.
+        db = make_db()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="Muse/2026 - The Wow! Signal",
+            original_date_created="2026-04-26T18:31:04.4425337Z",
+            album_item_id="d7139f369ef487c32970929c9a4adf01",
+            children_item_ids=["tr-1", "tr-2", "tr-3"],
+            request_id=8812,
+        )
+        self.assertIsInstance(pin_id, int)
+        cur = db._execute(
+            "SELECT imported_path, original_date_created, album_item_id, "
+            "children_item_ids, request_id, status "
+            "FROM jellyfin_date_created_pins WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["imported_path"], "Muse/2026 - The Wow! Signal")
+        self.assertEqual(row["original_date_created"],
+                         "2026-04-26T18:31:04.4425337Z")
+        self.assertEqual(row["album_item_id"], "d7139f369ef487c32970929c9a4adf01")
+        self.assertEqual(row["children_item_ids"], ["tr-1", "tr-2", "tr-3"])
+        self.assertEqual(row["request_id"], 8812)
+        self.assertEqual(row["status"], "pending")
+
+    def test_add_pin_round_trips_nullable_and_empty_fields(self):
+        # request_id is nullable and the children snapshot can be empty —
+        # both must round-trip exactly.
+        db = make_db()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="A/B", original_date_created="2026-01-01T00:00:00Z",
+            album_item_id="alb", children_item_ids=[], request_id=None)
+        cur = db._execute(
+            "SELECT children_item_ids, request_id "
+            "FROM jellyfin_date_created_pins WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["children_item_ids"], [])
+        self.assertIsNone(row["request_id"])
+
+    def test_mark_pin_round_trips_status_and_excludes_from_pending(self):
+        db = make_db()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="A/B", original_date_created="2026-01-01T00:00:00Z",
+            album_item_id="alb", children_item_ids=["t"], request_id=None)
+        now = datetime.now(timezone.utc)
+        db.mark_jellyfin_date_created_pin(
+            pin_id, status="expired", reconciled_at=now)
+        cur = db._execute(
+            "SELECT status, reconciled_at FROM jellyfin_date_created_pins "
+            "WHERE id = %s", (pin_id,))
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual(row["status"], "expired")
+        self.assertIsNotNone(row["reconciled_at"])
+        rows = db.get_pending_jellyfin_date_created_pins(
+            captured_before=now + timedelta(days=1), limit=100)
+        self.assertEqual([r for r in rows if r["id"] == pin_id], [],
+                         "terminal pin must not appear in pending")
+
+    def test_pending_getter_respects_captured_before_cutoff(self):
+        db = make_db()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="C/D", original_date_created="2026-01-01T00:00:00Z",
+            album_item_id="alb", children_item_ids=["t"], request_id=1)
+        # A cutoff in the past (before the just-now capture) excludes the pin —
+        # this is the reconciler's settle-window guard.
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        rows = db.get_pending_jellyfin_date_created_pins(
+            captured_before=past, limit=100)
         self.assertEqual([r for r in rows if r["id"] == pin_id], [])
 
 

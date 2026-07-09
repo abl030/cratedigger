@@ -238,6 +238,11 @@ class FakePipelineDB:
         # monotonically like the other fakes.
         self.plex_added_at_pins: list[dict[str, Any]] = []
         self._next_plex_pin_id = 0
+        # Migration 046 — Jellyfin DateCreated pin store. Rows mirror the
+        # production column shape (status 'pending'|'done'|'skipped'|
+        # 'expired'); ids assigned monotonically like the other fakes.
+        self.jellyfin_date_created_pins: list[dict[str, Any]] = []
+        self._next_jellyfin_pin_id = 0
         # ``_execute`` stubbing for tests that drive raw-SQL CLI paths
         # (``pipeline-cli query``, ``pipeline-cli repair-spectral``, ...).
         # ``queue_execute_results`` lets tests register a deterministic
@@ -384,6 +389,59 @@ class FakePipelineDB:
         reconciled_at: datetime,
     ) -> None:
         for p in self.plex_added_at_pins:
+            if p["id"] == pin_id:
+                p["status"] = status
+                p["reconciled_at"] = reconciled_at
+                return
+
+    # --- Migration 046: Jellyfin DateCreated pin store ---
+
+    def add_jellyfin_date_created_pin(
+        self,
+        *,
+        imported_path: str,
+        original_date_created: str,
+        album_item_id: str,
+        children_item_ids: list[str],
+        request_id: int | None,
+    ) -> int:
+        self._next_jellyfin_pin_id += 1
+        pin_id = self._next_jellyfin_pin_id
+        self.jellyfin_date_created_pins.append({
+            "id": pin_id,
+            "request_id": request_id,
+            "imported_path": imported_path,
+            "original_date_created": original_date_created,
+            "album_item_id": album_item_id,
+            "children_item_ids": list(children_item_ids),
+            "status": "pending",
+            "captured_at": _utcnow(),
+            "reconciled_at": None,
+        })
+        return pin_id
+
+    def get_pending_jellyfin_date_created_pins(
+        self,
+        *,
+        captured_before: datetime,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            copy.deepcopy(p) for p in self.jellyfin_date_created_pins
+            if p["status"] == "pending"
+            and _as_datetime(p["captured_at"]) < captured_before
+        ]
+        rows.sort(key=lambda p: (_as_datetime(p["captured_at"]), p["id"]))
+        return rows[:limit]
+
+    def mark_jellyfin_date_created_pin(
+        self,
+        pin_id: int,
+        *,
+        status: str,
+        reconciled_at: datetime,
+    ) -> None:
+        for p in self.jellyfin_date_created_pins:
             if p["id"] == pin_id:
                 p["status"] = status
                 p["reconciled_at"] = reconciled_at

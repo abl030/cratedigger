@@ -1454,6 +1454,26 @@ def main():
             logger.exception(
                 "PLEX PIN: reconciliation failed; continuing with the cycle.")
 
+        # --- Jellyfin DateCreated pin reconciliation (migration 046) ---
+        # The Jellyfin sibling of the Plex block above (issue #574): restore
+        # the original DateCreated on the album AND its audio items once the
+        # Jellyfin rescan is observable (item ids drifted from the capture
+        # snapshot) — Jellyfin's "Recently Added" orders by the CHILDREN's
+        # dates, and there is no field lock, so pins wait for the rescan to
+        # land instead of trusting a fixed settle window. Bounded,
+        # best-effort, never blocks the cycle.
+        try:
+            from lib.jellyfin_pin_service import (
+                reconcile_jellyfin_date_created_pins,
+            )
+            jf_pin_result = reconcile_jellyfin_date_created_pins(
+                cfg, pipeline_db_source._get_db(),
+                now=datetime.now(timezone.utc))
+            logger.info(jf_pin_result.to_log_line())
+        except Exception:
+            logger.exception(
+                "JELLYFIN PIN: reconciliation failed; continuing with the cycle.")
+
         # --- Phase 0: slskd orphan-transfer convergence (issue #278) ---
         # Cancel live slskd transfers that no downloading row owns.
         # Operator actions (Replace) deliberately leave in-flight

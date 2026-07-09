@@ -401,6 +401,20 @@ def _seed_get_pending_plex_added_at_pins(db: Any) -> "list[dict[str, Any]]":
         captured_before=captured_before, limit=100))
 
 
+def _seed_get_pending_jellyfin_date_created_pins(db: Any) -> "list[dict[str, Any]]":
+    db.add_jellyfin_date_created_pin(
+        imported_path="/x",
+        original_date_created="2026-04-26T18:31:04.4425337Z",
+        album_item_id="alb-1",
+        children_item_ids=["tr-1", "tr-2"],
+        request_id=None,
+    )
+    # captured_before must be AFTER the pin's captured_at (stamped NOW()).
+    captured_before = datetime.now(timezone.utc) + timedelta(days=1)
+    return list(db.get_pending_jellyfin_date_created_pins(
+        captured_before=captured_before, limit=100))
+
+
 def _seed_list_unfindable_probe_candidates(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
@@ -457,6 +471,7 @@ PARITY_REGISTRY: "dict[str, Seeder]" = {
         _seed_find_youtube_album_mapping_for_release,
     # plex pins / unfindable probe.
     "get_pending_plex_added_at_pins": _seed_get_pending_plex_added_at_pins,
+    "get_pending_jellyfin_date_created_pins": _seed_get_pending_jellyfin_date_created_pins,
     "list_unfindable_probe_candidates": _seed_list_unfindable_probe_candidates,
 }
 

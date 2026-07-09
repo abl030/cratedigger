@@ -38,7 +38,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `web.{enable,port,beetsDb,redis.host,redis.port}` | port=8085 | Web UI config. `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
 | `notifiers.meelo.{enable,url,usernameFile,passwordFile}` | disabled | Meelo notifier. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
-| `notifiers.jellyfin.{enable,url,tokenFile}` | disabled | Jellyfin notifier. |
+| `notifiers.jellyfin.{enable,url,tokenFile,pathMap}` | disabled | Jellyfin notifier; `pathMap` (local:remote prefix swap) enables the "Recently Added" DateCreated pin (issue #574, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See docs/quality-ranks.md § "Tuning reference (Nix options)". |

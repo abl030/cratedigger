@@ -187,6 +187,7 @@ class CratediggerConfig:
     jellyfin_token: Optional[str] = None
     jellyfin_token_file: str = ""
     jellyfin_library_id: Optional[str] = None  # optional; full refresh if unset
+    jellyfin_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"
 
     # --- Paths (derived from args) ---
     var_dir: str = "."
@@ -368,6 +369,7 @@ class CratediggerConfig:
             jellyfin_token=get("Jellyfin", "token") or None,
             jellyfin_token_file=get("Jellyfin", "token_file"),
             jellyfin_library_id=get("Jellyfin", "library_id") or None,
+            jellyfin_path_map=get("Jellyfin", "path_map") or None,
             # Paths
             var_dir=var_dir,
             lock_file_path=os.path.join(var_dir, ".cratedigger.lock"),

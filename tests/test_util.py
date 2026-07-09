@@ -1095,6 +1095,212 @@ class TestPlexAddedAtPinClient(unittest.TestCase):
         self.assertIn("X-Plex-Token=tok", req.full_url)
 
 
+class TestJellyfinDateCreatedClient(unittest.TestCase):
+    """Read/edit half of the Jellyfin 'Recently Added' pin (migration 046).
+    Path translation + find-by-path matching are driven through injected
+    get/post seams; the urllib leaves are asserted once via the real paths."""
+
+    ALBUM_PATH = "/mnt/fuse/Media/Music/Beets/Muse/2026 - The Wow! Signal"
+
+    def _cfg(self, **kw):
+        from lib.config import CratediggerConfig
+        kw.setdefault("jellyfin_url", "http://jellyfin:8096")
+        kw.setdefault("jellyfin_token", "tok")
+        kw.setdefault("beets_directory", "/mnt/virtio/Music/Beets")
+        kw.setdefault("jellyfin_path_map",
+                      "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets")
+        return CratediggerConfig(**kw)
+
+    def test_container_path_absolutize_then_path_map(self):
+        from lib.util import _jellyfin_container_path
+        cfg = self._cfg()
+        self.assertEqual(
+            _jellyfin_container_path(cfg, "Artist/Album"),
+            "/mnt/fuse/Media/Music/Beets/Artist/Album")
+        self.assertEqual(
+            _jellyfin_container_path(cfg, "/mnt/virtio/Music/Beets/X/Y"),
+            "/mnt/fuse/Media/Music/Beets/X/Y")
+
+    def test_container_path_none_when_not_absolutizable(self):
+        from lib.util import _jellyfin_container_path
+        from lib.config import CratediggerConfig
+        cfg = CratediggerConfig(jellyfin_url="http://jf:8096")
+        self.assertIsNone(_jellyfin_container_path(cfg, "Artist/Album"))
+        self.assertIsNone(_jellyfin_container_path(cfg, ""))
+
+    def _get(self, responses: dict[str, object]):
+        """A get_json seam keyed by (path, discriminating param)."""
+        def _fn(path, **params):
+            if path == "/Items" and params.get("includeItemTypes") == "MusicAlbum":
+                return responses.get("albums", {"Items": []})
+            if path == "/Items" and params.get("includeItemTypes") == "MusicArtist":
+                return responses.get("artists", {"Items": []})
+            if path == "/Items" and "parentId" in params:
+                return responses.get("children", {"Items": []})
+            return {"Items": []}
+        return _fn
+
+    def test_find_album_by_path_matches_on_exact_album_path(self):
+        from lib.util import jellyfin_find_album_by_path
+        albums = {"Items": [
+            {"Id": "other", "Name": "Wow", "AlbumArtist": "X",
+             "DateCreated": "2020-01-01T00:00:00Z",
+             "Path": "/mnt/fuse/Media/Music/Beets/Other/2020 - Wow"},
+            {"Id": "alb-1", "Name": "The Wow! Signal", "AlbumArtist": "Muse",
+             "DateCreated": "2026-04-26T18:31:04.4425337Z",
+             "Path": self.ALBUM_PATH},
+        ]}
+        ref = jellyfin_find_album_by_path(
+            self._cfg(), "Muse/2026 - The Wow! Signal",
+            get_json=self._get({"albums": albums}))
+        self.assertIsNotNone(ref)
+        assert ref is not None
+        self.assertEqual(ref.item_id, "alb-1")
+        self.assertEqual(ref.date_created, "2026-04-26T18:31:04.4425337Z")
+        self.assertEqual(ref.name, "The Wow! Signal")
+        self.assertEqual(ref.artist, "Muse")
+
+    def test_find_album_by_path_none_when_paths_dont_match(self):
+        from lib.util import jellyfin_find_album_by_path
+        albums = {"Items": [
+            {"Id": "1", "Name": "The Wow! Signal",
+             "DateCreated": "2026-01-01T00:00:00Z",
+             "Path": "/mnt/fuse/Media/Music/Me/Muse/The Wow! Signal"},
+        ]}
+        ref = jellyfin_find_album_by_path(
+            self._cfg(), "Muse/2026 - The Wow! Signal",
+            get_json=self._get({"albums": albums}))
+        self.assertIsNone(ref)
+
+    def test_find_album_via_artist_fallback(self):
+        # Album-title search misses (tag/path divergence); the artist search
+        # → albumArtistIds sweep still finds the album by exact path.
+        from lib.util import jellyfin_find_album_by_path
+        calls = []
+
+        def _fn(path, **params):
+            calls.append(params)
+            if params.get("includeItemTypes") == "MusicArtist":
+                return {"Items": [{"Id": "artist-1", "Name": "Muse"}]}
+            if params.get("albumArtistIds") == "artist-1":
+                return {"Items": [
+                    {"Id": "alb-1", "Name": "Different Tag Name",
+                     "AlbumArtist": "Muse",
+                     "DateCreated": "2026-04-26T18:31:04Z",
+                     "Path": self.ALBUM_PATH}]}
+            return {"Items": []}
+        ref = jellyfin_find_album_by_path(
+            self._cfg(), "/mnt/virtio/Music/Beets/Muse/2026 - The Wow! Signal",
+            get_json=_fn)
+        self.assertIsNotNone(ref)
+        assert ref is not None
+        self.assertEqual(ref.item_id, "alb-1")
+
+    def test_find_album_none_when_jellyfin_unconfigured(self):
+        from lib.util import jellyfin_find_album_by_path
+        from lib.config import CratediggerConfig
+        self.assertIsNone(jellyfin_find_album_by_path(
+            CratediggerConfig(), "A/B",
+            get_json=lambda path, **p: {"Items": []}))
+
+    def test_get_album_children_returns_audio_refs(self):
+        from lib.util import jellyfin_get_album_children
+        children = {"Items": [
+            {"Id": "tr-1", "DateCreated": "2026-07-09T00:39:26Z"},
+            {"Id": "tr-2", "DateCreated": "2026-07-09T00:39:27Z"},
+            {"Name": "no id — dropped"},
+        ]}
+        refs = jellyfin_get_album_children(
+            self._cfg(), "alb-1", get_json=self._get({"children": children}))
+        self.assertEqual([(r.item_id, r.date_created) for r in refs],
+                         [("tr-1", "2026-07-09T00:39:26Z"),
+                          ("tr-2", "2026-07-09T00:39:27Z")])
+
+    def test_set_date_created_round_trips_full_dto(self):
+        # The update endpoint REPLACES item metadata — the setter must post
+        # back the FULL fetched dto with only DateCreated changed.
+        from lib.util import jellyfin_set_date_created
+        posted = []
+
+        def _get(path, **params):
+            if path == "/Users":
+                return [{"Id": "user-1"}, {"Id": "user-2"}]
+            if path == "/Items/alb-1":
+                self.assertEqual(params.get("userId"), "user-1")
+                return {"Id": "alb-1", "Name": "The Wow! Signal",
+                        "DateCreated": "2026-07-09T00:39:26Z",
+                        "Genres": ["Rock"], "ProviderIds": {"MusicBrainzAlbum": "mbid"}}
+            self.fail(f"unexpected GET {path}")
+
+        def _post(path, payload):
+            posted.append((path, payload))
+            return 204
+        ok = jellyfin_set_date_created(
+            self._cfg(), "alb-1", "2026-04-26T18:31:04Z",
+            get_json=_get, post_json=_post)
+        self.assertTrue(ok)
+        path, payload = posted[0]
+        self.assertEqual(path, "/Items/alb-1")
+        self.assertEqual(payload["DateCreated"], "2026-04-26T18:31:04Z")
+        # Full dto preserved — a partial body would wipe these in Jellyfin.
+        self.assertEqual(payload["Genres"], ["Rock"])
+        self.assertEqual(payload["ProviderIds"], {"MusicBrainzAlbum": "mbid"})
+
+    def test_set_date_created_false_on_non_2xx(self):
+        from lib.util import jellyfin_set_date_created
+        self.assertFalse(jellyfin_set_date_created(
+            self._cfg(), "alb-1", "2026-01-01T00:00:00Z",
+            get_json=lambda path, **p: (
+                [{"Id": "u"}] if path == "/Users" else {"Id": "alb-1"}),
+            post_json=lambda path, payload: 500))
+
+    def test_set_date_created_false_when_no_users(self):
+        from lib.util import jellyfin_set_date_created
+        self.assertFalse(jellyfin_set_date_created(
+            self._cfg(), "alb-1", "2026-01-01T00:00:00Z",
+            get_json=lambda path, **p: [],
+            post_json=lambda path, payload: self.fail("must not POST")))
+
+    def test_set_date_created_false_when_item_missing(self):
+        from lib.util import jellyfin_set_date_created
+        self.assertFalse(jellyfin_set_date_created(
+            self._cfg(), "alb-1", "2026-01-01T00:00:00Z",
+            get_json=lambda path, **p: (
+                [{"Id": "u"}] if path == "/Users" else {}),
+            post_json=lambda path, payload: self.fail("must not POST")))
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_get_json_urllib_leaf_sends_token_header(self, mock_urlopen):
+        from lib.util import _jellyfin_get_json
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = b'{"Items": []}'
+        mock_urlopen.return_value = mock_resp
+        out = _jellyfin_get_json(self._cfg(), "/Items", searchTerm="x y")
+        self.assertEqual(out, {"Items": []})
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_header("X-emby-token"), "tok")
+        self.assertIn("/Items?searchTerm=x+y", req.full_url)
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_post_json_urllib_leaf_sends_json_body(self, mock_urlopen):
+        from lib.util import _jellyfin_post_json
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.status = 204
+        mock_urlopen.return_value = mock_resp
+        status = _jellyfin_post_json(
+            self._cfg(), "/Items/alb-1", {"Id": "alb-1"})
+        self.assertEqual(status, 204)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.method, "POST")
+        self.assertEqual(req.get_header("X-emby-token"), "tok")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        self.assertEqual(req.data, b'{"Id": "alb-1"}')
+
+
 class TestBeetsSubprocessEnv(unittest.TestCase):
     """beets_subprocess_env() is the single source of truth for the env dict
     used by every subprocess that invokes beets (directly or via the harness
