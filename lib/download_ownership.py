@@ -182,18 +182,24 @@ class DownloadOwnershipWriter:
         finally:
             self._close_db(db)
 
-    def stamp_transfer_id(
-        self, username: str, filename: str, transfer_id: str,
+    def stamp_transfer_ids(
+        self, username: str, pairs: list[tuple[str, str]],
     ) -> int:
-        """Enqueue-response ownership write (issue #571 PR 5, T1.5) using
-        a fresh DB handle -- same worker-safety rationale as
-        ``record_transfer_enqueue``. Called right after
-        ``slskd_enqueue_with_outcome`` reconciles a POST's transfer id,
-        so the row T1 just inserted carries it before the purge flip ever
-        needs to match a completed transfer back to its ledger row.
+        """Enqueue-response ownership write (issue #571 PR 5, T1.5) --
+        same worker-safety rationale as ``record_transfer_enqueue``, and
+        the same one-handle-per-batch shape: an enqueue reconciles every
+        file's transfer id at once, so a 20-track album is one connection,
+        not twenty. Called right after ``slskd_enqueue_with_outcome``
+        reconciles a POST's transfer ids, so the rows T1 just inserted
+        carry them before the purge flip ever needs to match a completed
+        transfer back to its ledger row. ``pairs`` is
+        ``[(filename, transfer_id), ...]``; returns total rows stamped.
         """
         db = self._open_db()
         try:
-            return db.stamp_transfer_id(username, filename, transfer_id)
+            return sum(
+                db.stamp_transfer_id(username, filename, transfer_id)
+                for filename, transfer_id in pairs
+            )
         finally:
             self._close_db(db)

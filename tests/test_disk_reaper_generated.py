@@ -6,9 +6,9 @@ good-citizen doctrine).
 ``lib/slskd_transfers.py::reap_disk_orphans`` reasons from filesystem +
 DB state (``ctx.cfg.slskd_download_dir`` + the ``downloading`` rows +
 the write-ahead transfer ledger, migration 045) because a
-completed-but-unconsumed download has no slskd-side handle left once
-``remove_completed_downloads()`` purges the transfer record at the end
-of the cycle. Eight invariants, each shipped as a deterministic pin
+completed-but-unconsumed download's slskd-side handle is unreliable —
+the end-of-cycle ``purge_completed_transfers`` removes stamped-owned
+completed records, and unstamped/foreign ones persist indefinitely. Eight invariants, each shipped as a deterministic pin
 (``TestDiskReaperDeterministicPins`` / ``TestCanonicalDerivationParity``)
 AND a generated property (``TestGeneratedDiskReaperInvariants`` /
 ``TestGeneratedCanonicalDerivationParity``):
