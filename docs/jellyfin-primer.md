@@ -137,6 +137,13 @@ Gotchas:
   artist search and verifies by exact `Path` equality instead.
 - `DateCreated` for new items comes from file **ctime**, not scan time — so
   re-stamped dates equal the import time even if the scan runs hours later.
+- **The finder matches the album folder path exactly.** If a deployment's
+  beets path format rendered per-disc subfolders (this one doesn't — paths
+  are flat `$albumartist/$year - $album/$track`), Jellyfin's album `Path`
+  wouldn't equal the beets album folder and no pin would be captured. That
+  degrades safely — the album is simply unprotected against Recently-Added
+  pollution; a false match is impossible (paths are unique) and a stale pin
+  marks itself `skipped`.
 
 ## Debugging "upgrade shows in Recently Added"
 

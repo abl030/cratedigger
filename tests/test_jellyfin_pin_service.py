@@ -324,6 +324,23 @@ class TestReconcile(unittest.TestCase):
              res.expired, res.errors), (0, 0, 0, 0, 0, 0))
         self.assertEqual(called, [])
 
+    def test_pending_fetch_failure_returns_empty_result(self):
+        # A DB fetch failure aborts the pass with all-zero counters and
+        # touches nothing (best-effort, never raises).
+        class FailingDB(FakePipelineDB):
+            def get_pending_jellyfin_date_created_pins(self, **kw):
+                raise RuntimeError("db down")
+        db = FailingDB()
+        pin_id = self._seed(db)
+        res = self._reconcile(
+            db, find_fn=lambda cfg, path: self.fail("must not reach Jellyfin"),
+            children_fn=lambda cfg, iid: [],
+            set_fn=lambda *a: True)
+        self.assertEqual(
+            (res.pinned, res.already_correct, res.skipped, res.waiting,
+             res.expired, res.errors), (0, 0, 0, 0, 0, 0))
+        self.assertEqual(self._pin(db, pin_id)["status"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()
