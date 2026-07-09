@@ -200,11 +200,17 @@ def _run_dispatch(world: DispatchWorld) -> dict:
 def _reject_via_evidence_decision(
     *, decision: str, requeue_on_failure: bool, new_min_bitrate: int,
     source_username: str | None = "user1",
+    distance: float | None = 0.0,
 ) -> FakePipelineDB:
     """Established recipe (mirrors
     ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionForcedRequeue._reject``)
     for driving the REAL ``_reject_import_from_evidence_decision`` directly
-    with a generated ``decision`` string."""
+    with a generated ``decision`` string.
+
+    ``distance`` defaults to ``0.0`` for the pre-existing self-heal
+    properties above (they don't care about the value); the #550 defect #4
+    properties below pass a generated ``float | None`` to prove the helper
+    threads it through unchanged to both persisted sinks."""
     from lib.dispatch import _reject_import_from_evidence_decision
 
     db = FakePipelineDB()
@@ -218,7 +224,7 @@ def _reject_via_evidence_decision(
             request_id=42,
             dl_info=dl_info,
             import_result=ir,
-            distance=0.0,
+            distance=distance,
             decision=decision,
             detail=f"generated {decision}",
             requeue_on_failure=requeue_on_failure,
@@ -330,6 +336,26 @@ def assert_preimport_fact_always_self_heals(
             "is bad)")
 
 
+def assert_beets_distance_round_trips(
+    db: FakePipelineDB, expected_distance: float | None,
+) -> None:
+    """Issue #550 defect #4 invariant: no unmeasured distance is ever
+    persisted as a number. Whatever ``distance`` flows INTO the reject
+    path is exactly what must land in ``download_log.beets_distance`` —
+    ``None`` in, ``None`` out (a pre-match/preimport-fact reject never
+    fabricates a 0.0 'perfect match'), and a genuinely measured value
+    (including a real 0.0) round-trips unchanged rather than being
+    nulled."""
+    assert_download_log_row_created(db)
+    last = db.download_logs[-1]
+    if last.beets_distance != expected_distance:
+        raise AssertionError(
+            f"expected persisted beets_distance={expected_distance!r}, "
+            f"got {last.beets_distance!r} — a reject/mark-done writer "
+            "must never substitute a fabricated value for the distance "
+            "it was actually given")
+
+
 def assert_quality_side_reject_honors_caller_flag(
     decision: str, requeue_on_failure: bool, db: FakePipelineDB,
 ) -> None:
@@ -395,6 +421,32 @@ class TestGeneratedEvidenceRejectSelfHeal(unittest.TestCase):
         assert_download_log_row_created(db)
         assert_quality_side_reject_honors_caller_flag(
             decision, requeue_on_failure, db)
+
+
+class TestGeneratedDistanceNeverFabricated(unittest.TestCase):
+    """Issue #550 defect #4: no unmeasured distance is ever persisted as a
+    number. ``_reject_import_from_evidence_decision`` is the reject helper
+    every preimport-fact AND pre-match reject funnels through (folded in
+    per U11 — see CLAUDE.md § "Quality decisions live in ONE place"); it
+    must thread whatever ``distance`` it's given straight to
+    ``download_log.beets_distance`` — ``None`` in, ``None`` out, and a
+    genuinely measured value (including a real 0.0 perfect match) never
+    gets nulled or swapped for a fabricated placeholder."""
+
+    @given(decision=st.sampled_from(sorted(_PREIMPORT_FACT_REJECT_DECISIONS)),
+           requeue_on_failure=st.booleans(),
+           new_min_bitrate=_bitrates(),
+           distance=st.one_of(
+               st.none(),
+               st.floats(min_value=0.0, max_value=1.0,
+                         allow_nan=False, allow_infinity=False),
+           ))
+    def test_distance_round_trips_exactly_or_stays_null(
+            self, decision, requeue_on_failure, new_min_bitrate, distance):
+        db = _reject_via_evidence_decision(
+            decision=decision, requeue_on_failure=requeue_on_failure,
+            new_min_bitrate=new_min_bitrate, distance=distance)
+        assert_beets_distance_round_trips(db, distance)
 
 
 # ===========================================================================
@@ -464,6 +516,25 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_quality_side_reject_honors_caller_flag(
                 "downgrade", False, db)
+
+    def test_distance_checker_trips_when_null_gets_fabricated_as_zero(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        # Planted bug: the caller asked for an unmeasured (None) distance
+        # but the writer fabricated a 0.0 "perfect match" — exactly the
+        # #550 defect #4 regression this property exists to catch.
+        db.log_download(request_id=42, outcome="rejected", beets_distance=0.0)
+        with self.assertRaises(AssertionError):
+            assert_beets_distance_round_trips(db, None)
+
+    def test_distance_checker_trips_when_measured_value_gets_nulled(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        # Planted bug: a genuinely measured distance (0.07) was dropped
+        # to NULL instead of being persisted as-is.
+        db.log_download(request_id=42, outcome="rejected", beets_distance=None)
+        with self.assertRaises(AssertionError):
+            assert_beets_distance_round_trips(db, 0.07)
 
     def test_hypothesis_harness_detects_planted_bad_router(self):
         """End-to-end RED proof: strategies + checker + Hypothesis catch a
