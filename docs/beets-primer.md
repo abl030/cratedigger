@@ -91,9 +91,11 @@ plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missi
 | `info` | `beet info` command for inspecting tags | — |
 | `missing` | `beet missing` command — lists tracks beets expects but can't find on disk | — |
 | `duplicates` | `beet duplicates` command | — |
+| `edit` | `beet edit` command — hand-edit metadata in an external editor during import/ops | — |
 | `fromfilename` | Guesses metadata from filenames when tags are missing | — |
 | `ftintitle` | Moves "feat." from artist to title field | — |
 | `the` | Handles "The" prefix in artist names | — |
+| `inline` | Lets config.yaml define computed item/album fields in Python — powers `short_mbid` (used in the path templates below) | — |
 | `permissions` | Sets imported file/art mode to 0664 and dir mode to 02775 (setgid) | Yes |
 
 `permissions` exists so media servers (Jellyfin) can read album art: beets'

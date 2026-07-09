@@ -34,3 +34,39 @@ write the query to a temp file and pass it as an argument.
 `pipeline-cli query` sets `default_transaction_read_only = on` — safe for diagnostics. When debugging pipeline behavior, start with the simulator (`pipeline-cli quality`) and add scenarios that expose the bug FIRST — see `.claude/rules/code-quality.md` § "Pipeline Decision Debugging — Simulator-First TDD".
 
 For search-plan iter2 triage signals, `album_requests.failure_class` (5-bucket cycle classification, written at plan-wrap) and `album_requests.unfindable_category` (4-bucket cohort taxonomy, written by the daily detection service) are queryable via `pipeline-cli query` — `GROUP BY failure_class` surfaces stuck-pattern distribution; `GROUP BY unfindable_category` surfaces unfindable-cohort distribution. `search_log.rejection_reason` (PR3 R22) is the per-search scalar that lets `GROUP BY` skip JSONB introspection into `candidates`. Full column inventory in `docs/pipeline-db-schema.md` § "Search-plan iteration 2".
+
+## Full command reference
+
+Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli routes` (or `pipeline-cli routes --json`) to regenerate this from the live argparse tree — it walks the same `_build_parser()` this table was derived from, so it can't drift from the actual CLI surface the way a hand-maintained list can.
+
+| Subcommand | Purpose |
+|---|---|
+| `add` | Add a new request by MBID or Discogs ID |
+| `beets-distance` | Real beets-distance between a download_log's audio and an MBID (refuses if MBID is outside the request's release group) |
+| `cancel` | Cancel a request (set to skipped) |
+| `disk-coverage` | Show which active pipeline rows are actually present in beets |
+| `force-import` | Force-import a rejected download by download_log ID |
+| `import-jobs` | List recent import queue jobs |
+| `import-preview` | Preview whether an import would pass |
+| `list` | List album requests |
+| `long-tail` | Long-tail worklist — wanted cohort pre-banded by on-disk quality (missing / QualityRank / unknown) + in_flight_rescue |
+| `manual-import` | Import a local folder as a pipeline request |
+| `quality` | Show quality state and simulate decisions |
+| `query` | Run a read-only SQL query for debugging |
+| `repair-spectral` | Fix albums stuck by stale `current_spectral_bitrate` (#18) |
+| `replace` | Supersede a request with a new row at a different release id in the same release group/master (same pathway as the source) |
+| `retry` | Reset a failed request to wanted |
+| `routes` | Self-document the CLI surface — every subcommand, its args, and its description |
+| `search-plan` | Inspect persisted search plans (read-only, U6) |
+| `set` | Change the status of a request |
+| `set-intent` | Toggle lossless-on-disk for a request |
+| `show` | Show full details of a request |
+| `status` | Show counts by status |
+| `triage` | Operator triage (U16) — compose unfindable + field-quality + search-forensics for one request, or list a cohort by filter |
+| `wrong-match-delete` | Delete one visible Wrong Matches source folder |
+| `wrong-match-delete-group` | Delete visible Wrong Matches source folders for one request |
+| `wrong-match-triage` | Clean the full Wrong Matches queue using existing evidence |
+| `youtube-album` | Resolve MBID/Discogs ID → YouTube Music album matrix (auto-widens to release group; N×M beets distances per YT sibling × MB sibling) |
+| `youtube-rescue` | Submit a YouTube Music rescue ingest for one request (requires a resolver mapping; emits a `youtube_running` download_log row) |
+
+`tests/test_docs_audit.py` enforces that every top-level subcommand from `_build_parser()` has a mention somewhere in this file — adding a subcommand without a row here fails the suite.
