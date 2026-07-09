@@ -523,20 +523,35 @@ ORPHAN_MIN_AGE_DAYS = 7
 class DiskReapSummary:
     """Aggregate result of one on-disk orphan sweep.
 
-    All-zero means the cycle found nothing to do — callers use
-    ``did_anything`` to suppress log spam on a clean cycle.
+    ``mutated`` gates the cycle's INFO summary line: only a sweep that
+    actually removed files or pruned directories says anything —
+    protected/young counts alone stay silent, so a steady-state cycle
+    produces no log traffic. ``aborted`` marks a fail-closed cycle (a
+    downloading row's ownership could not be decoded); nothing was
+    deleted.
     """
     removed: int = 0
     removed_bytes: int = 0
     pruned_dirs: int = 0
     protected: int = 0
     skipped_young: int = 0
+    aborted: bool = False
 
     @property
-    def did_anything(self) -> bool:
-        return bool(
-            self.removed or self.pruned_dirs
-            or self.protected or self.skipped_young)
+    def mutated(self) -> bool:
+        return bool(self.removed or self.pruned_dirs)
+
+
+class DiskReapOwnershipError(Exception):
+    """A downloading row's ownership could not be established.
+
+    Raised when a ``downloading`` row's ``active_download_state`` is
+    missing or fails to decode: the protected set would silently omit
+    that row's canonical folder and stamped files, leaving them
+    reap-eligible (fail-open). A deletion sweep must fail CLOSED
+    instead — ``reap_disk_orphans`` aborts the entire cycle's sweep
+    (zero deletions) when this is raised.
+    """
 
 
 def _protected_paths_for_downloading(
@@ -556,6 +571,11 @@ def _protected_paths_for_downloading(
     ``lib.slskd_transfers`` at module scope). ``protected_files`` adds each
     row's stamped ``local_path`` entries directly, as a second, independent
     guard beyond the directory-level protection.
+
+    Raises ``DiskReapOwnershipError`` when ANY downloading row's
+    ``active_download_state`` is missing or undecodable — partial
+    ownership knowledge must abort the sweep (fail-closed), never let
+    the unparseable row's files become reap-eligible.
     """
     protected_dirs = {
         normalize_processing_path(os.path.join(root, "failed_imports")),
@@ -564,16 +584,19 @@ def _protected_paths_for_downloading(
 
     for row in downloading_rows:
         raw_state = row.get("active_download_state")
-        if not raw_state:
-            continue
         try:
+            # from_raw raises ValueError on None/missing state too —
+            # a downloading row with no state is crash-recovery limbo
+            # (Phase 1 resets it to wanted this same cycle); until it
+            # heals, its ownership is unknowable and the sweep must not
+            # proceed on guesswork.
             state = ActiveDownloadState.from_raw(raw_state)
-        except Exception:
-            logger.exception(
-                "DISK-REAP: request %s has an undecodable "
-                "active_download_state; its files can't be protected "
-                "this cycle", row.get("id"))
-            continue
+        except Exception as exc:
+            raise DiskReapOwnershipError(
+                f"request {row.get('id')}: active_download_state is "
+                "missing or undecodable — cannot establish which files "
+                "this downloading row owns"
+            ) from exc
 
         for f in state.files:
             if f.local_path:
@@ -702,7 +725,10 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     current attempt computes that bare name any more, so it was never in
     the protected set to begin with — no special-casing needed.
 
-    Best-effort and silent on a clean cycle, matching
+    Fail-closed: if ANY downloading row's ownership can't be decoded,
+    the whole sweep is skipped for the cycle (zero deletions,
+    ``aborted=True``). Best-effort otherwise, and silent unless it
+    actually removed files or pruned directories — matching
     ``converge_slskd_orphans``'s Phase 0 contract.
     """
     root = ctx.cfg.slskd_download_dir
@@ -710,8 +736,15 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
         return DiskReapSummary()
 
     db = ctx.pipeline_db_source._get_db()
-    protected_dirs, protected_files = _protected_paths_for_downloading(
-        root, db.get_downloading())
+    try:
+        protected_dirs, protected_files = _protected_paths_for_downloading(
+            root, db.get_downloading())
+    except DiskReapOwnershipError:
+        logger.exception(
+            "DISK-REAP ABORTED: could not establish ownership for a "
+            "downloading row; skipping the entire sweep this cycle "
+            "(zero deletions) — fail-closed")
+        return DiskReapSummary(aborted=True)
 
     threshold = time.time() - ORPHAN_MIN_AGE_DAYS * 86400
     removed = 0
@@ -776,7 +809,7 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
         protected=protected_count,
         skipped_young=skipped_young,
     )
-    if summary.did_anything:
+    if summary.mutated:
         logger.info(
             "DISK-REAP summary removed=%d bytes=%d pruned_dirs=%d "
             "protected=%d skipped_young=%d",
