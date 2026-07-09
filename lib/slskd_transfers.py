@@ -36,10 +36,20 @@ logger = logging.getLogger("cratedigger")
 
 @dataclass(frozen=True)
 class SlskdEnqueueOutcome:
-    """Structured result for one slskd enqueue request."""
+    """Structured result for one slskd enqueue request.
+
+    ``reason`` (issue #564 C4) carries the real enqueue-failure cause
+    when one was captured — a peer-offline classification, the raw
+    slskd response body (e.g. a ``Soulseek.DownloadEnqueueException``
+    message), or a generic HTTP-status/exception fallback. ``None`` when
+    the outcome is ``"accepted"``, or when it's the falsy-return
+    ``"rejected"`` branch that never raised (no exception to extract a
+    reason from).
+    """
 
     status: Literal["accepted", "rejected", "unknown"]
     downloads: list[DownloadFile] | None = None
+    reason: str | None = None
 
 def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
     """Cancel downloads and delete their completed payloads.
@@ -176,6 +186,47 @@ def _is_user_offline_http_error(exc: BaseException) -> bool:
     return "appears to be offline" in body.lower()
 
 
+_ENQUEUE_FAILURE_REASON_MAX_LEN = 500
+_ENQUEUE_FAILURE_REASON_TRUNCATE_LEN = 300
+
+
+def _extract_enqueue_failure_reason(exc: BaseException) -> str | None:
+    """Best-effort structural extraction of slskd's enqueue-failure body
+    (issue #564 C4) — e.g. ``Soulseek.DownloadEnqueueException: File not
+    shared.``, the shape behind 1,236 ``status="unknown"`` writes in 14
+    days that previously discarded the real reason entirely.
+
+    Returns ``None`` when there's no readable response body, the body
+    looks like an HTML error page (starts with ``<``), or it's
+    implausibly long to be a short exception message — callers fall
+    back to a generic HTTP-status/exception message in that case.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        body = response.text
+    except Exception:
+        return None
+    if not isinstance(body, str):
+        return None
+    body = body.strip()
+    if not body or body.startswith("<"):
+        return None
+    if len(body) > _ENQUEUE_FAILURE_REASON_MAX_LEN:
+        return None
+    return body[:_ENQUEUE_FAILURE_REASON_TRUNCATE_LEN]
+
+
+def _enqueue_failure_fallback_reason(exc: BaseException) -> str:
+    """Generic reason when the response body isn't usable (issue #564 C4)."""
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        return f"slskd enqueue failed (HTTP {status_code})"
+    return str(exc)
+
+
 def slskd_enqueue_with_outcome(
     username: str,
     files: list[dict[str, Any]],
@@ -191,9 +242,14 @@ def slskd_enqueue_with_outcome(
                 "slskd reports peer %s offline at enqueue; classifying as rejected",
                 username,
             )
-            return SlskdEnqueueOutcome(status="rejected")
-        logger.debug("Enqueue failed", exc_info=True)
-        return SlskdEnqueueOutcome(status="unknown")
+            return SlskdEnqueueOutcome(
+                status="rejected", reason="peer appears to be offline")
+        reason = (
+            _extract_enqueue_failure_reason(exc)
+            or _enqueue_failure_fallback_reason(exc)
+        )
+        logger.debug("Enqueue failed: %s", reason, exc_info=True)
+        return SlskdEnqueueOutcome(status="unknown", reason=reason)
     if not enqueue:
         return SlskdEnqueueOutcome(status="rejected")
 

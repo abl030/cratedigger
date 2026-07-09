@@ -164,6 +164,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                      existing_v0_probe_min_bitrate: int | None = None,
                      existing_v0_probe_avg_bitrate: int | None = None,
                      existing_v0_probe_median_bitrate: int | None = None,
+                     # Per-file failure detail audit blob (issue #564 C7,
+                     # migration 043) — a list of FileFailureDetail
+                     # dicts (via msgspec.to_builtins), or None.
+                     transfer_detail: Any = None,
                      ) -> int:
         cur = self._execute("""
             INSERT INTO download_log (
@@ -180,10 +184,11 @@ class _DownloadLogMixin(_PipelineDBBase):
                 v0_probe_kind, v0_probe_min_bitrate,
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
-                existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate
+                existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
+                transfer_detail
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             request_id, soulseek_username, filetype, download_path,
@@ -200,6 +205,8 @@ class _DownloadLogMixin(_PipelineDBBase):
             v0_probe_avg_bitrate, v0_probe_median_bitrate,
             existing_v0_probe_kind, existing_v0_probe_min_bitrate,
             existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
+            psycopg2.extras.Json(transfer_detail)
+            if transfer_detail is not None else None,
         ))
         row = cur.fetchone()
         self.conn.commit()

@@ -423,6 +423,7 @@ class FakeSlskdAPI:
         state: str | None = None,
         size: int | None = None,
         bytesTransferred: int | None = None,
+        exception: str | None = None,
         **extra: Any,
     ) -> None:
         group = self._find_or_create_group(username)
@@ -434,6 +435,8 @@ class FakeSlskdAPI:
             transfer["size"] = size
         if bytesTransferred is not None:
             transfer["bytesTransferred"] = bytesTransferred
+        if exception is not None:
+            transfer["exception"] = exception
         transfer.update(extra)
         directory_row.setdefault("files", []).append(transfer)
 

@@ -512,6 +512,7 @@ def _copy_download_observations(
         target.retry = getattr(source, "retry", None)
         target.bytes_transferred = getattr(source, "bytes_transferred", None)
         target.last_state = getattr(source, "last_state", None)
+        target.last_exception = getattr(source, "last_exception", None)
 
 
 def _clear_download_observations(files: Sequence[DownloadFile]) -> None:
@@ -521,6 +522,7 @@ def _clear_download_observations(files: Sequence[DownloadFile]) -> None:
         file.retry = None
         file.bytes_transferred = None
         file.last_state = None
+        file.last_exception = None
 
 
 def _visible_transfer_files(files: Sequence[DownloadFile]) -> list[DownloadFile]:
@@ -602,6 +604,23 @@ def _reset_claim_after_verified_no_acceptance(
         claim.request_id,
     )
     return claim.entry.files
+
+
+def _stamp_enqueue_failure_reason(
+    files: Sequence[DownloadFile],
+    reason: str | None,
+) -> None:
+    """Stamp a captured enqueue-failure reason onto every planned file's
+    ``last_exception`` before an ambiguous claim is left for poll
+    recovery (issue #564 C4/I3) — so the eventual vanished-transfer
+    timeout message can name the real cause instead of reporting zero
+    evidence. No-op when no reason was captured.
+    """
+    if not reason:
+        return
+    stamped = f"enqueue failed: {reason}"
+    for f in files:
+        f.last_exception = stamped
 
 
 def _leave_claim_for_poll_recovery(
@@ -1002,9 +1021,10 @@ def try_enqueue(
                         soulseek_username=username,
                         filetype=allowed_filetype,
                         outcome="user_offline",
-                        error_message="user offline at enqueue",
+                        error_message=outcome.reason or "user offline at enqueue",
                     )
             elif claim.claimed:
+                _stamp_enqueue_failure_reason(claim.entry.files, outcome.reason)
                 owned = _leave_claim_for_poll_recovery(
                     claim,
                     ctx,
@@ -1301,6 +1321,8 @@ def try_multi_enqueue(
                                     pre_filter_skip_count=pre_filter_skips[0],
                                 )
                         elif claim.claimed:
+                            _stamp_enqueue_failure_reason(
+                                claim.entry.files, outcome.reason)
                             owned = _leave_claim_for_poll_recovery(
                                 claim,
                                 ctx,
@@ -1329,6 +1351,8 @@ def try_multi_enqueue(
                                     pre_filter_skip_count=pre_filter_skips[0],
                                 )
                         elif claim.claimed:
+                            _stamp_enqueue_failure_reason(
+                                claim.entry.files, outcome.reason)
                             owned = _leave_claim_for_poll_recovery(
                                 claim,
                                 ctx,

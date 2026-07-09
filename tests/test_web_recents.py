@@ -602,6 +602,13 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge, "Failed")
         self.assertEqual(result.badge_class, "badge-failed")
 
+    def test_user_offline(self):
+        result = classify_log_entry(_entry(
+            outcome="user_offline", beets_scenario=None,
+            error_message="peer appears to be offline"))
+        self.assertEqual(result.badge, "Peer offline")
+        self.assertEqual(result.badge_class, "badge-rejected")
+
     def test_search_filetype_override_upgrade(self):
         """search_filetype_override set - replacing garbage CBR with genuine V0."""
         result = classify_log_entry(_entry(
@@ -806,8 +813,23 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("verified lossless", result.verdict.lower())
 
     def test_timeout_verdict(self):
-        result = classify_log_entry(_entry(outcome="timeout", beets_scenario="timeout"))
-        self.assertIn("timed out", result.verdict.lower())
+        result = classify_log_entry(_entry(
+            outcome="timeout", beets_scenario=None,
+            error_message="all transfers vanished from slskd before any "
+                          "status was observed (slskd restart?)"))
+        self.assertIn("download failed", result.verdict.lower())
+        self.assertIn("vanished", result.verdict.lower())
+
+    def test_user_offline_verdict_uses_error_message(self):
+        result = classify_log_entry(_entry(
+            outcome="user_offline", beets_scenario=None,
+            error_message="peer appears to be offline"))
+        self.assertEqual(result.verdict, "peer appears to be offline")
+
+    def test_user_offline_verdict_falls_back_when_no_error_message(self):
+        result = classify_log_entry(_entry(
+            outcome="user_offline", beets_scenario=None, error_message=None))
+        self.assertEqual(result.verdict, "Peer offline at enqueue")
 
     def test_exception_verdict(self):
         result = classify_log_entry(_entry(outcome="failed", beets_scenario="exception"))
@@ -978,12 +1000,21 @@ class TestExceptionVerdicts(unittest.TestCase):
         ))
         self.assertIn("Harness returned rc=2", result.verdict)
 
-    def test_timeout_ignores_error_message(self):
-        """Timeout verdict is fixed, doesn't use error_message."""
+    def test_timeout_uses_error_message(self):
+        """Issue #564 C6: a download timeout's verdict now names the real
+        evidence in error_message instead of a fixed "timed out" string."""
         result = classify_log_entry(_entry(
-            outcome="timeout", beets_scenario="timeout",
-            error_message="some error"))
-        self.assertIn("timed out", result.verdict.lower())
+            outcome="timeout", beets_scenario=None,
+            error_message="all 2 files errored — 2× 'Transfer rejected: Banned'"))
+        self.assertEqual(
+            result.verdict,
+            "Download failed: all 2 files errored — "
+            "2× 'Transfer rejected: Banned'")
+
+    def test_timeout_without_error_message_uses_generic_fallback(self):
+        result = classify_log_entry(_entry(
+            outcome="timeout", beets_scenario=None, error_message=None))
+        self.assertEqual(result.verdict, "Download failed")
 
 
 # ============================================================================

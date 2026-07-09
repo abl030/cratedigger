@@ -573,6 +573,48 @@ class TestFakePipelineDB(unittest.TestCase):
         with self.assertRaises(psycopg2.errors.CheckViolation):
             db.log_download(42, outcome="error")
 
+    def test_set_update_download_state_error_raises_and_leaves_row_untouched(self):
+        """Issue #564 review: the injection seam mirrors a psycopg2 error
+        at the UPDATE — raises from BOTH state writers, records the
+        attempt, never mutates the row; other requests are unaffected."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="downloading",
+            active_download_state={"original": True}))
+        db.seed_request(make_request_row(
+            id=2, status="downloading", mb_release_id="mbid-2"))
+        boom = RuntimeError("UPDATE failed")
+        db.set_update_download_state_error(1, boom)
+
+        with self.assertRaises(RuntimeError):
+            db.update_download_state(1, '{"mutated": true}')
+        with self.assertRaises(RuntimeError):
+            db.update_download_state_if_downloading(1, '{"mutated": true}')
+
+        # Row 1 untouched; both attempts recorded.
+        self.assertEqual(
+            db.request(1)["active_download_state"], {"original": True})
+        self.assertEqual(len(db.update_download_state_calls), 2)
+        # Other requests still write normally.
+        self.assertTrue(
+            db.update_download_state_if_downloading(2, '{"ok": true}'))
+        self.assertEqual(
+            db.request(2)["active_download_state"], {"ok": True})
+
+    def test_log_download_records_transfer_detail(self):
+        """Issue #564 C7: transfer_detail is a first-class field on
+        DownloadLogRow, not swallowed into .extra."""
+        db = FakePipelineDB()
+        detail = [
+            {"username": "user1", "filename": "01.flac",
+             "last_state": "Completed, Errored",
+             "last_exception": "Read error: Connection reset by peer",
+             "bytes_transferred": 0, "retry_count": 2},
+        ]
+        db.log_download(42, outcome="timeout", transfer_detail=detail)
+
+        self.assertEqual(db.download_logs[0].transfer_detail, detail)
+
     def test_assert_log_passes(self):
         db = FakePipelineDB()
         log_id = db.log_download(42, outcome="success", soulseek_username="user1")
@@ -1689,6 +1731,23 @@ class TestFakeSlskdAPI(unittest.TestCase):
         self.assertIn("presence", result)
         self.assertIn("isPrivileged", result)
         self.assertIsInstance(result["isPrivileged"], bool)
+
+    def test_add_transfer_can_carry_exception_reason(self):
+        """Issue #564: seeded transfers can carry slskd's real failure
+        reason so poll/harvest tests can drive it through the same
+        parse_downloads_envelope() decode production uses."""
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(
+            username="user1", directory="user1\\Music",
+            filename="user1\\Music\\01.flac", id="tid-1",
+            state="Completed, Rejected",
+            exception="Transfer rejected: Banned",
+        )
+
+        downloads = slskd.transfers.get_all_downloads(includeRemoved=True)
+
+        snap = downloads[0].directories[0].files[0]
+        self.assertEqual(snap.exception, "Transfer rejected: Banned")
 
 
 class TestFakeSlskdSearches(unittest.TestCase):
@@ -3987,6 +4046,7 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "assert_log",
             "set_advisory_lock_result",
             "set_cooldown_result",
+            "set_update_download_state_error",
             "queue_execute_results",
             "seed_youtube_album_mapping",
         }

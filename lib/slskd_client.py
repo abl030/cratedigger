@@ -89,16 +89,23 @@ class TransferSnapshot(msgspec.Struct, rename="camel", frozen=True):
     concept slskd reports for a matched file — not a narrower ad hoc
     subset — even though nothing downstream reads them via ``.status.*``
     yet. slskd's real Transfer DTO carries many more fields still
-    (``direction``, ``averageSpeed``, ``placeInQueue``, ``exception``,
-    ...) that we don't model at all — msgspec ignores unknown fields by
-    default (no ``forbid_unknown_fields``).
+    (``direction``, ``averageSpeed``, ``placeInQueue``, ...) that we
+    don't model at all — msgspec ignores unknown fields by default (no
+    ``forbid_unknown_fields``).
+
+    ``exception`` is the one field of that "not modeled" set we DO model
+    (issue #564): it carries slskd's real per-transfer failure reason
+    (e.g. "Transfer rejected: Banned", "Read error: Connection reset by
+    peer", "Inactivity timeout of 900000 milliseconds was reached") —
+    discarding it was root cause #1 of misleading generic download-failure
+    messages.
 
     Every field defaults: a queued transfer has no ``bytesTransferred``
     or lifecycle timestamps yet, a bare match-lookup entry may carry only
     ``filename``/``id``, and the two synthetic constructions
     (``_restored_terminal_status``, the vanished-transfer fallback in
     ``lib/download.py``) build a ``TransferSnapshot`` directly with only
-    ``state`` (+ optionally ``bytes_transferred``) set.
+    ``state`` (+ optionally ``bytes_transferred``/``exception``) set.
     """
 
     id: str = ""
@@ -112,6 +119,7 @@ class TransferSnapshot(msgspec.Struct, rename="camel", frozen=True):
     started_at: str | None = None
     ended_at: str | None = None
     percent_complete: float = 0.0
+    exception: str | None = None
 
 
 def parse_transfer_snapshot(raw: dict[str, Any]) -> TransferSnapshot | None:

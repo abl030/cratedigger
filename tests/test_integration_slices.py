@@ -219,6 +219,76 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
         self.assertEqual(poll_slskd.transfers.get_all_downloads_calls, [True])
 
 
+class TestAmbiguousEnqueueReasonPropagationSlice(unittest.TestCase):
+    """Issue #564 C4/I3: an ambiguous enqueue failure with a captured
+    reason must survive into the persisted per-file state when the claim
+    is left for poll recovery — root cause #4 (the enqueue-failure body
+    was discarded entirely, landing as a bare status="unknown")."""
+
+    def test_ambiguous_enqueue_stamps_last_exception_on_persisted_state(self):
+        from lib.slskd_transfers import SlskdEnqueueOutcome
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.enqueue import try_enqueue
+        from lib.matching import MatchResult
+
+        cfg = _download_ownership_cfg()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", artist_name="Artist", album_title="Album",
+            mb_release_id="mbid-1",
+        ))
+        album = SimpleNamespace(
+            id=1, db_request_id=1, title="Album", artist_name="Artist",
+            release_date="2024-01-01T00:00:00Z", db_mb_release_id="mbid-1",
+            db_source="request", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+        enqueue_ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=FakeSlskdAPI())
+        enqueue_ctx.current_album_cache[1] = album
+        enqueue_ctx.user_upload_speed = {"u00": 1000}
+        enqueue_ctx.download_ownership = DownloadOwnershipWriter(
+            db_factory=lambda: db,
+        )
+        file_dir = "Music\\u00\\Album"
+        tracks = cast(
+            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}])
+        results = {"u00": {"flac": [file_dir]}}
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        def ambiguous_outcome(*, username, files, file_dir, ctx):
+            return SlskdEnqueueOutcome(
+                status="unknown",
+                reason="Soulseek.DownloadEnqueueException: File not shared.",
+            )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 side_effect=ambiguous_outcome,
+             ):
+            attempt = try_enqueue(
+                tracks, results, "flac", enqueue_ctx,
+                match_fn=lambda *a, **kw: match,
+            )
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        persisted_state = db.request(1)["active_download_state"]
+        self.assertEqual(
+            persisted_state["files"][0]["last_exception"],
+            "enqueue failed: Soulseek.DownloadEnqueueException: "
+            "File not shared.",
+        )
+
+
 class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
     """End-to-end coverage for Part 1 (user_offline classification) +
     Part 2 (presence probe). Real ``try_enqueue`` over real

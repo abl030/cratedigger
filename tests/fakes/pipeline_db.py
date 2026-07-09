@@ -204,6 +204,13 @@ class FakePipelineDB:
         self._cooldown_result: bool | Callable[[str], bool] = False
         self._advisory_lock_result: (
             bool | Callable[[int, int], bool]) = True
+        # Per-request failure injection for the active_download_state
+        # writers (issue #564 review): ``set_update_download_state_error``
+        # makes ``update_download_state`` (and, via delegation, its
+        # status-guarded ``_if_downloading`` variant) raise for one
+        # request id — simulating a psycopg2 error at the UPDATE — so
+        # per-row error-isolation contracts can be pinned.
+        self._update_download_state_errors: dict[int, Exception] = {}
         # U1 persisted-search-plans state.
         self.search_plans: dict[int, _FakeSearchPlanRow] = {}
         self.search_plan_items: dict[int, _FakeSearchPlanItemRow] = {}
@@ -400,6 +407,20 @@ class FakePipelineDB:
         for per-user conditional results.
         """
         self._cooldown_result = result
+
+    def set_update_download_state_error(
+        self, request_id: int, error: Exception,
+    ) -> None:
+        """Make ``update_download_state`` raise ``error`` for one request.
+
+        Also fires through ``update_download_state_if_downloading`` (it
+        delegates here), mirroring a production psycopg2 error at the
+        UPDATE: the call is recorded but the row is never mutated. Same
+        targeted-seam style as ``set_cooldown_result`` /
+        ``FakeSlskdUsers.set_directory_error``. Persistent for the
+        fake's lifetime (a one-shot harvest only calls once).
+        """
+        self._update_download_state_errors[request_id] = error
 
     def set_advisory_lock_result(
         self, result: bool | Callable[[int, int], bool],
@@ -1129,6 +1150,12 @@ class FakePipelineDB:
     def update_download_state(self, request_id: int, state_json: str) -> None:
         row = self._requests.get(request_id)
         self.update_download_state_calls.append((request_id, state_json))
+        injected = self._update_download_state_errors.get(request_id)
+        if injected is not None:
+            # Mirror a psycopg2 error at the UPDATE: the attempt is
+            # recorded (like FakeSlskdAPI's failing calls) but the row
+            # is never mutated. See set_update_download_state_error.
+            raise injected
         if row:
             try:
                 row["active_download_state"] = json.loads(state_json)
@@ -1236,12 +1263,13 @@ class FakePipelineDB:
                      existing_v0_probe_min_bitrate: int | None = None,
                      existing_v0_probe_avg_bitrate: int | None = None,
                      existing_v0_probe_median_bitrate: int | None = None,
+                     transfer_detail: Any = None,
                      **extra: Any) -> int:
         """Record a download_log row.
 
         Every parameter name matches ``PipelineDB.log_download`` exactly
         — the contract test in ``test_fakes.py`` enforces this. Only
-        the 11 "first-class" fields land on ``DownloadLogRow``; the
+        the 12 "first-class" fields land on ``DownloadLogRow``; the
         remaining named fields plus any test-only ``**extra`` merge into
         ``.extra`` so ``assert_log`` can still introspect them.
         """
@@ -1306,6 +1334,7 @@ class FakePipelineDB:
             error_message=error_message,
             validation_result=validation_result,
             import_result=import_result,
+            transfer_detail=transfer_detail,
             id=new_log_id,
             extra=auxiliary,
         ))
@@ -3680,6 +3709,9 @@ class FakePipelineDB:
             "error_message": entry.error_message,
             "validation_result": entry.validation_result,
             "import_result": entry.import_result,
+            # Migration 043 — per-file failure detail audit blob (issue
+            # #564 C7).
+            "transfer_detail": entry.transfer_detail,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
             # Migration 037 — source discriminator + YT JSONB. Mirrors

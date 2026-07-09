@@ -10,6 +10,8 @@ and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 
+import ast
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 import logging
@@ -703,6 +705,17 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         err.response = SimpleNamespace(text=body)  # type: ignore[attr-defined]
         return err
 
+    def _make_http_error(self, body: str, status_code: int = 500) -> Exception:
+        """Build a ``requests.HTTPError`` with a full response (body +
+        status code) for the enqueue-failure reason-extraction tests."""
+        from types import SimpleNamespace
+        import requests
+
+        err = requests.HTTPError(f"{status_code} Server Error")
+        err.response = SimpleNamespace(  # type: ignore[attr-defined]
+            text=body, status_code=status_code)
+        return err
+
     def test_offline_http_error_body_returns_rejected(self):
         """The canonical slskd response body 'User pooyork appears to be
         offline' must be classified as rejected — the safety net that
@@ -720,6 +733,22 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
 
         self.assertEqual(outcome.status, "rejected")
         self.assertIsNone(outcome.downloads)
+
+    def test_offline_http_error_carries_offline_reason(self):
+        """Issue #564 C4: the offline classification carries a stable,
+        human-readable reason regardless of the raw response body text."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_offline_http_error(
+            "User pooyork appears to be offline")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "pooyork", [{"filename": "track.flac", "size": 1}],
+                "pooyork\\Music", ctx)
+
+        self.assertEqual(outcome.reason, "peer appears to be offline")
 
     def test_offline_http_error_case_insensitive(self):
         """Body match must tolerate slskd-version body casing variants."""
@@ -750,6 +779,54 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
 
         self.assertEqual(outcome.status, "unknown")
 
+    def test_non_offline_http_error_carries_response_body_as_reason(self):
+        """Issue #564 C4: the real slskd body (e.g. a
+        DownloadEnqueueException message) is the reason, not the
+        discarded default."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_http_error(
+            "Soulseek.DownloadEnqueueException: File not shared.")
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(
+            outcome.reason,
+            "Soulseek.DownloadEnqueueException: File not shared.")
+
+    def test_html_error_body_falls_back_to_status_code_message(self):
+        """An HTML error page body isn't a usable reason — fall back to a
+        generic HTTP-status message."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_http_error(
+            "<html><body>502 Bad Gateway</body></html>", status_code=502)
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.reason, "slskd enqueue failed (HTTP 502)")
+
+    def test_overlong_error_body_falls_back_to_status_code_message(self):
+        """An implausibly long body isn't a short exception message —
+        fall back rather than storing a huge blob."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = self._make_http_error(
+            "x" * 600, status_code=500)
+        ctx = _make_ctx(slskd=slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
+
+        self.assertEqual(outcome.reason, "slskd enqueue failed (HTTP 500)")
+
     def test_http_error_with_no_response_returns_unknown(self):
         """Defensive: HTTPError without an attached response should not
         crash — fall through to unknown."""
@@ -763,6 +840,7 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
                 "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
 
         self.assertEqual(outcome.status, "unknown")
+        self.assertEqual(outcome.reason, "synthetic — no .response")
 
     def test_connection_error_returns_unknown(self):
         """Generic non-HTTPError exceptions (network drop, etc.) stay in
@@ -785,6 +863,7 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
                 "user1", [{"filename": "t.flac", "size": 1}], "user1\\m", ctx)
 
         self.assertEqual(outcome.status, "unknown")
+        self.assertEqual(outcome.reason, "dropped")
 
     def test_falsy_enqueue_response_still_returns_rejected(self):
         """Regression guard: when slskd-api ever returns falsy (rather
@@ -2483,6 +2562,587 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
             self.assertEqual(db.request(1)["status"], "wanted")
 
 
+class TestCaptureDownloadProgress(unittest.TestCase):
+    """Test _capture_download_progress() — the persistence-gate split
+    (issue #564 C2 / root cause #2): progress_made drives stall-detection
+    timing; state_dirty must independently gate persistence so a
+    terminal-error observation is never silently dropped just because it
+    isn't "forward progress".
+    """
+
+    def _file(self, **overrides: Any) -> Any:
+        from tests.helpers import make_download_file
+        f = make_download_file()
+        for key, value in overrides.items():
+            setattr(f, key, value)
+        return f
+
+    def _state(self) -> Any:
+        from lib.quality import ActiveDownloadState
+        return ActiveDownloadState(
+            filetype="flac", enqueued_at="2026-01-01T00:00:00+00:00",
+            files=[])
+
+    CASES = [
+        (
+            "bytes increase is progress and dirty",
+            dict(bytes_transferred=0, last_state="InProgress",
+                 last_exception=None),
+            TransferSnapshot(state="InProgress", bytes_transferred=100),
+            True, True,
+        ),
+        (
+            "no status observed leaves file untouched",
+            dict(bytes_transferred=0, last_state=None, last_exception=None),
+            None,
+            False, False,
+        ),
+        (
+            "transition into non-progress state without exception is "
+            "still dirty (not progress)",
+            dict(bytes_transferred=0, last_state=None, last_exception=None),
+            TransferSnapshot(state="Queued, Remotely", bytes_transferred=0),
+            False, True,
+        ),
+        (
+            "terminal error with no byte progress is dirty but not "
+            "progress -- issue #564 root cause #2's exact shape",
+            dict(bytes_transferred=0, last_state="InProgress",
+                 last_exception=None),
+            TransferSnapshot(state="Completed, Rejected", bytes_transferred=0,
+                              exception="Transfer rejected: Banned"),
+            False, True,
+        ),
+        (
+            "identical repeat observation is neither progress nor dirty",
+            dict(bytes_transferred=0, last_state="Completed, Errored",
+                 last_exception="Read error: Connection reset by peer"),
+            TransferSnapshot(state="Completed, Errored", bytes_transferred=0,
+                              exception="Read error: Connection reset by peer"),
+            False, False,
+        ),
+        (
+            "a blank re-observation preserves the prior exception",
+            dict(bytes_transferred=0, last_state="Completed, Errored",
+                 last_exception="Read error: Connection reset by peer"),
+            TransferSnapshot(state="Completed, Errored", bytes_transferred=0),
+            False, False,
+        ),
+    ]
+
+    def test_progress_and_dirty_split(self):
+        for desc, file_kwargs, status, expect_progress, expect_dirty in self.CASES:
+            with self.subTest(desc=desc):
+                from lib.download import _capture_download_progress
+                f = self._file(**file_kwargs)
+                f.status = status
+                state = self._state()
+                progress_made, state_dirty = _capture_download_progress(
+                    [f], state, datetime(2026, 1, 1, tzinfo=timezone.utc))
+                self.assertEqual(progress_made, expect_progress, desc)
+                self.assertEqual(state_dirty, expect_dirty, desc)
+
+    def test_terminal_error_records_exception_even_without_progress(self):
+        """Regression pin for root cause #2: the exception must be
+        recorded on the file even though this is NOT forward progress."""
+        from lib.download import _capture_download_progress
+        f = self._file(bytes_transferred=0, last_state="InProgress",
+                       last_exception=None)
+        f.status = TransferSnapshot(
+            state="Completed, Rejected", bytes_transferred=0,
+            exception="Transfer rejected: Banned")
+        state = self._state()
+
+        progress_made, state_dirty = _capture_download_progress(
+            [f], state, datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        self.assertFalse(progress_made)
+        self.assertTrue(state_dirty)
+        self.assertEqual(f.last_state, "Completed, Rejected")
+        self.assertEqual(f.last_exception, "Transfer rejected: Banned")
+
+    def test_progress_made_advances_last_progress_at_only(self):
+        """state.last_progress_at moves on progress_made, exactly as
+        before issue #564 -- the split does not change stall timing."""
+        from lib.download import _capture_download_progress
+        f = self._file(bytes_transferred=0, last_state="InProgress",
+                       last_exception=None)
+        f.status = TransferSnapshot(state="InProgress", bytes_transferred=50)
+        state = self._state()
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        _capture_download_progress([f], state, now)
+
+        self.assertEqual(state.last_progress_at, now.isoformat())
+
+
+def _fail_file(*, last_state=None, last_exception=None):
+    from tests.helpers import make_download_file
+    return make_download_file(last_state=last_state, last_exception=last_exception)
+
+
+class TestSummarizeFileFailures(unittest.TestCase):
+    """Pure unit tests for summarize_file_failures() — issue #564 C5."""
+
+    def test_no_files_returns_none(self):
+        from lib.download import summarize_file_failures
+        self.assertIsNone(summarize_file_failures([]))
+
+    CASES = [
+        (
+            "no evidence at all",
+            [_fail_file()],
+            None,
+        ),
+        (
+            "only succeeded state contributes nothing",
+            [_fail_file(last_state="Completed, Succeeded")],
+            None,
+        ),
+        (
+            "non-terminal state without exception contributes nothing",
+            [_fail_file(last_state="InProgress")],
+            None,
+        ),
+        (
+            "single exception",
+            [_fail_file(last_exception="Transfer rejected: Banned")],
+            "1× 'Transfer rejected: Banned'",
+        ),
+        (
+            "terminal state fallback when no exception",
+            [_fail_file(last_state="Completed, Errored")],
+            "1× 'Completed, Errored'",
+        ),
+        (
+            "exception preferred over terminal state",
+            [_fail_file(last_state="Completed, Errored",
+                        last_exception="Read error: Connection reset by peer")],
+            "1× 'Read error: Connection reset by peer'",
+        ),
+        (
+            "same reason counted across files",
+            [_fail_file(last_exception="Transfer rejected: Banned"),
+             _fail_file(last_exception="Transfer rejected: Banned")],
+            "2× 'Transfer rejected: Banned'",
+        ),
+        (
+            "mixed reasons sorted by count desc then alphabetically",
+            [_fail_file(last_exception="Transfer rejected: File not shared."),
+             _fail_file(last_exception="Transfer rejected: File not shared."),
+             _fail_file(last_exception="Read error: Connection reset by peer")],
+            "2× 'Transfer rejected: File not shared.', "
+            "1× 'Read error: Connection reset by peer'",
+        ),
+        (
+            "tie broken alphabetically",
+            [_fail_file(last_exception="Zed reason"),
+             _fail_file(last_exception="Alpha reason")],
+            "1× 'Alpha reason', 1× 'Zed reason'",
+        ),
+        (
+            "one file with evidence, others without, still summarized",
+            [_fail_file(),
+             _fail_file(last_state="Completed, Succeeded"),
+             _fail_file(last_exception="Transfer rejected: Banned")],
+            "1× 'Transfer rejected: Banned'",
+        ),
+    ]
+
+    def test_summary_table(self):
+        from lib.download import summarize_file_failures
+        for desc, files, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(summarize_file_failures(files), expected)
+
+
+class TestVanishedTimeoutReason(unittest.TestCase):
+    """Pure unit tests for _vanished_timeout_reason() — issue #564 C5/I2."""
+
+    def test_no_evidence_claims_never_observed(self):
+        from lib.download import _vanished_timeout_reason
+        reason = _vanished_timeout_reason([_fail_file()])
+        self.assertEqual(
+            reason,
+            "transfers vanished from slskd before any status was "
+            "observed (slskd restart?)")
+
+    def test_evidence_names_last_observed_summary(self):
+        from lib.download import _vanished_timeout_reason
+        reason = _vanished_timeout_reason(
+            [_fail_file(last_exception="Transfer rejected: Banned")])
+        self.assertEqual(
+            reason,
+            "transfers no longer in slskd — last observed: "
+            "1× 'Transfer rejected: Banned'")
+
+    def test_never_observed_phrase_only_appears_without_evidence(self):
+        from lib.download import _vanished_timeout_reason
+        with_evidence = _vanished_timeout_reason(
+            [_fail_file(last_state="Completed, Errored")])
+        without_evidence = _vanished_timeout_reason([_fail_file()])
+        self.assertNotIn("before any status was observed", with_evidence)
+        self.assertIn("before any status was observed", without_evidence)
+
+
+class TestEnrichTimeoutReason(unittest.TestCase):
+    """Pure unit tests for _enrich_timeout_reason() — issue #564 C5/I2."""
+
+    def test_no_evidence_leaves_reason_unchanged(self):
+        from lib.download import _enrich_timeout_reason
+        reason = _enrich_timeout_reason("all 3 files errored", [_fail_file()])
+        self.assertEqual(reason, "all 3 files errored")
+
+    def test_appends_summary_when_evidence_exists(self):
+        from lib.download import _enrich_timeout_reason
+        reason = _enrich_timeout_reason(
+            "all 1 files errored",
+            [_fail_file(last_exception="Transfer rejected: Banned")])
+        self.assertEqual(
+            reason,
+            "all 1 files errored — 1× 'Transfer rejected: Banned'")
+
+    def test_does_not_duplicate_summary_already_embedded(self):
+        """The vanished-branch reason already embeds the summary inline
+        -- the generic append must not repeat it."""
+        from lib.download import _enrich_timeout_reason, _vanished_timeout_reason
+        files = [_fail_file(last_exception="Transfer rejected: Banned")]
+        vanished_reason = _vanished_timeout_reason(files)
+        enriched = _enrich_timeout_reason(vanished_reason, files)
+        self.assertEqual(enriched, vanished_reason)
+        self.assertEqual(enriched.count("Transfer rejected: Banned"), 1)
+
+
+class TestHarvestTerminalTransferEvidence(unittest.TestCase):
+    """Test harvest_terminal_transfer_evidence() — issue #564 root cause
+    #3 / C3: the pre-purge harvest that stamps terminal slskd transfer
+    evidence into active_download_state before remove_completed_downloads()
+    discards slskd's own record of it.
+    """
+
+    def _row(self, request_id, *, files, processing_started_at=None):
+        state_dict: dict[str, Any] = {
+            "filetype": "flac",
+            "enqueued_at": _utc_now_iso(),
+            "files": files,
+        }
+        if processing_started_at is not None:
+            state_dict["processing_started_at"] = processing_started_at
+        return {
+            "id": request_id,
+            "album_title": "Test Album",
+            "artist_name": "Test Artist",
+            "year": 2020,
+            "mb_release_id": f"test-mbid-{request_id}",
+            "source": "request",
+            "search_filetype_override": None,
+            "target_format": None,
+            "status": "downloading",
+            "active_download_state": state_dict,
+        }
+
+    def _ctx(self, rows, slskd_downloads):
+        fake_db = FakePipelineDB()
+        for row in rows:
+            fake_db.seed_request(row)
+        ctx = make_ctx_with_fake_db(
+            fake_db, slskd=FakeSlskdAPI(downloads=slskd_downloads))
+        return ctx, fake_db
+
+    def test_stamps_terminal_transfer_before_local_processing(self):
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000, "last_state": "InProgress"},
+        ])
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "Completed, Rejected",
+                "bytesTransferred": 500,
+                "exception": "Transfer rejected: Banned",
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        state = fake_db.request(1)["active_download_state"]
+        f = state["files"][0]
+        self.assertEqual(f["last_state"], "Completed, Rejected")
+        self.assertEqual(f["last_exception"], "Transfer rejected: Banned")
+        self.assertEqual(f["bytes_transferred"], 500)
+
+    def test_skips_rows_with_processing_started(self):
+        """Files already handed to local processing are no longer purely
+        slskd-side transfers — the harvest must not touch them."""
+        row = self._row(
+            1,
+            files=[
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 1000,
+                 "last_state": "InProgress"},
+            ],
+            processing_started_at="2026-01-01T00:00:00+00:00",
+        )
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "Completed, Succeeded",
+                "bytesTransferred": 1000,
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_skips_files_already_terminal(self):
+        """A file whose persisted last_state is already terminal is left
+        alone — no redundant re-match/re-persist."""
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "Completed, Succeeded"},
+        ])
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_non_terminal_match_does_not_persist(self):
+        """A matched but still-in-progress transfer is not evidence worth
+        persisting here -- the ordinary poll cycle owns in-progress state."""
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "InProgress",
+                "bytesTransferred": 200,
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_missing_active_download_state_is_skipped(self):
+        row = self._row(1, files=[])
+        row["active_download_state"] = None
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_undecodable_active_download_state_is_skipped(self):
+        row = self._row(1, files=[])
+        row["active_download_state"] = {"garbage": True}
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_snapshot_failure_is_a_noop(self):
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        cast(Any, ctx.slskd).transfers.get_all_downloads_error = RuntimeError("boom")
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_one_rows_write_failure_does_not_abort_remaining_rows(self):
+        """Review finding (issue #564): the per-row guard must cover the
+        WHOLE loop body including the state write — one row's failing
+        write must never abort harvesting the remaining rows, because
+        the purge runs immediately after and would destroy their
+        un-harvested evidence (the I1b failure mode)."""
+        row1 = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        row2 = self._row(2, files=[
+            {"username": "user2", "filename": "user2\\Music\\01.flac",
+             "file_dir": "user2\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        slskd_downloads = [
+            {
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Errored",
+                    "bytesTransferred": 0,
+                    "exception": "Read error: Connection reset by peer",
+                }]}],
+            },
+            {
+                "username": "user2",
+                "directories": [{"directory": "user2\\Music", "files": [{
+                    "filename": "user2\\Music\\01.flac",
+                    "id": "tid-2",
+                    "state": "Completed, Rejected",
+                    "bytesTransferred": 0,
+                    "exception": "Transfer rejected: Banned",
+                }]}],
+            },
+        ]
+        ctx, fake_db = self._ctx([row1, row2], slskd_downloads)
+        fake_db.set_update_download_state_error(
+            1, RuntimeError("UPDATE failed"))
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        # Row 1's write failed — its persisted state is unchanged.
+        state1 = fake_db.request(1)["active_download_state"]
+        self.assertEqual(state1["files"][0]["last_state"], "InProgress")
+        # Row 2 was still harvested despite row 1's failure.
+        state2 = fake_db.request(2)["active_download_state"]
+        self.assertEqual(
+            state2["files"][0]["last_state"], "Completed, Rejected")
+        self.assertEqual(
+            state2["files"][0]["last_exception"], "Transfer rejected: Banned")
+
+    def test_write_goes_through_status_guarded_update(self):
+        """Review finding (issue #564): the harvest write must use the
+        status-guarded update_download_state_if_downloading — a row a
+        concurrent operator action flipped out of 'downloading' between
+        the get_downloading() read and the write is never rewritten."""
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "Completed, Rejected",
+                "bytesTransferred": 0,
+                "exception": "Transfer rejected: Banned",
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        # Simulate the concurrent flip: get_downloading() returns deep
+        # copies, so flipping the stored row's status right after the
+        # read mirrors an operator action landing mid-cycle.
+        original_get_downloading = fake_db.get_downloading
+
+        def get_downloading_then_flip():
+            rows = original_get_downloading()
+            fake_db._requests[1]["status"] = "manual"
+            return rows
+
+        cast(Any, fake_db).get_downloading = get_downloading_then_flip
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        # The guarded write refused: persisted state is unchanged.
+        state = fake_db.request(1)["active_download_state"]
+        self.assertEqual(state["files"][0]["last_state"], "InProgress")
+        self.assertNotIn("last_exception", state["files"][0])
+
+    def test_no_downloading_rows_is_a_noop(self):
+        ctx, fake_db = self._ctx([], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+
+class TestHarvestPhase0Wiring(unittest.TestCase):
+    """harvest_terminal_transfer_evidence must run immediately BEFORE
+    remove_completed_downloads(), guarded by its own try/except so a
+    harvest failure can never block the purge or the cycle — mirrors the
+    same source-inspection pattern as
+    tests/test_disk_reaper_generated.py::TestDiskReaperPhase0Wiring.
+    """
+
+    def _main_source(self) -> str:
+        import cratedigger
+        return inspect.getsource(cratedigger.main)
+
+    def test_called_immediately_before_remove_completed_downloads(self):
+        source = self._main_source()
+        harvest_idx = source.index("harvest_terminal_transfer_evidence(_module_ctx)")
+        purge_idx = source.index("slskd.transfers.remove_completed_downloads()")
+        self.assertLess(harvest_idx, purge_idx)
+
+    def test_call_is_isolated_in_its_own_try_except_exception_block(self):
+        tree = ast.parse(self._main_source())
+
+        def _calls_harvest(node: ast.AST) -> bool:
+            return (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "harvest_terminal_transfer_evidence"
+            )
+
+        matches = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            in_body = any(
+                _calls_harvest(n) for stmt in node.body for n in ast.walk(stmt))
+            if in_body:
+                matches.append(node)
+
+        inner_matches = [
+            m for m in matches
+            if not any(
+                other is not m and id(other) in {id(n) for n in ast.walk(m)}
+                for other in matches
+            )
+        ]
+
+        self.assertEqual(
+            len(inner_matches), 1,
+            "expected exactly one (innermost) try block calling "
+            "harvest_terminal_transfer_evidence")
+        node = inner_matches[0]
+        self.assertTrue(node.handlers, "the try block must have a handler")
+        for handler in node.handlers:
+            self.assertIsInstance(
+                handler.type, ast.Name,
+                "handler must catch a bare exception type")
+            assert isinstance(handler.type, ast.Name)
+            self.assertEqual(
+                handler.type.id, "Exception",
+                "must catch Exception broadly so a harvest failure can't "
+                "abort the cycle")
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 
@@ -2964,7 +3624,13 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         fake_db.assert_log(self, 0, outcome="timeout")
         log = fake_db.download_logs[0]
-        self.assertEqual(log.error_message, "all 2 files errored")
+        # Issue #564 C5: the generic reason is now enriched with the real
+        # per-file evidence instead of staying a bare "all N files
+        # errored" — the exact fix for this test's own reproduction.
+        self.assertEqual(
+            log.error_message,
+            "all 2 files errored — 1× 'Completed, Errored', "
+            "1× 'Completed, Rejected'")
         self.assertNotEqual(log.error_message, "all transfers vanished from slskd")
         self.assertEqual(log.filetype, "m4a")
         self.assertEqual(log.soulseek_username, "elgoognplus")
@@ -3293,7 +3959,13 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
         self.assertEqual(fake_db.download_logs, [])
-        self.assertEqual(fake_db.update_download_state_calls, [])
+        # First observation of "Queued, Remotely" is new evidence (issue
+        # #564 state_dirty split) even though it isn't forward progress —
+        # persisted once, but stalled_timeout still doesn't fire.
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertIn(
+            "Queued, Remotely",
+            fake_db.update_download_state_calls[0][1])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
 
     def test_poll_transfer_vanished_partial(self):
@@ -4558,6 +5230,27 @@ class TestBuildActiveDownloadState(unittest.TestCase):
         self.assertEqual(state.files[0].bytes_transferred, 2048)
         self.assertEqual(state.files[0].last_state, "InProgress")
 
+    def test_persists_last_exception(self):
+        """Issue #564: the real slskd failure reason survives the
+        GrabListEntry -> ActiveDownloadState round trip."""
+        from lib.download import build_active_download_state
+        from lib.grab_list import GrabListEntry, DownloadFile
+        entry = GrabListEntry(
+            album_id=1, filetype="flac", title="T", artist="A", year="2020",
+            mb_release_id="mbid",
+            files=[
+                DownloadFile(
+                    filename="u\\M\\01.flac", id="tid-1",
+                    file_dir="u\\M", username="user1", size=30000000,
+                    last_state="Completed, Rejected",
+                    last_exception="Transfer rejected: Banned",
+                ),
+            ],
+        )
+        state = build_active_download_state(entry)
+        self.assertEqual(
+            state.files[0].last_exception, "Transfer rejected: Banned")
+
     def test_enqueued_at_is_utc_iso(self):
         from lib.download import build_active_download_state
         from lib.grab_list import GrabListEntry, DownloadFile
@@ -4748,6 +5441,70 @@ class TestReconstructGrabListEntry(unittest.TestCase):
             entry.files[0].status,
             TransferSnapshot(state="Completed, Rejected", bytes_transferred=0),
         )
+
+    def test_reconstruct_restores_exception_onto_terminal_status(self):
+        """Issue #564: a persisted exception rehydrates onto the
+        synthetic TransferSnapshot AND the DownloadFile field directly."""
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        state = ActiveDownloadState(
+            filetype="m4a",
+            enqueued_at="now",
+            files=[
+                ActiveDownloadFileState(
+                    username="elgoognplus",
+                    filename="Music\\78 Saab\\Crossed Lines\\01 No Illusions.m4a",
+                    file_dir="Music\\78 Saab\\Crossed Lines",
+                    size=26799968,
+                    bytes_transferred=0,
+                    last_state="Completed, Rejected",
+                    last_exception="Transfer rejected: Banned",
+                ),
+            ],
+        )
+        request = {"id": 10, "album_title": "Crossed Lines",
+                   "artist_name": "78 Saab", "year": 2004,
+                   "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+
+        entry = reconstruct_grab_list_entry(request, state)
+
+        self.assertEqual(
+            entry.files[0].status,
+            TransferSnapshot(state="Completed, Rejected", bytes_transferred=0,
+                              exception="Transfer rejected: Banned"),
+        )
+        self.assertEqual(
+            entry.files[0].last_exception, "Transfer rejected: Banned")
+
+    def test_reconstruct_persists_last_exception_independent_of_terminal_status(self):
+        """A non-terminal state carries no synthetic status, but the
+        persisted exception field itself must still survive the round
+        trip — evidence the pre-purge harvest (issue #564 C3) relies on."""
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="now",
+            files=[
+                ActiveDownloadFileState(
+                    username="user1", filename="user1\\Music\\01.flac",
+                    file_dir="user1\\Music", size=1000,
+                    last_state="InProgress",
+                    last_exception="Read error: Connection reset by peer",
+                ),
+            ],
+        )
+        request = {"id": 10, "album_title": "B", "artist_name": "A",
+                   "year": 2020, "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+
+        entry = reconstruct_grab_list_entry(request, state)
+
+        self.assertIsNone(entry.files[0].status)
+        self.assertEqual(
+            entry.files[0].last_exception,
+            "Read error: Connection reset by peer")
 
     def test_reconstruct_missing_year(self):
         from lib.download import reconstruct_grab_list_entry

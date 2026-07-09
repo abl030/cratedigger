@@ -16,6 +16,7 @@ from contextlib import AbstractContextManager
 from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
                     runtime_checkable)
 
+import msgspec
 
 from lib import download_processing
 from lib.download_processing import (
@@ -41,6 +42,7 @@ from lib.processing_paths import attempt_fingerprint, directory_has_entries
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
                          DownloadDecision,
+                         FileFailureDetail,
                          decide_download_action,
                          extract_usernames)
 from lib import transitions
@@ -57,6 +59,7 @@ from lib.slskd_transfers import (
     _get_all_downloads_snapshot,
     cancel_and_delete,
     downloads_all_done,
+    match_transfer,
     rederive_transfer_ids,
     slskd_do_enqueue,
     slskd_download_status,
@@ -95,6 +98,10 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         self, request_id: int, state_json: str,
     ) -> None: ...
 
+    def update_download_state_if_downloading(
+        self, request_id: int, state_json: str,
+    ) -> bool: ...
+
     def update_download_state_current_path(
         self, request_id: int, current_path: str | None,
     ) -> None: ...
@@ -107,6 +114,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         filetype: str | None = None,
         outcome: DownloadLogOutcome | None = None,
         error_message: str | None = None,
+        transfer_detail: Any = None,
     ) -> int: ...
 
     def enqueue_import_job(
@@ -189,6 +197,7 @@ def build_active_download_state(
             retry_count=f.retry or 0,
             bytes_transferred=f.bytes_transferred or 0,
             last_state=f.last_state,
+            last_exception=f.last_exception,
             local_path=f.local_path,
         )
         for f in entry.files
@@ -225,6 +234,7 @@ def reconstruct_grab_list_entry(
         restored_status = _restored_terminal_status(
             f.last_state,
             f.bytes_transferred,
+            f.last_exception,
         )
         files.append(DownloadFile(
             filename=f.filename,
@@ -237,6 +247,7 @@ def reconstruct_grab_list_entry(
             retry=f.retry_count,
             bytes_transferred=f.bytes_transferred,
             last_state=f.last_state,
+            last_exception=f.last_exception,
             status=restored_status,
             local_path=f.local_path,
         ))
@@ -267,20 +278,107 @@ def reconstruct_grab_list_entry(
 def _restored_terminal_status(
     last_state: str | None,
     bytes_transferred: int,
+    exception: str | None = None,
 ) -> TransferSnapshot | None:
     """Rehydrate terminal slskd observations persisted in JSONB state.
 
     slskd's ``includeRemoved`` snapshot can stop exposing terminal transfer
     rows between poll cycles. Once we have seen a terminal state, keep that
     evidence actionable instead of downgrading it to an invisible transfer.
+    ``exception`` (issue #564) restores the real failure reason onto the
+    synthetic snapshot so downstream message composition still has it.
     """
     if not last_state or not last_state.startswith("Completed,"):
         return None
-    return TransferSnapshot(state=last_state, bytes_transferred=bytes_transferred)
+    return TransferSnapshot(
+        state=last_state, bytes_transferred=bytes_transferred,
+        exception=exception)
 
 
 
 # === Async download polling ===
+
+def summarize_file_failures(files: list[DownloadFile]) -> str | None:
+    """Compose a deterministic, human-readable summary of per-file
+    download failures (issue #564 C5) — the evidence a download-timeout
+    message names instead of a generic "vanished"/"errored" verdict.
+
+    Per file, prefers ``last_exception`` (slskd's real per-transfer
+    failure reason); falls back to a terminal ``last_state`` (any state
+    starting ``"Completed,"`` other than ``"Completed, Succeeded"``).
+    Files with no exception and no terminal-error state (still in
+    progress, or genuinely never observed) contribute nothing.
+
+    Returns ``None`` when no file carries any evidence at all — callers
+    use that to distinguish "genuinely never observed" from "observed
+    and failed" (I2).
+
+    Deterministic ordering: most common reason first, ties broken
+    alphabetically, so the composed message never varies cycle to cycle
+    for the same evidence set.
+    """
+    counts: dict[str, int] = {}
+    for f in files:
+        reason = f.last_exception
+        if not reason:
+            state = f.last_state
+            if (state and state.startswith("Completed,")
+                    and state != "Completed, Succeeded"):
+                reason = state
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+    if not counts:
+        return None
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{count}× '{reason}'" for reason, count in ordered)
+
+
+def _file_failure_details(files: list[DownloadFile]) -> list[FileFailureDetail]:
+    """Per-file failure detail behind the composed timeout summary
+    (issue #564 C7) — the full audit record (one entry per tracked
+    file, not only the ones with evidence) persisted to
+    ``download_log.transfer_detail``."""
+    return [
+        FileFailureDetail(
+            username=f.username,
+            filename=f.filename,
+            last_state=f.last_state,
+            last_exception=f.last_exception,
+            bytes_transferred=f.bytes_transferred or 0,
+            retry_count=f.retry or 0,
+        )
+        for f in files
+    ]
+
+
+def _vanished_timeout_reason(files: list[DownloadFile]) -> str:
+    """Compose the reason for the "transfers vanished from slskd" timeout
+    path (issue #564 C5/I2): names the last observed evidence when any
+    exists (persisted from a prior cycle's poll or pre-purge harvest),
+    and claims nothing was ever observed only when that's actually true.
+    """
+    summary = summarize_file_failures(files)
+    if summary:
+        return f"transfers no longer in slskd — last observed: {summary}"
+    return (
+        "transfers vanished from slskd before any status was observed "
+        "(slskd restart?)")
+
+
+def _enrich_timeout_reason(reason: str, files: list[DownloadFile]) -> str:
+    """Append the per-file failure-evidence summary to a timeout reason
+    (issue #564 C5), unless it's already embedded — the vanished-timeout
+    reason above already names the same evidence inline, so this stays a
+    no-op for that caller while still enriching every
+    ``decide_download_action``-derived reason (whose strings are
+    UNCHANGED — simulator scenarios depend on them; this is where the
+    enrichment happens instead).
+    """
+    summary = summarize_file_failures(files)
+    if summary and summary not in reason:
+        return f"{reason} — {summary}"
+    return reason
+
 
 def _timeout_album(
     entry: GrabListEntry,
@@ -296,6 +394,8 @@ def _timeout_album(
                     if f.status and f.status.state == "Completed, Succeeded")
 
     dl_info = _build_download_info(entry)
+    reason = _enrich_timeout_reason(reason, entry.files)
+    transfer_detail = msgspec.to_builtins(_file_failure_details(entry.files))
 
     logger.info(f"DOWNLOAD TIMEOUT: {entry.artist} - {entry.title} "
                 f"({completed}/{total} files done, reason={reason})")
@@ -307,6 +407,7 @@ def _timeout_album(
         filetype=dl_info.filetype,
         outcome="timeout",
         error_message=reason,
+        transfer_detail=transfer_detail,
     )
     for username in extract_usernames(entry.files):
         if db.check_and_apply_cooldown(username):
@@ -343,6 +444,92 @@ def _persist_updated_download_state(
     )
 
 
+def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
+    """Harvest terminal slskd transfer evidence immediately before the
+    end-of-cycle purge (issue #564 root cause #3, C3).
+
+    ``cratedigger.py`` calls ``slskd.transfers.remove_completed_downloads()``
+    at the end of every cycle, discarding slskd's per-transfer terminal
+    state — including the ``exception`` reason — for any transfer that
+    completed and errored within the SAME cycle it was enqueued, before
+    the next poll cycle ever observes it. The very next poll then finds
+    no transfer at all and reports a generic "vanished from slskd"
+    timeout with zero evidence.
+
+    This takes one final bulk snapshot and, for every ``downloading`` row
+    that hasn't reached local processing yet, stamps any file whose
+    matched transfer is now terminal into ``active_download_state`` —
+    the SAME persisted fields ``_capture_download_progress`` writes
+    (``last_state``, ``last_exception``, ``bytes_transferred``) via the
+    real ``ActiveDownloadState`` round trip (decode -> mutate -> encode),
+    never a hand-rolled JSON dict. Rows already past
+    ``processing_started_at`` are skipped — their files already moved to
+    local processing and are no longer purely slskd-side transfers.
+
+    Best-effort and silent on the happy path: a snapshot failure skips
+    the whole pass, and ANY per-row failure (undecodable
+    ``active_download_state``, a matcher error, the state write raising)
+    skips only that row — one row's failure must never abort harvesting
+    the remaining rows, because the purge runs immediately after and an
+    aborted loop would destroy the un-harvested rows' evidence (the I1b
+    failure mode). The purge always still runs regardless (the
+    pre-existing behavior). The write goes through the status-guarded
+    ``update_download_state_if_downloading`` — mirroring the poll path's
+    fresh-status guard — so a row a concurrent operator action just
+    flipped out of ``downloading`` is never rewritten. MUST be called
+    before ``remove_completed_downloads()`` — see the call site in
+    ``cratedigger.py``.
+    """
+    db = ctx.pipeline_db_source._get_db()
+    downloading = db.get_downloading()
+    if not downloading:
+        return
+
+    snapshot = _get_all_downloads_snapshot(
+        ctx.slskd, purpose="pre-purge terminal evidence harvest")
+    if snapshot is None:
+        return
+
+    harvested = 0
+    for row in downloading:
+        request_id = row["id"]
+        try:
+            raw_state = row.get("active_download_state")
+            if not raw_state:
+                continue
+            state = ActiveDownloadState.from_raw(raw_state)
+            if state.processing_started_at is not None:
+                continue
+
+            dirty = False
+            for f in state.files:
+                if f.last_state and f.last_state.startswith("Completed,"):
+                    continue
+                transfer = match_transfer(
+                    snapshot, f.filename, username=f.username)
+                if (transfer is None
+                        or not transfer.state.startswith("Completed,")):
+                    continue
+                f.last_state = transfer.state
+                f.last_exception = transfer.exception or f.last_exception
+                f.bytes_transferred = transfer.bytes_transferred
+                dirty = True
+
+            if dirty and db.update_download_state_if_downloading(
+                    request_id, state.to_json()):
+                harvested += 1
+        except Exception:
+            logger.warning(
+                "HARVEST: request %s could not be harvested — skipping "
+                "this row this cycle", request_id, exc_info=True)
+            continue
+
+    if harvested:
+        logger.info(
+            "HARVEST: captured pre-purge terminal transfer evidence for "
+            "%d downloading row(s)", harvested)
+
+
 _NON_PROGRESS_STATES = {
     "",
     "Queued, Remotely",
@@ -358,33 +545,58 @@ def _capture_download_progress(
     downloads: list[DownloadFile],
     state: ActiveDownloadState,
     now: datetime,
-) -> bool:
-    """Record byte/state progress from fresh slskd status snapshots.
+) -> tuple[bool, bool]:
+    """Record byte/state/exception evidence from fresh slskd status snapshots.
 
-    Returns True when any file made observable forward progress this cycle.
+    Returns ``(progress_made, state_dirty)``:
+
+    - ``progress_made`` — observable forward progress this cycle (bytes
+      increased, or the state changed to something outside
+      ``_NON_PROGRESS_STATES``). Drives ``state.last_progress_at`` —
+      stall-detection semantics are UNCHANGED from before issue #564.
+    - ``state_dirty`` — ANY change to a file's ``last_state``,
+      ``last_exception``, or ``bytes_transferred`` this cycle, including
+      a transition INTO a terminal error state (which is deliberately
+      NOT "progress"). Callers must persist on ``state_dirty``, not
+      ``progress_made`` — gating persistence on progress alone silently
+      dropped every terminal-error observation that arrived without
+      forward progress (issue #564 root cause #2), so the poller's next
+      cycle found the row's evidence gone.
     """
     progress_made = False
+    state_dirty = False
     for file in downloads:
         if not file.status:
             continue
 
         current_state = file.status.state
         current_bytes = file.status.bytes_transferred
+        current_exception = file.status.exception
         previous_bytes = file.bytes_transferred or 0
-        previous_state = file.last_state or ""
+        previous_state = file.last_state
+        previous_exception = file.last_exception
 
         if current_bytes > previous_bytes:
             progress_made = True
-        elif current_state != previous_state and current_state not in _NON_PROGRESS_STATES:
+        elif (current_state != (previous_state or "")
+              and current_state not in _NON_PROGRESS_STATES):
             progress_made = True
 
+        new_state = current_state or previous_state
+        new_exception = current_exception or previous_exception
+        if (current_bytes != previous_bytes
+                or new_state != previous_state
+                or new_exception != previous_exception):
+            state_dirty = True
+
         file.bytes_transferred = current_bytes
-        file.last_state = current_state or file.last_state
+        file.last_state = new_state
+        file.last_exception = new_exception
 
     if progress_made:
         state.last_progress_at = now.isoformat()
 
-    return progress_made
+    return progress_made, state_dirty
 
 
 def _run_completed_processing(
@@ -911,7 +1123,8 @@ def _poll_one_active_download(
                 request_id,
             )
             return
-        _timeout_album(entry, request_id, "all transfers vanished from slskd", ctx)
+        _timeout_album(
+            entry, request_id, _vanished_timeout_reason(entry.files), ctx)
         return
 
     # Mark files with vanished transfers as errored. Preserve restored
@@ -935,7 +1148,8 @@ def _poll_one_active_download(
 
     album_done, problems, queued = downloads_all_done(entry.files)
     statusful_files = [f for f in entry.files if f.status is not None]
-    state_changed = _capture_download_progress(statusful_files, state, now)
+    _progress_made, state_dirty = _capture_download_progress(
+        statusful_files, state, now)
 
     all_remote_queued = _all_files_remotely_queued(entry.files, queued)
     error_filenames = [f.filename for f in problems] if problems is not None else None
@@ -991,11 +1205,12 @@ def _poll_one_active_download(
                             file.username,
                             [{"filename": file.filename, "size": file.size}],
                             file.file_dir, ctx)
-                        state_changed = True
+                        state_dirty = True
                         if requeue:
                             df.id = requeue[0].id
                             df.bytes_transferred = 0
                             df.last_state = None
+                            df.last_exception = None
                             state.last_progress_at = now.isoformat()
                         else:
                             logger.warning(f"Failed to re-enqueue file: {retry_filename}")
@@ -1009,7 +1224,7 @@ def _poll_one_active_download(
     refreshed = db.get_request(request_id)
     if refreshed and refreshed["status"] != "downloading":
         return
-    if state_changed:
+    if state_dirty:
         _persist_updated_download_state(db, request_id, entry, state)
 
     # Still in progress — log and continue to next album

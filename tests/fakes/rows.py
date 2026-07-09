@@ -22,6 +22,8 @@ class DownloadLogRow:
     error_message: str | None = None
     validation_result: Any = None
     import_result: Any = None
+    # Migration 043 — per-file failure detail audit blob (issue #564 C7).
+    transfer_detail: Any = None
     # Auto-assigned monotonic id matching PostgreSQL serial behaviour.
     id: int = 0
     # Migration 021: addressing FK to album_quality_evidence(id).

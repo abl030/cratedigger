@@ -997,6 +997,45 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         assert log.error_message is not None
         self.assertIn("offline", log.error_message.lower())
 
+    def test_verified_no_acceptance_user_offline_log_uses_captured_reason(self):
+        """Issue #564 C4: when the offline classification captured a
+        reason, the download_log error_message uses it directly instead
+        of the generic fallback string."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=FakeSlskdAPI(downloads=[]),
+        )
+        cast(FakePipelineDBSource, ctx.pipeline_db_source).db = db
+        users = ["pooyork"]
+        results = _make_results(users)
+        file_dir = "musiclibrary\\Mercury Rev\\Deserter's Songs"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(
+                     status="rejected", reason="peer appears to be offline"),
+             ):
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
+
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "user_offline")
+        self.assertEqual(log.error_message, "peer appears to be offline")
+
     def test_rejected_enqueue_with_visible_transfer_does_not_log(self):
         """When the rejected outcome leaves a visible transfer (the
         residual-claim safety net), the request stays in ``downloading``
