@@ -2483,6 +2483,120 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
             self.assertEqual(db.request(1)["status"], "wanted")
 
 
+class TestCaptureDownloadProgress(unittest.TestCase):
+    """Test _capture_download_progress() — the persistence-gate split
+    (issue #564 C2 / root cause #2): progress_made drives stall-detection
+    timing; state_dirty must independently gate persistence so a
+    terminal-error observation is never silently dropped just because it
+    isn't "forward progress".
+    """
+
+    def _file(self, **overrides: Any) -> Any:
+        from tests.helpers import make_download_file
+        f = make_download_file()
+        for key, value in overrides.items():
+            setattr(f, key, value)
+        return f
+
+    def _state(self) -> Any:
+        from lib.quality import ActiveDownloadState
+        return ActiveDownloadState(
+            filetype="flac", enqueued_at="2026-01-01T00:00:00+00:00",
+            files=[])
+
+    CASES = [
+        (
+            "bytes increase is progress and dirty",
+            dict(bytes_transferred=0, last_state="InProgress",
+                 last_exception=None),
+            TransferSnapshot(state="InProgress", bytes_transferred=100),
+            True, True,
+        ),
+        (
+            "no status observed leaves file untouched",
+            dict(bytes_transferred=0, last_state=None, last_exception=None),
+            None,
+            False, False,
+        ),
+        (
+            "transition into non-progress state without exception is "
+            "still dirty (not progress)",
+            dict(bytes_transferred=0, last_state=None, last_exception=None),
+            TransferSnapshot(state="Queued, Remotely", bytes_transferred=0),
+            False, True,
+        ),
+        (
+            "terminal error with no byte progress is dirty but not "
+            "progress -- issue #564 root cause #2's exact shape",
+            dict(bytes_transferred=0, last_state="InProgress",
+                 last_exception=None),
+            TransferSnapshot(state="Completed, Rejected", bytes_transferred=0,
+                              exception="Transfer rejected: Banned"),
+            False, True,
+        ),
+        (
+            "identical repeat observation is neither progress nor dirty",
+            dict(bytes_transferred=0, last_state="Completed, Errored",
+                 last_exception="Read error: Connection reset by peer"),
+            TransferSnapshot(state="Completed, Errored", bytes_transferred=0,
+                              exception="Read error: Connection reset by peer"),
+            False, False,
+        ),
+        (
+            "a blank re-observation preserves the prior exception",
+            dict(bytes_transferred=0, last_state="Completed, Errored",
+                 last_exception="Read error: Connection reset by peer"),
+            TransferSnapshot(state="Completed, Errored", bytes_transferred=0),
+            False, False,
+        ),
+    ]
+
+    def test_progress_and_dirty_split(self):
+        for desc, file_kwargs, status, expect_progress, expect_dirty in self.CASES:
+            with self.subTest(desc=desc):
+                from lib.download import _capture_download_progress
+                f = self._file(**file_kwargs)
+                f.status = status
+                state = self._state()
+                progress_made, state_dirty = _capture_download_progress(
+                    [f], state, datetime(2026, 1, 1, tzinfo=timezone.utc))
+                self.assertEqual(progress_made, expect_progress, desc)
+                self.assertEqual(state_dirty, expect_dirty, desc)
+
+    def test_terminal_error_records_exception_even_without_progress(self):
+        """Regression pin for root cause #2: the exception must be
+        recorded on the file even though this is NOT forward progress."""
+        from lib.download import _capture_download_progress
+        f = self._file(bytes_transferred=0, last_state="InProgress",
+                       last_exception=None)
+        f.status = TransferSnapshot(
+            state="Completed, Rejected", bytes_transferred=0,
+            exception="Transfer rejected: Banned")
+        state = self._state()
+
+        progress_made, state_dirty = _capture_download_progress(
+            [f], state, datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        self.assertFalse(progress_made)
+        self.assertTrue(state_dirty)
+        self.assertEqual(f.last_state, "Completed, Rejected")
+        self.assertEqual(f.last_exception, "Transfer rejected: Banned")
+
+    def test_progress_made_advances_last_progress_at_only(self):
+        """state.last_progress_at moves on progress_made, exactly as
+        before issue #564 -- the split does not change stall timing."""
+        from lib.download import _capture_download_progress
+        f = self._file(bytes_transferred=0, last_state="InProgress",
+                       last_exception=None)
+        f.status = TransferSnapshot(state="InProgress", bytes_transferred=50)
+        state = self._state()
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        _capture_download_progress([f], state, now)
+
+        self.assertEqual(state.last_progress_at, now.isoformat())
+
+
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 
@@ -3293,7 +3407,13 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
         self.assertEqual(fake_db.download_logs, [])
-        self.assertEqual(fake_db.update_download_state_calls, [])
+        # First observation of "Queued, Remotely" is new evidence (issue
+        # #564 state_dirty split) even though it isn't forward progress —
+        # persisted once, but stalled_timeout still doesn't fire.
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        self.assertIn(
+            "Queued, Remotely",
+            fake_db.update_download_state_calls[0][1])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
 
     def test_poll_transfer_vanished_partial(self):
@@ -4558,6 +4678,27 @@ class TestBuildActiveDownloadState(unittest.TestCase):
         self.assertEqual(state.files[0].bytes_transferred, 2048)
         self.assertEqual(state.files[0].last_state, "InProgress")
 
+    def test_persists_last_exception(self):
+        """Issue #564: the real slskd failure reason survives the
+        GrabListEntry -> ActiveDownloadState round trip."""
+        from lib.download import build_active_download_state
+        from lib.grab_list import GrabListEntry, DownloadFile
+        entry = GrabListEntry(
+            album_id=1, filetype="flac", title="T", artist="A", year="2020",
+            mb_release_id="mbid",
+            files=[
+                DownloadFile(
+                    filename="u\\M\\01.flac", id="tid-1",
+                    file_dir="u\\M", username="user1", size=30000000,
+                    last_state="Completed, Rejected",
+                    last_exception="Transfer rejected: Banned",
+                ),
+            ],
+        )
+        state = build_active_download_state(entry)
+        self.assertEqual(
+            state.files[0].last_exception, "Transfer rejected: Banned")
+
     def test_enqueued_at_is_utc_iso(self):
         from lib.download import build_active_download_state
         from lib.grab_list import GrabListEntry, DownloadFile
@@ -4748,6 +4889,70 @@ class TestReconstructGrabListEntry(unittest.TestCase):
             entry.files[0].status,
             TransferSnapshot(state="Completed, Rejected", bytes_transferred=0),
         )
+
+    def test_reconstruct_restores_exception_onto_terminal_status(self):
+        """Issue #564: a persisted exception rehydrates onto the
+        synthetic TransferSnapshot AND the DownloadFile field directly."""
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        state = ActiveDownloadState(
+            filetype="m4a",
+            enqueued_at="now",
+            files=[
+                ActiveDownloadFileState(
+                    username="elgoognplus",
+                    filename="Music\\78 Saab\\Crossed Lines\\01 No Illusions.m4a",
+                    file_dir="Music\\78 Saab\\Crossed Lines",
+                    size=26799968,
+                    bytes_transferred=0,
+                    last_state="Completed, Rejected",
+                    last_exception="Transfer rejected: Banned",
+                ),
+            ],
+        )
+        request = {"id": 10, "album_title": "Crossed Lines",
+                   "artist_name": "78 Saab", "year": 2004,
+                   "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+
+        entry = reconstruct_grab_list_entry(request, state)
+
+        self.assertEqual(
+            entry.files[0].status,
+            TransferSnapshot(state="Completed, Rejected", bytes_transferred=0,
+                              exception="Transfer rejected: Banned"),
+        )
+        self.assertEqual(
+            entry.files[0].last_exception, "Transfer rejected: Banned")
+
+    def test_reconstruct_persists_last_exception_independent_of_terminal_status(self):
+        """A non-terminal state carries no synthetic status, but the
+        persisted exception field itself must still survive the round
+        trip — evidence the pre-purge harvest (issue #564 C3) relies on."""
+        from lib.download import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="now",
+            files=[
+                ActiveDownloadFileState(
+                    username="user1", filename="user1\\Music\\01.flac",
+                    file_dir="user1\\Music", size=1000,
+                    last_state="InProgress",
+                    last_exception="Read error: Connection reset by peer",
+                ),
+            ],
+        )
+        request = {"id": 10, "album_title": "B", "artist_name": "A",
+                   "year": 2020, "mb_release_id": "mbid", "source": "request",
+                   "search_filetype_override": None, "target_format": None}
+
+        entry = reconstruct_grab_list_entry(request, state)
+
+        self.assertIsNone(entry.files[0].status)
+        self.assertEqual(
+            entry.files[0].last_exception,
+            "Read error: Connection reset by peer")
 
     def test_reconstruct_missing_year(self):
         from lib.download import reconstruct_grab_list_entry

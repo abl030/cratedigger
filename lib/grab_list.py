@@ -68,6 +68,9 @@ class DownloadFile:
     retry: Optional[int] = None     # retry counter, initialized on error
     bytes_transferred: Optional[int] = None
     last_state: Optional[str] = None
+    # slskd's real per-transfer failure reason (issue #564), mirrored
+    # from TransferSnapshot.exception and persisted alongside last_state.
+    last_exception: Optional[str] = None
     # slskd's authoritative post-rename local path, stamped from the
     # DownloadFileComplete event stream (issue #146 phase 1).
     local_path: Optional[str] = None

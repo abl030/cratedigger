@@ -512,6 +512,7 @@ def _copy_download_observations(
         target.retry = getattr(source, "retry", None)
         target.bytes_transferred = getattr(source, "bytes_transferred", None)
         target.last_state = getattr(source, "last_state", None)
+        target.last_exception = getattr(source, "last_exception", None)
 
 
 def _clear_download_observations(files: Sequence[DownloadFile]) -> None:
@@ -521,6 +522,7 @@ def _clear_download_observations(files: Sequence[DownloadFile]) -> None:
         file.retry = None
         file.bytes_transferred = None
         file.last_state = None
+        file.last_exception = None
 
 
 def _visible_transfer_files(files: Sequence[DownloadFile]) -> list[DownloadFile]:

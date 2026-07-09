@@ -171,6 +171,11 @@ class ActiveDownloadFileState(msgspec.Struct, omit_defaults=True):
     retry_count: int = 0
     bytes_transferred: int = 0
     last_state: str | None = None
+    # slskd's real per-transfer failure reason (issue #564), e.g.
+    # "Transfer rejected: Banned", "Read error: Connection reset by
+    # peer". Persisted alongside ``last_state`` so a download-failure
+    # message can name the actual cause instead of a generic timeout.
+    last_exception: str | None = None
     # Authoritative post-rename local path from slskd's
     # DownloadFileComplete event (issue #146 phase 1). Persisted because
     # multi-file albums complete file-by-file across poll cycles while

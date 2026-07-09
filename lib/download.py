@@ -189,6 +189,7 @@ def build_active_download_state(
             retry_count=f.retry or 0,
             bytes_transferred=f.bytes_transferred or 0,
             last_state=f.last_state,
+            last_exception=f.last_exception,
             local_path=f.local_path,
         )
         for f in entry.files
@@ -225,6 +226,7 @@ def reconstruct_grab_list_entry(
         restored_status = _restored_terminal_status(
             f.last_state,
             f.bytes_transferred,
+            f.last_exception,
         )
         files.append(DownloadFile(
             filename=f.filename,
@@ -237,6 +239,7 @@ def reconstruct_grab_list_entry(
             retry=f.retry_count,
             bytes_transferred=f.bytes_transferred,
             last_state=f.last_state,
+            last_exception=f.last_exception,
             status=restored_status,
             local_path=f.local_path,
         ))
@@ -267,16 +270,21 @@ def reconstruct_grab_list_entry(
 def _restored_terminal_status(
     last_state: str | None,
     bytes_transferred: int,
+    exception: str | None = None,
 ) -> TransferSnapshot | None:
     """Rehydrate terminal slskd observations persisted in JSONB state.
 
     slskd's ``includeRemoved`` snapshot can stop exposing terminal transfer
     rows between poll cycles. Once we have seen a terminal state, keep that
     evidence actionable instead of downgrading it to an invisible transfer.
+    ``exception`` (issue #564) restores the real failure reason onto the
+    synthetic snapshot so downstream message composition still has it.
     """
     if not last_state or not last_state.startswith("Completed,"):
         return None
-    return TransferSnapshot(state=last_state, bytes_transferred=bytes_transferred)
+    return TransferSnapshot(
+        state=last_state, bytes_transferred=bytes_transferred,
+        exception=exception)
 
 
 
@@ -358,33 +366,58 @@ def _capture_download_progress(
     downloads: list[DownloadFile],
     state: ActiveDownloadState,
     now: datetime,
-) -> bool:
-    """Record byte/state progress from fresh slskd status snapshots.
+) -> tuple[bool, bool]:
+    """Record byte/state/exception evidence from fresh slskd status snapshots.
 
-    Returns True when any file made observable forward progress this cycle.
+    Returns ``(progress_made, state_dirty)``:
+
+    - ``progress_made`` — observable forward progress this cycle (bytes
+      increased, or the state changed to something outside
+      ``_NON_PROGRESS_STATES``). Drives ``state.last_progress_at`` —
+      stall-detection semantics are UNCHANGED from before issue #564.
+    - ``state_dirty`` — ANY change to a file's ``last_state``,
+      ``last_exception``, or ``bytes_transferred`` this cycle, including
+      a transition INTO a terminal error state (which is deliberately
+      NOT "progress"). Callers must persist on ``state_dirty``, not
+      ``progress_made`` — gating persistence on progress alone silently
+      dropped every terminal-error observation that arrived without
+      forward progress (issue #564 root cause #2), so the poller's next
+      cycle found the row's evidence gone.
     """
     progress_made = False
+    state_dirty = False
     for file in downloads:
         if not file.status:
             continue
 
         current_state = file.status.state
         current_bytes = file.status.bytes_transferred
+        current_exception = file.status.exception
         previous_bytes = file.bytes_transferred or 0
-        previous_state = file.last_state or ""
+        previous_state = file.last_state
+        previous_exception = file.last_exception
 
         if current_bytes > previous_bytes:
             progress_made = True
-        elif current_state != previous_state and current_state not in _NON_PROGRESS_STATES:
+        elif (current_state != (previous_state or "")
+              and current_state not in _NON_PROGRESS_STATES):
             progress_made = True
 
+        new_state = current_state or previous_state
+        new_exception = current_exception or previous_exception
+        if (current_bytes != previous_bytes
+                or new_state != previous_state
+                or new_exception != previous_exception):
+            state_dirty = True
+
         file.bytes_transferred = current_bytes
-        file.last_state = current_state or file.last_state
+        file.last_state = new_state
+        file.last_exception = new_exception
 
     if progress_made:
         state.last_progress_at = now.isoformat()
 
-    return progress_made
+    return progress_made, state_dirty
 
 
 def _run_completed_processing(
@@ -935,7 +968,8 @@ def _poll_one_active_download(
 
     album_done, problems, queued = downloads_all_done(entry.files)
     statusful_files = [f for f in entry.files if f.status is not None]
-    state_changed = _capture_download_progress(statusful_files, state, now)
+    _progress_made, state_dirty = _capture_download_progress(
+        statusful_files, state, now)
 
     all_remote_queued = _all_files_remotely_queued(entry.files, queued)
     error_filenames = [f.filename for f in problems] if problems is not None else None
@@ -991,11 +1025,12 @@ def _poll_one_active_download(
                             file.username,
                             [{"filename": file.filename, "size": file.size}],
                             file.file_dir, ctx)
-                        state_changed = True
+                        state_dirty = True
                         if requeue:
                             df.id = requeue[0].id
                             df.bytes_transferred = 0
                             df.last_state = None
+                            df.last_exception = None
                             state.last_progress_at = now.isoformat()
                         else:
                             logger.warning(f"Failed to re-enqueue file: {retry_filename}")
@@ -1009,7 +1044,7 @@ def _poll_one_active_download(
     refreshed = db.get_request(request_id)
     if refreshed and refreshed["status"] != "downloading":
         return
-    if state_changed:
+    if state_dirty:
         _persist_updated_download_state(db, request_id, entry, state)
 
     # Still in progress — log and continue to next album
