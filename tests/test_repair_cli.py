@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from typing import Any, cast
 
+from lib.pipeline_db import TransferLedgerRow
 from lib.repair import OrphanInfo, SlskdOrphanTransfer
 from scripts import repair
 from tests.fakes import FakePipelineDB
@@ -177,7 +178,7 @@ class TestCollectIssues(unittest.TestCase):
 
         with redirect_stdout(stdout):
             collected = repair._collect_issues(
-                MagicMock(),
+                cast(Any, FakePipelineDB()),
                 slskd_host="http://slskd",
                 slskd_key="secret",
             )
@@ -209,7 +210,7 @@ class TestCollectIssues(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             collected = repair._collect_issues(
-                MagicMock(),
+                cast(Any, FakePipelineDB()),
                 slskd_host="http://slskd",
                 slskd_key="secret",
                 find_orphaned_fn=lambda rows, active, existing_local_paths=None: orphans,
@@ -251,7 +252,7 @@ class TestCollectIssues(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             collected = repair._collect_issues(
-                MagicMock(),
+                cast(Any, FakePipelineDB()),
                 slskd_host="http://slskd",
                 slskd_key="secret",
                 find_orphaned_fn=lambda rows, active, existing_local_paths=None: orphans,
@@ -267,14 +268,17 @@ class TestCollectIssues(unittest.TestCase):
 
 
 class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
-    """#479 item 1: scan surfaces slskd-side orphans (read-only).
+    """#479 item 1: scan surfaces slskd-side orphans (read-only);
+    ledger-positive since #571 PR 3.
 
     ``find_slskd_orphans`` runs for real against the same raw snapshot
     ``_fetch_slskd_downloads`` already fetched for the forward
     (``orphaned_download``) check — no second network round-trip, and no
     ``fix`` action is derived from it (the #278 convergence in
     ``lib.slskd_transfers.converge_slskd_orphans`` is the only thing that
-    ever cancels these).
+    ever cancels these). Report and convergence share the SAME
+    classification helper, so a transfer only ever shows up here when
+    convergence would also treat it as a ledger-owned stray.
     """
 
     RAW_SNAPSHOT = [
@@ -302,9 +306,15 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
             beets_staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
         )
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username="peer1",
+                filename="Music\\Orphan\\01.flac"),
+        ])
 
         collected = repair._collect_issues(
-            MagicMock(),
+            cast(Any, db),
             slskd_host="http://slskd",
             slskd_key="secret",
             find_blocked_recovery_fn=lambda *args, **kwargs: [],
@@ -317,6 +327,35 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
         self.assertEqual(orphan.transfer_id, "t-orphan")
         self.assertEqual(orphan.filename, "Music\\Orphan\\01.flac")
         self.assertEqual(orphan.state, "InProgress")
+        self.assertEqual(collected.slskd_foreign_count, 0)
+
+    @patch("scripts.repair._fetch_slskd_downloads", return_value=RAW_SNAPSHOT)
+    @patch("scripts.repair.read_runtime_config")
+    @patch("scripts.repair._get_all_rows", return_value=[])
+    def test_collect_issues_reports_unledgered_live_transfer_as_foreign_not_orphan(
+        self,
+        _mock_get_rows,
+        mock_read_runtime_config,
+        _mock_fetch_downloads,
+    ) -> None:
+        """C1 pin at the CLI-report layer: the SAME live transfer the prior
+        test reports as an orphan when ledgered is reported as foreign
+        (never an orphan) when the ledger has no matching row for it."""
+        mock_read_runtime_config.return_value = SimpleNamespace(
+            beets_staging_dir="/tmp/staging",
+            slskd_download_dir="/tmp/downloads",
+        )
+
+        collected = repair._collect_issues(
+            cast(Any, FakePipelineDB()),
+            slskd_host="http://slskd",
+            slskd_key="secret",
+            find_blocked_recovery_fn=lambda *args, **kwargs: [],
+        )
+
+        self.assertEqual(collected.issues, [])
+        self.assertEqual(collected.slskd_orphans, [])
+        self.assertEqual(collected.slskd_foreign_count, 1)
 
     @patch("scripts.repair._fetch_slskd_downloads", return_value=[])
     @patch("scripts.repair._get_all_rows", return_value=[])
@@ -390,6 +429,22 @@ class TestCmdScanSlskdOrphanReport(unittest.TestCase):
         # the actionable issue list cmd_fix would later consume.
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].request_id, 17)
+
+    @patch("scripts.repair._collect_issues")
+    def test_scan_prints_foreign_count_when_present(self, mock_collect) -> None:
+        """#571 PR 3: the foreign classification (C1) is reported too, not
+        just the orphan/stray list — the operator can see both at a
+        glance on a shared slskd instance."""
+        mock_collect.return_value = repair.CollectedIssues(
+            issues=[], slskd_orphans=[], slskd_foreign_count=3)
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            repair.cmd_scan(cast(Any, FakePipelineDB()))
+
+        output = stdout.getvalue()
+        self.assertIn("foreign", output.lower())
+        self.assertIn("3", output)
 
 
 class TestDefaultDsnFailsLoud(unittest.TestCase):

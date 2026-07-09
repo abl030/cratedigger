@@ -24,6 +24,7 @@ from typing import Any, TYPE_CHECKING, cast
 
 from lib.download_processing import Materialized, MaterializeFailed, MaterializeGuarded
 from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
+from lib.pipeline_db import TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
 from tests.helpers import (
     make_ctx_with_fake_db,
@@ -5818,15 +5819,25 @@ class TestDownloadDBProtocolParity(unittest.TestCase):
 
 
 class TestConvergeSlskdOrphans(unittest.TestCase):
-    """#278 Phase 0 convergence: cancel live transfers no downloading row owns."""
+    """#278 Phase 0 convergence, ledger-positive since #571 PR 3: cancel
+    LEDGERED live transfers no downloading row backs. A live transfer
+    absent from cratedigger's write-ahead ledger is foreign — never
+    cancelled, whatever its state or age (C1)."""
 
     OWNED_FILE = "Music\\Owned\\01.flac"
     ORPHAN_FILE = "Music\\Orphan\\01.flac"
 
-    def _make_ctx(self, slskd, rows=()):
+    def _make_ctx(self, slskd, rows=(), ledger=(), request_id=1):
         fake_db = FakePipelineDB()
         for row in rows:
             fake_db.seed_request(row)
+        if ledger:
+            fake_db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=request_id, username=username,
+                    filename=filename)
+                for (username, filename) in ledger
+            ])
         return make_ctx_with_fake_db(fake_db, slskd=slskd)
 
     def _seed_slskd(self):
@@ -5850,10 +5861,20 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
                 "files": [{"username": "peer1",
                            "filename": self.OWNED_FILE}]})
 
-    def test_cancels_only_live_unowned_transfers(self):
+    OWNED_ORPHAN_LEDGER = (
+        ("peer1", OWNED_FILE),
+        ("peer2", ORPHAN_FILE),
+    )
+
+    def test_cancels_only_ledgered_unbacked_transfers(self):
+        """C2: peer1/OWNED is ledgered AND backed by the downloading row
+        -> left alone. peer2/ORPHAN is ledgered but unbacked -> cancelled.
+        Every transfer here is ledgered (mirrors production: every enqueue
+        write-aheads), so this isolates the backed/unbacked axis."""
         from lib.slskd_transfers import converge_slskd_orphans
         slskd = self._seed_slskd()
-        ctx = self._make_ctx(slskd, rows=[self._owning_row()])
+        ctx = self._make_ctx(
+            slskd, rows=[self._owning_row()], ledger=self.OWNED_ORPHAN_LEDGER)
 
         cancelled = converge_slskd_orphans(ctx)
 
@@ -5869,17 +5890,20 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         Completed* itself, so removed/terminal history is dead weight)."""
         from lib.slskd_transfers import converge_slskd_orphans
         slskd = self._seed_slskd()
-        ctx = self._make_ctx(slskd, rows=[self._owning_row()])
+        ctx = self._make_ctx(
+            slskd, rows=[self._owning_row()], ledger=self.OWNED_ORPHAN_LEDGER)
 
         converge_slskd_orphans(ctx)
 
         self.assertEqual(slskd.transfers.get_all_downloads_calls, [False])
 
-    def test_no_downloading_rows_cancels_stranded_transfer(self):
-        """The Replace scenario: zero downloading rows, one live transfer."""
+    def test_no_downloading_rows_cancels_stranded_ledgered_transfers(self):
+        """The Replace scenario: zero downloading rows, two LIVE LEDGERED
+        transfers (cratedigger created both, per its write-ahead ledger) —
+        both are strays now that nothing backs them."""
         from lib.slskd_transfers import converge_slskd_orphans
         slskd = self._seed_slskd()
-        ctx = self._make_ctx(slskd, rows=[])
+        ctx = self._make_ctx(slskd, rows=[], ledger=self.OWNED_ORPHAN_LEDGER)
 
         cancelled = converge_slskd_orphans(ctx)
 
@@ -5887,11 +5911,46 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         cancelled_ids = {c.id for c in slskd.transfers.cancel_download_calls}
         self.assertEqual(cancelled_ids, {"t-owned", "t-orphan"})
 
+    def test_ledgered_transfer_self_healed_to_wanted_is_still_cancelled(self):
+        """Edge case pinned per the #571 PR 3 brief: a ledgered transfer
+        whose request already self-healed back to `wanted` (e.g. after a
+        failed cancel/timeout) is STILL the stray C2 targets — the
+        ledger row, not the request's current status, proves cratedigger
+        created it. `wanted` != `downloading`, so nothing backs it."""
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = FakeSlskdAPI()
+        slskd.add_transfer(username="peer2", directory="Music\\Orphan",
+                           filename=self.ORPHAN_FILE, id="t-orphan",
+                           state="InProgress")
+        healed_row = make_request_row(id=7, status="wanted")
+        ctx = self._make_ctx(
+            slskd, rows=[healed_row], ledger=[("peer2", self.ORPHAN_FILE)],
+            request_id=7)
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 1)
+        self.assertEqual(slskd.transfers.cancel_download_calls[0].id, "t-orphan")
+
+    def test_foreign_live_transfer_never_cancelled(self):
+        """C1 pin, the flip of the old doctrine: zero ledger knowledge and
+        zero downloading rows used to mean BOTH live transfers were
+        cancelled as "unowned". Now, with no ledger rows at all, neither
+        is cratedigger's — both are foreign and neither is touched."""
+        from lib.slskd_transfers import converge_slskd_orphans
+        slskd = self._seed_slskd()
+        ctx = self._make_ctx(slskd, rows=[])
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(cancelled, 0)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
     def test_snapshot_failure_cancels_nothing(self):
         from lib.slskd_transfers import converge_slskd_orphans
         slskd = self._seed_slskd()
         slskd.transfers.get_all_downloads_error = RuntimeError("slskd down")
-        ctx = self._make_ctx(slskd, rows=[])
+        ctx = self._make_ctx(slskd, rows=[], ledger=self.OWNED_ORPHAN_LEDGER)
 
         cancelled = converge_slskd_orphans(ctx)
 
@@ -5902,12 +5961,12 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         from lib.slskd_transfers import converge_slskd_orphans
         slskd = self._seed_slskd()
         slskd.transfers.cancel_download_error = RuntimeError("cancel failed")
-        ctx = self._make_ctx(slskd, rows=[])
+        ctx = self._make_ctx(slskd, rows=[], ledger=self.OWNED_ORPHAN_LEDGER)
 
         cancelled = converge_slskd_orphans(ctx)
 
         self.assertEqual(cancelled, 0)
-        # Both live orphans were still attempted despite the first failure.
+        # Both ledgered strays were still attempted despite the first failure.
         self.assertEqual(len(slskd.transfers.cancel_download_calls), 2)
 
     def test_clean_state_is_a_noop(self):
@@ -5916,7 +5975,9 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         slskd.add_transfer(username="peer1", directory="Music\\Owned",
                            filename=self.OWNED_FILE, id="t-owned",
                            state="InProgress")
-        ctx = self._make_ctx(slskd, rows=[self._owning_row()])
+        ctx = self._make_ctx(
+            slskd, rows=[self._owning_row()],
+            ledger=[("peer1", self.OWNED_FILE)])
 
         cancelled = converge_slskd_orphans(ctx)
 

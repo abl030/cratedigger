@@ -73,17 +73,22 @@ def _active_transfer_pairs(downloads: list[DownloadUser]) -> set[tuple[str, str]
 @dataclass(frozen=True)
 class CollectedIssues:
     """Result of ``_collect_issues`` (#479): actionable DB issues, plus a
-    read-only report of slskd-side orphans (live transfers no
-    ``downloading`` row owns).
+    read-only report of slskd-side orphans (ledger-owned live transfers no
+    ``downloading`` row backs — #571 PR 3 flipped this to ledger-positive
+    ownership).
 
-    ``slskd_orphans`` is informational only — ``cmd_fix`` never acts on it.
-    The #278 convergence (``lib.slskd_transfers.converge_slskd_orphans``,
-    run every cycle before search) is the only thing that ever cancels
-    these; it self-heals on its own next pass regardless of whether anyone
-    reads this report.
+    ``slskd_orphans`` and ``slskd_foreign_count`` are informational only —
+    ``cmd_fix`` never acts on either. The #278 convergence
+    (``lib.slskd_transfers.converge_slskd_orphans``, run every cycle
+    before search) is the only thing that ever cancels a transfer; it
+    self-heals on its own next pass regardless of whether anyone reads
+    this report. Both fields come from the SAME classification helper
+    (``lib.repair.find_slskd_orphans``) production convergence uses, so
+    this report can never diverge from what convergence will actually do.
     """
     issues: list[OrphanInfo]
     slskd_orphans: list[SlskdOrphanTransfer]
+    slskd_foreign_count: int = 0
 
 
 def _dedupe_issues(issues: list[OrphanInfo]) -> list[OrphanInfo]:
@@ -176,9 +181,15 @@ def _collect_issues(
             return CollectedIssues(issues=_dedupe_issues(issues), slskd_orphans=[])
 
         active = _active_transfer_pairs(downloads)
-        # Inverse direction (#278/#479): live transfers no downloading row
-        # owns. Report-only — nothing here ever cancels a transfer.
-        slskd_orphans = find_slskd_orphans(downloads, rows)
+        # Inverse direction (#278/#479), ledger-positive since #571 PR 3:
+        # live transfers cratedigger ledgered but no downloading row backs.
+        # Report-only — nothing here ever cancels a transfer; the SAME
+        # helper production convergence uses, so this report can't
+        # classify foreign-vs-stray differently than the real sweep.
+        ownership = find_slskd_orphans(
+            downloads, rows, db.get_owned_transfer_keys())
+        slskd_orphans = ownership.orphans
+        slskd_foreign_count = ownership.foreign_count
 
         orphans = find_orphaned_fn(
             rows,
@@ -192,7 +203,8 @@ def _collect_issues(
         except Exception as e:
             print(f"  slskd: could not load runtime config for local-path checks: {e}")
             return CollectedIssues(
-                issues=_dedupe_issues(issues), slskd_orphans=slskd_orphans)
+                issues=_dedupe_issues(issues), slskd_orphans=slskd_orphans,
+                slskd_foreign_count=slskd_foreign_count)
 
         blocked_processing_path_issues: list[OrphanInfo] = []
         blocked_recovery_issues: list[OrphanInfo] = []
@@ -252,7 +264,9 @@ def _collect_issues(
             and not blocked_recovery_issues
         ):
             print(f"  slskd: checked {len(active)} active transfers, no orphans.")
-        return CollectedIssues(issues=issues, slskd_orphans=slskd_orphans)
+        return CollectedIssues(
+            issues=issues, slskd_orphans=slskd_orphans,
+            slskd_foreign_count=slskd_foreign_count)
 
     downloading = [r for r in rows if r["status"] == "downloading"
                    and r.get("active_download_state")]
@@ -262,24 +276,40 @@ def _collect_issues(
     return CollectedIssues(issues=_dedupe_issues(issues), slskd_orphans=[])
 
 
-def _print_slskd_orphan_report(slskd_orphans: list[SlskdOrphanTransfer]) -> None:
-    """Report-only (#479 item 1): live slskd transfers no ``downloading``
-    row owns. Never triggers a cancel — the #278 convergence
+def _print_slskd_orphan_report(
+    slskd_orphans: list[SlskdOrphanTransfer],
+    slskd_foreign_count: int = 0,
+) -> None:
+    """Report-only (#479 item 1; ledger-positive since #571 PR 3):
+    ledger-owned live slskd transfers no ``downloading`` row backs. Never
+    triggers a cancel — the #278 convergence
     (``lib.slskd_transfers.converge_slskd_orphans``) is the only thing
     that reaps these, on its own next cycle.
+
+    ``slskd_foreign_count`` (live transfers absent from cratedigger's
+    ledger entirely — never candidates for convergence, whatever their
+    state or age) is surfaced too so an operator scanning a shared slskd
+    instance can see both classifications at a glance.
     """
-    if not slskd_orphans:
+    if not slskd_orphans and not slskd_foreign_count:
         return
-    print(
-        f"slskd-side orphans (read-only, {len(slskd_orphans)}): live "
-        "transfer(s) with no owning downloading row. The #278 "
-        "convergence cancels these automatically next cycle — no action "
-        "needed here.\n"
-    )
-    for orphan in slskd_orphans:
-        print(f"  user={orphan.username!r} file={orphan.filename!r} "
-              f"state={orphan.state!r} id={orphan.transfer_id}")
-    print()
+    if slskd_orphans:
+        print(
+            f"slskd-side orphans (read-only, {len(slskd_orphans)}): "
+            "ledger-owned live transfer(s) with no owning downloading "
+            "row. The #278 convergence cancels these automatically next "
+            "cycle — no action needed here.\n"
+        )
+        for orphan in slskd_orphans:
+            print(f"  user={orphan.username!r} file={orphan.filename!r} "
+                  f"state={orphan.state!r} id={orphan.transfer_id}")
+        print()
+    if slskd_foreign_count:
+        print(
+            f"slskd-side foreign transfers (read-only, {slskd_foreign_count}): "
+            "live transfer(s) not in cratedigger's ledger — never touched "
+            "by convergence.\n"
+        )
 
 
 def cmd_scan(db: PipelineDB, slskd_host: str | None = None,
@@ -298,7 +328,7 @@ def cmd_scan(db: PipelineDB, slskd_host: str | None = None,
             print(f"         → suggested: {repair.action} — {repair.detail}")
             print()
 
-    _print_slskd_orphan_report(collected.slskd_orphans)
+    _print_slskd_orphan_report(collected.slskd_orphans, collected.slskd_foreign_count)
     return issues
 
 
