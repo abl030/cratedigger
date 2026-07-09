@@ -13,6 +13,14 @@
 - After live verification of a deploy-worthy state, tag it `vYYYY.MM.DD` (suffix `-N` for same-day). The pre-push hook (`scripts/pre-push`, runs the generated-test fuzz burst then `nix flake check`) gates every push; the tag records the verified state.
 - Use the `/deploy` command for the full sequence.
 
+## Post-ship reflection (after tag, before ending the session)
+
+The end of a shipped series is the only moment its debt is cheap to see — the session context still holds what reviews caught by hand, what got fixed twice, and what scar tissue the work itself introduced. Once the session ends, that knowledge is gone and the next reviewer pays for it again. So, after tagging a non-trivial series (skip for typo-level deploys):
+
+1. **Reflect in your own context**, mining: review findings that were deferred as non-blocking; anything you fixed more than once or in more than one place; duplication or boilerplate the series itself added; "would a structural audit have caught this for free?"; process failures worth encoding as rules.
+2. **Rank by value-for-effort, then de-dupe against open issues** (`gh issue list` — read the bodies of the open refactor issues, not just titles). De-dupe is mandatory; a duplicate covering issue is worse than none.
+3. **File ONE covering issue** with ranked items and a suggested PR grouping (house pattern: #573 after #550, #590 after #571/#576) — or state explicitly that nothing clears the bar. The reflection is mandatory; the issue is conditional on something actually clearing it.
+
 ## Database migrations
 
 - Schema lives in `migrations/NNN_name.sql`. The deploy unit `cratedigger-db-migrate.service` (oneshot, `restartIfChanged = true`) runs them automatically on every `nixos-rebuild switch`, BEFORE `cratedigger-web.service`, `cratedigger-importer.service`, `cratedigger-import-preview-worker.service`, and `cratedigger-youtube-ingest.service` start — those four `requires` the migrate unit, so a failed migration blocks them from coming up against an inconsistent schema. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT `requires` it (only `wants`+`after`): both are timer-driven with `restartIfChanged = false`, and the migrate unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate the migrate unit's every-switch restart as a SIGTERM to a mid-flight cycle. Those two instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`, called from `cratedigger.py::main()` / `scripts/run_unfindable_detection.py::main()`) — a behind/missing schema still aborts them before any work runs.
