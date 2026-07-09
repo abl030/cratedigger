@@ -16,7 +16,13 @@ from datetime import datetime, timezone
 from typing import Any, Literal, TYPE_CHECKING
 
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.processing_paths import path_is_within_root
+from lib.processing_paths import (
+    attempt_fingerprint,
+    canonical_processing_path,
+    normalize_processing_path,
+    path_is_within_root,
+)
+from lib.quality import ActiveDownloadState
 from lib.slskd_client import DownloadUser, TransferSnapshot
 
 if TYPE_CHECKING:
@@ -501,3 +507,312 @@ def rederive_transfer_ids(
         else:
             logger.debug(f"Transfer not found for {f.filename} from {f.username}")
     return True
+
+
+# === Disk orphan reaper (issue #550 defect 3) ===
+
+# No config knob (single-operator doctrine — .claude/rules/scope.md):
+# completed-but-unconsumed downloads have no slskd-side handle once
+# remove_completed_downloads() purges the transfer record at the end of
+# every cycle, so a fixed grace window is the only safety net before the
+# filesystem sweep below reaps a folder.
+ORPHAN_MIN_AGE_DAYS = 7
+
+
+@dataclass(frozen=True)
+class DiskReapSummary:
+    """Aggregate result of one on-disk orphan sweep.
+
+    ``mutated`` gates the cycle's INFO summary line: only a sweep that
+    actually removed files or pruned directories says anything —
+    protected/young counts alone stay silent, so a steady-state cycle
+    produces no log traffic. ``aborted`` marks a fail-closed cycle (a
+    downloading row's ownership could not be decoded); nothing was
+    deleted.
+    """
+    removed: int = 0
+    removed_bytes: int = 0
+    pruned_dirs: int = 0
+    protected: int = 0
+    skipped_young: int = 0
+    aborted: bool = False
+
+    @property
+    def mutated(self) -> bool:
+        return bool(self.removed or self.pruned_dirs)
+
+
+class DiskReapOwnershipError(Exception):
+    """A downloading row's ownership could not be established.
+
+    Raised when a ``downloading`` row's ``active_download_state`` is
+    missing or fails to decode: the protected set would silently omit
+    that row's canonical folder and stamped files, leaving them
+    reap-eligible (fail-open). A deletion sweep must fail CLOSED
+    instead — ``reap_disk_orphans`` aborts the entire cycle's sweep
+    (zero deletions) when this is raised.
+    """
+
+
+def _protected_paths_for_downloading(
+    root: str,
+    downloading_rows: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    """Return (protected_dirs, protected_files) the reaper must never touch.
+
+    ``protected_dirs`` always includes the ``failed_imports/`` quarantine
+    subtree (Wrong Match cards reference these paths) plus, for every
+    ``downloading`` row, its canonical processing folder derived the SAME
+    way materialize does — ``canonical_processing_path`` keyed by the
+    attempt fingerprint of the row's persisted (username, filename) set
+    (mirrors ``lib/download_processing.py``'s ``_canonical_import_folder_path``
+    / ``_attempt_fingerprint_for`` without importing that module, which
+    would create an import cycle: ``lib.download`` imports
+    ``lib.slskd_transfers`` at module scope). ``protected_files`` adds each
+    row's stamped ``local_path`` entries directly, as a second, independent
+    guard beyond the directory-level protection.
+
+    Raises ``DiskReapOwnershipError`` when ANY downloading row's
+    ``active_download_state`` is missing or undecodable — partial
+    ownership knowledge must abort the sweep (fail-closed), never let
+    the unparseable row's files become reap-eligible.
+    """
+    protected_dirs = {
+        normalize_processing_path(os.path.join(root, "failed_imports")),
+    }
+    protected_files: set[str] = set()
+
+    for row in downloading_rows:
+        raw_state = row.get("active_download_state")
+        try:
+            # from_raw raises ValueError on None/missing state too —
+            # a downloading row with no state is crash-recovery limbo
+            # (Phase 1 resets it to wanted this same cycle); until it
+            # heals, its ownership is unknowable and the sweep must not
+            # proceed on guesswork.
+            state = ActiveDownloadState.from_raw(raw_state)
+        except Exception as exc:
+            raise DiskReapOwnershipError(
+                f"request {row.get('id')}: active_download_state is "
+                "missing or undecodable — cannot establish which files "
+                "this downloading row owns"
+            ) from exc
+
+        for f in state.files:
+            if f.local_path:
+                protected_files.add(normalize_processing_path(f.local_path))
+
+        fingerprint = attempt_fingerprint(
+            [(f.username, f.filename) for f in state.files])
+        canonical = canonical_processing_path(
+            artist=row.get("artist_name") or "",
+            title=row.get("album_title") or "",
+            year=str(row.get("year") or ""),
+            slskd_download_dir=root,
+            attempt_fingerprint=fingerprint,
+        )
+        protected_dirs.add(normalize_processing_path(canonical))
+
+    return protected_dirs, protected_files
+
+
+def _is_within_any(path: str, roots: set[str]) -> bool:
+    return any(path_is_within_root(path, candidate) for candidate in roots)
+
+
+def _prune_empty_upward(start_dir: str, root: str) -> int:
+    """Remove now-empty directories walking upward from ``start_dir``,
+    stopping at (never removing) ``root``.
+
+    Extends ``_delete_completed_payloads``'s single-level prune to walk
+    multiple levels, for nested orphan folders (e.g. a multi-disc
+    ``CD 01/`` subfolder under the canonical album folder). No age check
+    here — the files that emptied this directory were already age-gated
+    individually; unconditional ``os.rmdir`` is the same "fails harmlessly
+    if non-empty" safety used throughout this module.
+    """
+    pruned = 0
+    current = start_dir
+    root_real = os.path.realpath(root)
+    while (
+        path_is_within_root(current, root)
+        and os.path.realpath(current) != root_real
+    ):
+        try:
+            os.rmdir(current)
+        except OSError:
+            break
+        pruned += 1
+        current = os.path.dirname(current)
+    return pruned
+
+
+def _prune_stale_empty_dirs(
+    root: str,
+    protected_dirs: set[str],
+    threshold: float,
+) -> int:
+    """Remove directories that were already empty — never touched by this
+    sweep's file removals — and are older than ``threshold`` by their own
+    mtime.
+
+    There are no files to age-gate in an already-empty directory, so its
+    own mtime is the safety net that stops a folder slskd only just
+    created (and hasn't populated yet) from being reaped mid-download.
+    Walks deepest-first so a chain of nested empty directories collapses
+    in one pass.
+    """
+    candidates: list[str] = []
+    root_norm = normalize_processing_path(root)
+    for dirpath, dirnames, _filenames in os.walk(root, topdown=True):
+        norm_dirpath = normalize_processing_path(dirpath)
+        if _is_within_any(norm_dirpath, protected_dirs):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            d for d in dirnames
+            if not _is_within_any(
+                normalize_processing_path(os.path.join(dirpath, d)),
+                protected_dirs)
+        ]
+        if norm_dirpath == root_norm:
+            continue
+        candidates.append(dirpath)
+
+    candidates.sort(key=lambda p: p.count(os.sep), reverse=True)
+
+    pruned = 0
+    for dirpath in candidates:
+        if not os.path.isdir(dirpath):
+            continue  # Already removed as a side effect of a deeper prune.
+        try:
+            with os.scandir(dirpath) as entries:
+                if any(True for _ in entries):
+                    continue
+        except OSError:
+            continue
+        try:
+            mtime = os.path.getmtime(dirpath)
+        except OSError:
+            continue
+        if mtime >= threshold:
+            continue
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            continue
+        pruned += 1
+    return pruned
+
+
+def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
+    """Phase 0 sweep (issue #550 defect 3): reap completed-but-unconsumed
+    downloads that have no slskd-side handle.
+
+    ``converge_slskd_orphans`` above only cancels LIVE unowned transfers —
+    it deliberately skips ``Completed*`` states — and
+    ``remove_completed_downloads()`` purges slskd's completed-transfer
+    records at the end of every cycle, so a stranded completed folder has
+    no slskd handle left to reason from. This reaper reasons from
+    filesystem + DB state instead: any file under ``slskd_download_dir``
+    that isn't in the ``failed_imports/`` quarantine, isn't owned by a
+    live ``downloading`` row's canonical folder or stamped ``local_path``,
+    and is older than ``ORPHAN_MIN_AGE_DAYS`` is deleted individually
+    (never a recursive folder ``rmtree`` — CLAUDE.md), with now-empty
+    parent directories pruned afterward. This also reaps stale
+    bare-canonical processing folders left over from before the
+    per-attempt fingerprint suffix (issue #550 phase 2, PR #560): no
+    current attempt computes that bare name any more, so it was never in
+    the protected set to begin with — no special-casing needed.
+
+    Fail-closed: if ANY downloading row's ownership can't be decoded,
+    the whole sweep is skipped for the cycle (zero deletions,
+    ``aborted=True``). Best-effort otherwise, and silent unless it
+    actually removed files or pruned directories — matching
+    ``converge_slskd_orphans``'s Phase 0 contract.
+    """
+    root = ctx.cfg.slskd_download_dir
+    if not root or not os.path.isdir(root):
+        return DiskReapSummary()
+
+    db = ctx.pipeline_db_source._get_db()
+    try:
+        protected_dirs, protected_files = _protected_paths_for_downloading(
+            root, db.get_downloading())
+    except DiskReapOwnershipError:
+        logger.exception(
+            "DISK-REAP ABORTED: could not establish ownership for a "
+            "downloading row; skipping the entire sweep this cycle "
+            "(zero deletions) — fail-closed")
+        return DiskReapSummary(aborted=True)
+
+    threshold = time.time() - ORPHAN_MIN_AGE_DAYS * 86400
+    removed = 0
+    removed_bytes = 0
+    protected_count = 0
+    skipped_young = 0
+    touched_dirs: set[str] = set()
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        norm_dirpath = normalize_processing_path(dirpath)
+        if _is_within_any(norm_dirpath, protected_dirs):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            d for d in dirnames
+            if not _is_within_any(
+                normalize_processing_path(os.path.join(dirpath, d)),
+                protected_dirs)
+        ]
+        for filename in filenames:
+            full_path = os.path.join(dirpath, filename)
+            norm_path = normalize_processing_path(full_path)
+            if not path_is_within_root(norm_path, root):
+                continue  # Defensive — os.walk(root) can't yield this.
+            if norm_path in protected_files:
+                protected_count += 1
+                continue
+            try:
+                mtime = os.path.getmtime(full_path)
+            except OSError:
+                continue
+            if mtime >= threshold:
+                skipped_young += 1
+                continue
+            try:
+                size = os.path.getsize(full_path)
+            except OSError:
+                size = 0
+            try:
+                os.remove(full_path)
+            except OSError:
+                logger.warning(
+                    "DISK-REAP: failed to remove %s", full_path,
+                    exc_info=True)
+                continue
+            removed += 1
+            removed_bytes += size
+            touched_dirs.add(dirpath)
+            logger.info(
+                "DISK-REAP removed %s (age>=%dd, %d bytes)",
+                full_path, ORPHAN_MIN_AGE_DAYS, size)
+
+    pruned = 0
+    for touched_dir in touched_dirs:
+        pruned += _prune_empty_upward(touched_dir, root)
+    pruned += _prune_stale_empty_dirs(root, protected_dirs, threshold)
+
+    summary = DiskReapSummary(
+        removed=removed,
+        removed_bytes=removed_bytes,
+        pruned_dirs=pruned,
+        protected=protected_count,
+        skipped_young=skipped_young,
+    )
+    if summary.mutated:
+        logger.info(
+            "DISK-REAP summary removed=%d bytes=%d pruned_dirs=%d "
+            "protected=%d skipped_young=%d",
+            summary.removed, summary.removed_bytes, summary.pruned_dirs,
+            summary.protected, summary.skipped_young)
+    return summary

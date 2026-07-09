@@ -138,3 +138,4 @@ remote_filename  # wire-contract field on SlskdDownloadFileCompleteEvent (lib/sl
 requested_at  # wire-contract field on TransferSnapshot, not yet read downstream (lib/slskd_client.py)
 ended_at  # wire-contract field on TransferSnapshot, not yet read downstream (lib/slskd_client.py)
 percent_complete  # wire-contract field on TransferSnapshot, not yet read downstream (lib/slskd_client.py)
+aborted  # DiskReapSummary fail-closed marker, asserted by tests — vulture doesn't scan tests/ (lib/slskd_transfers.py)

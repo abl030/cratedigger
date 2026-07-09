@@ -1429,6 +1429,20 @@ def main():
             logger.exception(
                 "SLSKD ORPHAN: convergence failed; continuing with the cycle.")
 
+        # --- Phase 0b: on-disk orphan reaper (issue #550 defect 3) ---
+        # Completed-but-unconsumed downloads have no slskd-side handle:
+        # the convergence above only cancels LIVE transfers, and
+        # remove_completed_downloads() purges slskd's completed-transfer
+        # records at the end of every cycle. This reaper reasons from
+        # filesystem + DB state instead. Same quiescent-window guarantee
+        # as the convergence above; best-effort — never blocks the cycle.
+        try:
+            from lib.slskd_transfers import reap_disk_orphans
+            reap_disk_orphans(_module_ctx)
+        except Exception:
+            logger.exception(
+                "DISK-REAP: sweep failed; continuing with the cycle.")
+
         logger.info("Starting Phase 1 (poll downloads) in background...")
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
             phase1_future = pool.submit(_run_phase1)
