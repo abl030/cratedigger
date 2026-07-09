@@ -227,13 +227,69 @@ def _enqueue_failure_fallback_reason(exc: BaseException) -> str:
     return str(exc)
 
 
+def _write_ahead_transfer_ledger(
+    username: str,
+    files: list[dict[str, Any]],
+    ctx: CratediggerContext,
+    *,
+    request_id: int | None,
+    attempt_fp: str | None,
+) -> None:
+    """Write-ahead ownership ledger insert (issue #571, T1) -- MUST run
+    BEFORE ``ctx.slskd.transfers.enqueue(...)`` so a process death at any
+    point after the POST still leaves a durable ownership record
+    (migration 045).
+
+    ``slskd_enqueue_with_outcome`` is the ONLY production call site of
+    ``ctx.slskd.transfers.enqueue`` (``slskd_do_enqueue`` just wraps it),
+    so putting the write-ahead insert here covers every enqueue call site
+    in the pipeline -- the main single-disc path, multi-disc, and the
+    poll-loop's single-file retry re-enqueue -- without hunting each one
+    down individually.
+
+    ``request_id``/``ctx.download_ownership`` are expected to be present
+    on every production call (every enqueue is for an album_requests
+    row, and the top-level context always carries the worker-safe
+    ownership writer). Skips silently only in the legacy/test fallback
+    shape ``grab_most_wanted`` already documents (no
+    ``ctx.download_ownership`` collaborator wired) -- the SAME guard
+    ``_claim_initial_download_ownership`` (lib/enqueue.py) already uses
+    for the ownership claim itself, so this never diverges from whether
+    a claim was even attempted.
+
+    A DB failure here deliberately propagates (write-ahead: no POST
+    before the ledger commits; DB-down is already cycle-fatal), matching
+    the search ledger's ``record_search_id`` precedent.
+    """
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None or request_id is None or not files:
+        return
+    from lib.pipeline_db import TransferLedgerRow
+
+    rows = [
+        TransferLedgerRow(
+            request_id=request_id,
+            username=username,
+            filename=str(f["filename"]),
+            attempt_fingerprint=attempt_fp,
+        )
+        for f in files
+    ]
+    writer.record_transfer_enqueue(rows)
+
+
 def slskd_enqueue_with_outcome(
     username: str,
     files: list[dict[str, Any]],
     file_dir: str,
     ctx: CratediggerContext,
+    *,
+    request_id: int | None = None,
+    attempt_fp: str | None = None,
 ) -> SlskdEnqueueOutcome:
     """Enqueue files for download via slskd with an explicit outcome."""
+    _write_ahead_transfer_ledger(
+        username, files, ctx, request_id=request_id, attempt_fp=attempt_fp)
     try:
         enqueue = ctx.slskd.transfers.enqueue(username=username, files=files)
     except Exception as exc:
@@ -308,9 +364,13 @@ def slskd_enqueue_with_outcome(
 
 
 def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
-                     file_dir: str, ctx: CratediggerContext) -> list[DownloadFile] | None:
+                     file_dir: str, ctx: CratediggerContext,
+                     *, request_id: int | None = None,
+                     attempt_fp: str | None = None) -> list[DownloadFile] | None:
     """Enqueue files for download via slskd. Returns DownloadFile list or None."""
-    outcome = slskd_enqueue_with_outcome(username, files, file_dir, ctx)
+    outcome = slskd_enqueue_with_outcome(
+        username, files, file_dir, ctx,
+        request_id=request_id, attempt_fp=attempt_fp)
     if outcome.status != "accepted":
         return None
     return outcome.downloads

@@ -8,6 +8,7 @@ from typing import Callable, Protocol, TYPE_CHECKING, runtime_checkable
 from lib import transitions
 
 if TYPE_CHECKING:
+    from lib.pipeline_db import TransferLedgerRow
     from lib.search import PlanExecutionContext
 
 logger = logging.getLogger("cratedigger")
@@ -35,6 +36,8 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
     def update_download_state_if_downloading(
         self, request_id: int, state_json: str,
     ) -> bool: ...
+
+    def record_transfer_enqueue(self, rows: "list[TransferLedgerRow]") -> None: ...
 
     def close(self) -> None: ...
 
@@ -156,5 +159,21 @@ class DownloadOwnershipWriter:
             return bool(
                 db.update_download_state_if_downloading(request_id, state_json)
             )
+        finally:
+            self._close_db(db)
+
+    def record_transfer_enqueue(self, rows: "list[TransferLedgerRow]") -> None:
+        """Write-ahead ownership ledger insert (issue #571, T1) using a
+        fresh DB handle -- same worker-safety rationale as every other
+        method here: find_download workers cannot reach the owner
+        thread's cached connection, so every call site (worker or the
+        sequential poll loop alike) goes through this collaborator
+        uniformly rather than threading the owner connection down.
+        """
+        if not rows:
+            return
+        db = self._open_db()
+        try:
+            db.record_transfer_enqueue(rows)
         finally:
             self._close_db(db)

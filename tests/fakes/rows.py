@@ -128,6 +128,30 @@ class SearchLedgerRow:
 
 
 @dataclass
+class FakeTransferLedgerRow:
+    """One row in slskd_transfer_ledger (migration 045, issue #571).
+
+    Named ``FakeTransferLedgerRow`` (not ``TransferLedgerRow``) to avoid
+    colliding with the real write-payload ``msgspec.Struct`` of the same
+    short name in ``lib.pipeline_db`` — that Struct carries only the
+    write-ahead fields (``request_id``/``username``/``filename``/
+    ``attempt_fingerprint``); this fake row carries the FULL table shape
+    (``id``/``transfer_id``/``enqueued_at``/``local_path``/
+    ``completed_at``) so ``get_owned_transfers``/``get_owned_local_paths``
+    have something real to read back.
+    """
+    id: int
+    request_id: int
+    username: str
+    filename: str
+    attempt_fingerprint: str | None = None
+    transfer_id: str | None = None
+    enqueued_at: datetime = field(default_factory=_utcnow)
+    local_path: str | None = None
+    completed_at: datetime | None = None
+
+
+@dataclass
 class FieldResolutionRow:
     """One row in album_request_field_resolutions (migration 030).
 

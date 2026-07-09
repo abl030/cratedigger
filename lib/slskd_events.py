@@ -65,13 +65,19 @@ class EventIngestResult:
     file_events: int = 0
     files_stamped: int = 0
     requests_updated: int = 0
+    # T2 (issue #571): transfer-ledger rows stamped this pass. Distinct
+    # from files_stamped/requests_updated (active_download_state, only
+    # currently-downloading rows) — a ledger row can be stamped for a
+    # request that has since left 'downloading' too.
+    transfers_stamped: int = 0
     cursor_gap: bool = False
 
     def to_log_line(self) -> str:
         return (
             f"SLSKD EVENTS: outcome={self.outcome} events_seen={self.events_seen} "
             f"file_events={self.file_events} files_stamped={self.files_stamped} "
-            f"requests_updated={self.requests_updated} cursor_gap={self.cursor_gap}"
+            f"requests_updated={self.requests_updated} "
+            f"transfers_stamped={self.transfers_stamped} cursor_gap={self.cursor_gap}"
         )
 
 
@@ -197,6 +203,32 @@ def _stamp_local_paths(
     return files_stamped, requests_updated
 
 
+def _stamp_transfer_ledger(
+    db: Any,
+    local_paths: dict[tuple[str, str], str],
+    completed_at: datetime,
+) -> int:
+    """Write-ahead ledger completion stamp (issue #571, T2).
+
+    Matches by the SAME ``(username, remote filename)`` keys
+    ``_stamp_local_paths`` already uses for ``active_download_state``, in
+    the SAME ingestion pass (one new call, no second cursor, no separate
+    scan). An unledgered pair — a foreign transfer, or one this pipeline
+    never enqueued — stamps nothing and never invents a ledger row;
+    ``stamp_transfer_completion`` returns 0 for those, which this simply
+    sums. ``completed_at`` is the ingestion pass's own clock reading
+    (matching ``enqueued_at``'s ``DEFAULT now()`` semantics — a
+    pipeline-observed timestamp, not slskd's own event clock), passed by
+    the caller so a single pass stamps every matched row with one
+    consistent value.
+    """
+    stamped = 0
+    for (username, filename), local_path in local_paths.items():
+        stamped += db.stamp_transfer_completion(
+            username, filename, local_path, completed_at)
+    return stamped
+
+
 @dataclass(frozen=True)
 class RecentCompletionPaths:
     """Authoritative local paths from one fresh events-page fetch.
@@ -286,6 +318,13 @@ def ingest_download_file_events(
         if local_paths
         else (0, 0)
     )
+    # T2 (issue #571): same pass, same local_paths map — no second cursor,
+    # no separate scan. One consistent "now" for every row this pass stamps.
+    transfers_stamped = (
+        _stamp_transfer_ledger(db, local_paths, datetime.now(timezone.utc))
+        if local_paths
+        else 0
+    )
 
     newest = new_events[0]
     db.upsert_slskd_event_cursor(newest.id, newest.timestamp)
@@ -296,5 +335,6 @@ def ingest_download_file_events(
             1 for e in new_events if e.type == DOWNLOAD_FILE_COMPLETE),
         files_stamped=files_stamped,
         requests_updated=requests_updated,
+        transfers_stamped=transfers_stamped,
         cursor_gap=cursor_gap,
     )

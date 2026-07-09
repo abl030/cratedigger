@@ -902,6 +902,152 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         self.assertEqual(outcome.downloads[0].id, "tid-1")
 
 
+class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
+    """T1 pin (issue #571): slskd_enqueue_with_outcome -- the ONE
+    production call site of ctx.slskd.transfers.enqueue -- ledgers every
+    file BEFORE issuing the POST. Order-recording fakes, same shape as
+    the search ledger's I2 pins in tests/test_slskd_searches.py."""
+
+    def _ctx_with_ownership(self, db, slskd):
+        from lib.download_ownership import DownloadOwnershipWriter
+        ctx = _make_ctx(slskd=slskd)
+        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+        return ctx
+
+    def test_ledger_insert_precedes_the_post(self):
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        from tests.fakes import FakePipelineDB
+
+        order: list[str] = []
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [
+                    {"filename": "01.flac", "id": "tid-1"},
+                    {"filename": "02.flac", "id": "tid-2"},
+                ],
+            }],
+        }])
+        ctx = self._ctx_with_ownership(db, slskd)
+
+        real_record = db.record_transfer_enqueue
+
+        def recording_record(rows):
+            order.append(f"ledger:{len(rows)}")
+            return real_record(rows)
+
+        db.record_transfer_enqueue = recording_record  # type: ignore[method-assign]
+
+        real_enqueue = slskd.transfers.enqueue
+
+        def recording_enqueue(*, username, files):
+            order.append(f"post:{len(files)}")
+            return real_enqueue(username=username, files=files)
+
+        slskd.transfers.enqueue = recording_enqueue  # type: ignore[method-assign]
+
+        files = [
+            {"filename": "01.flac", "size": 1},
+            {"filename": "02.flac", "size": 2},
+        ]
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", files, "user1\\Music", ctx,
+                request_id=42, attempt_fp="fp-1")
+
+        self.assertEqual(outcome.status, "accepted")
+        self.assertEqual(order, ["ledger:2", "post:2"])
+        rows = db.get_owned_transfers(request_id=42)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {r["filename"] for r in rows}, {"01.flac", "02.flac"})
+        for row in rows:
+            self.assertEqual(row["attempt_fingerprint"], "fp-1")
+            self.assertEqual(row["request_id"], 42)
+
+    def test_ledger_row_survives_a_simulated_kill_at_the_post(self):
+        """Kill-safety: the POST raising AFTER the ledger write still
+        leaves a durable ownership row -- proves T1 holds even when the
+        enqueue call itself fails/dies."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        slskd.transfers.enqueue_error = RuntimeError("simulated kill mid-POST")
+        ctx = self._ctx_with_ownership(db, slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "a.flac", "size": 1}],
+                "user1\\Music", ctx, request_id=7)
+
+        self.assertEqual(outcome.status, "unknown")
+        rows = db.get_owned_transfers(request_id=7)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["filename"], "a.flac")
+
+    def test_no_request_id_skips_ledger_but_still_enqueues(self):
+        """Documents the guard: the legacy/test fallback shape (no
+        ownership context) never blocks the enqueue -- it just can't be
+        ledgered, matching _claim_initial_download_ownership's own
+        request_id-is-None carve-out."""
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [{"filename": "a.flac", "id": "tid-1"}],
+            }],
+        }])
+        ctx = self._ctx_with_ownership(db, slskd)
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "a.flac", "size": 1}],
+                "user1\\Music", ctx, request_id=None)
+
+        self.assertEqual(outcome.status, "accepted")
+        self.assertEqual(db.get_owned_transfers(), [])
+
+    def test_no_download_ownership_skips_ledger_but_still_enqueues(self):
+        from lib.slskd_transfers import slskd_enqueue_with_outcome
+
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [{"filename": "a.flac", "id": "tid-1"}],
+            }],
+        }])
+        ctx = _make_ctx(slskd=slskd)  # download_ownership stays None
+
+        with patch("time.sleep"):
+            outcome = slskd_enqueue_with_outcome(
+                "user1", [{"filename": "a.flac", "size": 1}],
+                "user1\\Music", ctx, request_id=99)
+
+        self.assertEqual(outcome.status, "accepted")
+
+    def test_empty_files_list_writes_no_ledger_row(self):
+        from lib.slskd_transfers import slskd_do_enqueue
+        from tests.fakes import FakePipelineDB
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        ctx = self._ctx_with_ownership(db, slskd)
+
+        with patch("time.sleep"):
+            slskd_do_enqueue("user1", [], "dir", ctx, request_id=1)
+
+        self.assertEqual(db.get_owned_transfers(), [])
+
+
 class TestGrabMostWanted(unittest.TestCase):
     """grab_most_wanted enqueues and persists state, no blocking monitor."""
 

@@ -1201,10 +1201,19 @@ def _poll_one_active_download(
                     # Find the problem file for username/size/dir
                     file = next((f for f in entry.files if f.filename == retry_filename), None)
                     if file:
+                        # T1 (issue #571): the retry is still within THIS
+                        # attempt (not a new one), so the fingerprint is
+                        # computed from the whole entry, matching what
+                        # canonical_processing_path derives from the same
+                        # manifest elsewhere (issue #550 phase 2).
                         requeue = slskd_do_enqueue(
                             file.username,
                             [{"filename": file.filename, "size": file.size}],
-                            file.file_dir, ctx)
+                            file.file_dir, ctx,
+                            request_id=request_id,
+                            attempt_fp=attempt_fingerprint(
+                                [(f.username, f.filename) for f in entry.files]),
+                        )
                         state_dirty = True
                         if requeue:
                             df.id = requeue[0].id

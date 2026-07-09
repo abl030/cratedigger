@@ -1087,3 +1087,30 @@ class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
     distances: list[PersistedDistance] = msgspec.field(default_factory=list)
 
 
+class TransferLedgerRow(msgspec.Struct, kw_only=True):
+    """One write-ahead row for ``slskd_transfer_ledger`` (migration 045,
+    issue #571 good-citizen doctrine, T1).
+
+    Every field name IS a ``slskd_transfer_ledger`` column name --
+    ``record_transfer_enqueue`` derives the INSERT column list directly
+    from these fields (``msgspec.structs.fields``), the struct-typed
+    write pattern #565 established for ``PersistedYoutubeRow``, so a
+    field can never silently drift from the SQL (the ``album_title``
+    class of bug migration 036 fixed). The fields-are-a-subset-of-columns
+    invariant is enforced at test time by
+    ``tests/test_pipeline_db_column_contract.py``.
+
+    Deliberately NOT part of this Struct: ``enqueued_at`` defaults from
+    the DB (``DEFAULT now()``); ``transfer_id`` is never known yet at
+    write-ahead time (the row is inserted BEFORE the POST that would
+    return it); ``local_path``/``completed_at`` are stamped later, only
+    by event ingestion (``stamp_transfer_completion``, T2), never at
+    enqueue time.
+    """
+
+    request_id: int
+    username: str
+    filename: str
+    attempt_fingerprint: Optional[str] = None
+
+
