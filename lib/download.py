@@ -481,7 +481,7 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     ``update_download_state_if_downloading`` — mirroring the poll path's
     fresh-status guard — so a row a concurrent operator action just
     flipped out of ``downloading`` is never rewritten. MUST be called
-    before ``remove_completed_downloads()`` — see the call site in
+    before ``purge_completed_transfers`` — see the call site in
     ``cratedigger.py``.
     """
     db = ctx.pipeline_db_source._get_db()

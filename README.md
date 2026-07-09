@@ -26,7 +26,7 @@ Pipeline DB (PostgreSQL)           |                       |
       |    set status=downloading  |  download (async)     |
       |    return immediately      |<-----------           |
       |                            |                       |
-      |  (next 5-min cycle)        |                       |
+      |  (next cycle)              |                       |
       |    poll sees completion    |                       |
       |    validate against MBID --|---------------------->|
       |                            |                       |
@@ -46,7 +46,7 @@ Pipeline DB (PostgreSQL)           |                       |
 - **Web UI** for browsing MusicBrainz and Discogs and adding albums to the pipeline
 - **Spectral quality verification** — sox-based transcode detection catches fake FLACs and upsampled MP3s
 - **Quality upgrade system** — automatically re-queues albums when better sources appear (CBR → lossless → verified target format)
-- **Async, parallel operation** — searches fan out concurrently; downloads span 5-minute cycles without blocking
+- **Async, parallel operation** — searches fan out concurrently; downloads span cycles without blocking (cycles run back-to-back, each starting seconds after the last completes)
 - **Persisted search plans** with escalation (wildcarded queries → exact → per-track) and long-tail "unfindable" triage
 - **Owned beets runtime** — the module ships a pinned beets with the full plugin closure and renders its config; your library's path layout is protected by config invariants tested in a VM on every `nix flake check`; imported files and fetched art land group-readable (`0664`) so media servers can read album art directly
 - **Self-cleaning download workspace** — files cratedigger can positively prove it created (via its own write-ahead transfer ledger) are reaped after 7 days once no longer active; deletions are per-file with empty-dir pruning, never a folder guess. A file it can't attribute to itself — someone else's download, quarantined review material — is never touched, however old

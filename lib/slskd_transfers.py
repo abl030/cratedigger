@@ -303,9 +303,9 @@ def _stamp_transfer_ids_after_enqueue(
     writer = getattr(ctx, "download_ownership", None)
     if writer is None:
         return
-    for download in downloads:
-        if download.id:
-            writer.stamp_transfer_id(username, download.filename, download.id)
+    pairs = [(d.filename, d.id) for d in downloads if d.id]
+    if pairs:
+        writer.stamp_transfer_ids(username, pairs)
 
 
 def slskd_enqueue_with_outcome(
@@ -1039,10 +1039,10 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
 
     ``converge_slskd_orphans`` above only cancels LIVE ledger-owned stray
     transfers — it deliberately skips ``Completed*`` states — and
-    ``remove_completed_downloads()`` purges slskd's completed-transfer
-    records at the end of every cycle, so a stranded completed folder has
-    no slskd handle left to reason from. This reaper reasons from
-    filesystem + DB state instead.
+    ``purge_completed_transfers`` removes only stamped-owned completed
+    records, so a stranded completed folder's slskd handle may or may not
+    still exist (unstamped/foreign records persist). This reaper doesn't
+    depend on it either way: it reasons from filesystem + DB state alone.
 
     A file is reap-eligible ONLY when it carries a positive ownership
     signal:

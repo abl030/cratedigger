@@ -1487,7 +1487,7 @@ in {
     };
 
     # Unfindable detection oneshot + daily timer. Lives in its own
-    # systemd unit, NOT inline in the 5-min cratedigger.service loop,
+    # systemd unit, NOT inline in the main cratedigger.service loop,
     # because R20 ("the system never stops searching") forbids the
     # regular search cadence from being throttled by detection state.
     # The structural separation makes that invariant enforceable: this

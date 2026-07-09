@@ -58,7 +58,7 @@ ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service -n 30'
 ```
 
 ## IMPORTANT
-- `restartIfChanged = false` on `cratedigger.service` — deploys don't restart cratedigger itself. The 5-min timer picks up new code on next cycle.
+- `restartIfChanged = false` on `cratedigger.service` — deploys don't restart cratedigger itself. The back-to-back timer picks up new code on the next cycle.
 - `restartIfChanged = true` on `cratedigger-db-migrate.service` — deploys DO re-run the migrator. Fast no-op if nothing changed.
 - To force a run: `ssh doc2 'sudo systemctl start cratedigger --no-block'` (don't block — it's a oneshot)
 - Flake updates MUST happen on doc1 (has the Forgejo token at `/run/secrets/forgejo/nixbot-token` and the signing key). NEVER from doc2 or Windows.
