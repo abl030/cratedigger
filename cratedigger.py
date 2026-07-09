@@ -1470,13 +1470,18 @@ def main():
             logger.exception(
                 "SLSKD ORPHAN: convergence failed; continuing with the cycle.")
 
-        # --- Phase 0b: on-disk orphan reaper (issue #550 defect 3) ---
+        # --- Phase 0b: on-disk orphan reaper (issue #550 defect 3, flipped
+        # to positive ledger ownership by issue #571) ---
         # Completed-but-unconsumed downloads have no slskd-side handle:
         # the convergence above only cancels LIVE transfers, and
         # remove_completed_downloads() purges slskd's completed-transfer
         # records at the end of every cycle. This reaper reasons from
-        # filesystem + DB state instead. Same quiescent-window guarantee
-        # as the convergence above; best-effort — never blocks the cycle.
+        # filesystem + DB state instead — and only ever deletes a file it
+        # can positively prove it created (the write-ahead transfer
+        # ledger, migration 045, or a currently-downloading row's active
+        # canonical folder); an unrecognised file is never touched,
+        # however old. Same quiescent-window guarantee as the convergence
+        # above; best-effort — never blocks the cycle.
         try:
             from lib.slskd_transfers import reap_disk_orphans
             reap_disk_orphans(_module_ctx)
@@ -1503,9 +1508,13 @@ def main():
         # Every production enqueue call site now write-ahead ledgers the
         # (username, filename) it is about to POST to slskd (migration
         # 045) — this is ONLY the bounded-retention prune of that
-        # bookkeeping table; it never touches slskd or disk state. The
-        # convergence/reaper/purge flips that will actually CONSULT the
-        # ledger to prove ownership are separate follow-up PRs.
+        # bookkeeping table; it never touches slskd or disk state itself.
+        # The disk reaper above (Phase 0b) now consults this ledger to
+        # prove file ownership; converge_slskd_orphans/
+        # remove_completed_downloads flipping to the same doctrine are
+        # separate follow-up PRs. The prune window (90d) must strictly
+        # exceed the reaper's own age threshold — see
+        # reap_disk_orphans' docstring.
         try:
             from lib.slskd_transfer_ledger import prune_transfer_ledger_cycle
             prune_transfer_ledger_cycle(_module_ctx)

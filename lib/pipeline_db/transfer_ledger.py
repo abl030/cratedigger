@@ -1,7 +1,7 @@
 """slskd transfer write-ahead ownership ledger (issue #571 good-citizen
 doctrine, migration 045).
 
-The five methods this mixin adds:
+The six methods this mixin adds:
 
 * ``record_transfer_enqueue`` -- write-ahead batch INSERT, called BEFORE
   ``ctx.slskd.transfers.enqueue(...)`` (T1). This is what makes the
@@ -14,6 +14,10 @@ The five methods this mixin adds:
 * ``get_owned_transfers`` / ``get_owned_local_paths`` -- read surface
   shaped for what the future reaper/convergence flips will need: "is
   this (username, filename) mine?" and "is this local_path mine?".
+* ``get_owned_attempt_folders`` -- read surface for the disk-reaper
+  flip (issue #571): "which canonical processing folders are mine?",
+  joined to each ledgered attempt's request identity so the caller can
+  re-derive the folder with ``lib.processing_paths.canonical_processing_path``.
 * ``prune_transfer_ledger`` -- T3: keeps the table bounded by
   hard-deleting rows that are both old AND whose request is no longer
   active (``wanted``/``downloading``).
@@ -144,14 +148,49 @@ class _TransferLedgerMixin(_PipelineDBBase):
 
     def get_owned_local_paths(self) -> set[str]:
         """Every completion-stamped ``local_path`` in the ledger -- the
-        future disk-reaper flip's "is this file mine?" set. Rows with no
-        completion stamp yet contribute nothing.
+        disk-reaper flip's (issue #571) "is this file mine?" set. Rows
+        with no completion stamp yet contribute nothing.
         """
         cur = self._execute(
             "SELECT local_path FROM slskd_transfer_ledger "
             "WHERE local_path IS NOT NULL",
         )
         return {r["local_path"] for r in cur.fetchall()}
+
+    def get_owned_attempt_folders(self) -> list[dict[str, Any]]:
+        """Every distinct ledgered ``(request_id, attempt_fingerprint)``
+        pair, joined to its request's artist/title/year identity -- the
+        disk-reaper flip's (issue #571) "which canonical processing
+        folders are mine?" lookup.
+
+        The caller re-derives each folder with
+        ``lib.processing_paths.canonical_processing_path`` from the
+        returned ``artist_name``/``album_title``/``year``/
+        ``attempt_fingerprint`` -- the SAME leaf function
+        ``_protected_paths_for_downloading`` uses for a currently
+        ``downloading`` row, so a past attempt (imported, replaced, or
+        reset-to-wanted-and-retried) whose row has since left
+        ``downloading`` is STILL recognised as owned here, unlike the
+        active-protection set which only tracks the row's CURRENT state.
+
+        The ``JOIN`` to ``album_requests`` means a ``request_id`` whose
+        row has been hard-deleted (the ledger's ``request_id`` carries
+        no FK, migration 045) silently drops out -- conservative in the
+        reap direction: the FOLDER stops being derivable as owned, but
+        any individually completion-stamped file under it is still
+        provable via ``get_owned_local_paths`` above, independent of
+        this join.
+        """
+        cur = self._execute(
+            """
+            SELECT DISTINCT t.request_id, t.attempt_fingerprint,
+                   r.artist_name, r.album_title, r.year
+            FROM slskd_transfer_ledger t
+            JOIN album_requests r ON r.id = t.request_id
+            WHERE t.attempt_fingerprint IS NOT NULL
+            """,
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Hard-delete rows older than ``older_than`` whose request is

@@ -4302,6 +4302,31 @@ class FakePipelineDB:
             if r.local_path is not None
         }
 
+    def get_owned_attempt_folders(self) -> list[dict[str, Any]]:
+        """Mirrors the real INNER JOIN to ``album_requests`` -- a
+        ``request_id`` with no matching seeded row (hard-deleted
+        elsewhere) drops out, same as the real query."""
+        seen: set[tuple[int, str]] = set()
+        result: list[dict[str, Any]] = []
+        for row in self._transfer_ledger.values():
+            if row.attempt_fingerprint is None:
+                continue
+            key = (row.request_id, row.attempt_fingerprint)
+            if key in seen:
+                continue
+            request = self._requests.get(row.request_id)
+            if request is None:
+                continue
+            seen.add(key)
+            result.append({
+                "request_id": row.request_id,
+                "attempt_fingerprint": row.attempt_fingerprint,
+                "artist_name": request.get("artist_name"),
+                "album_title": request.get("album_title"),
+                "year": request.get("year"),
+            })
+        return result
+
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Mirrors the real DELETE ... WHERE enqueued_at < older_than AND
         request not currently active (wanted/downloading); a request_id

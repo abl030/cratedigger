@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""Generated + pinned tests for the on-disk orphan reaper (issue #550 defect 3).
+"""Generated + pinned tests for the on-disk orphan reaper (issue #550
+defect 3, flipped to positive ledger ownership by issue #571's
+good-citizen doctrine).
 
-``lib/slskd_transfers.py::reap_disk_orphans`` reasons purely from
-filesystem + DB state (``ctx.cfg.slskd_download_dir`` + the
-``downloading`` rows) because a completed-but-unconsumed download has no
-slskd-side handle left once ``remove_completed_downloads()`` purges the
-transfer record at the end of the cycle. Seven invariants, each shipped
-as a deterministic pin (``TestDiskReaperDeterministicPins`` /
-``TestCanonicalDerivationParity``) AND a generated property
-(``TestGeneratedDiskReaperInvariants`` /
+``lib/slskd_transfers.py::reap_disk_orphans`` reasons from filesystem +
+DB state (``ctx.cfg.slskd_download_dir`` + the ``downloading`` rows +
+the write-ahead transfer ledger, migration 045) because a
+completed-but-unconsumed download has no slskd-side handle left once
+``remove_completed_downloads()`` purges the transfer record at the end
+of the cycle. Eight invariants, each shipped as a deterministic pin
+(``TestDiskReaperDeterministicPins`` / ``TestCanonicalDerivationParity``)
+AND a generated property (``TestGeneratedDiskReaperInvariants`` /
 ``TestGeneratedCanonicalDerivationParity``):
 
 1. **Within-root** — the reaper never removes anything outside
    ``slskd_download_dir``, and never removes the root itself.
-2. **Ownership** — no file under a ``downloading`` row's canonical
-   folder, and no stamped ``local_path``, is ever removed regardless of
-   age.
+2. **Active protection** — no file under a ``downloading`` row's
+   CURRENT canonical folder, and no stamped ``local_path``, is ever
+   removed regardless of ledger ownership or age.
 3. **Quarantine** — nothing under ``failed_imports/`` is ever touched.
-4. **Age** — no file younger than ``ORPHAN_MIN_AGE_DAYS`` is removed.
-5. **Empty-dir-only pruning** — directories are only removed when empty
-   (never a recursive ``rmtree``); an always-empty stale directory is
-   pruned by its own mtime, a fresh one survives.
+4. **Age** — no ledger-owned file younger than ``ORPHAN_MIN_AGE_DAYS``
+   is removed.
+5. **Empty-dir-only pruning, owned only** — directories are only
+   removed when empty (never a recursive ``rmtree``); an already-empty
+   directory is pruned by its own mtime ONLY when it lies under a
+   ledger-owned canonical folder — a foreign already-empty directory
+   stays, however old.
 6. **Fail-closed ownership** — if ANY downloading row's
    ``active_download_state`` is missing or undecodable, the sweep
    aborts with ZERO deletions for the cycle: partial ownership
@@ -31,6 +36,20 @@ as a deterministic pin (``TestDiskReaperDeterministicPins`` /
    ``_canonical_import_folder_path`` on one side, the reaper's
    ``_protected_paths_for_downloading`` on the other), guarding the
    #546 projection-drift class.
+8. **Good-citizen positive ownership (#571)** — R1: a file with NO
+   positive ownership signal (no ledgered event-stamped ``local_path``,
+   no ledgered ``attempt_fingerprint``-derived canonical folder) is
+   NEVER removed, whatever its age. R2: an aged, ledger-owned,
+   non-active file/folder IS removed, and its emptied directories
+   pruned.
+
+Invariant 8 is the flip's headline change and inverts the pre-#571
+ORPHAN-zone doctrine this file used to pin: an aged file with NO
+recognised owner used to be reaped (issue #550 defect 3's original
+"anything unrecognised and old enough goes" rule) — now it must
+SURVIVE, however old, and only a positively ledger-owned file is
+reap-eligible. The equivalence proof for every pin this flip changed
+lives in the PR/commit message.
 
 Checkers are module-level functions with known-bad self-tests
 (``TestDiskReaperCheckerTripsOnViolations``) per the house method
@@ -48,6 +67,7 @@ import tempfile
 import time
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from unittest.mock import MagicMock
@@ -62,6 +82,7 @@ from hypothesis import strategies as st
 
 from lib.download import build_active_download_state, reconstruct_grab_list_entry
 from lib.download_processing import _canonical_import_folder_path
+from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_processing_path,
@@ -155,10 +176,102 @@ def _downloading_row_and_canonical(
     return row, canonical
 
 
-def _make_ctx(root: str, rows: list[dict[str, Any]] | None = None) -> Any:
-    fake_db = FakePipelineDB()
-    for row in rows or []:
-        fake_db.seed_request(row)
+def _ledger_seed(
+    fake_db: FakePipelineDB,
+    *,
+    request_id: int,
+    file_pairs: list[tuple[str, str]],
+    local_paths: dict[tuple[str, str], str] | None = None,
+    with_fingerprint: bool = True,
+) -> None:
+    """Write-ahead ledger + completion-stamp seed mirroring production's
+    two-write sequence (T1 ``record_transfer_enqueue``, T2
+    ``stamp_transfer_completion`` — migration 045, issue #571) for one
+    attempt's files. Every production enqueue call site ledgers
+    write-ahead regardless of the row's eventual status, so a realistic
+    disk-reaper world always seeds both alongside any downloading/
+    request row.
+    """
+    fp = attempt_fingerprint(file_pairs) if with_fingerprint else None
+    fake_db.record_transfer_enqueue([
+        TransferLedgerRow(
+            request_id=request_id, username=username, filename=filename,
+            attempt_fingerprint=fp)
+        for username, filename in file_pairs
+    ])
+    for (username, filename), local_path in (local_paths or {}).items():
+        fake_db.stamp_transfer_completion(
+            username, filename, local_path, datetime.now(timezone.utc))
+
+
+def _seed_active_downloading(
+    fake_db: FakePipelineDB,
+    *,
+    request_id: int,
+    artist: str,
+    title: str,
+    year: str,
+    file_pairs: list[tuple[str, str]],
+    root: str,
+    local_paths: dict[tuple[str, str], str] | None = None,
+) -> str:
+    """Seed a currently-``downloading`` row (active protection, the SAME
+    real derivation ``_downloading_row_and_canonical`` builds) AND its
+    write-ahead ledger rows -- returns the canonical folder path.
+
+    Every production enqueue ledgers write-ahead BEFORE the row is even
+    ``downloading``, so a realistic world always carries both; the
+    active-protection guard and the ledger's positive-ownership record
+    simply overlap for a row's CURRENT attempt.
+    """
+    row, canonical = _downloading_row_and_canonical(
+        request_id=request_id, artist=artist, title=title, year=year,
+        file_pairs=file_pairs, root=root, local_paths=local_paths)
+    fake_db.seed_request(row)
+    _ledger_seed(
+        fake_db, request_id=request_id, file_pairs=file_pairs,
+        local_paths=local_paths)
+    return canonical
+
+
+def _seed_owned_inactive(
+    fake_db: FakePipelineDB,
+    *,
+    request_id: int,
+    artist: str,
+    title: str,
+    year: str,
+    file_pairs: list[tuple[str, str]],
+    root: str,
+    status: str = "imported",
+) -> str:
+    """Seed a request whose row is NOT ``downloading`` (contributes
+    nothing to active protection) but whose files ARE write-ahead
+    ledgered from a past attempt -- exactly the "abandoned attempt"
+    shape ``_owned_paths_from_ledger`` recognises in production (a
+    retry that moved on, an import that already completed, a request
+    reset back to wanted). Returns the canonical folder ownership
+    derives to.
+    """
+    fake_db.seed_request(make_request_row(
+        id=request_id, status=status, artist_name=artist,
+        album_title=title, year=int(year) if year else None))
+    _ledger_seed(fake_db, request_id=request_id, file_pairs=file_pairs)
+    fp = attempt_fingerprint(file_pairs)
+    return canonical_processing_path(
+        artist=artist, title=title, year=year,
+        slskd_download_dir=root, attempt_fingerprint=fp)
+
+
+def _make_ctx(
+    root: str,
+    rows: list[dict[str, Any]] | None = None,
+    fake_db: FakePipelineDB | None = None,
+) -> Any:
+    if fake_db is None:
+        fake_db = FakePipelineDB()
+        for row in rows or []:
+            fake_db.seed_request(row)
     cfg = MagicMock()
     cfg.slskd_download_dir = root
     return make_ctx_with_fake_db(fake_db, cfg=cfg)
@@ -169,47 +282,94 @@ def _make_ctx(root: str, rows: list[dict[str, Any]] | None = None) -> Any:
 # ============================================================================
 
 class TestDiskReaperDeterministicPins(unittest.TestCase):
-    def test_boosh_shape_orphans_reaped_active_canonical_untouched(self):
-        """Orphaned multi-disc folders (CD 01/CD 03) from an abandoned
-        attempt are reaped; a currently-downloading request's fingerprinted
-        canonical folder in the SAME root is left alone."""
+    def test_boosh_shape_ledger_owned_inactive_reaped_active_canonical_untouched(self):
+        """R2 pin: orphaned multi-disc folders (CD 01/CD 03) from an
+        abandoned, ledger-owned attempt are reaped once aged; a
+        DIFFERENT, currently-downloading request's fingerprinted
+        canonical folder in the SAME root is left alone.
+
+        Re-expresses the pre-#571 'boosh shape' pin (which proved "any
+        unrecognised old folder is reaped") under positive-ownership
+        semantics: same physical shape, same removed count, but the
+        reap is now driven by the write-ahead ledger recognising an
+        abandoned attempt — not by mere unrecognition.
+        """
         with tempfile.TemporaryDirectory() as root:
-            boosh_root = os.path.join(
-                root, "The Mighty Boosh - The Mighty Boosh (2007)")
+            fake_db = FakePipelineDB()
+            boosh_pairs = [
+                ("boosh-peer", "boosh-peer\\Album\\CD 01\\01 Track.flac"),
+                ("boosh-peer", "boosh-peer\\Album\\CD 03\\01 Track.flac"),
+            ]
+            boosh_canonical = _seed_owned_inactive(
+                fake_db, request_id=2, artist="The Mighty Boosh",
+                title="The Mighty Boosh", year="2007",
+                file_pairs=boosh_pairs, root=root)
             _write_aged_file(
-                os.path.join(boosh_root, "CD 01", "01 Track.flac"),
+                os.path.join(boosh_canonical, "CD 01", "01 Track.flac"),
                 age_days=_OLD_DAYS)
             _write_aged_file(
-                os.path.join(boosh_root, "CD 03", "01 Track.flac"),
+                os.path.join(boosh_canonical, "CD 03", "01 Track.flac"),
                 age_days=_OLD_DAYS)
 
-            row, canonical = _downloading_row_and_canonical(
-                request_id=1, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
+            canonical = _seed_active_downloading(
+                fake_db, request_id=1, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
                 year=_ACTIVE_YEAR,
                 file_pairs=[("peer1", "peer1\\Album\\01.flac")], root=root)
             _write_aged_file(
                 os.path.join(canonical, "01.flac"), age_days=_OLD_DAYS)
 
-            ctx = _make_ctx(root, rows=[row])
+            ctx = _make_ctx(root, fake_db=fake_db)
             summary = reap_disk_orphans(ctx)
 
-            self.assertFalse(os.path.exists(boosh_root))
+            self.assertFalse(os.path.exists(boosh_canonical))
             self.assertTrue(os.path.isdir(canonical))
             self.assertTrue(os.path.exists(os.path.join(canonical, "01.flac")))
             self.assertEqual(summary.removed, 2)
 
-    def test_stale_bare_canonical_folder_reaped(self):
-        """A pre-PR#560 bare canonical folder (no fingerprint suffix) is
-        an ordinary orphan — no current attempt computes that name."""
+    def test_unledgered_orphan_folder_survives_however_old(self):
+        """R1 pin: the exact inversion of the pin above — the SAME
+        multi-disc folder shape, but NEVER ledgered at all, must now
+        SURVIVE no matter how old. This is the headline behavioral
+        flip: pre-#571, this exact shape was reaped
+        (test_boosh_shape_orphans_reaped_active_canonical_untouched);
+        post-#571, it is never cratedigger's to delete.
+        """
         with tempfile.TemporaryDirectory() as root:
-            bare = os.path.join(root, "Old Artist - Old Album (2015)")
-            _write_aged_file(os.path.join(bare, "01.flac"), age_days=_OLD_DAYS)
+            unowned_root = os.path.join(
+                root, "The Mighty Boosh - The Mighty Boosh (2007)")
+            target1 = os.path.join(unowned_root, "CD 01", "01 Track.flac")
+            target2 = os.path.join(unowned_root, "CD 03", "01 Track.flac")
+            _write_aged_file(target1, age_days=_OLD_DAYS * 10)
+            _write_aged_file(target2, age_days=_OLD_DAYS * 10)
 
             ctx = _make_ctx(root)
             summary = reap_disk_orphans(ctx)
 
-            self.assertFalse(os.path.exists(bare))
-            self.assertEqual(summary.removed, 1)
+            self.assertTrue(os.path.exists(target1))
+            self.assertTrue(os.path.exists(target2))
+            self.assertEqual(summary.removed, 0)
+            self.assertEqual(summary.unowned, 2)
+
+    def test_stale_bare_canonical_folder_survives_unledgered(self):
+        """Pre-#571 debris pin: a pre-#560 bare canonical folder (no
+        fingerprint suffix) with no ledger row and no request row at
+        all is now unowned debris that survives forever — flips
+        test_stale_bare_canonical_folder_reaped. The operator clears
+        any already-stranded pre-ledger debris in a one-off deploy
+        pass (see PR body); this reaper never touches it going
+        forward.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            bare = os.path.join(root, "Old Artist - Old Album (2015)")
+            target = os.path.join(bare, "01.flac")
+            _write_aged_file(target, age_days=_OLD_DAYS)
+
+            ctx = _make_ctx(root)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertTrue(os.path.exists(target))
+            self.assertEqual(summary.removed, 0)
+            self.assertEqual(summary.unowned, 1)
 
     def test_failed_imports_quarantine_never_touched(self):
         """Wrong Match cards reference failed_imports/ paths — never reap,
@@ -226,8 +386,8 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
             self.assertEqual(summary.removed, 0)
 
     def test_fresh_orphan_folder_not_touched(self):
-        """A folder younger than the grace window survives even with no
-        DB owner at all."""
+        """A folder younger than the grace window survives — doubly so
+        now: it's both unowned AND too young."""
         with tempfile.TemporaryDirectory() as root:
             fresh = os.path.join(root, "Fresh Artist - Fresh Album (2026)")
             target = os.path.join(fresh, "01.flac")
@@ -238,6 +398,7 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
 
             self.assertTrue(os.path.exists(target))
             self.assertEqual(summary.removed, 0)
+            self.assertEqual(summary.unowned, 1)
 
     def test_blank_download_dir_is_a_no_op(self):
         """No configured root -> never walk anything (never walks '/')."""
@@ -245,26 +406,154 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
         summary = reap_disk_orphans(ctx)
         self.assertEqual(summary, DiskReapSummary())
 
+    def test_ledger_owned_stamped_file_reaped_when_aged(self):
+        """R2 pin, file-level ownership mechanism: a file matching a
+        ledgered, completion-stamped local_path is reaped once aged,
+        even though it sits OUTSIDE any canonical-folder derivation —
+        proves mechanism (a) (``get_owned_local_paths``) independent
+        of mechanism (b) (canonical folder derivation)."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            fake_db.seed_request(make_request_row(id=3, status="imported"))
+            path = os.path.join(root, "Weird Folder", "stray.flac")
+            pair = ("op", "op\\stray.flac")
+            _ledger_seed(
+                fake_db, request_id=3, file_pairs=[pair],
+                local_paths={pair: path}, with_fingerprint=False)
+            _write_aged_file(path, age_days=_OLD_DAYS)
+
+            ctx = _make_ctx(root, fake_db=fake_db)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(summary.removed, 1)
+
+    def test_ledger_owned_file_survives_when_young(self):
+        """Age gate still applies to owned files — R2 requires AGED,
+        not merely owned."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            fake_db.seed_request(make_request_row(id=3, status="imported"))
+            path = os.path.join(root, "Weird Folder", "stray.flac")
+            pair = ("op", "op\\stray.flac")
+            _ledger_seed(
+                fake_db, request_id=3, file_pairs=[pair],
+                local_paths={pair: path}, with_fingerprint=False)
+            _write_aged_file(path, age_days=_YOUNG_DAYS)
+
+            ctx = _make_ctx(root, fake_db=fake_db)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(summary.removed, 0)
+            self.assertEqual(summary.skipped_young, 1)
+
+    def test_same_request_retry_old_attempt_reaped_new_attempt_protected(self):
+        """A request retried after a failed/timed-out attempt: BOTH
+        attempts get their own write-ahead ledger row (a fresh
+        ``attempt_fingerprint`` each time — issue #550 phase 2), but
+        only the CURRENT ``active_download_state``'s attempt is in
+        ``_protected_paths_for_downloading``. The abandoned first
+        attempt's canonical folder is ledger-owned but inactive —
+        reaped once aged; the live retry's folder is active-protected
+        regardless (the edge case #571's PR3 brief calls out for
+        convergence applies here too)."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            old_pairs = [("peerA", "peerA\\Album\\01.flac")]
+            new_pairs = [("peerB", "peerB\\Album\\01.flac")]
+
+            # First (abandoned) attempt: ledgered only — never became
+            # the row's active_download_state (the retry replaced it).
+            _ledger_seed(fake_db, request_id=5, file_pairs=old_pairs)
+            old_fp = attempt_fingerprint(old_pairs)
+            old_canonical = canonical_processing_path(
+                artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE, year=_ACTIVE_YEAR,
+                slskd_download_dir=root, attempt_fingerprint=old_fp)
+            _write_aged_file(
+                os.path.join(old_canonical, "01.flac"), age_days=_OLD_DAYS)
+
+            # Second (live, current) attempt: this IS what
+            # active_download_state reflects — actively protected.
+            new_canonical = _seed_active_downloading(
+                fake_db, request_id=5, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
+                year=_ACTIVE_YEAR, file_pairs=new_pairs, root=root)
+            _write_aged_file(
+                os.path.join(new_canonical, "01.flac"), age_days=_OLD_DAYS)
+
+            ctx = _make_ctx(root, fake_db=fake_db)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertFalse(os.path.exists(old_canonical))
+            self.assertTrue(os.path.isdir(new_canonical))
+            self.assertTrue(
+                os.path.exists(os.path.join(new_canonical, "01.flac")))
+            self.assertEqual(summary.removed, 1)
+
+    def test_stale_empty_owned_dir_pruned(self):
+        """An already-empty (e.g. every file already consumed by
+        import) ledgered canonical folder for an inactive attempt IS
+        pruned once its own mtime is stale — the owned half of the
+        empty-dir-pruning restriction."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            canonical = _seed_owned_inactive(
+                fake_db, request_id=4, artist="Empty Artist",
+                title="Empty Album", year="2019",
+                file_pairs=[("op", "op\\01.flac")], root=root)
+            os.makedirs(canonical)
+            _age_dir(canonical, age_days=_OLD_DAYS)
+
+            ctx = _make_ctx(root, fake_db=fake_db)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertFalse(os.path.isdir(canonical))
+            self.assertEqual(summary.pruned_dirs, 1)
+
+    def test_stale_empty_unowned_dir_survives(self):
+        """A foreign already-empty stale directory (no ledger record
+        at all) is NEVER pruned, however old — flips the pre-#571
+        'prune any stale empty dir' doctrine."""
+        with tempfile.TemporaryDirectory() as root:
+            stale = os.path.join(root, "Empty Stale Folder")
+            os.makedirs(stale)
+            _age_dir(stale, age_days=_OLD_DAYS)
+
+            ctx = _make_ctx(root)
+            summary = reap_disk_orphans(ctx)
+
+            self.assertTrue(os.path.isdir(stale))
+            self.assertEqual(summary.pruned_dirs, 0)
+
     def test_undecodable_ownership_aborts_sweep_fail_closed(self):
-        """A downloading row whose state can't be decoded (or is missing)
-        must abort the ENTIRE sweep — its files can't be told apart from
-        orphans, so nothing anywhere gets deleted this cycle."""
+        """A downloading row whose state can't be decoded (or is
+        missing) must abort the ENTIRE sweep — its files can't be told
+        apart from a genuinely reap-eligible ledger-owned orphan, so
+        nothing anywhere gets deleted this cycle. The planted "orphan"
+        here is deliberately LEDGER-OWNED-INACTIVE (would be reaped
+        under normal, non-aborted conditions) so its survival proves
+        the abort — not mere unownership, which would survive either
+        way post-#571."""
         for desc, bad_state in (
             ("missing state", None),
             ("undecodable state", {"garbage": True}),
         ):
             with self.subTest(desc=desc):
                 with tempfile.TemporaryDirectory() as root:
-                    orphan = os.path.join(
-                        root, "Orphan Artist - Orphan Album (2001)", "01.flac")
+                    fake_db = FakePipelineDB()
+                    owned_canonical = _seed_owned_inactive(
+                        fake_db, request_id=8, artist="Orphan Artist",
+                        title="Orphan Album", year="2001",
+                        file_pairs=[("op", "op\\Album\\01.flac")], root=root)
+                    orphan = os.path.join(owned_canonical, "01.flac")
                     _write_aged_file(orphan, age_days=_OLD_DAYS)
                     stale_empty = os.path.join(root, "Empty Stale Folder")
                     os.makedirs(stale_empty)
                     _age_dir(stale_empty, age_days=_OLD_DAYS)
-                    bad_row = make_request_row(
+                    fake_db.seed_request(make_request_row(
                         id=7, status="downloading",
-                        active_download_state=bad_state)
-                    ctx = _make_ctx(root, rows=[bad_row])
+                        active_download_state=bad_state))
+                    ctx = _make_ctx(root, fake_db=fake_db)
 
                     summary = reap_disk_orphans(ctx)
 
@@ -275,21 +564,27 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
                     self.assertEqual(summary.pruned_dirs, 0)
 
     def test_one_undecodable_row_aborts_despite_healthy_rows(self):
-        """ANY undecodable downloading row aborts — a healthy sibling row
-        with a decodable state doesn't rescue the sweep."""
+        """ANY undecodable downloading row aborts — a healthy sibling
+        row with a decodable state doesn't rescue the sweep. Same
+        ledger-owned-inactive "would normally be reaped" planted orphan
+        as above."""
         with tempfile.TemporaryDirectory() as root:
-            orphan = os.path.join(
-                root, "Orphan Artist - Orphan Album (2001)", "01.flac")
+            fake_db = FakePipelineDB()
+            owned_canonical = _seed_owned_inactive(
+                fake_db, request_id=8, artist="Orphan Artist",
+                title="Orphan Album", year="2001",
+                file_pairs=[("op", "op\\Album\\01.flac")], root=root)
+            orphan = os.path.join(owned_canonical, "01.flac")
             _write_aged_file(orphan, age_days=_OLD_DAYS)
-            good_row, _canonical = _downloading_row_and_canonical(
-                request_id=1, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
+            _seed_active_downloading(
+                fake_db, request_id=1, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
                 year=_ACTIVE_YEAR,
                 file_pairs=[("peer1", "peer1\\Album\\01.flac")], root=root)
-            bad_row = make_request_row(
+            fake_db.seed_request(make_request_row(
                 id=7, status="downloading",
-                active_download_state={"garbage": True})
-            ctx = _make_ctx(root, rows=[good_row, bad_row])
+                active_download_state={"garbage": True}))
 
+            ctx = _make_ctx(root, fake_db=fake_db)
             summary = reap_disk_orphans(ctx)
 
             self.assertTrue(os.path.exists(orphan))
@@ -302,17 +597,18 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
 # ============================================================================
 
 class _Zone(Enum):
-    ORPHAN = "orphan"
-    PROTECTED = "protected"
-    FAILED_IMPORTS = "failed_imports"
-    STALE_BARE = "stale_bare"
+    ORPHAN = "orphan"            # never ledgered — always survives
+    PROTECTED = "protected"      # active row's canonical folder — always survives
+    FAILED_IMPORTS = "failed_imports"  # quarantine — always survives
+    OWNED_DIR = "owned_dir"      # ledgered attempt_fingerprint folder, inactive request
+    OWNED_FILE = "owned_file"    # ledgered + stamped exact local_path, standalone
 
 
 @dataclass(frozen=True)
 class _FileSpec:
     zone: _Zone
     folder: str      # top-level orphan folder name (ORPHAN zone only)
-    nested: bool     # place under a "Disc 1" subfolder (ORPHAN zone only)
+    nested: bool     # place under a "Disc 1" subfolder (ORPHAN/OWNED_DIR zones)
     old: bool
     size: int
     ext: str
@@ -322,10 +618,11 @@ class _FileSpec:
 class DiskReaperWorld:
     files: tuple[_FileSpec, ...]
     stray_protected: bool
-    empty_stale_dir: bool
+    empty_stale_unowned_dir: bool
+    empty_stale_owned_dir: bool
     empty_fresh_dir: bool
     # A second downloading row with an undecodable state — the sweep must
-    # abort fail-closed: everything (however old/orphaned) survives.
+    # abort fail-closed: everything (however old/orphaned/owned) survives.
     undecodable_state: bool
 
 
@@ -372,13 +669,27 @@ def _disk_reaper_worlds(draw) -> DiskReaperWorld:
                 ext=draw(st.sampled_from(_EXTS)),
             ))
 
-    if include_protected and draw(st.booleans()):
-        files.append(_FileSpec(
-            zone=_Zone.STALE_BARE, folder="", nested=False, old=True,
-            size=16, ext=".flac"))
+    if draw(st.booleans()):
+        for _ in range(draw(st.integers(min_value=1, max_value=3))):
+            files.append(_FileSpec(
+                zone=_Zone.OWNED_DIR, folder="", nested=draw(st.booleans()),
+                old=draw(st.booleans()),
+                size=draw(st.sampled_from([0, 16, 4096])),
+                ext=draw(st.sampled_from(_EXTS)),
+            ))
+
+    if draw(st.booleans()):
+        for _ in range(draw(st.integers(min_value=1, max_value=3))):
+            files.append(_FileSpec(
+                zone=_Zone.OWNED_FILE, folder="", nested=False,
+                old=draw(st.booleans()),
+                size=draw(st.sampled_from([0, 16, 4096])),
+                ext=draw(st.sampled_from(_EXTS)),
+            ))
 
     stray_protected = include_protected and draw(st.booleans())
-    empty_stale_dir = draw(st.booleans())
+    empty_stale_unowned_dir = draw(st.booleans())
+    empty_stale_owned_dir = draw(st.booleans())
     empty_fresh_dir = draw(st.booleans())
     # Weighted low so most examples still exercise the deletion logic.
     undecodable_state = draw(
@@ -387,7 +698,8 @@ def _disk_reaper_worlds(draw) -> DiskReaperWorld:
     return DiskReaperWorld(
         files=tuple(files),
         stray_protected=stray_protected,
-        empty_stale_dir=empty_stale_dir,
+        empty_stale_unowned_dir=empty_stale_unowned_dir,
+        empty_stale_owned_dir=empty_stale_owned_dir,
         empty_fresh_dir=empty_fresh_dir,
         undecodable_state=undecodable_state,
     )
@@ -401,9 +713,11 @@ class DiskReaperRunResult:
     path_actual_survive: dict[str, bool]
     folder_expected_exists: dict[str, bool]
     folder_actual_exists: dict[str, bool]
-    empty_stale_path: str | None
-    empty_stale_expected_survive: bool
-    empty_stale_survived: bool
+    empty_stale_unowned_path: str | None
+    empty_stale_unowned_survived: bool
+    empty_stale_owned_path: str | None
+    empty_stale_owned_expected_survive: bool
+    empty_stale_owned_survived: bool
     empty_fresh_path: str | None
     empty_fresh_survived: bool
     root_intact: bool
@@ -421,6 +735,8 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
         sentinel = os.path.join(parent, "sibling-sentinel.flac")
         _write_aged_file(sentinel, age_days=_OLD_DAYS * 10)
         path_expected: dict[str, bool] = {sentinel: True}
+
+        fake_db = FakePipelineDB()
 
         active_file_pairs = [
             ("activepeer", f"activepeer\\Album\\p{i}.flac") for i in range(3)]
@@ -441,8 +757,8 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
             active_file_pairs = active_file_pairs + [stray_pair]
             local_paths[stray_pair] = stray_path
 
-        row, canonical = _downloading_row_and_canonical(
-            request_id=1, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
+        canonical = _seed_active_downloading(
+            fake_db, request_id=1, artist=_ACTIVE_ARTIST, title=_ACTIVE_TITLE,
             year=_ACTIVE_YEAR, file_pairs=active_file_pairs, root=root,
             local_paths=local_paths)
 
@@ -458,6 +774,26 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
         if stray_folder_name is not None:
             folder_has_survivor[stray_folder_name] = True
 
+        # --- Inactive owned attempt (OWNED_DIR zone) ---
+        has_owned_dir_files = any(
+            spec.zone == _Zone.OWNED_DIR for spec in world.files)
+        owned_dir_canonical: str | None = None
+        owned_dir_rel_name: str | None = None
+        if has_owned_dir_files:
+            owned_dir_canonical = _seed_owned_inactive(
+                fake_db, request_id=2, artist="Owned Inactive Artist",
+                title="Owned Inactive Album", year="2018",
+                file_pairs=[("ownedpeer", "ownedpeer\\Album\\owned.flac")],
+                root=root)
+            owned_dir_rel_name = os.path.basename(owned_dir_canonical)
+            folder_has_survivor[owned_dir_rel_name] = False
+
+        # --- Standalone stamped-file ownership (OWNED_FILE zone) ---
+        has_owned_file = any(
+            spec.zone == _Zone.OWNED_FILE for spec in world.files)
+        if has_owned_file:
+            fake_db.seed_request(make_request_row(id=3, status="imported"))
+
         for idx, spec in enumerate(world.files):
             if spec.zone == _Zone.ORPHAN:
                 folder = os.path.join(root, spec.folder)
@@ -468,9 +804,8 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
                     path,
                     age_days=_OLD_DAYS if spec.old else _YOUNG_DAYS,
                     size=spec.size)
-                path_expected[path] = not spec.old
-                if not spec.old:
-                    folder_has_survivor[spec.folder] = True
+                path_expected[path] = True  # never ledgered — always survives
+                folder_has_survivor[spec.folder] = True
             elif spec.zone == _Zone.PROTECTED:
                 path = os.path.join(canonical, f"protected-{idx}{spec.ext}")
                 _write_aged_file(
@@ -487,18 +822,49 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
                     age_days=_OLD_DAYS if spec.old else _YOUNG_DAYS,
                     size=spec.size)
                 path_expected[path] = True  # quarantine ignores age
-            elif spec.zone == _Zone.STALE_BARE:
-                bare_name = sanitize_processing_folder_name(
-                    f"{_ACTIVE_ARTIST} - {_ACTIVE_TITLE} ({_ACTIVE_YEAR})")
-                path = os.path.join(root, bare_name, f"legacy-{idx}{spec.ext}")
-                _write_aged_file(path, age_days=_OLD_DAYS, size=spec.size)
-                path_expected[path] = False  # ordinary orphan
+            elif spec.zone == _Zone.OWNED_DIR:
+                assert owned_dir_canonical is not None
+                assert owned_dir_rel_name is not None
+                folder = owned_dir_canonical
+                if spec.nested:
+                    folder = os.path.join(folder, "Disc 1")
+                path = os.path.join(folder, f"owned-{idx}{spec.ext}")
+                _write_aged_file(
+                    path,
+                    age_days=_OLD_DAYS if spec.old else _YOUNG_DAYS,
+                    size=spec.size)
+                path_expected[path] = not spec.old  # ledger-owned, age-gated
+                if not spec.old:
+                    folder_has_survivor[owned_dir_rel_name] = True
+            elif spec.zone == _Zone.OWNED_FILE:
+                path = os.path.join(root, f"owned-file-{idx}{spec.ext}")
+                pair = (
+                    f"filepeer{idx}",
+                    f"filepeer{idx}\\owned-file-{idx}{spec.ext}")
+                _ledger_seed(
+                    fake_db, request_id=3, file_pairs=[pair],
+                    local_paths={pair: path}, with_fingerprint=False)
+                _write_aged_file(
+                    path,
+                    age_days=_OLD_DAYS if spec.old else _YOUNG_DAYS,
+                    size=spec.size)
+                path_expected[path] = not spec.old  # ledger-owned, age-gated
 
-        empty_stale_path: str | None = None
-        if world.empty_stale_dir:
-            empty_stale_path = os.path.join(root, "Empty Stale Folder")
-            os.makedirs(empty_stale_path, exist_ok=True)
-            _age_dir(empty_stale_path, age_days=_OLD_DAYS)
+        empty_stale_unowned_path: str | None = None
+        if world.empty_stale_unowned_dir:
+            empty_stale_unowned_path = os.path.join(root, "Empty Stale Folder")
+            os.makedirs(empty_stale_unowned_path, exist_ok=True)
+            _age_dir(empty_stale_unowned_path, age_days=_OLD_DAYS)
+
+        empty_stale_owned_path: str | None = None
+        if world.empty_stale_owned_dir:
+            empty_stale_owned_path = _seed_owned_inactive(
+                fake_db, request_id=4, artist="Empty Owned Artist",
+                title="Empty Owned Album", year="2017",
+                file_pairs=[("emptypeer", "emptypeer\\Album\\gone.flac")],
+                root=root)
+            os.makedirs(empty_stale_owned_path, exist_ok=True)
+            _age_dir(empty_stale_owned_path, age_days=_OLD_DAYS)
 
         empty_fresh_path: str | None = None
         if world.empty_fresh_dir:
@@ -506,18 +872,18 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
             os.makedirs(empty_fresh_path, exist_ok=True)
             # Freshly created -- mtime is already "now".
 
-        rows = [row]
         if world.undecodable_state:
-            rows.append(make_request_row(
-                id=2, status="downloading",
+            fake_db.seed_request(make_request_row(
+                id=99, status="downloading",
                 active_download_state={"garbage": True}))
             # Fail-closed: the sweep aborts, so EVERYTHING survives —
-            # including old orphans and the stale empty directory.
+            # including old orphans, owned-inactive attempts, and the
+            # stale empty owned directory.
             path_expected = {p: True for p in path_expected}
             folder_has_survivor = {
                 name: True for name in folder_has_survivor}
 
-        ctx = _make_ctx(root, rows=rows)
+        ctx = _make_ctx(root, fake_db=fake_db)
         summary = reap_disk_orphans(ctx)
 
         path_actual = {p: os.path.exists(p) for p in path_expected}
@@ -538,11 +904,15 @@ def _materialize_and_run(world: DiskReaperWorld) -> DiskReaperRunResult:
             path_actual_survive=path_actual,
             folder_expected_exists=folder_expected,
             folder_actual_exists=folder_actual,
-            empty_stale_path=empty_stale_path,
-            empty_stale_expected_survive=world.undecodable_state,
-            empty_stale_survived=(
-                empty_stale_path is not None
-                and os.path.exists(empty_stale_path)),
+            empty_stale_unowned_path=empty_stale_unowned_path,
+            empty_stale_unowned_survived=(
+                empty_stale_unowned_path is not None
+                and os.path.exists(empty_stale_unowned_path)),
+            empty_stale_owned_path=empty_stale_owned_path,
+            empty_stale_owned_expected_survive=world.undecodable_state,
+            empty_stale_owned_survived=(
+                empty_stale_owned_path is not None
+                and os.path.exists(empty_stale_owned_path)),
             empty_fresh_path=empty_fresh_path,
             empty_fresh_survived=(
                 empty_fresh_path is not None
@@ -582,14 +952,20 @@ def assert_disk_reaper_invariants(result: DiskReaperRunResult) -> None:
                 f"orphan folder survival diverged: folder={folder} "
                 f"expected_exists={expected} actual_exists={actual}")
 
-    if result.empty_stale_path is not None and (
-            result.empty_stale_survived
-            != result.empty_stale_expected_survive):
+    if (result.empty_stale_unowned_path is not None
+            and not result.empty_stale_unowned_survived):
         raise AssertionError(
-            f"stale empty directory survival diverged: "
-            f"path={result.empty_stale_path} "
-            f"expected_survive={result.empty_stale_expected_survive} "
-            f"actual_survive={result.empty_stale_survived}")
+            "a foreign already-empty stale directory must NEVER be "
+            f"pruned: {result.empty_stale_unowned_path}")
+
+    if result.empty_stale_owned_path is not None and (
+            result.empty_stale_owned_survived
+            != result.empty_stale_owned_expected_survive):
+        raise AssertionError(
+            f"owned already-empty stale directory survival diverged: "
+            f"path={result.empty_stale_owned_path} "
+            f"expected_survive={result.empty_stale_owned_expected_survive} "
+            f"actual_survive={result.empty_stale_owned_survived}")
 
     if result.empty_fresh_path is not None and not result.empty_fresh_survived:
         raise AssertionError(
@@ -600,13 +976,14 @@ def assert_disk_reaper_invariants(result: DiskReaperRunResult) -> None:
         raise AssertionError("root itself must never be removed")
 
 
-# Pinned regression: a mixed-age orphan folder (one old file reaped, one
+# Pinned regression: a mixed-age orphan folder (never ledgered — always
+# survives), a mixed-age owned-inactive folder (one old file reaped, one
 # young survivor keeping the folder alive), a protected file aged past
 # the threshold (must still survive), a quarantined failed_imports file
-# aged past the threshold (must still survive), a stale bare-canonical
-# legacy folder, a stray protected file living inside an orphan folder,
-# and both empty-directory scenarios -- the full mixed shape the
-# strategy can produce.
+# aged past the threshold (must still survive), a standalone
+# ledger-owned stamped file, a stray protected file living inside an
+# orphan folder, and all three empty-directory scenarios (foreign,
+# owned, fresh) -- the full mixed shape the strategy can produce.
 _PINNED_WORLD = DiskReaperWorld(
     files=(
         _FileSpec(zone=_Zone.ORPHAN, folder="CD 01", nested=False,
@@ -617,31 +994,38 @@ _PINNED_WORLD = DiskReaperWorld(
                    old=True, size=16, ext=".flac"),
         _FileSpec(zone=_Zone.FAILED_IMPORTS, folder="", nested=False,
                    old=True, size=16, ext=".flac"),
-        _FileSpec(zone=_Zone.STALE_BARE, folder="", nested=False,
+        _FileSpec(zone=_Zone.OWNED_DIR, folder="", nested=False,
+                   old=True, size=16, ext=".flac"),
+        _FileSpec(zone=_Zone.OWNED_DIR, folder="", nested=True,
+                   old=False, size=0, ext=".jpg"),
+        _FileSpec(zone=_Zone.OWNED_FILE, folder="", nested=False,
                    old=True, size=16, ext=".flac"),
     ),
     stray_protected=True,
-    empty_stale_dir=True,
+    empty_stale_unowned_dir=True,
+    empty_stale_owned_dir=True,
     empty_fresh_dir=True,
     undecodable_state=False,
 )
 
 # Pinned fail-closed world: the same full mixed shape, but with a second
 # downloading row whose state can't be decoded — the sweep must abort and
-# every path (however old and orphaned) must survive.
+# every path (however old, orphaned, or owned) must survive.
 _PINNED_ABORT_WORLD = DiskReaperWorld(
     files=_PINNED_WORLD.files,
     stray_protected=True,
-    empty_stale_dir=True,
+    empty_stale_unowned_dir=True,
+    empty_stale_owned_dir=True,
     empty_fresh_dir=True,
     undecodable_state=True,
 )
 
 
 class TestGeneratedDiskReaperInvariants(unittest.TestCase):
-    """Properties 1-6: within-root, ownership, quarantine, age,
-    empty-dir-only pruning, fail-closed ownership -- patrolled together
-    over generated worlds."""
+    """Properties 1-6 and 8: within-root, active protection, quarantine,
+    age, owned-only empty-dir pruning, fail-closed ownership, and
+    good-citizen positive ownership -- patrolled together over
+    generated worlds."""
 
     @given(world=_disk_reaper_worlds())
     @example(world=_PINNED_WORLD)
@@ -666,9 +1050,11 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
             path_actual_survive={},
             folder_expected_exists={},
             folder_actual_exists={},
-            empty_stale_path=None,
-            empty_stale_expected_survive=False,
-            empty_stale_survived=False,
+            empty_stale_unowned_path=None,
+            empty_stale_unowned_survived=True,
+            empty_stale_owned_path=None,
+            empty_stale_owned_expected_survive=False,
+            empty_stale_owned_survived=False,
             empty_fresh_path=None,
             empty_fresh_survived=False,
             root_intact=True,
@@ -678,6 +1064,9 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
         return DiskReaperRunResult(**defaults)
 
     def test_trips_on_protected_or_young_path_wrongly_removed(self):
+        """R1/active-protection known-bad self-test: a path that should
+        have survived (protected, unowned, or too young) but was
+        removed."""
         result = self._base_result(
             path_expected_survive={"/tmp/x/owned.flac": True},
             path_actual_survive={"/tmp/x/owned.flac": False},
@@ -685,7 +1074,9 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_disk_reaper_invariants(result)
 
-    def test_trips_on_old_orphan_wrongly_kept(self):
+    def test_trips_on_old_owned_orphan_wrongly_kept(self):
+        """R2 known-bad self-test: an aged, ledger-owned, non-active
+        path that should have been reaped but survived."""
         result = self._base_result(
             path_expected_survive={"/tmp/x/orphan.flac": False},
             path_actual_survive={"/tmp/x/orphan.flac": True},
@@ -701,22 +1092,30 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_disk_reaper_invariants(result)
 
-    def test_trips_on_stale_empty_dir_wrongly_kept(self):
+    def test_trips_on_foreign_empty_dir_wrongly_pruned(self):
         result = self._base_result(
-            empty_stale_path="/tmp/x/Empty Stale Folder",
-            empty_stale_expected_survive=False,
-            empty_stale_survived=True,
+            empty_stale_unowned_path="/tmp/x/Foreign Empty Folder",
+            empty_stale_unowned_survived=False,
         )
         with self.assertRaises(AssertionError):
             assert_disk_reaper_invariants(result)
 
-    def test_trips_on_stale_empty_dir_wrongly_pruned_during_abort(self):
+    def test_trips_on_stale_owned_empty_dir_wrongly_kept(self):
+        result = self._base_result(
+            empty_stale_owned_path="/tmp/x/Owned Empty Folder",
+            empty_stale_owned_expected_survive=False,
+            empty_stale_owned_survived=True,
+        )
+        with self.assertRaises(AssertionError):
+            assert_disk_reaper_invariants(result)
+
+    def test_trips_on_stale_owned_empty_dir_wrongly_pruned_during_abort(self):
         result = self._base_result(
             summary=DiskReapSummary(aborted=True),
             expect_abort=True,
-            empty_stale_path="/tmp/x/Empty Stale Folder",
-            empty_stale_expected_survive=True,
-            empty_stale_survived=False,
+            empty_stale_owned_path="/tmp/x/Owned Empty Folder",
+            empty_stale_owned_expected_survive=True,
+            empty_stale_owned_survived=False,
         )
         with self.assertRaises(AssertionError):
             assert_disk_reaper_invariants(result)
@@ -742,8 +1141,7 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
     def test_trips_on_deletions_during_abort(self):
         result = self._base_result(
             expect_abort=True,
-            summary=DiskReapSummary(removed=1, aborted=True),
-        )
+            summary=DiskReapSummary(removed=1, aborted=True))
         with self.assertRaises(AssertionError):
             assert_disk_reaper_invariants(result)
 
@@ -766,7 +1164,8 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
 # artist/title/year projection), the reaper would silently stop protecting
 # the folder materialize actually writes into — the #546 projection-drift
 # class. This parity test drives BOTH real production derivations from the
-# same row and demands byte-equality.
+# same row and demands byte-equality. Unaffected by the #571 ownership
+# flip — this is purely about the ACTIVE-protection derivation.
 
 def assert_canonical_derivation_parity(
     materialize_path: str,
