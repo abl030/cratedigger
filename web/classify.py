@@ -378,8 +378,19 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         verdict = _rejection_verdict(entry)
         return ("Rejected", "badge-rejected", "#a33", verdict)
 
-    # --- Failed / Timeout ---
-    if entry.outcome in ("failed", "timeout"):
+    # --- Timeout (download-phase; outcome="timeout" is written ONLY by
+    # lib/download.py::_timeout_album — error_message is the real
+    # per-file evidence summary, issue #564 C5, when any was captured) ---
+    if entry.outcome == "timeout":
+        verdict = (
+            f"Download failed: {entry.error_message}"
+            if entry.error_message
+            else "Download failed"
+        )
+        return ("Failed", "badge-failed", "#a33", verdict)
+
+    # --- Failed (import-phase) ---
+    if entry.outcome == "failed":
         if entry.beets_scenario == "timeout":
             verdict = "Import timed out"
         elif entry.error_message:
@@ -403,6 +414,13 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         if entry.soulseek_username:
             verdict = f"Marked bad rip — denylisted {entry.soulseek_username}"
         return ("Bad rip", "badge-rejected", "#a33", verdict)
+
+    # --- Peer offline at enqueue (verified rejection written by
+    # lib/enqueue.py; issue #564 — previously fell through to the
+    # generic "Unknown outcome" branch below) ---
+    if entry.outcome == "user_offline":
+        verdict = entry.error_message or "Peer offline at enqueue"
+        return ("Peer offline", "badge-rejected", "#a33", verdict)
 
     # --- Success ---
     if entry.outcome == "success":
