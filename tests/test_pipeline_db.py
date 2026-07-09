@@ -8751,6 +8751,25 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(removed, 1)
         self.assertEqual(self.db.get_owned_transfers(request_id=rid), [])
 
+    def test_prune_transfer_ledger_exact_boundary_row_survives(self):
+        """The retention cutoff is strict-<: enqueued_at == older_than is
+        NOT pruned (documents the SQL `<` choice at the exact boundary)."""
+        rid = self._seed_request(status="imported")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
+        ])
+        boundary = datetime.now(timezone.utc) - timedelta(days=90)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s",
+            (boundary, rid),
+        )
+
+        removed = self.db.prune_transfer_ledger(older_than=boundary)
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(self.db.get_owned_transfers(request_id=rid)), 1)
+
     def test_prune_transfer_ledger_keeps_active_request_rows_regardless_of_age(self):
         rid = self._seed_request(status="downloading")
         self.db.record_transfer_enqueue([

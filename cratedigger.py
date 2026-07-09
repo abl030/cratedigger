@@ -1192,8 +1192,7 @@ def _search_and_queue_parallel(albums, ctx):
 
 
 from lib.download import grab_most_wanted as _grab_most_wanted_impl
-from lib.slskd_transfers import (cancel_and_delete as _cancel_and_delete_impl,
-                                 slskd_do_enqueue as _slskd_do_enqueue_impl)
+from lib.slskd_transfers import cancel_and_delete as _cancel_and_delete_impl
 
 
 def _make_ctx():
@@ -1203,10 +1202,6 @@ def _make_ctx():
 
 def cancel_and_delete(files):
     _cancel_and_delete_impl(files, _make_ctx())
-
-
-def slskd_do_enqueue(username, files, file_dir):
-    return _slskd_do_enqueue_impl(username, files, file_dir, _make_ctx())
 
 
 def grab_most_wanted(albums):

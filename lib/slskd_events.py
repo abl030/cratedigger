@@ -65,12 +65,12 @@ class EventIngestResult:
     file_events: int = 0
     files_stamped: int = 0
     requests_updated: int = 0
-    cursor_gap: bool = False
     # T2 (issue #571): transfer-ledger rows stamped this pass. Distinct
     # from files_stamped/requests_updated (active_download_state, only
     # currently-downloading rows) — a ledger row can be stamped for a
     # request that has since left 'downloading' too.
     transfers_stamped: int = 0
+    cursor_gap: bool = False
 
     def to_log_line(self) -> str:
         return (
