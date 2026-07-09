@@ -1483,6 +1483,22 @@ def main():
             except Exception:
                 logger.exception("Phase 1 (poll downloads) failed — continuing to cleanup")
 
+        # --- Pre-purge terminal transfer evidence harvest (issue #564) ---
+        # remove_completed_downloads() below discards slskd's per-transfer
+        # terminal state (including the failure reason) for anything that
+        # completed/errored within THIS cycle before the next poll cycle
+        # ever observes it. This harvest takes one last snapshot and
+        # stamps that evidence into active_download_state first. MUST
+        # stay ordered before the purge — best-effort, never blocks the
+        # cycle (the purge still runs even if the harvest fails).
+        try:
+            from lib.download import harvest_terminal_transfer_evidence
+            harvest_terminal_transfer_evidence(_module_ctx)
+        except Exception:
+            logger.exception(
+                "HARVEST: pre-purge evidence harvest failed; continuing "
+                "with the cycle.")
+
         # Clean up completed transfer UI entries
         slskd.transfers.remove_completed_downloads()
 

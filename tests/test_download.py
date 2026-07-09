@@ -10,6 +10,8 @@ and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 
+import ast
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 import logging
@@ -2595,6 +2597,240 @@ class TestCaptureDownloadProgress(unittest.TestCase):
         _capture_download_progress([f], state, now)
 
         self.assertEqual(state.last_progress_at, now.isoformat())
+
+
+class TestHarvestTerminalTransferEvidence(unittest.TestCase):
+    """Test harvest_terminal_transfer_evidence() — issue #564 root cause
+    #3 / C3: the pre-purge harvest that stamps terminal slskd transfer
+    evidence into active_download_state before remove_completed_downloads()
+    discards slskd's own record of it.
+    """
+
+    def _row(self, request_id, *, files, processing_started_at=None):
+        state_dict: dict[str, Any] = {
+            "filetype": "flac",
+            "enqueued_at": _utc_now_iso(),
+            "files": files,
+        }
+        if processing_started_at is not None:
+            state_dict["processing_started_at"] = processing_started_at
+        return {
+            "id": request_id,
+            "album_title": "Test Album",
+            "artist_name": "Test Artist",
+            "year": 2020,
+            "mb_release_id": f"test-mbid-{request_id}",
+            "source": "request",
+            "search_filetype_override": None,
+            "target_format": None,
+            "status": "downloading",
+            "active_download_state": state_dict,
+        }
+
+    def _ctx(self, rows, slskd_downloads):
+        fake_db = FakePipelineDB()
+        for row in rows:
+            fake_db.seed_request(row)
+        ctx = make_ctx_with_fake_db(
+            fake_db, slskd=FakeSlskdAPI(downloads=slskd_downloads))
+        return ctx, fake_db
+
+    def test_stamps_terminal_transfer_before_local_processing(self):
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000, "last_state": "InProgress"},
+        ])
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "Completed, Rejected",
+                "bytesTransferred": 500,
+                "exception": "Transfer rejected: Banned",
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        state = fake_db.request(1)["active_download_state"]
+        f = state["files"][0]
+        self.assertEqual(f["last_state"], "Completed, Rejected")
+        self.assertEqual(f["last_exception"], "Transfer rejected: Banned")
+        self.assertEqual(f["bytes_transferred"], 500)
+
+    def test_skips_rows_with_processing_started(self):
+        """Files already handed to local processing are no longer purely
+        slskd-side transfers — the harvest must not touch them."""
+        row = self._row(
+            1,
+            files=[
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 1000,
+                 "last_state": "InProgress"},
+            ],
+            processing_started_at="2026-01-01T00:00:00+00:00",
+        )
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "Completed, Succeeded",
+                "bytesTransferred": 1000,
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_skips_files_already_terminal(self):
+        """A file whose persisted last_state is already terminal is left
+        alone — no redundant re-match/re-persist."""
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "Completed, Succeeded"},
+        ])
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_non_terminal_match_does_not_persist(self):
+        """A matched but still-in-progress transfer is not evidence worth
+        persisting here -- the ordinary poll cycle owns in-progress state."""
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        slskd_downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "InProgress",
+                "bytesTransferred": 200,
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], slskd_downloads)
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_missing_active_download_state_is_skipped(self):
+        row = self._row(1, files=[])
+        row["active_download_state"] = None
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_undecodable_active_download_state_is_skipped(self):
+        row = self._row(1, files=[])
+        row["active_download_state"] = {"garbage": True}
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_snapshot_failure_is_a_noop(self):
+        row = self._row(1, files=[
+            {"username": "user1", "filename": "user1\\Music\\01.flac",
+             "file_dir": "user1\\Music", "size": 1000,
+             "last_state": "InProgress"},
+        ])
+        ctx, fake_db = self._ctx([row], slskd_downloads=[])
+        cast(Any, ctx.slskd).transfers.get_all_downloads_error = RuntimeError("boom")
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)  # must not raise
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_no_downloading_rows_is_a_noop(self):
+        ctx, fake_db = self._ctx([], slskd_downloads=[])
+        from lib.download import harvest_terminal_transfer_evidence
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+
+class TestHarvestPhase0Wiring(unittest.TestCase):
+    """harvest_terminal_transfer_evidence must run immediately BEFORE
+    remove_completed_downloads(), guarded by its own try/except so a
+    harvest failure can never block the purge or the cycle — mirrors the
+    same source-inspection pattern as
+    tests/test_disk_reaper_generated.py::TestDiskReaperPhase0Wiring.
+    """
+
+    def _main_source(self) -> str:
+        import cratedigger
+        return inspect.getsource(cratedigger.main)
+
+    def test_called_immediately_before_remove_completed_downloads(self):
+        source = self._main_source()
+        harvest_idx = source.index("harvest_terminal_transfer_evidence(_module_ctx)")
+        purge_idx = source.index("slskd.transfers.remove_completed_downloads()")
+        self.assertLess(harvest_idx, purge_idx)
+
+    def test_call_is_isolated_in_its_own_try_except_exception_block(self):
+        tree = ast.parse(self._main_source())
+
+        def _calls_harvest(node: ast.AST) -> bool:
+            return (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "harvest_terminal_transfer_evidence"
+            )
+
+        matches = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            in_body = any(
+                _calls_harvest(n) for stmt in node.body for n in ast.walk(stmt))
+            if in_body:
+                matches.append(node)
+
+        inner_matches = [
+            m for m in matches
+            if not any(
+                other is not m and id(other) in {id(n) for n in ast.walk(m)}
+                for other in matches
+            )
+        ]
+
+        self.assertEqual(
+            len(inner_matches), 1,
+            "expected exactly one (innermost) try block calling "
+            "harvest_terminal_transfer_evidence")
+        node = inner_matches[0]
+        self.assertTrue(node.handlers, "the try block must have a handler")
+        for handler in node.handlers:
+            self.assertIsInstance(
+                handler.type, ast.Name,
+                "handler must catch a bare exception type")
+            assert isinstance(handler.type, ast.Name)
+            self.assertEqual(
+                handler.type.id, "Exception",
+                "must catch Exception broadly so a harvest failure can't "
+                "abort the cycle")
 
 
 class TestPollActiveDownloads(unittest.TestCase):

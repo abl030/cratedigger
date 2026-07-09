@@ -57,6 +57,7 @@ from lib.slskd_transfers import (
     _get_all_downloads_snapshot,
     cancel_and_delete,
     downloads_all_done,
+    match_transfer,
     rederive_transfer_ids,
     slskd_do_enqueue,
     slskd_download_status,
@@ -349,6 +350,84 @@ def _persist_updated_download_state(
             current_path=entry.import_folder,
         ).to_json(),
     )
+
+
+def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
+    """Harvest terminal slskd transfer evidence immediately before the
+    end-of-cycle purge (issue #564 root cause #3, C3).
+
+    ``cratedigger.py`` calls ``slskd.transfers.remove_completed_downloads()``
+    at the end of every cycle, discarding slskd's per-transfer terminal
+    state — including the ``exception`` reason — for any transfer that
+    completed and errored within the SAME cycle it was enqueued, before
+    the next poll cycle ever observes it. The very next poll then finds
+    no transfer at all and reports a generic "vanished from slskd"
+    timeout with zero evidence.
+
+    This takes one final bulk snapshot and, for every ``downloading`` row
+    that hasn't reached local processing yet, stamps any file whose
+    matched transfer is now terminal into ``active_download_state`` —
+    the SAME persisted fields ``_capture_download_progress`` writes
+    (``last_state``, ``last_exception``, ``bytes_transferred``) via the
+    real ``ActiveDownloadState`` round trip (decode -> mutate -> encode),
+    never a hand-rolled JSON dict. Rows already past
+    ``processing_started_at`` are skipped — their files already moved to
+    local processing and are no longer purely slskd-side transfers.
+
+    Best-effort and silent on the happy path: a snapshot failure, or one
+    row's undecodable ``active_download_state``, skips harvesting for
+    that row/cycle — the purge always still runs regardless (the
+    pre-existing behavior). MUST be called before
+    ``remove_completed_downloads()`` — see the call site in
+    ``cratedigger.py``.
+    """
+    db = ctx.pipeline_db_source._get_db()
+    downloading = db.get_downloading()
+    if not downloading:
+        return
+
+    snapshot = _get_all_downloads_snapshot(
+        ctx.slskd, purpose="pre-purge terminal evidence harvest")
+    if snapshot is None:
+        return
+
+    harvested = 0
+    for row in downloading:
+        request_id = row["id"]
+        raw_state = row.get("active_download_state")
+        if not raw_state:
+            continue
+        try:
+            state = ActiveDownloadState.from_raw(raw_state)
+        except Exception:
+            logger.warning(
+                "HARVEST: request %s active_download_state is missing "
+                "or undecodable — skipping this row this cycle",
+                request_id, exc_info=True)
+            continue
+        if state.processing_started_at is not None:
+            continue
+
+        dirty = False
+        for f in state.files:
+            if f.last_state and f.last_state.startswith("Completed,"):
+                continue
+            transfer = match_transfer(snapshot, f.filename, username=f.username)
+            if transfer is None or not transfer.state.startswith("Completed,"):
+                continue
+            f.last_state = transfer.state
+            f.last_exception = transfer.exception or f.last_exception
+            f.bytes_transferred = transfer.bytes_transferred
+            dirty = True
+
+        if dirty:
+            db.update_download_state(request_id, state.to_json())
+            harvested += 1
+
+    if harvested:
+        logger.info(
+            "HARVEST: captured pre-purge terminal transfer evidence for "
+            "%d downloading row(s)", harvested)
 
 
 _NON_PROGRESS_STATES = {
