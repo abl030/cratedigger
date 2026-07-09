@@ -1292,6 +1292,26 @@ def main():
             except Exception as exc:
                 logger.debug(f"verified_lossless_target rank check failed: {exc}")
 
+        # --- Fail-loud schema gate ---
+        # cratedigger.service uses Wants=, not Requires=, on
+        # cratedigger-db-migrate.service (nix/module.nix) -- a Requires=
+        # edge would propagate the migrate unit's every-deploy restart as a
+        # SIGTERM to a mid-flight cycle, since the migrate unit's ExecStart
+        # store path changes on every code deploy. Wants= drops that
+        # ordering guarantee, so this gate re-provides it: refuse to run a
+        # cycle against a DB missing any shipped migration.
+        from lib.migrator import SchemaBehindError, assert_schema_current
+        try:
+            assert_schema_current(cfg.pipeline_db_dsn)
+        except SchemaBehindError as exc:
+            logger.error(
+                "Pipeline DB schema is behind: missing migration "
+                f"version(s) {exc.missing_versions}. Refusing to run a "
+                "cycle against an un-migrated schema -- run "
+                "cratedigger-db-migrate.service first."
+            )
+            sys.exit(1)
+
         from album_source import DatabaseSource
         pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
         logger.info(f"Pipeline DB: {cfg.pipeline_db_dsn}")

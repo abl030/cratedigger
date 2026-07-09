@@ -141,7 +141,7 @@ Push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → sig
 
 ## Database migrations
 
-Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on every switch before app services start. Add a numbered SQL file — no manual psql, **never** edit a shipped migration, **never** add DDL inside `PipelineDB` methods. Full workflow in `.claude/rules/deploy.md`.
+Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on every switch. `cratedigger-web` and the other long-running workers `requires` the migrate unit and start after it; `cratedigger` and `cratedigger-unfindable` are timer-driven (`restartIfChanged = false`) so they only `wants`+`after` it — a `requires` edge would let the migrate unit's every-deploy restart SIGTERM a mid-flight cycle — and instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`). Add a numbered SQL file — no manual psql, **never** edit a shipped migration, **never** add DDL inside `PipelineDB` methods. Full workflow in `.claude/rules/deploy.md`.
 
 ## Running tests
 

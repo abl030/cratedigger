@@ -178,6 +178,28 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl show -p After cratedigger-web.service | grep -q redis-cratedigger.service")
     machine.succeed("systemctl show -p Wants cratedigger-web.service | grep -q redis-cratedigger.service")
 
+    # Deploy-kill-migrate fix: cratedigger.service is timer-driven and
+    # restartIfChanged=false, so it must NOT Requires= the migrate unit --
+    # that unit's ExecStart store path changes on every deploy, and a
+    # Requires= edge would propagate its every-switch restart as a SIGTERM
+    # to a mid-flight cycle. It still Wants=+After= the migrate unit (so it
+    # normally starts behind a first-boot migration) and gates on schema
+    # currency itself at startup instead (lib/migrator.py
+    # assert_schema_current, exercised by the Python suite).
+    machine.succeed("systemctl show -p Wants cratedigger.service | grep -q cratedigger-db-migrate.service")
+    machine.fail("systemctl show -p Requires cratedigger.service | grep -q cratedigger-db-migrate.service")
+
+    # Counterpart pins: the long-running workers restart on switch anyway
+    # (restartIfChanged=true), so they MUST keep the hard Requires= gate --
+    # for them it's harmless AND it's their only "failed migration blocks
+    # start" guarantee (they have no assert_schema_current startup gate).
+    # A future edit flipping one of these to Wants= would silently lose
+    # that guarantee. (youtube-ingest's identical pin lives in its U7
+    # block further down.)
+    machine.succeed("systemctl show -p Requires cratedigger-web.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Requires cratedigger-importer.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Requires cratedigger-import-preview-worker.service | grep -q cratedigger-db-migrate.service")
+
     # Peer auth by construction (KTD5): the socket DSN carries no
     # password, and none exists in the rendered config or unit files.
     machine.succeed("grep -q 'dsn = postgresql:///root?host=/run/postgresql' /var/lib/cratedigger/config.ini")
@@ -210,10 +232,16 @@ pkgs.testers.nixosTest {
     # detection unit, or render it without the migrate dependency.
     machine.succeed("systemctl cat cratedigger-unfindable.service > /dev/null")
     machine.succeed("systemctl cat cratedigger-unfindable.timer > /dev/null")
-    # After= must include the db-migrate unit so the detection job never
-    # runs against an un-migrated schema.
+    # After= must include the db-migrate unit so the detection job normally
+    # runs behind a first-boot migration. Same deploy-kill-migrate fix as
+    # cratedigger.service above: Wants=, NOT Requires= (restartIfChanged
+    # here is false too, so a switch-time migrate restart must not
+    # SIGTERM a mid-flight run) -- the fail-loud assert_schema_current
+    # startup gate re-provides the "never runs against an un-migrated
+    # schema" guarantee.
     machine.succeed("systemctl show -p After cratedigger-unfindable.service | grep -q cratedigger-db-migrate.service")
-    machine.succeed("systemctl show -p Requires cratedigger-unfindable.service | grep -q cratedigger-db-migrate.service")
+    machine.succeed("systemctl show -p Wants cratedigger-unfindable.service | grep -q cratedigger-db-migrate.service")
+    machine.fail("systemctl show -p Requires cratedigger-unfindable.service | grep -q cratedigger-db-migrate.service")
     # Timer is enabled (wantedBy timers.target) — the daily fire is
     # not opt-in. ``systemctl is-enabled`` returns "enabled" for units
     # wired into timers.target.
