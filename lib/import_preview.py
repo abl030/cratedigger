@@ -8,6 +8,7 @@ import, but runs both against isolated temporary copies.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
@@ -45,6 +46,8 @@ from lib.quality import (
 )
 from lib.util import repair_mp3_headers, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
+
+logger = logging.getLogger("cratedigger")
 
 
 @runtime_checkable
@@ -200,6 +203,63 @@ def _preview_result(
     )
 
 
+# Bound on how much of a subprocess's stderr we fold into a persisted
+# MeasurementFailure.detail / the journal — this is diagnostic breadcrumb,
+# not a log dump. Individual import_one.py [FAIL] lines are themselves
+# already bounded to a ~230-char ffmpeg-stderr tail (see
+# harness/import_one.py::convert_lossless), so a handful of them fits
+# comfortably; this is a hard ceiling against pathological inputs.
+_STDERR_DIAGNOSTIC_MAX_CHARS = 2000
+
+
+def _diagnostic_from_stderr(stderr: str, max_chars: int = _STDERR_DIAGNOSTIC_MAX_CHARS) -> str:
+    """Extract the useful per-file failure signal from an import_one.py stderr blob.
+
+    ``convert_lossless`` (``harness/import_one.py``) prints one
+    ``[FAIL] <file>: <ffmpeg tail>`` line per failed conversion to stderr,
+    but the aggregate ``ImportResult.error`` on a ``conversion_failed`` /
+    ``target_conversion_failed`` result only ever says e.g. "11 FLAC files
+    failed to convert" — the per-file *why* was otherwise dropped on the
+    floor (never persisted, never streamed to the journal on the preview
+    path, unlike the importer's ``dispatch_import_core``). This pulls every
+    ``[FAIL]`` line back out so the true tool-level reason survives.
+
+    Falls back to a bounded tail of the raw stderr when no ``[FAIL]`` marker
+    is present (e.g. a crash before the per-file loop even started), so a
+    non-empty stderr never yields an empty diagnostic.
+
+    Keeps whole lines (never slices a line in half) so a captured ``[FAIL]``
+    marker is never partially truncated; only hard-truncates as a last
+    resort for a single line that alone exceeds ``max_chars``. Never raises
+    — this runs on arbitrary subprocess output.
+    """
+    if not stderr or not stderr.strip():
+        return ""
+
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    fail_lines = [ln for ln in lines if "[FAIL]" in ln]
+    source_lines = fail_lines if fail_lines else lines
+
+    # Keep the most recent lines within the char budget (newest failures are
+    # the most actionable), without truncating a kept line mid-string.
+    kept: list[str] = []
+    total = 0
+    for line in reversed(source_lines):
+        joiner_cost = 3 if kept else 0  # " / "
+        added = len(line) + joiner_cost
+        if total + added > max_chars and kept:
+            break
+        kept.append(line)
+        total += added
+    kept.reverse()
+
+    result = " / ".join(kept)
+    if len(result) > max_chars:
+        # Pathological single oversized line — hard ceiling wins.
+        result = result[:max_chars]
+    return result
+
+
 def _measurement_failed_result(
     *,
     mode: str,
@@ -211,11 +271,33 @@ def _measurement_failed_result(
     download_log_id: int | None = None,
     import_result: ImportResult | None = None,
     stage_chain: list[str] | None = None,
+    subprocess_stderr: str | None = None,
 ) -> ImportPreviewResult:
-    """Build a ``verdict='measurement_failed'`` preview result with typed payload."""
+    """Build a ``verdict='measurement_failed'`` preview result with typed payload.
+
+    ``subprocess_stderr``, when supplied, is the raw ``ImportOneRun.stderr``
+    from the ``run_import_one`` call that triggered this failure. The
+    per-file tool diagnostic it carries (e.g. the real ffmpeg decode error
+    behind a "conversion_failed") is folded into ``detail`` (so it reaches
+    both the persisted ``MeasurementFailure`` payload and the operator-
+    facing preview result) and logged at WARNING so it is visible in the
+    journal without needing to reproduce the failure. This closes the gap
+    where a conversion failure's only DB/journal trace was an aggregate
+    count ("11 FLAC files failed to convert") with the actual per-file
+    reason discarded.
+    """
+    full_detail = detail
+    if subprocess_stderr:
+        diagnostic = _diagnostic_from_stderr(subprocess_stderr)
+        if diagnostic:
+            full_detail = f"{detail} | {diagnostic}"
+            logger.warning(
+                "measurement_failed decision=%s request_id=%s: %s",
+                decision, request_id, diagnostic,
+            )
     payload = MeasurementFailure(
         reason=reason,
-        detail=detail,
+        detail=full_detail,
         source_path=source_path or "",
     )
     return _preview_result(
@@ -223,7 +305,7 @@ def _measurement_failed_result(
         verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
         decision=decision,
         reason=reason,
-        detail=detail,
+        detail=full_detail,
         stage_chain=stage_chain,
         request_id=request_id,
         download_log_id=download_log_id,
@@ -687,6 +769,7 @@ def measure_and_persist_candidate_evidence(
                 download_log_id=download_log_id,
                 source_path=path,
                 import_result=run.import_result,
+                subprocess_stderr=run.stderr,
             )
         if run.import_result.decision in (
             "conversion_failed",
@@ -701,6 +784,7 @@ def measure_and_persist_candidate_evidence(
                 download_log_id=download_log_id,
                 source_path=path,
                 import_result=run.import_result,
+                subprocess_stderr=run.stderr,
             )
         if run.import_result.new_measurement is None:
             return _measurement_failed_result(
@@ -712,6 +796,7 @@ def measure_and_persist_candidate_evidence(
                 download_log_id=download_log_id,
                 source_path=path,
                 import_result=run.import_result,
+                subprocess_stderr=run.stderr,
             )
 
         # --- Snapshot freshness guard (post-measurement) ---
