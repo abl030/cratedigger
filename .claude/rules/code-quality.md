@@ -273,6 +273,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 | A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes.py`, `tests/test_fakes.py` |
 | A new `BeetsDB` method | Either (a) an equivalent stub on `FakeBeetsDB` with a self-test in `tests/test_fakes.py::TestFakeBeetsDB`, OR (b) drive the test against a real test SQLite DB if it's a read-only query | `tests/fakes.py`, `tests/test_fakes.py` |
 | A feature with policy invariants (pure decisions, lifecycle / state machine, wire or event ingestion) | Generated properties + strategies in the same PR, each invariant checker with a known-bad self-test; invariants written down FIRST | `tests/_hypothesis_profiles.py`, checker/strategy patterns in `tests/test_*_generated.py`, `docs/generated-testing.md` |
+| A documented surface (a module option, a beets plugin, an operator action / CLI subcommand, the permission/ownership model, or a subsystem's documented behavior) | The doc update in the SAME PR (README / `docs/` / `examples/` / CLAUDE.md) — docs are part of done, not a follow-up | `tests/test_docs_audit.py` (structural coverage: plugins, CLI, dead-links, option descriptions); the relevant `docs/*.md` |
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
 
@@ -383,6 +384,7 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
 ## Pre-Commit Review Gate
 - For non-trivial changes (new dataclasses, refactored function signatures, new pipeline paths), spawn an Opus agent to review the diff before committing.
 - The agent should check: correctness bugs, test gaps, callers you missed, type errors, unfinished wiring.
+- Docs freshness: does this diff make any README / `docs/` / `examples/` / CLAUDE.md statement wrong or incomplete, or ship a documented surface (a new option / plugin / CLI subcommand / behavior) undocumented? `test_docs_audit.py` catches structural gaps; the reviewer catches stale prose the audit can't see.
 - Fix everything it finds before committing. This is not optional.
 
 ## Commits & PRs
