@@ -8482,6 +8482,7 @@ class TestSlskdEventCursorRoundTrip(unittest.TestCase):
         self.assertEqual(strip(real), strip(mirrored))
 
 
+@requires_postgres
 class TestSearchLedgerRoundTrip(unittest.TestCase):
     """Rule A round-trip for the slskd search-id write-ahead ledger
     (migration 044, issue #576)."""

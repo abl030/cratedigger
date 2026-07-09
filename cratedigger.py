@@ -370,7 +370,9 @@ def search_for_album(album, ctx):
                 f"variant={variant_tag}, ordinal={plan_execution.plan_ordinal})")
     # Write-ahead ledger (issue #576, I2): the id must be persisted BEFORE
     # the POST so a kill at any point after submission still leaves the
-    # sweep something to find and clean up (I1).
+    # sweep something to find and clean up (I1). A DB failure here
+    # deliberately propagates — you cannot POST before the ledger commits,
+    # and DB-down is already cycle-fatal.
     search_id = str(uuid.uuid4())
     db.record_search_id(
         search_id, purpose="plan_search",
@@ -453,6 +455,8 @@ def _submit_plan_search(album, query, strategy_tag, search_cfg, slskd_client, db
     # slskd has SemaphoreSlim(1,1) — 409 means another search is still being submitted.
     for attempt in range(6):
         search_id = str(uuid.uuid4())
+        # A DB failure here deliberately propagates (write-ahead: no POST
+        # before the ledger commits; DB-down is already cycle-fatal).
         db.record_search_id(search_id, purpose="plan_search", request_id=request_id)
         try:
             submit_kwargs = _plan_search_submit_kwargs(query, search_cfg)

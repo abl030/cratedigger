@@ -261,6 +261,46 @@ class TestConvergeSlskdSearchesI3Pin(unittest.TestCase):
         self.assertEqual(slskd.searches.delete_calls, ["mine-1"])
         self.assertIn("human-3", [s["id"] for s in slskd.searches.get_all()])
 
+    def test_own_inside_grace_search_is_not_counted_foreign(self):
+        """The good-citizen count means "a human's searches I left alone"
+        — cratedigger's own not-yet-eligible (inside-grace) resident
+        search must be neither deleted nor miscounted as foreign."""
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        _ledger(db, "mine-old", age_s=_PAST_GRACE)
+        _ledger(db, "mine-fresh", age_s=_INSIDE_GRACE)
+        slskd.searches.add_search(
+            search_id="mine-old", state="Completed, TimedOut", responses=[])
+        slskd.searches.add_search(
+            search_id="mine-fresh", state="Completed, TimedOut", responses=[])
+        slskd.searches.add_search(
+            search_id="human-4", state="Completed, TimedOut", responses=[])
+
+        summary = converge_slskd_searches(_ctx(db, slskd))
+
+        self.assertEqual(summary, SearchSweepSummary(deleted=1, foreign_skipped=1))
+        self.assertEqual(slskd.searches.delete_calls, ["mine-old"])
+        self.assertIsNone(db._search_ledger["mine-fresh"].deleted_at)
+
+    def test_ledgered_id_matches_case_insensitively(self):
+        """We mint lowercase UUIDs but nothing may depend on slskd echoing
+        the same casing: an upper-cased echo must still match the ledger
+        (a miss would mark the row already-gone — irreversible — while
+        the real search leaked forever as \"foreign\")."""
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        ledgered = "7b0e8d9a-1234-4f00-9a9a-abcdefabcdef"
+        _ledger(db, ledgered, age_s=_PAST_GRACE)
+        slskd.searches.add_search(
+            search_id=ledgered.upper(), state="Completed, TimedOut",
+            responses=[])
+
+        summary = converge_slskd_searches(_ctx(db, slskd))
+
+        self.assertEqual(summary, SearchSweepSummary(deleted=1))
+        self.assertEqual(slskd.searches.delete_calls, [ledgered.upper()])
+        self.assertIsNotNone(db._search_ledger[ledgered].deleted_at)
+
 
 class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
     """I2 pin: cratedigger._submit_plan_search ledgers the id BEFORE

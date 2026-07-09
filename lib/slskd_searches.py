@@ -28,6 +28,7 @@ Invariants (``.claude/rules/code-quality.md`` Red/Green TDD; tests in
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -85,7 +86,19 @@ def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
 
     I3: an slskd search whose id is NOT in the ledger is never touched —
     not deleted, not stopped, not even inspected beyond counting it for
-    the summary line.
+    the summary line. ``foreign_skipped`` is measured against EVERY
+    unswept ledger row (grace-window included), so cratedigger's own
+    not-yet-eligible searches are never miscounted as a human's.
+
+    The already-gone mark trusts ``GET /searches`` being a complete,
+    non-paginated snapshot (true of slskd today — the endpoint returns
+    every resident search in one response). A ledgered id absent from
+    that snapshot is permanently marked swept; the 1h grace covers the
+    POST-accepted-but-not-yet-listed window.
+
+    Ids are compared case-insensitively through their canonical UUID
+    form: we always mint lowercase, and .NET's Guid.ToString() echoes
+    lowercase, but nothing in the sweep depends on that staying true.
 
     Best-effort throughout: this function never raises for an external
     failure. Wrap it in the caller (matching how ``converge_slskd_orphans``
@@ -94,21 +107,26 @@ def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
     db = ctx.pipeline_db_source._get_db()
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(seconds=SEARCH_LEDGER_SWEEP_GRACE_S)
-    ledgered_rows = db.get_unswept_search_ids(older_than=cutoff)
+    unswept_rows = db.get_unswept_search_ids(older_than=now)
 
     deleted_ids: list[str] = []
     already_gone_ids: list[str] = []
     foreign_skipped = 0
 
-    if ledgered_rows:
-        ledgered_ids = {row["search_id"] for row in ledgered_rows}
+    eligible = [r for r in unswept_rows if r["created_at"] < cutoff]
+    if eligible:
+        ledgered_all = {
+            _canonical_search_id(r["search_id"]) for r in unswept_rows
+        }
         all_searches = _fetch_all_searches(ctx.slskd)
         if all_searches is not None:
-            live_by_id: dict[Any, dict[str, Any]] = {
-                s.get("id"): s for s in all_searches if s.get("id") is not None
+            live_by_id: dict[str, dict[str, Any]] = {
+                _canonical_search_id(s["id"]): s
+                for s in all_searches if s.get("id") is not None
             }
-            for search_id in ledgered_ids:
-                live = live_by_id.get(search_id)
+            for row in eligible:
+                search_id = row["search_id"]
+                live = live_by_id.get(_canonical_search_id(search_id))
                 if live is None:
                     # Already gone — the fast-path delete in
                     # execute_search's finally already worked, or slskd
@@ -121,7 +139,10 @@ def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
                     # later cycle sweeps it once it settles.
                     continue
                 try:
-                    ctx.slskd.searches.delete(search_id)
+                    # Delete by the id slskd itself echoed, not the
+                    # ledgered spelling — the DB mark below keeps the
+                    # ledger's own value.
+                    ctx.slskd.searches.delete(live["id"])
                     deleted_ids.append(search_id)
                 except Exception:
                     logger.warning(
@@ -130,7 +151,8 @@ def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
 
             foreign_skipped = sum(
                 1 for s in all_searches
-                if s.get("id") not in ledgered_ids
+                if s.get("id") is not None
+                and _canonical_search_id(s["id"]) not in ledgered_all
                 and str(s.get("state") or "").startswith("Completed"))
 
             to_mark = deleted_ids + already_gone_ids
@@ -153,6 +175,18 @@ def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
             "SEARCH-LEDGER sweep: deleted=%d already_gone=%d foreign_skipped=%d",
             summary.deleted, summary.already_gone, summary.foreign_skipped)
     return summary
+
+
+def _canonical_search_id(value: Any) -> str:
+    """Case-insensitive UUID comparison key; non-UUID ids compare verbatim.
+
+    A foreign (human-created) search id is whatever slskd minted for it —
+    usually a GUID, but the sweep must not assume so.
+    """
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return str(value)
 
 
 def _fetch_all_searches(slskd_client: Any) -> list[dict[str, Any]] | None:

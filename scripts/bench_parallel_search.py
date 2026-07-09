@@ -68,6 +68,11 @@ def run_single_search(client: SlskdClient, query: str,
     """
     t0 = time.time()
     try:
+        # Deliberately unledgered (issue #576): this hand-run dev bench has
+        # no pipeline-DB handle, delete=True covers the happy path, and per
+        # I3 the sweep treats its searches as foreign and leaves them alone
+        # — a killed bench run leaks its in-flight searches, accepted for a
+        # manual tool.
         exec_result = execute_search(
             client,
             submit_kwargs={"searchText": query, "searchTimeout": search_timeout},
