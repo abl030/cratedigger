@@ -183,6 +183,22 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(set_calls, [])
         self.assertEqual(self._pin(db, pin_id)["status"], "expired")
 
+    def test_midscan_empty_children_waits(self):
+        # Landed by album recreation, but zero audio children against a
+        # non-empty snapshot: the mid-scan window (old items deleted, new not
+        # yet inserted). Writing/closing now would orphan the new items.
+        db = FakePipelineDB()
+        pin_id = self._seed(db, album_item_id="alb-old", children=("tr-1",))
+        set_calls = []
+        res = self._reconcile(
+            db,
+            find_fn=lambda cfg, path: _album(item_id="alb-new", date_created=BUMPED),
+            children_fn=lambda cfg, iid: [],
+            set_fn=lambda cfg, iid, val: set_calls.append((iid, val)) or True)
+        self.assertEqual(res.waiting, 1)
+        self.assertEqual(set_calls, [])
+        self.assertEqual(self._pin(db, pin_id)["status"], "pending")
+
     # --- Invariant 3: once landed, every drifted item is restored ---
 
     def test_landed_via_children_change_restores_album_and_drifted_children(self):

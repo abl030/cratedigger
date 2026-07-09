@@ -213,10 +213,15 @@ def reconcile_jellyfin_date_created_pins(
                 ref.item_id != snapshot_album_id
                 or {c.item_id for c in children} != snapshot_children
             )
-            if not landed:
-                # The rescan hasn't visibly happened yet. Writing now would
-                # pin the OLD items (about to be deleted) and close the pin
-                # with nothing left to fix the new ones — so wait, up to TTL.
+            # A landed rescan showing ZERO audio children against a non-empty
+            # snapshot is a mid-scan window (old items deleted, new ones not
+            # yet inserted) — the new items don't exist to write to yet.
+            settled = landed and (bool(children) or not snapshot_children)
+            if not settled:
+                # The rescan hasn't visibly (fully) happened yet. Writing now
+                # would pin the OLD items (about to be deleted) and close the
+                # pin with nothing left to fix the new ones — so wait, up to
+                # TTL.
                 captured_at = pin["captured_at"]
                 if captured_at < now - timedelta(hours=ttl_hours):
                     db.mark_jellyfin_date_created_pin(

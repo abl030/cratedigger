@@ -88,6 +88,12 @@ class World:
                 or {i for i, _ in self.live_children} != set(self.snapshot_children))
 
     @property
+    def settled(self) -> bool:
+        """Landed AND not in the mid-scan zero-children window."""
+        return self.landed and (bool(self.live_children)
+                                or not self.snapshot_children)
+
+    @property
     def past_grace(self) -> bool:
         return self.age_minutes * 60 > GRACE_SECONDS
 
@@ -176,21 +182,23 @@ def assert_only_original_written(res: RunResult) -> None:
             f"{res.world.original!r} may ever be written")
 
 
-def assert_unlanded_never_finalized(res: RunResult) -> None:
-    """P2: ids unchanged ⇒ zero writes, and pending-until-TTL / expired-after."""
+def assert_unsettled_never_finalized(res: RunResult) -> None:
+    """P2: rescan not observably settled ⇒ zero writes, pending-until-TTL /
+    expired-after. Covers both the ids-unchanged case and the mid-scan
+    zero-children window."""
     w = res.world
     if not w.past_grace:
         assert res.set_calls == [], "pin inside grace window must be untouched"
         assert res.status == "pending"
         return
-    if w.find_outcome != "present" or w.children_raises or w.landed:
+    if w.find_outcome != "present" or w.children_raises or w.settled:
         return
     assert res.set_calls == [], (
-        "rescan not observable (ids unchanged) but the reconciler wrote — "
+        "rescan not observably settled but the reconciler wrote — "
         "it would pin doomed items and close the pin with nothing left")
     expected = "expired" if w.past_ttl else "pending"
     assert res.status == expected, (
-        f"unlanded pin must be {expected}, got {res.status}")
+        f"unsettled pin must be {expected}, got {res.status}")
 
 
 def assert_terminal_state_correct(res: RunResult) -> None:
@@ -204,7 +212,7 @@ def assert_terminal_state_correct(res: RunResult) -> None:
     assert res.status != "skipped", "skipped is reserved for album-gone"
     if res.status == "done":
         assert w.find_outcome == "present" and not w.children_raises
-        assert w.landed or all(ok for _, _, ok in res.set_calls)
+        assert w.settled, "done before the rescan observably settled"
         assert all(ok for _, _, ok in res.set_calls), (
             "done despite a failed write — that write is lost forever")
         written = {i for i, _, _ in res.set_calls}
@@ -223,8 +231,8 @@ class TestReconcileProperties(unittest.TestCase):
         assert_only_original_written(_run_reconcile(world))
 
     @given(worlds)
-    def test_unlanded_never_finalized(self, world: World):
-        assert_unlanded_never_finalized(_run_reconcile(world))
+    def test_unsettled_never_finalized(self, world: World):
+        assert_unsettled_never_finalized(_run_reconcile(world))
 
     @given(worlds)
     def test_terminal_state_correct(self, world: World):
@@ -279,17 +287,27 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_only_original_written(res)
 
-    def test_unlanded_checker_trips_on_write_before_rescan(self):
+    def test_unsettled_checker_trips_on_write_before_rescan(self):
         # ids match the snapshot (not landed) yet a write happened.
         res = RunResult(world=self._world(), status="pending",
                         set_calls=[("c1", "D-orig", True)])
         with self.assertRaises(AssertionError):
-            assert_unlanded_never_finalized(res)
+            assert_unsettled_never_finalized(res)
 
-    def test_unlanded_checker_trips_on_premature_done(self):
+    def test_unsettled_checker_trips_on_premature_done(self):
         res = RunResult(world=self._world(), status="done", set_calls=[])
         with self.assertRaises(AssertionError):
-            assert_unlanded_never_finalized(res)
+            assert_unsettled_never_finalized(res)
+
+    def test_unsettled_checker_trips_on_write_in_midscan_window(self):
+        # Landed (children id-set changed) but zero live children against a
+        # non-empty snapshot: the mid-scan window — writing/closing now
+        # orphans the about-to-arrive new items.
+        res = RunResult(
+            world=self._world(live_album_recreated=True, live_children=[]),
+            status="done", set_calls=[])
+        with self.assertRaises(AssertionError):
+            assert_unsettled_never_finalized(res)
 
     def test_terminal_checker_trips_on_done_with_failed_write(self):
         res = RunResult(
