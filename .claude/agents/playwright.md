@@ -1,6 +1,6 @@
 ---
 name: playwright
-description: Drive a real browser to test the cratedigger web UI at music.ablz.au. Use for debugging the browse tab (MusicBrainz + Discogs sources), library view, recents/validation log, decisions simulator, and the add-to-pipeline flow. Especially useful for the Discogs pathway — search, artist discography, master pressings, release detail, and verifying external links.
+description: Drive a real browser to test the cratedigger web UI at music.ablz.au. Use for debugging the browse tab (MusicBrainz + Discogs sources), library view, recents/validation log, and the add-to-pipeline flow. Especially useful for the Discogs pathway — search, artist discography, master pressings, release detail, and verifying external links.
 mcpServers:
   - playwright:
       type: stdio
@@ -40,7 +40,6 @@ A single-page app for browsing MusicBrainz and Discogs, viewing the beets librar
 - **Browse** — the primary debugging target. Has a MusicBrainz/Discogs source toggle. When Discogs is selected, search, artist discography, master pressings, and release detail hit `discogs.ablz.au`. External links are source-aware (`musicbrainz.org` vs `discogs.com`).
 - **Library** — beets library view. Quality labels, upgrade/accept buttons, intent toggle (Default / Lossless).
 - **Recents** — validation pipeline log. Per-download: slskd reported → actual on disk → spectral → existing. Badges: Upgraded, New import, Wrong match, Transcode, Quality mismatch.
-- **Decisions** — pipeline decision diagram + interactive simulator. Hits `/api/pipeline/simulate`. Rank policy badge row at the top mirrors the deployed `[Quality Ranks]` config.
 
 ### Debugging the Discogs pathway
 

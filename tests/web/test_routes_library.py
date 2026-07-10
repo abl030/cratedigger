@@ -163,37 +163,6 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
             ["/music/Test Artist/Test Album/01 Track.mp3"],
         )
 
-    def _set_overlay_min_bitrate(self, *, min_bitrate: int | None) -> None:
-        """Raise request 42's pipeline floor — the overlay now flows
-        through ``PipelineDB.get_pipeline_overlay`` and the fake's
-        state-derived mirror reads the seeded row directly (#445
-        item 2; the queued-cursor projection helper is gone)."""
-        self.db.update_request_fields(42, min_bitrate=min_bitrate)
-
-    def test_beets_search_contract(self):
-        self.beets_db.set_library_albums([self._album()])
-        self._set_overlay_min_bitrate(min_bitrate=900)
-        status, data = self._get("/api/beets/search?q=test")
-
-        self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"albums"}, "beets search response")
-        _assert_required_fields(self, data["albums"][0], self.ALBUM_REQUIRED_FIELDS,
-                                "beets search album")
-        # Pipeline enrichment ran for real: 900 kbps pipeline floor
-        # overrides the album's 320000 bps beets value.
-        self.assertEqual(data["albums"][0]["min_bitrate"], 900000)
-
-    def test_beets_recent_contract(self):
-        self.beets_db.set_library_albums([self._album()])
-        self._set_overlay_min_bitrate(min_bitrate=900)
-        status, data = self._get("/api/beets/recent")
-
-        self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"albums"}, "beets recent response")
-        _assert_required_fields(self, data["albums"][0], self.ALBUM_REQUIRED_FIELDS,
-                                "beets recent album")
-        self.assertEqual(data["albums"][0]["min_bitrate"], 900000)
-
     def test_beets_album_detail_contract(self):
         detail = self._album()
         detail["artpath"] = "/music/Test Artist/Test Album/cover.jpg"

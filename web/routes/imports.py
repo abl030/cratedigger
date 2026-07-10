@@ -1,4 +1,4 @@
-"""Manual import route handlers — scan, import, wrong matches."""
+"""Manual import route handlers — import, wrong matches."""
 
 import json
 import os
@@ -9,11 +9,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from web.routes._pydantic import parse_body
 
-from lib.manual_import import (
-    scan_complete_folder,
-    match_folders_to_requests,
-    ImportRequest,
-)
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_MANUAL,
@@ -123,50 +118,6 @@ def _entry_sort_key(entry: dict[str, object]) -> tuple:
     log_id = entry.get("download_log_id")
     log_id_int = log_id if isinstance(log_id, int) else 0
     return (-rank_value, distance_sort, -log_id_int)
-
-
-def get_manual_import_scan(h, params: dict[str, list[str]]) -> None:
-
-    complete_dir = params.get("dir", ["/mnt/data/Media/Temp/Music/Complete"])[0]
-    folders = scan_complete_folder(complete_dir)
-
-    # Get wanted requests for matching
-    pdb = _server()._db()
-    wanted = pdb.get_by_status("wanted")
-    requests = [
-        ImportRequest(
-            id=r["id"],
-            artist_name=r["artist_name"],
-            album_title=r["album_title"],
-            mb_release_id=r.get("mb_release_id", ""),
-        )
-        for r in wanted
-    ]
-
-    matches = match_folders_to_requests(folders, requests)
-
-    h._json({
-        "folders": [
-            {
-                "name": f.name,
-                "path": f.path,
-                "artist": f.artist,
-                "album": f.album,
-                "file_count": f.file_count,
-                "match": next(
-                    ({"request_id": m.request.id,
-                      "artist": m.request.artist_name,
-                      "album": m.request.album_title,
-                      "mb_release_id": m.request.mb_release_id,
-                      "score": round(m.score, 2)}
-                     for m in matches if m.folder.name == f.name),
-                    None,
-                ),
-            }
-            for f in folders
-        ],
-        "wanted_count": len(requests),
-    })
 
 
 class ManualImportRequest(BaseModel):
@@ -895,10 +846,10 @@ def post_import_preview(h, body: dict) -> None:
 
     try:
         if has_values:
-            from web.routes.decisions import _runtime_rank_config
+            from lib.config import read_runtime_rank_config
             preview = preview_import_from_values(
                 _preview_values_from_body(body),
-                cfg=_runtime_rank_config(),
+                cfg=read_runtime_rank_config(),
             )
         elif has_download_log:
             preview = preview_import_from_download_log(
@@ -968,12 +919,6 @@ def get_wrong_match_triage_status(h, params: dict) -> None:
 
 
 ROUTES: list[RouteRegistration] = [
-    route(
-        "GET", "/api/manual-import/scan", get_manual_import_scan,
-        "Scan a Complete folder for album dirs and fuzzy-match each to "
-        "wanted pipeline requests.",
-        classified=True,
-    ),
     route(
         "GET", "/api/wrong-matches", get_wrong_matches,
         "Wrong-match queue — rejected downloads grouped by request, with "

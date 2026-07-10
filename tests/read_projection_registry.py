@@ -165,14 +165,6 @@ def _seed_get_by_status(db: Any) -> "list[dict[str, Any]]":
     return list(db.get_by_status("wanted"))
 
 
-def _seed_get_recent(db: Any) -> "list[dict[str, Any]]":
-    rid = db.add_request(
-        "Parity Artist", "Parity Album", "request",
-        mb_release_id="recent-parity")
-    db.log_download(rid, outcome="success")
-    return list(db.get_recent())
-
-
 def _seed_list_non_replaced_requests(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
@@ -442,7 +434,6 @@ PARITY_REGISTRY: "dict[str, Seeder]" = {
         _seed_get_request_by_replaces_request_id,
     "get_wanted": _seed_get_wanted,
     "get_by_status": _seed_get_by_status,
-    "get_recent": _seed_get_recent,
     "search_requests": _seed_search_requests,
     "list_non_replaced_requests": _seed_list_non_replaced_requests,
     "list_requests_by_artist": _seed_list_requests_by_artist,

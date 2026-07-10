@@ -3039,12 +3039,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         # normalisation.
         rows = db.get_by_status("wanted")
         self.assertEqual(len(rows), 2)
-        # Populate download history for both then ensure ``get_recent``
-        # also sorts through the mixed shapes without raising.
-        db.log_download(1, outcome="success")
-        db.log_download(2, outcome="success")
-        recent = db.get_recent()
-        self.assertEqual({r["id"] for r in recent}, {1, 2})
 
     def test_delete_request_removes_row_and_tracks(self):
         db = FakePipelineDB()
@@ -3194,28 +3188,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             id=2, status="wanted", created_at=now))
         rows = db.get_by_status("wanted")
         self.assertEqual([r["id"] for r in rows], [2, 1])
-
-    def test_get_recent_requires_download_history(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1))
-        db.seed_request(make_request_row(id=2))
-        db.log_download(1, outcome="success")
-        rows = db.get_recent()
-        self.assertEqual([r["id"] for r in rows], [1])
-
-    def test_get_recent_deterministic_with_missing_updated_at(self):
-        """Sort key must not call ``_utcnow()`` per comparison —
-        multiple rows with no ``updated_at`` must fall into a stable
-        insertion order so tests cannot flake."""
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, updated_at=None))
-        db.seed_request(make_request_row(id=2, updated_at=None))
-        db.seed_request(make_request_row(id=3, updated_at=None))
-        db.log_download(1, outcome="success")
-        db.log_download(2, outcome="success")
-        db.log_download(3, outcome="success")
-        rows = db.get_recent()
-        self.assertEqual({r["id"] for r in rows}, {1, 2, 3})
 
     def test_count_by_status(self):
         db = FakePipelineDB()
@@ -4559,38 +4531,6 @@ class TestFakeBeetsDB(unittest.TestCase):
         beets._album_ids_default = [5]
         self.assertEqual(beets.get_album_ids_by_mbids(["mbid-x"]),
                          {"mbid-x": 5})
-
-    def test_search_albums_substring_matches_artist_or_album(self) -> None:
-        # Real query: LIKE %q% COLLATE NOCASE on albumartist OR album,
-        # ORDER BY albumartist, year, album, LIMIT.
-        beets = FakeBeetsDB()
-        beets.set_library_albums([
-            {"id": 2, "album": "Zeta", "artist": "B Artist", "year": 2020,
-             "added": 10.0},
-            {"id": 1, "album": "Alpha", "artist": "A Artist", "year": 2020,
-             "added": 20.0},
-            {"id": 3, "album": "Unrelated", "artist": "Nobody", "year": 2020,
-             "added": 30.0},
-        ])
-        out = beets.search_albums("aRtIsT")
-        self.assertEqual([a["id"] for a in out], [1, 2])
-        self.assertEqual(beets.search_albums("artist", limit=1)[0]["id"], 1)
-        self.assertEqual(beets.search_albums_calls,
-                         [("aRtIsT", 100), ("artist", 1)])
-
-    def test_get_recent_sorts_by_added_desc(self) -> None:
-        beets = FakeBeetsDB()
-        beets.set_library_albums([
-            {"id": 1, "album": "Old", "artist": "X", "added": 10.0},
-            {"id": 2, "album": "New", "artist": "X", "added": 30.0},
-            {"id": 3, "album": "Never stamped", "artist": "X", "added": None},
-        ])
-        out = beets.get_recent(limit=2)
-        self.assertEqual([a["id"] for a in out], [2, 1])
-        # NULL added sorts last under DESC (SQLite ordering).
-        self.assertEqual(
-            [a["id"] for a in beets.get_recent(limit=3)], [2, 1, 3])
-        self.assertEqual(beets.get_recent_calls, [2, 3])
 
     def test_locate_state_derived_from_album_id_seeds(self) -> None:
         from lib.beets_db import ReleaseLocation

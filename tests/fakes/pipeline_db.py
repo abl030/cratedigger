@@ -2916,20 +2916,6 @@ class FakePipelineDB:
             return None
         return self._long_tail_projection(row)
 
-    def get_recent(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Return requests that have at least one download_log row."""
-        with_history = {row.request_id for row in self.download_logs}
-        rows = [
-            r for r in self._requests.values() if r["id"] in with_history]
-        # ``_as_datetime`` normalises ISO strings (from ``make_request_row``)
-        # and datetimes (from ``add_request``) to one representation so
-        # Python's stable sort does not raise ``TypeError`` on mixed inputs,
-        # and uses a fixed epoch sentinel for missing ``updated_at`` so
-        # ordering stays deterministic.
-        rows.sort(
-            key=lambda r: _as_datetime(r.get("updated_at")), reverse=True)
-        return [copy.deepcopy(r) for r in rows[:limit]]
-
     def count_by_status(self) -> dict[str | None, int]:
         counts: dict[str | None, int] = {}
         for r in self._requests.values():

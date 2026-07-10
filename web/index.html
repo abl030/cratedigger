@@ -492,52 +492,6 @@
   .loading { color: #666; padding: 20px; text-align: center; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: #2a5a2a; color: #8d8; border-radius: 8px; font-size: 14px; z-index: 100; display: none; }
   .toast.error { background: #5a2a2a; color: #d88; }
-
-  /* Decision diagram + simulator */
-  .ds { font-size: 13px; }
-  .ds-title { font-size: 1.1em; color: #aaa; margin-bottom: 12px; font-weight: 600; }
-  .dp-stage { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; margin-bottom: 4px; }
-  .dp-stage-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-  .dp-stage-title { font-weight: 600; font-size: 0.9em; }
-  .dp-stage-fn { color: #555; font-size: 0.75em; font-family: monospace; }
-  .dp-stage-when { color: #666; font-size: 0.8em; margin-bottom: 6px; }
-  .dp-rule { display: flex; gap: 8px; padding: 3px 0; font-size: 0.85em; align-items: baseline; }
-  .dp-rule-cond { color: #999; flex: 1; }
-  .dp-rule-result { font-weight: 500; white-space: nowrap; }
-  .dp-rule-effect { color: #666; font-size: 0.8em; font-style: italic; }
-  .dp-note { color: #665; font-size: 0.8em; margin-top: 4px; padding-top: 4px; border-top: 1px solid #252525; }
-  .dp-arrow { text-align: center; color: #444; padding: 2px 0; font-size: 14px; }
-  .dp-out-green { color: #6d6; }
-  .dp-out-amber { color: #da6; }
-  .dp-out-red { color: #d66; }
-  .dp-policy { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-  .dp-policy-badge { display: inline-flex; flex-direction: column; background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; line-height: 1.25; }
-  .dp-policy-badge-label { color: #888; font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.5px; }
-  .dp-policy-badge-value { color: #6a9; font-size: 0.9em; font-weight: 600; font-family: monospace; }
-  .dp-section-title { color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin: 16px 0 8px; }
-  .ds-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
-  .ds-field { display: flex; flex-direction: column; gap: 2px; }
-  .ds-field label { font-size: 0.8em; color: #888; }
-  .ds-field select, .ds-field input { background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 6px 8px; font-size: 13px; }
-  .ds-field select:focus, .ds-field input:focus { outline: none; border-color: #6a9; }
-  .ds-run { grid-column: 1 / -1; }
-  .ds-run button { width: 100%; padding: 10px; background: #2a3a2a; color: #6a9; border: 1px solid #6a9; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
-  .ds-run button:hover { background: #3a4a3a; }
-  .ds-results { margin-top: 8px; }
-  .ds-stage { background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; }
-  .ds-stage-title { font-weight: 600; font-size: 0.85em; color: #888; margin-bottom: 4px; }
-  .ds-stage-value { font-size: 0.95em; font-weight: 500; }
-  .ds-outcome { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.9em; font-weight: 500; }
-  .ds-green { background: #1a3a1a; color: #6d6; }
-  .ds-amber { background: #3a3a1a; color: #da6; }
-  .ds-red { background: #3a1a1a; color: #d66; }
-  .ds-skip { color: #555; font-style: italic; }
-  .ds-summary { background: #1a1a2a; border: 1px solid #335; border-radius: 6px; padding: 12px; margin-top: 12px; }
-  .ds-summary-row { display: flex; justify-content: space-between; padding: 2px 0; }
-  .ds-summary-label { color: #888; }
-  .ds-presets { margin-bottom: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
-  .ds-preset { padding: 4px 10px; background: #222; border: 1px solid #444; border-radius: 4px; cursor: pointer; color: #aaa; font-size: 0.8em; }
-  .ds-preset:hover { border-color: #6a9; color: #6a9; }
 </style>
 </head>
 <body>
@@ -546,7 +500,6 @@
   <div class="tab active" onclick="showTab('browse')">Browse</div>
   <div class="tab" onclick="showTab('recents')">Recents</div>
   <div class="tab" onclick="showTab('pipeline')">Pipeline</div>
-  <div class="tab" onclick="showTab('decisions')">Decisions</div>
   <div class="tab" onclick="showTab('manual')">Wrong Matches</div>
 </div>
 
@@ -608,10 +561,6 @@
   <div id="pipeline-content" class="loading">Loading...</div>
 </div>
 
-
-<div id="decisions-section" class="section">
-  <div id="decisions-content" class="loading">Loading...</div>
-</div>
 
 <div id="manual-section" class="section">
   <div id="wrong-matches-content" class="loading"></div>

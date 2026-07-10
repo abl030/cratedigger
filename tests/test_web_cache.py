@@ -319,7 +319,7 @@ class TestMetaIsolatedFromGroupInvalidation(_CacheTestBase):
         # web: entries we SHOULD drop on invalidation (legacy routing cache)
         self.fake._store["web:/api/release/abc"] = ("{}", None)
         self.fake._store["web:/api/pipeline/status"] = ("{}", None)
-        self.fake._store["web:/api/beets/search?q=x"] = ("{}", None)
+        self.fake._store["web:/api/beets/album/7"] = ("{}", None)
 
     def _assert_meta_intact(self) -> None:
         self.assertEqual(self.cache.meta_get("mb:release:abc"), {"id": "abc"})

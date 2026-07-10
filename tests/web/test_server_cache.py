@@ -47,8 +47,7 @@ class TestOverlayNotBakedIntoRoutingCache(_WebServerCase):
         "/api/discogs/artist",
         "/api/artist",              # /api/artist/<id> + /api/artist/<id>/disambiguate + /api/artist/compare
         "/api/library",             # /api/library/artist
-        "/api/beets",               # /api/beets/search + /api/beets/album + /api/beets/recent
-        "/api/pipeline/recent",
+        "/api/beets",               # /api/beets/album
         "/api/pipeline/all",
         "/api/pipeline/log",
         "/api/pipeline/status",

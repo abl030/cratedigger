@@ -45,38 +45,6 @@ class TestCheckPipeline(unittest.TestCase):
             info["mbid-1"]["search_filetype_override"], "lossless")
 
 
-class TestEnrichWithPipeline(unittest.TestCase):
-    def test_none_handle_leaves_albums_untouched(self):
-        albums: list[dict[str, object]] = [{"mb_albumid": "mbid-1"}]
-        overlay.enrich_with_pipeline(None, albums)
-        self.assertEqual(albums, [{"mb_albumid": "mbid-1"}])
-
-    def test_wanted_with_override_marks_upgrade_queued(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=7, mb_release_id="mbid-1", status="wanted",
-            search_filetype_override="lossless", min_bitrate=None))
-        albums: list[dict[str, object]] = [
-            {"mb_albumid": "mbid-1"}, {"mb_albumid": "other"}]
-        overlay.enrich_with_pipeline(db, albums)
-        self.assertTrue(albums[0].get("upgrade_queued"))
-        self.assertNotIn("upgrade_queued", albums[1])
-
-
-class TestApplyPipelineBitrateOverride(unittest.TestCase):
-    def test_pipeline_kbps_overrides_lower_beets_bps(self):
-        album = {"min_bitrate": 192_000}
-        overlay.apply_pipeline_bitrate_override(
-            album, {"status": "imported", "min_bitrate": 320})
-        self.assertEqual(album["min_bitrate"], 320_000)
-
-    def test_lower_pipeline_bitrate_does_not_override(self):
-        album = {"min_bitrate": 900_000}
-        overlay.apply_pipeline_bitrate_override(
-            album, {"status": "imported", "min_bitrate": 320})
-        self.assertEqual(album["min_bitrate"], 900_000)
-
-
 class TestBeetsHelpers(unittest.TestCase):
     def test_none_beets_degrades(self):
         self.assertEqual(overlay.check_beets_library(None, ["m"]), set())

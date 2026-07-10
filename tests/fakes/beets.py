@@ -59,10 +59,7 @@ class FakeBeetsDB:
         self._mbid_detail: dict[str, dict[str, Any]] = {}
         self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
         self.list_release_identities_calls: int = 0
-        self._library_albums: list[dict[str, Any]] = []
         self._album_detail: dict[int, dict[str, Any]] = {}
-        self.search_albums_calls: list[tuple[str, int]] = []
-        self.get_recent_calls: list[int] = []
         self.get_album_detail_calls: list[int] = []
         self._locate_queue: list[ReleaseLocation] = []
         self.locate_calls: list[str] = []
@@ -107,10 +104,6 @@ class FakeBeetsDB:
     ) -> None:
         self._tracks_by_release[release_id] = [
             copy.deepcopy(t) for t in tracks]
-
-    def set_library_albums(self, rows: list[dict[str, Any]]) -> None:
-        """Seed the album table backing ``search_albums``/``get_recent``."""
-        self._library_albums = [copy.deepcopy(r) for r in rows]
 
     def set_album_detail(self, album_id: int, detail: dict[str, Any]) -> None:
         self._album_detail[album_id] = copy.deepcopy(detail)
@@ -262,34 +255,6 @@ class FakeBeetsDB:
         if self._album_ids_lookup(key):
             return []
         return None
-
-    def search_albums(
-        self, query: str, limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Mirror of ``BeetsDB.search_albums`` over the seeded album
-        table: case-insensitive substring on artist/album, ordered by
-        (artist, year, album), LIMIT applied after ordering."""
-        self.search_albums_calls.append((query, limit))
-        q = query.lower()
-        hits = [
-            a for a in self._library_albums
-            if q in str(a.get("artist", "")).lower()
-            or q in str(a.get("album", "")).lower()
-        ]
-        hits.sort(key=lambda a: (
-            str(a.get("artist", "")), a.get("year") or 0,
-            str(a.get("album", ""))))
-        return [copy.deepcopy(a) for a in hits[:limit]]
-
-    def get_recent(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Mirror of ``BeetsDB.get_recent`` — ``added`` DESC, NULLs last
-        (SQLite DESC ordering), LIMIT applied after ordering."""
-        self.get_recent_calls.append(limit)
-        rows = sorted(
-            self._library_albums,
-            key=lambda a: (a.get("added") is not None, a.get("added") or 0),
-            reverse=True)
-        return [copy.deepcopy(a) for a in rows[:limit]]
 
     def get_album_detail(self, album_id: int) -> dict[str, Any] | None:
         """Mirror of ``BeetsDB.get_album_detail`` — None when missing."""

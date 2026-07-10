@@ -13,7 +13,6 @@ import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, render
 import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tail.js';
 import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
 import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
-import { loadDecisions, dsPreset, runSimulator } from './decisions.js';
 import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
@@ -65,7 +64,7 @@ async function openReplacePickerAndHandle(options) {
 }
 
 // --- Tab management ---
-const tabOrder = ['browse', 'recents', 'pipeline', 'decisions', 'manual'];
+const tabOrder = ['browse', 'recents', 'pipeline', 'manual'];
 
 /**
  * Internal flag used by `openSearchPlanDetail`-style flows to suppress
@@ -97,7 +96,6 @@ function showTab(name) {
   if (secEl) secEl.classList.add('active');
   if (name === 'pipeline') loadPipeline();
   if (name === 'recents') loadRecents();
-  if (name === 'decisions') loadDecisions();
   if (name === 'manual') loadWrongMatches();
 }
 
@@ -191,9 +189,6 @@ Object.assign(window, {
   setIntent,
   confirmDeleteBeets,
   executeBeetsDeletion,
-  loadDecisions,
-  dsPreset,
-  runSimulator,
   renderDisambiguateInto,
   toggleDisambRGTracks,
   disambRemove,

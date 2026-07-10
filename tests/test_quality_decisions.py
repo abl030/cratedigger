@@ -28,7 +28,6 @@ from lib.quality import (
     DownloadInfo,
     rejected_download_tier,
     narrow_override_on_downgrade,
-    QUALITY_MIN_BITRATE_KBPS,
     TRANSCODE_MIN_BITRATE_KBPS,
     # Codec-aware rank model (issue #60)
     QualityRank,
@@ -603,9 +602,8 @@ class TestTranscodeDetection(unittest.TestCase):
 
         These are two different surfaces for the same number — if a future
         change tunes mp3_vbr.excellent without updating the legacy constant,
-        the contract tests in test_decision_tree_constants_match_code break
-        and the displayed transcode threshold drifts from the runtime
-        threshold. Pin the equality so the divergence is loud.
+        the runtime transcode threshold drifts from the legacy-constant
+        surface. Pin the equality so the divergence is loud.
         """
         defaults_excellent = QualityRankConfig.defaults().mp3_vbr.excellent
         self.assertEqual(TRANSCODE_MIN_BITRATE_KBPS, defaults_excellent)
@@ -857,7 +855,7 @@ class TestIsVerifiedLossless(unittest.TestCase):
 # simulator. If a stage is added/removed or the result shape changes, these
 # fail — forcing the simulator to be updated in sync.
 
-from lib.quality import full_pipeline_decision, get_decision_tree
+from lib.quality import full_pipeline_decision
 import inspect
 
 # The exact keys the simulator reads from the result dict
@@ -1344,55 +1342,6 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
         self.assertIsNone(r["final_status"])
 
 
-class TestDecisionTreePreimportStages(unittest.TestCase):
-    """``get_decision_tree`` must surface preimport_audio + preimport_nested
-    stages so the Decisions tab documents the full gate pipeline (issue #91)."""
-
-    def test_preimport_stages_present_and_ordered_first(self):
-        tree = get_decision_tree()
-        ids = [s["id"] for s in tree["stages"]]
-        self.assertIn("preimport_audio", ids)
-        self.assertIn("preimport_nested", ids)
-        # Must appear before every FLAC/MP3/import stage — they gate
-        # everything else in production.
-        audio_idx = ids.index("preimport_audio")
-        nested_idx = ids.index("preimport_nested")
-        for later_stage in ("flac_spectral", "mp3_spectral_gate",
-                            "mp3_spectral", "import_decision",
-                            "quality_gate"):
-            self.assertLess(audio_idx, ids.index(later_stage),
-                            f"preimport_audio must precede {later_stage}")
-            self.assertLess(nested_idx, ids.index(later_stage),
-                            f"preimport_nested must precede {later_stage}")
-
-    def test_preimport_audio_stage_contract(self):
-        tree = get_decision_tree()
-        stage_map = {s["id"]: s for s in tree["stages"]}
-        audio = stage_map["preimport_audio"]
-        self.assertEqual(audio["function"], "preimport_audio_gate")
-        self.assertTrue(len(audio["rules"]) > 0)
-        outcomes = set(audio["outcomes"])
-        # Must be a subset of the pure function's value domain.
-        self.assertTrue(outcomes <= (VALID_PREIMPORT_AUDIO - {None}),
-                        f"Audio outcomes {outcomes} not a subset of "
-                        f"{VALID_PREIMPORT_AUDIO - {None}}")
-
-    def test_preimport_nested_stage_contract(self):
-        tree = get_decision_tree()
-        stage_map = {s["id"]: s for s in tree["stages"]}
-        nested = stage_map["preimport_nested"]
-        self.assertEqual(nested["function"], "preimport_nested_gate")
-        self.assertTrue(len(nested["rules"]) > 0)
-        outcomes = set(nested["outcomes"])
-        self.assertTrue(outcomes <= (VALID_PREIMPORT_NESTED - {None}),
-                        f"Nested outcomes {outcomes} not a subset of "
-                        f"{VALID_PREIMPORT_NESTED - {None}}")
-        # Note must make clear this is force/manual-only so operators don't
-        # think the auto path flattens nested layouts.
-        note = nested.get("note", "")
-        self.assertIn("force", note.lower() + " " + str(nested.get("when", "")).lower())
-
-
 class TestFullPipelineContract(unittest.TestCase):
     """Contract tests for full_pipeline_decision() — the web simulator depends
     on these exact keys, values, and parameter names."""
@@ -1732,134 +1681,6 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
         # Genuine → stage 1 runs and says import
         self.assertEqual(r["stage1_spectral"], "import")
-
-    def test_decision_tree_stage_ids(self):
-        """Decision tree must have the expected stages in order."""
-        tree = get_decision_tree()
-        ids = [s["id"] for s in tree["stages"]]
-        self.assertEqual(ids, ["preimport_audio", "preimport_nested",
-                               "flac_spectral", "flac_convert", "transcode",
-                               "verified_lossless", "target_conversion",
-                               "provisional_lossless",
-                               "mp3_spectral_gate", "mp3_spectral",
-                               "import_decision",
-                               "quality_gate", "dispatch"])
-
-    def test_decision_tree_mp3_gate_exposes_threshold(self):
-        """The new mp3_spectral_gate stage must surface the VBR threshold
-        (issue #93) so the UI Decisions tab shows the same cutoff as the
-        live production gate in lib/measurement._needs_spectral_check."""
-        tree = get_decision_tree()
-        stage_map = {s["id"]: s for s in tree["stages"]}
-        self.assertIn("mp3_spectral_gate", stage_map,
-                      "mp3_spectral_gate stage must exist")
-        gate = stage_map["mp3_spectral_gate"]
-        self.assertEqual(gate["function"], "spectral_gate_trigger")
-        outcomes = set(gate["outcomes"])
-        self.assertEqual(outcomes,
-                         {"would_run", "skipped_vbr_high_avg", "skipped_flac"})
-        # Threshold surfaces as part of at least one rule/note
-        threshold = tree["constants"]["TRANSCODE_MIN_BITRATE_KBPS"]
-        tree_text = str(gate["rules"]) + str(gate.get("note", ""))
-        self.assertIn(str(threshold), tree_text,
-                      f"threshold {threshold} must appear in gate stage text")
-
-    def test_decision_tree_outcomes_match_valid_values(self):
-        """Outcomes declared in the tree must match what the contract allows."""
-        tree = get_decision_tree()
-        stage_map = {s["id"]: s for s in tree["stages"]}
-        # mp3_spectral stage outcomes must be subset of VALID_STAGE1
-        spectral_outcomes = set(stage_map["mp3_spectral"]["outcomes"])
-        self.assertTrue(spectral_outcomes <= (VALID_STAGE1 - {None}),
-                        f"Tree spectral outcomes {spectral_outcomes} not in {VALID_STAGE1}")
-        # import_decision outcomes must be subset of VALID_STAGE2
-        import_outcomes = set(stage_map["import_decision"]["outcomes"])
-        self.assertTrue(import_outcomes <= (VALID_STAGE2 - {None}),
-                        f"Tree import outcomes {import_outcomes} not in {VALID_STAGE2}")
-        # quality_gate outcomes must be subset of VALID_STAGE3
-        gate_outcomes = set(stage_map["quality_gate"]["outcomes"])
-        self.assertTrue(gate_outcomes <= (VALID_STAGE3 - {None}),
-                        f"Tree gate outcomes {gate_outcomes} not in {VALID_STAGE3}")
-
-    def test_decision_tree_constants_match_code(self):
-        """Tree constants must match the actual module constants under default cfg.
-
-        With no cfg passed, get_decision_tree falls back to
-        QualityRankConfig.defaults(), whose mp3_vbr.excellent equals the
-        legacy TRANSCODE_MIN_BITRATE_KBPS constant (pinned by
-        test_default_constant_matches_default_cfg_mp3_vbr_excellent).
-        """
-        tree = get_decision_tree()
-        consts = tree["constants"]
-        self.assertEqual(consts["QUALITY_MIN_BITRATE_KBPS"],
-                         QUALITY_MIN_BITRATE_KBPS)
-        self.assertEqual(consts["TRANSCODE_MIN_BITRATE_KBPS"],
-                         TRANSCODE_MIN_BITRATE_KBPS)
-
-    def test_decision_tree_custom_cfg_drives_transcode_threshold(self):
-        """get_decision_tree(cfg=...) must surface cfg.mp3_vbr.excellent in
-        the transcode stage so the web Decisions tab tracks runtime retuning.
-
-        Issue #66 made transcode_detection() read cfg.mp3_vbr.excellent at
-        call time, but the decision tree previously hardcoded the legacy
-        constant. An operator who set mp3_vbr.excellent=170 would see a
-        stale "< 210kbps" threshold in the UI while the actual gate ran
-        at 170. This test pins the fix: the threshold surfaced to the UI
-        must come from the same cfg the gate uses.
-        """
-        from lib.quality import CodecRankBands, QualityRankConfig
-
-        custom_cfg = QualityRankConfig(
-            mp3_vbr=CodecRankBands(
-                transparent=245, excellent=170, good=140, acceptable=100))
-        tree = get_decision_tree(cfg=custom_cfg)
-        self.assertEqual(tree["constants"]["TRANSCODE_MIN_BITRATE_KBPS"], 170)
-
-        # The transcode stage's rule text and note must also reference the
-        # custom threshold — the UI reads these strings directly.
-        transcode_stage = next(
-            s for s in tree["stages"] if s["id"] == "transcode")
-        fallback_rule = next(
-            r for r in transcode_stage["rules"]
-            if "no spectral" in r["condition"])
-        self.assertIn("170kbps", fallback_rule["condition"])
-        self.assertIn("170kbps", transcode_stage["note"])
-        self.assertNotIn(f"{TRANSCODE_MIN_BITRATE_KBPS}kbps",
-                         fallback_rule["condition"])
-
-    def test_decision_tree_default_cfg_matches_legacy_constant(self):
-        """Explicit None cfg must reproduce the legacy hardcoded threshold.
-
-        Back-compat guard: any existing caller passing no cfg (or None)
-        should see the same payload they saw before #66's follow-up. Pins
-        the default surface against TRANSCODE_MIN_BITRATE_KBPS.
-        """
-        default_tree = get_decision_tree(cfg=None)
-        self.assertEqual(
-            default_tree["constants"]["TRANSCODE_MIN_BITRATE_KBPS"],
-            TRANSCODE_MIN_BITRATE_KBPS)
-        transcode_stage = next(
-            s for s in default_tree["stages"] if s["id"] == "transcode")
-        self.assertIn(
-            f"{TRANSCODE_MIN_BITRATE_KBPS}kbps",
-            transcode_stage["note"])
-
-    def test_decision_tree_every_stage_has_rules(self):
-        """Every stage must have at least one rule."""
-        tree = get_decision_tree()
-        for stage in tree["stages"]:
-            self.assertTrue(len(stage["rules"]) > 0,
-                            f"Stage {stage['id']} has no rules")
-
-    def test_decision_tree_every_stage_has_path(self):
-        """Every stage must declare a path for the branching diagram."""
-        tree = get_decision_tree()
-        # "preimport" labels stages that run before any FLAC/MP3 branching
-        # (issue #91). "shared" labels post-merge stages.
-        valid_paths = set(tree["paths"]) | {"shared", "preimport"}
-        for stage in tree["stages"]:
-            self.assertIn(stage.get("path"), valid_paths,
-                          f"Stage {stage['id']} has invalid path")
 
     def test_target_conversion_genuine_flac(self):
         """Genuine FLAC + verified_lossless_target → target format, accepted."""
@@ -2325,10 +2146,8 @@ class TestDispatchActionContract(unittest.TestCase):
     """Verify dispatch_action covers all import_decision outcomes."""
 
     def test_covers_import_decision_outcomes(self):
-        from lib.quality import dispatch_action, get_decision_tree
-        tree = get_decision_tree()
-        import_stage = [s for s in tree["stages"] if s["id"] == "import_decision"][0]
-        for outcome in import_stage["outcomes"]:
+        from lib.quality import dispatch_action
+        for outcome in VALID_STAGE2 - {None}:
             a = dispatch_action(outcome)
             self.assertTrue(a.mark_done or a.record_rejection,
                             f"dispatch_action('{outcome}') must set mark_done or "

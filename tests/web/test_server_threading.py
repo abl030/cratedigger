@@ -61,10 +61,10 @@ class TestConcurrentRequests(_WebServerCase):
             # this GET would deadlock (and the gate timeout would fail
             # the test).
             start = time.monotonic()
-            status, body = self._get("/api/pipeline/constants")
+            status, body = self._get("/api/_index")
             elapsed = time.monotonic() - start
             self.assertEqual(status, 200)
-            self.assertIsInstance(body, dict)
+            self.assertIsInstance(body, list)
             self.assertLess(elapsed, 5.0)
             self.assertFalse(release_gate.is_set())
 
@@ -79,7 +79,7 @@ class TestKeepAlive(_WebServerCase):
     def test_two_requests_reuse_one_connection(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", "/api/pipeline/constants")
+            conn.request("GET", "/api/_index")
             r1 = conn.getresponse()
             body1 = r1.read()
             self.assertEqual(r1.status, 200)
@@ -87,7 +87,7 @@ class TestKeepAlive(_WebServerCase):
             # Same socket: a second request only works if the server
             # honoured keep-alive (it would have closed an HTTP/1.0
             # connection after the first response).
-            conn.request("GET", "/api/pipeline/constants")
+            conn.request("GET", "/api/_index")
             r2 = conn.getresponse()
             self.assertEqual(r2.status, 200)
             self.assertTrue(r2.read())
@@ -97,7 +97,7 @@ class TestKeepAlive(_WebServerCase):
     def test_options_declares_zero_content_length(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("OPTIONS", "/api/pipeline/constants")
+            conn.request("OPTIONS", "/api/_index")
             resp = conn.getresponse()
             self.assertEqual(resp.status, 200)
             self.assertEqual(resp.getheader("Content-Length"), "0")
@@ -110,11 +110,10 @@ class TestProductionWiringOverlays(unittest.TestCase):
     """With production wiring (`_db_dsn` set, `db` global None), the
     pipeline-status overlays must still work.
 
-    Regression guard for the #427 P1: ``check_pipeline`` /
-    ``_enrich_with_pipeline`` used to gate on the ``db`` global, which
-    production no longer assigns — every browse/library row silently
-    lost its pipeline badge while the injected-handle test harness kept
-    passing."""
+    Regression guard for the #427 P1: ``check_pipeline`` used to gate on
+    the ``db`` global, which production no longer assigns — every
+    browse/library row silently lost its pipeline badge while the
+    injected-handle test harness kept passing."""
 
     def setUp(self):
         from web import server as srv
@@ -146,21 +145,6 @@ class TestProductionWiringOverlays(unittest.TestCase):
         self.assertEqual(info["prod-wiring-mbid"]["id"], rid)
         self.assertEqual(info["prod-wiring-mbid"]["status"], "wanted")
 
-    def test_enrich_with_pipeline_mutates_albums_without_db_global(self):
-        rid = self._pg.add_request(
-            artist_name="Wired", album_title="For Prod",
-            source="request",
-            mb_release_id="prod-wiring-mbid", status="wanted",
-        )
-        self._pg.update_request_fields(
-            rid, search_filetype_override="lossless")
-        albums: list[dict[str, object]] = [
-            {"mb_albumid": "prod-wiring-mbid"},
-            {"mb_albumid": "not-in-pipeline"},
-        ]
-        self._srv._enrich_with_pipeline(albums)
-        self.assertTrue(albums[0].get("upgrade_queued"))
-        self.assertNotIn("upgrade_queued", albums[1])
 
 
 class TestPerThreadDbHandles(unittest.TestCase):
