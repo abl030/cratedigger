@@ -59,7 +59,12 @@ Browser → https://music.ablz.au
 
 ## Frontend Features
 
-- **Source toggle** — MB / Discogs toggle in the browse tab header. Switches all search, artist, and release views between MusicBrainz and Discogs data sources.
+- **Source toggle** — a labelled **Source** MB / Discogs switch in the browse tab
+  header. The selected source is the *primary* discography for all search, artist,
+  and release views; the other source only *fills in* releases the primary is
+  missing, surfaced as the appended "Only on …" section. A live hint line under the
+  switch spells this out ("MusicBrainz is primary · Discogs fills the rest …") and
+  flips when you toggle, so the primary/complement relationship is never a mystery.
 - **Search** — debounced text search, returns artists (or releases in album mode)
 - **Unified artist page (#575 PR4)** — one scrolling page (the old
   Discography / Analysis / Library / Compare sub-tabs are gone), sectioned by
