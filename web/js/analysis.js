@@ -159,26 +159,28 @@ function renderDisambRGTracksInto(el, rgId) {
   if (rg.tracks && rg.tracks.length > 0) {
     html += '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings:</div>';
     const totalPressings = pressingRecSets.length;
+    // One span per row — .lib-track is flex justify-between, so marker
+    // and title must live together or they get pushed to opposite edges.
     html += rg.tracks.map(t => {
       if (!t.unique) {
         const alsoOn = t.also_on && t.also_on.length > 0
           ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
           : '';
         return `<div class="lib-track" style="opacity:0.5;">
-          <span style="color:#555;">  </span><span>${esc(t.title)}${alsoOn}</span>
+          <span>${esc(t.title)}${alsoOn}</span>
         </div>`;
       }
       const pIdxs = trackToPressings[t.recording_id] || [];
       // If on all pressings, it's a common track — no dots needed
       if (pIdxs.length === totalPressings) {
         return `<div class="lib-track">
-          <span style="color:#6d6;font-weight:bold;">★ </span><span>${esc(t.title)}</span>
+          <span><span style="color:#6d6;font-weight:bold;">★</span> ${esc(t.title)}</span>
         </div>`;
       }
       // Colour dots for tracks only on some pressings
       const dots = pIdxs.map(i => `<span style="color:${_PRESSING_COLORS[i % _PRESSING_COLORS.length]};">●</span>`).join('');
       return `<div class="lib-track">
-        <span style="margin-right:4px;">${dots || '★'}</span><span>${esc(t.title)}</span>
+        <span><span style="margin-right:4px;">${dots || '★'}</span>${esc(t.title)}</span>
       </div>`;
     }).join('');
   }
