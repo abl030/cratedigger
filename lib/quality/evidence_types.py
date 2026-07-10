@@ -311,6 +311,63 @@ def is_comparable_lossless_source_probe(
     )
 
 
+class QualityComparisonBasis(msgspec.Struct, frozen=True):
+    """The comparison ``compare_quality()`` actually performed — persisted so
+    the UI renders the decision's own story instead of re-deriving one.
+
+    Emitted per-branch from inside ``compare_quality()``: the branch tag names
+    which rule fired, and ``new_value_kbps`` / ``existing_value_kbps`` are the
+    numbers that DECIDED that branch (spectral-clamped values on a clamped
+    rank comparison, raw configured-metric values on a same-rank tiebreak).
+    Consumers reading ``(metric, value)`` pairs must suppress the metric
+    label when ``branch == "rank" and spectral_clamped`` — the value there
+    is ``min(metric, spectral floor)``, not the named statistic.
+    ``new_metric`` / ``existing_metric`` name the per-side statistic actually
+    classified — ``measurement_rank()`` falls back to min when the configured
+    metric is unmeasured, and a basis claiming "avg" for a min value would be
+    the same class of display lie this type exists to kill (request 6039:
+    a genuine avg-196→288 rank upgrade rendered as "MP3 V2 to MP3 V2"
+    because every UI label re-derived from min bitrate).
+
+    ``verified_lossless_bypass`` is set by ``import_quality_decision()``, not
+    ``compare_quality()`` — True only when the bypass CHANGED the outcome
+    (an "equivalent" verdict imported because the source was verified
+    lossless), never merely because the flag was present.
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` — crosses the
+    harness stdout and ``download_log.import_result`` JSONB boundaries inside
+    ``ImportResult``. Optional there; rows predating the field decode as None
+    and the UI falls back to the legacy min-based labels.
+    """
+
+    verdict: str  # "better" | "worse" | "equivalent"
+    branch: str   # see COMPARISON_BASIS_BRANCHES
+    new_rank: str
+    existing_rank: str
+    new_metric: str = "min"        # "min" | "avg" | "median"
+    existing_metric: str = "min"
+    new_value_kbps: Optional[int] = None
+    existing_value_kbps: Optional[int] = None
+    new_format: Optional[str] = None
+    existing_format: Optional[str] = None
+    spectral_clamped: bool = False
+    tolerance_kbps: Optional[int] = None
+    verified_lossless_bypass: bool = False
+
+
+COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
+    "rank",                        # ranks differ — the primary key decided
+    "lossless_same_rank",          # both LOSSLESS: equivalent by identity
+    "cross_family_same_rank",      # same rank, different codec family
+    "label_contract_same_rank",    # same rank, explicit label is authoritative
+    "metric_tiebreak",             # same rank, raw metric delta vs tolerance
+    "metric_missing",              # same rank, a side has no classifiable value
+    "transcode_rank_regression",   # transcode-grade candidate regresses real rank
+})
+"""Every branch tag ``compare_quality()`` may emit. The generated
+basis-consistency property patrols this taxonomy against the decision."""
+
+
 SPECTRAL_TRANSCODE_GRADES: frozenset[str] = frozenset({"suspect", "likely_transcode"})
 """Spectral grades that authorize the spectral bitrate as an override input.
 

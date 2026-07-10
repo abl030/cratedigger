@@ -57,6 +57,36 @@ function withWas(value, wasValue) {
 }
 
 /**
+ * Value phrase for one side of a persisted comparison basis: "avg 288k",
+ * or "~250k" when the rank branch classified spectral-clamped values
+ * (a clamped number is min(metric, spectral floor) — labelling it with
+ * the metric would lie, which is what the basis exists to prevent).
+ * @param {Object} basis - comparison_basis dict from the API
+ * @param {'new'|'existing'} side
+ * @returns {string} escaped HTML fragment
+ */
+function basisValuePhrase(basis, side) {
+  const value = side === 'new' ? basis.new_value_kbps : basis.existing_value_kbps;
+  const metric = side === 'new' ? basis.new_metric : basis.existing_metric;
+  if (value === null || value === undefined) return 'unmeasured';
+  if (basis.spectral_clamped && basis.branch === 'rank') return `~${esc(value)}k`;
+  return `${esc(metric)} ${esc(value)}k`;
+}
+
+/**
+ * One side of the basis as "MP3 avg 288k · transparent" for the strip.
+ * @param {Object} basis
+ * @param {'new'|'existing'} side
+ * @returns {string} escaped HTML fragment
+ */
+function basisSidePhrase(basis, side) {
+  const fmt = side === 'new' ? basis.new_format : basis.existing_format;
+  const rank = side === 'new' ? basis.new_rank : basis.existing_rank;
+  return `${esc((fmt || '?').toUpperCase())} ${basisValuePhrase(basis, side)}`
+    + ` · ${esc(rank)}`;
+}
+
+/**
  * Compact one-line IN/HAVE evidence comparison for list rows.
  *
  * Same numbers as the detail grid (measured incoming vs on-disk at the
@@ -74,15 +104,27 @@ export function renderEvidenceStrip(h) {
   const hasMeasurement = Boolean(
     h.actual_min_bitrate || h.spectral_bitrate || h.spectral_grade
     || h.v0_probe_avg_bitrate || h.existing_min_bitrate
-    || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate,
+    || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate
+    || h.comparison_basis,
   );
   if (!hasMeasurement) return '';
 
+  const basis = h.comparison_basis || null;
   const inParts = [];
-  if (h.downloaded_label) inParts.push(esc(h.downloaded_label));
-  if (h.actual_min_bitrate) inParts.push(`${esc(h.actual_min_bitrate)}k`);
+  if (basis) {
+    // The persisted basis IS the comparison the decider performed —
+    // render it instead of re-deriving labels from min bitrate (request
+    // 6039: min-derived labels turned a real avg 196→288 rank upgrade
+    // into "IN MP3 V2 · 194k HAVE MP3 194k").
+    inParts.push(basisSidePhrase(basis, 'new'));
+  } else {
+    if (h.downloaded_label) inParts.push(esc(h.downloaded_label));
+    if (h.actual_min_bitrate) inParts.push(`${esc(h.actual_min_bitrate)}k`);
+  }
   if (h.spectral_grade) {
-    const floor = h.spectral_bitrate ? `~${esc(h.spectral_bitrate)}k ` : '';
+    // With a basis, the clamped rank value already carries the floor —
+    // repeating "~250k" in the grade chip would double it up.
+    const floor = (!basis && h.spectral_bitrate) ? `~${esc(h.spectral_bitrate)}k ` : '';
     const sgColor = h.spectral_grade === 'genuine' ? '#6d6'
       : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
     inParts.push(`<span style="color:${sgColor};">${floor}${esc(h.spectral_grade)}</span>`);
@@ -95,7 +137,9 @@ export function renderEvidenceStrip(h) {
   // Lead with "MP3 256k" as one piece — the codec class is often the
   // deciding metric (a rank upgrade at equal bitrate is unreadable
   // without it).
-  if (h.existing_format && h.existing_min_bitrate) {
+  if (basis) {
+    haveParts.push(basisSidePhrase(basis, 'existing'));
+  } else if (h.existing_format && h.existing_min_bitrate) {
     haveParts.push(`${esc(h.existing_format)} ${esc(h.existing_min_bitrate)}k`);
   } else if (h.existing_format) {
     haveParts.push(esc(h.existing_format));
@@ -196,6 +240,19 @@ export function renderDownloadHistoryItem(h) {
       ? `${esc(h.existing_v0_probe_avg_bitrate)}kbps avg`
       : null;
     rows.push(['V0 probe', withWas(candidate, was)]);
+  }
+
+  // Compared row — the persisted comparison basis, rendered verbatim.
+  // This is the decision's own story (metric, values, ranks); the Bitrate
+  // row below stays as the raw min-vs-min detail.
+  if (h.comparison_basis) {
+    const b = h.comparison_basis;
+    let compared = `${basisValuePhrase(b, 'new')} (${esc(b.new_rank)})`
+      + ` vs ${basisValuePhrase(b, 'existing')} (${esc(b.existing_rank)})`;
+    if (b.verified_lossless_bypass) {
+      compared += ' <span style="color:#6af;">· verified lossless bypass</span>';
+    }
+    rows.push(['Compared', compared]);
   }
 
   // Bitrate row — apples-to-apples between candidate and existing on

@@ -9,6 +9,7 @@ import msgspec
 
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
+    QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
     V0ProbeEvidence,
     is_comparable_lossless_source_probe,
@@ -122,12 +123,21 @@ def spectral_import_decision(spectral_grade, spectral_bitrate, existing_spectral
 # import_one.py decisions (FLAC conversion path)
 # ---------------------------------------------------------------------------
 
+class ImportQualityDecision(msgspec.Struct, frozen=True):
+    """A decision string plus the comparison basis that produced it.
+
+    ``basis`` is None exactly when no comparison ran (no existing album).
+    """
+    decision: str
+    basis: Optional[QualityComparisonBasis] = None
+
+
 def import_quality_decision(
     new: AudioQualityMeasurement,
     existing: "AudioQualityMeasurement | None",
     is_transcode: bool = False,
     cfg: "QualityRankConfig | None" = None,
-) -> str:
+) -> ImportQualityDecision:
     """Decide whether to import based on codec-aware quality comparison (issue #60).
 
     Called in import_one.py after FLAC→V0 conversion (if applicable)
@@ -141,9 +151,13 @@ def import_quality_decision(
     ``verified_lossless=True`` still forces an import when the verdict is
     "better" or "equivalent", but NOT when it would be a downgrade — this
     blocks a deliberately too-low ``verified_lossless_target`` (e.g. Opus
-    64) from replacing a good existing album.
+    64) from replacing a good existing album. When the bypass CHANGED the
+    outcome (an "equivalent" verdict imported), the returned basis records
+    ``verified_lossless_bypass=True`` so the persisted audit trail explains
+    the import; a "better" verdict imports on its own merits and the flag
+    stays False.
 
-    Returns one of:
+    Returns an ImportQualityDecision whose ``decision`` is one of:
         "import"              — new files are better (or no existing), proceed
         "downgrade"           — new files are worse, skip (exit 5)
         "transcode_upgrade"   — transcode but better than existing, import + denylist (exit 6)
@@ -161,22 +175,33 @@ def import_quality_decision(
         cfg = QualityRankConfig.defaults()
 
     if existing is None:
-        return "transcode_first" if is_transcode else "import"
+        return ImportQualityDecision(
+            decision="transcode_first" if is_transcode else "import")
 
-    verdict = compare_quality(new, existing, cfg)
+    basis = compare_quality(new, existing, cfg)
+    verdict = basis.verdict
 
     # verified_lossless is a soft preference: "better" or "equivalent" still
     # import, but "worse" is blocked regardless of verified_lossless status.
     # This prevents a deliberately too-low verified-lossless target from
     # blindly replacing a good existing album (issue #60 acceptance criterion).
-    if new.verified_lossless and verdict in ("better", "equivalent"):
-        return "transcode_upgrade" if is_transcode else "import"
+    if new.verified_lossless and verdict == "equivalent":
+        return ImportQualityDecision(
+            decision="transcode_upgrade" if is_transcode else "import",
+            basis=msgspec.structs.replace(basis, verified_lossless_bypass=True),
+        )
 
     if verdict == "better":
-        return "transcode_upgrade" if is_transcode else "import"
+        return ImportQualityDecision(
+            decision="transcode_upgrade" if is_transcode else "import",
+            basis=basis,
+        )
 
     # "worse" or "equivalent" without verified_lossless bypass → reject.
-    return "transcode_downgrade" if is_transcode else "downgrade"
+    return ImportQualityDecision(
+        decision="transcode_downgrade" if is_transcode else "downgrade",
+        basis=basis,
+    )
 
 
 class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
@@ -201,6 +226,10 @@ class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
     cleanup_eligible: bool = False
     stage_chain: list[str] = []
     reason: Optional[str] = None
+    # The comparison compare_quality() performed, None when no existing
+    # album was compared. Persisted onto ImportResult so the UI renders
+    # the decision's own explanation instead of re-deriving one.
+    comparison_basis: Optional[QualityComparisonBasis] = None
 
 
 class ProvisionalLosslessDecisionInput(msgspec.Struct, frozen=True):
@@ -392,12 +421,13 @@ def measured_import_decision(
     cfg: "QualityRankConfig | None" = None,
 ) -> MeasuredImportDecisionResult:
     """Reduce measured import facts to a decision and preview classification."""
-    decision = import_quality_decision(
+    quality = import_quality_decision(
         measured.new_measurement,
         measured.existing_measurement,
         measured.is_transcode,
         cfg=cfg,
     )
+    decision = quality.decision
     exit_code = 0
     if decision == "downgrade":
         exit_code = 5
@@ -433,6 +463,7 @@ def measured_import_decision(
         cleanup_eligible=confident_reject,
         stage_chain=[f"stage2_import:{decision}"],
         reason=reason,
+        comparison_basis=quality.basis,
     )
 
 

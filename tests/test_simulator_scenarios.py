@@ -126,6 +126,9 @@ class SimResult:
     backfill_override: str | None
     search_filetype_override_after: str | None  # what search_filetype_override becomes after cycle
     target_format_after: str | None = None  # target_format is always preserved
+    # QualityComparisonBasis as plain builtins (dict) from the decision
+    # dict, None when stage 2 never compared against an existing album.
+    comparison_basis: dict | None = None
 
 
 # --- 13 album state fixtures ---
@@ -352,6 +355,7 @@ def simulate(album: AlbumState, download: DownloadScenario,
         backfill_override=backfill,
         search_filetype_override_after=override_after,
         target_format_after=album.target_format,  # always preserved
+        comparison_basis=result["comparison_basis"],
     )
 
 
@@ -999,11 +1003,11 @@ class TestNamedRegressions(unittest.TestCase):
         mp3_v0 = AudioQualityMeasurement(
             format="mp3 v0", avg_bitrate_kbps=245)
         # compare_quality uses label-based rank → both TRANSPARENT
-        self.assertEqual(compare_quality(opus_128, mp3_v0, cfg), "equivalent")
+        self.assertEqual(compare_quality(opus_128, mp3_v0, cfg).verdict, "equivalent")
         # import_quality_decision honors the verified_lossless preference
         from lib.quality import import_quality_decision
         self.assertEqual(
-            import_quality_decision(opus_128, mp3_v0, cfg=cfg), "import")
+            import_quality_decision(opus_128, mp3_v0, cfg=cfg).decision, "import")
 
     def test_opus_64_cannot_replace_mp3_v0(self):
         """Too-low verified_lossless target Opus 64 is blocked by rank floor.
@@ -1022,7 +1026,7 @@ class TestNamedRegressions(unittest.TestCase):
         mp3_v0 = AudioQualityMeasurement(
             format="mp3 v0", avg_bitrate_kbps=245)
         self.assertEqual(
-            import_quality_decision(opus_64, mp3_v0, cfg=cfg), "downgrade")
+            import_quality_decision(opus_64, mp3_v0, cfg=cfg).decision, "downgrade")
 
     def test_flac_to_opus_128_replaces_cbr_320(self):
         """Verified Opus 128 replaces unverified CBR 320 (codec parity)."""
@@ -1035,7 +1039,7 @@ class TestNamedRegressions(unittest.TestCase):
         cbr_320 = AudioQualityMeasurement(
             format="mp3 320", avg_bitrate_kbps=320, is_cbr=True)
         self.assertEqual(
-            import_quality_decision(opus_128, cbr_320, cfg=cfg), "import")
+            import_quality_decision(opus_128, cbr_320, cfg=cfg).decision, "import")
 
     def test_lofi_v0_still_imports(self):
         """Lo-fi V0 (207kbps) imports under the rank model via the label.

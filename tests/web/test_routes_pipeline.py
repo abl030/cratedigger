@@ -61,6 +61,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # The on-disk codec at download time (from import_result JSONB) —
         # rank-driven upgrades at equal bitrate are unreadable without it.
         "existing_format",
+        # The persisted QualityComparisonBasis (JSON-plain dict, null on
+        # legacy rows) — the decision's own comparison for the evidence
+        # strip; request 6039 tautology fix.
+        "comparison_basis",
         # Issue #130: post-import `beet move` failures surface as typed
         # reason + detail so the frontend can render a warning chip.
         # Null on clean rows; the field must always be present.

@@ -510,5 +510,123 @@ console.log('renderEvidenceStrip() escapes injected values');
   assertContains(strip, '&lt;img src=x&gt;', 'label escaped');
 }
 
+console.log('renderEvidenceStrip() renders the persisted comparison basis when present');
+{
+  // Request 6039: avg 196->288 rank upgrade; min 194 on BOTH sides made the
+  // legacy strip a tautology ("IN MP3 V2 . 194k HAVE MP3 194k").
+  const strip = renderEvidenceStrip({
+    downloaded_label: 'MP3 V2',
+    actual_min_bitrate: 194,
+    spectral_grade: 'genuine',
+    existing_format: 'MP3',
+    existing_min_bitrate: 194,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'transparent', existing_rank: 'good',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 288, existing_value_kbps: 196,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, 'avg 288k', 'IN side shows the deciding avg');
+  assertContains(strip, 'transparent', 'IN side shows the rank');
+  assertContains(strip, 'avg 196k', 'HAVE side shows the deciding avg');
+  assertContains(strip, 'good', 'HAVE side shows the rank');
+  assertContains(strip, 'genuine', 'spectral grade chip survives');
+  assertExcludes(strip, 'MP3 V2', 'min-derived label replaced by the basis');
+}
+
+console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
+{
+  const strip = renderEvidenceStrip({
+    actual_min_bitrate: 194,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'transparent', existing_rank: 'good',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 250, existing_value_kbps: 196,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, '~250k', 'clamped value gets the ~ prefix, no metric label');
+  assertExcludes(strip, 'avg 250k', 'clamped value must not claim a metric');
+}
+
+console.log('renderEvidenceStrip() escapes basis strings');
+{
+  const strip = renderEvidenceStrip({
+    actual_min_bitrate: 194,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: '<b>x</b>', existing_rank: 'good',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 288, existing_value_kbps: 196,
+      new_format: '<img src=x>', existing_format: 'MP3',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertExcludes(strip, '<img src=x>', 'raw basis format not rendered');
+  assertExcludes(strip, '<b>x</b>', 'raw basis rank not rendered');
+}
+
+console.log('renderDownloadHistoryItem() renders a Compared row from the basis');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'dbqs',
+    created_at: '2026-07-10T14:46:05+00:00',
+    actual_min_bitrate: 194,
+    existing_min_bitrate: 194,
+    beets_distance: 0.0899,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'transparent', existing_rank: 'good',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 288, existing_value_kbps: 196,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(html, 'Compared', 'Compared label rendered');
+  assertContains(html, 'avg 288k (transparent)', 'new side with rank');
+  assertContains(html, 'avg 196k (good)', 'existing side with rank');
+}
+
+console.log('renderDownloadHistoryItem() Compared row notes the verified-lossless bypass');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'dbqs',
+    created_at: '2026-07-10T14:46:05+00:00',
+    comparison_basis: {
+      verdict: 'equivalent', branch: 'metric_tiebreak',
+      new_rank: 'transparent', existing_rank: 'transparent',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 250, existing_value_kbps: 248,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: false, tolerance_kbps: 5,
+      verified_lossless_bypass: true,
+    },
+  });
+  assertContains(html, 'verified lossless bypass', 'bypass annotated');
+}
+
+console.log('renderDownloadHistoryItem() omits the Compared row without a basis');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'dbqs',
+    created_at: '2026-07-10T14:46:05+00:00',
+    actual_min_bitrate: 194,
+  });
+  assertExcludes(html, 'Compared', 'no Compared row on legacy rows');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

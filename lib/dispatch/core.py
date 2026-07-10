@@ -22,6 +22,7 @@ finalize_request = transitions.finalize_request
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
                          ImportResult, QUALITY_UPGRADE_TIERS, ValidationResult,
+                         comparison_basis_from_decision,
                          dispatch_action, evidence_decision_name,
                          extract_usernames,
                          full_pipeline_decision_from_evidence,
@@ -305,6 +306,9 @@ def dispatch_import_core(
                             evidence_gate.candidate.v0_metric
                         ),
                         existing_v0_probe=existing_v0_probe,
+                        comparison_basis=comparison_basis_from_decision(
+                            evidence_decision
+                        ),
                     )
                     return _reject_import_from_evidence_decision(
                         db=db,

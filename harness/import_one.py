@@ -60,7 +60,8 @@ finalize_request = transitions.finalize_request
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DuplicateRemoveCandidate,
                          DuplicateRemoveGuardInfo, ImportResult,
-                         PostflightInfo, QualityRankConfig,
+                         PostflightInfo, QualityComparisonBasis,
+                         QualityRankConfig,
                          QualityEvidenceActionPayload,
                          QualityEvidenceActionProvenance,
                          MeasuredImportDecisionInput,
@@ -71,6 +72,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          V0ProbeEvidence,
                          SPECTRAL_TRANSCODE_GRADES,
                          build_existing_quality_measurement,
+                         comparison_basis_from_decision,
                          comparison_format_hint, native_codec_format_label,
                          determine_verified_lossless,
                          evidence_decision_name,
@@ -222,6 +224,9 @@ class StageResult:
     exit_code: int = 0
     error: str | None = None
     terminal: bool = False
+    # Set by quality_decision_stage: the comparison the decision performed,
+    # copied onto ImportResult so it persists in download_log JSONB.
+    comparison_basis: QualityComparisonBasis | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -282,9 +287,13 @@ def quality_decision_stage(
             decision=decision,
             exit_code=result.exit_code,
             terminal=True,
+            comparison_basis=result.comparison_basis,
         )
     # import, transcode_upgrade, transcode_first all proceed to import
-    return StageResult(decision=decision, exit_code=0)
+    return StageResult(
+        decision=decision, exit_code=0,
+        comparison_basis=result.comparison_basis,
+    )
 
 
 def build_existing_measurement(
@@ -1399,6 +1408,18 @@ def _run_quality_evidence_authorized_import(
         r.existing_v0_probe = audit_v0_probe_from_metric(
             payload.current.v0_metric
             if payload.current is not None else None)
+        # The decision dict crossed the action-file wire as plain JSON;
+        # comparison_basis_from_decision is the one converter back to the
+        # typed Struct. Tolerant HERE (unlike the same-process dispatch
+        # site): this sits inside the outcome-affecting try, and the basis
+        # is explanation — an explanation must never flip an import to a
+        # reject, so a malformed one degrades to None (legacy rendering),
+        # mirroring web/classify.py's tolerant _parse_import_result.
+        try:
+            r.comparison_basis = comparison_basis_from_decision(
+                payload.decision)
+        except msgspec.ValidationError:
+            r.comparison_basis = None
 
         if not _evidence_action_allows_import(payload):
             r.exit_code = 5
@@ -1951,6 +1972,7 @@ def main():
             cfg=_rank_cfg)
         decision = qd.decision
         r.decision = decision
+        r.comparison_basis = qd.comparison_basis
 
     if args.dry_run:
         if provisional.decision is not None:

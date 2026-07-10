@@ -46,6 +46,9 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     slskd_bitrate: int | None
     downloaded_label: str
     verdict: str
+    # Persisted QualityComparisonBasis as a plain dict (null on rows
+    # predating the field) — the detail grid's "Compared" row.
+    comparison_basis: dict[str, object] | None
     disambiguation_failure: str | None
     disambiguation_detail: str | None
     bad_extensions: list[str]
@@ -118,6 +121,7 @@ def build_download_history_row(
             "downloaded_label": classified.downloaded_label,
             "existing_format": classified.existing_format,
             "verdict": classified.verdict,
+            "comparison_basis": classified.comparison_basis,
             "disambiguation_failure": classified.disambiguation_failure,
             "disambiguation_detail": classified.disambiguation_detail,
             "bad_extensions": classified.bad_extensions,
