@@ -58,6 +58,9 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # The evidence strip's codec prefix (issue #575 PR2) — classifier
         # field the raw LogEntry columns don't carry; must be forwarded.
         "downloaded_label",
+        # The on-disk codec at download time (from import_result JSONB) —
+        # rank-driven upgrades at equal bitrate are unreadable without it.
+        "existing_format",
         # Issue #130: post-import `beet move` failures surface as typed
         # reason + detail so the frontend can render a warning chip.
         # Null on clean rows; the field must always be present.
@@ -78,7 +81,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "downloaded_label", "verdict", "beets_scenario", "beets_distance",
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
-        "existing_spectral_bitrate",
+        "existing_spectral_bitrate", "existing_format",
         "source", "youtube_metadata",
         "wrong_match_triage_action", "wrong_match_triage_summary",
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
