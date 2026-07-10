@@ -55,6 +55,9 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "id", "request_id", "outcome", "album_title", "artist_name",
         "created_at", "badge", "badge_class", "border_color", "summary",
         "verdict", "in_beets",
+        # The evidence strip's codec prefix (issue #575 PR2) — classifier
+        # field the raw LogEntry columns don't carry; must be forwarded.
+        "downloaded_label",
         # Issue #130: post-import `beet move` failures surface as typed
         # reason + detail so the frontend can render a warning chip.
         # Null on clean rows; the field must always be present.
@@ -71,6 +74,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     }
     HISTORY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "created_at", "soulseek_username",
+        "badge", "badge_class", "border_color",
         "downloaded_label", "verdict", "beets_scenario", "beets_distance",
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",

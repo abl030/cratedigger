@@ -402,5 +402,44 @@ console.log('renderRecentsItems() does not mark visible wrong-match rows as clea
     'actionable row with failed_path does not get cleared chip');
 }
 
+console.log('renderRecentsItems() shows the compact IN/HAVE evidence strip on quality rows');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 900,
+    request_id: 901,
+    created_at: '2026-07-10T07:18:00+00:00',
+    album_title: 'The Warmest Place',
+    artist_name: 'Catcall',
+    badge: 'Rejected',
+    badge_class: 'badge-rejected',
+    border_color: '#a33',
+    summary: '245kbps avg (spectral likely_transcode ~160kbps) is not better than existing 320kbps avg · davesv',
+    downloaded_label: 'MP3 V0',
+    actual_min_bitrate: 245,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 160,
+    existing_min_bitrate: 320,
+  }]);
+  assertContains(html, 'r-evidence', 'evidence strip rendered on quality rows');
+  assertContains(html, '245k', 'incoming bitrate in strip');
+  assertContains(html, '320k', 'on-disk bitrate in strip');
+}
+
+console.log('renderRecentsItems() omits the evidence strip when a row has no measurements');
+{
+  const html = __test__.renderRecentsItems([{
+    id: 902,
+    request_id: 903,
+    created_at: '2026-07-10T06:37:00+00:00',
+    album_title: 'Paper Crush',
+    artist_name: 'Letting Up Despite Great Faults',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    border_color: '#a33',
+    summary: "Download failed: all 5 files errored — 5× 'Inactivity timeout'",
+  }]);
+  assertExcludes(html, 'r-evidence', 'no strip without measurements');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

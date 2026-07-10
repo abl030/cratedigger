@@ -80,6 +80,16 @@ Browser → https://music.ablz.au
   shows import jobs in beets-import order, with preview states (`waiting`,
   `previewing`, `importable`, `uncertain`, `failed`) and preview messages
   visible before the serial importer claims work.
+- **Recents evidence schema (#575 PR2)** — History list rows carry a compact
+  monospace `IN … HAVE …` evidence strip (measured incoming bitrate/spectral/
+  V0 probe vs on-disk at download time); rows with no measurements (download-
+  phase failures) show none. Expanded download-history blocks render a fixed
+  Source / Spectral / Bitrate / Distance vocabulary (em-dash when unknown, one
+  label/value pair per row so columns never shift), with the server-classified
+  badge as the header — the same words as the list badges, never the raw
+  outcome enum. Force imports show `overridden` in the Distance row instead of
+  beets' misleading 0.000. Debug internals (Preview / Reason / Stages) sit
+  behind a collapsed `forensics` toggle per attempt.
 - **Wrong Matches Converge** — each release starts with a `180` milli-distance
   loosen threshold. Candidates at or below that threshold turn green; Converge
   queues those folders as force-import jobs and deletes the non-green folders

@@ -25,6 +25,9 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     id: int
     request_id: int
     outcome: str
+    badge: str
+    badge_class: str
+    border_color: str
     created_at: str | None
     beets_scenario: str | None
     beets_distance: float | None
@@ -108,6 +111,9 @@ def build_download_history_row(
     return msgspec.convert(
         {
             **entry.to_json_dict(),
+            "badge": classified.badge,
+            "badge_class": classified.badge_class,
+            "border_color": classified.border_color,
             "downloaded_label": classified.downloaded_label,
             "verdict": classified.verdict,
             "disambiguation_failure": classified.disambiguation_failure,

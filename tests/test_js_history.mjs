@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_history.mjs
  */
 
-import { renderDownloadHistoryItem, __test__ } from '../web/js/history.js';
+import { renderDownloadHistoryItem, renderEvidenceStrip, __test__ } from '../web/js/history.js';
 const { formatV0Probe, formatSpectral, withWas } = __test__;
 
 let passed = 0;
@@ -313,6 +313,159 @@ console.log('formatV0Probe() helper picks the right kind suffix per source linea
     failed++;
     console.error('  FAIL: unknown kind should fall back to raw label');
   } else { passed++; }
+}
+
+console.log('renderDownloadHistoryItem() shows "overridden" instead of the fake 0.000 distance on force imports');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'force_import',
+    soulseek_username: 'pimpek1977',
+    created_at: '2026-07-10T07:03:00+00:00',
+    downloaded_label: 'FLAC (converted to OPUS V0)',
+    beets_distance: 0.0,
+    verdict: 'Force imported after manual review',
+  });
+
+  assertContains(html, 'class="p-hist-label">Distance</span>',
+    'Distance row present on force imports');
+  assertContains(html, 'overridden', 'force-import distance reads overridden');
+  assertExcludes(html, '0.000', 'the fake beets 0.000 never renders');
+}
+
+console.log('renderDownloadHistoryItem() always renders the core row vocabulary with em-dash placeholders');
+{
+  // A timeout row with no measurements still shows the fixed schema —
+  // Source / Spectral / Bitrate / Distance — so adjacent entries stop
+  // jumping shape.
+  const html = renderDownloadHistoryItem({
+    outcome: 'timeout',
+    soulseek_username: 'griot_not_riot',
+    created_at: '2026-07-07T21:22:00+00:00',
+    verdict: 'Download failed: file exceeded retry limit',
+  });
+
+  for (const label of ['Source', 'Spectral', 'Bitrate', 'Distance']) {
+    assertContains(html, `class="p-hist-label">${label}</span>`,
+      `${label} row present even without data`);
+  }
+  assertContains(html, '—', 'unknown cells render an em-dash');
+}
+
+console.log('renderDownloadHistoryItem() header uses the server badge vocabulary');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'timeout',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-07T21:22:00+00:00',
+  });
+
+  assertContains(html, 'badge badge-failed', 'server badge class on header');
+  assertContains(html, '>Failed<', 'server badge label on header');
+  // The raw outcome word must not appear as the status any more — the
+  // list rows say "Failed", the detail block must not say "timeout".
+  assertExcludes(html, '>timeout<', 'raw outcome word no longer the header status');
+}
+
+console.log('renderDownloadHistoryItem() header falls back to outcome when badge fields absent');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-07T21:22:00+00:00',
+  });
+  assertContains(html, '>rejected<', 'outcome fallback when classifier fields missing');
+}
+
+console.log('renderDownloadHistoryItem() tucks debug forensics behind a details toggle');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    verdict: 'Wrong match (dist 0.190)',
+    wrong_match_triage_summary: 'deleted: spectral reject',
+    wrong_match_triage_preview_verdict: 'confident_reject',
+    wrong_match_triage_preview_decision: 'requeue_upgrade',
+    wrong_match_triage_reason: 'requeue_upgrade',
+    wrong_match_triage_stage_chain: ['mp3_spectral:reject'],
+  });
+
+  assertContains(html, '<details class="p-hist-forensics">',
+    'forensics details element present');
+  assertContains(html, 'mp3_spectral:reject', 'stage chain still reachable');
+  // Triage (the operator-action audit) stays visible outside the toggle.
+  const detailsStart = html.indexOf('<details');
+  const triagePos = html.indexOf('deleted: spectral reject');
+  if (triagePos !== -1 && detailsStart !== -1 && triagePos < detailsStart) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: triage summary should render before/outside the forensics toggle');
+  }
+  const stagesPos = html.indexOf('mp3_spectral:reject');
+  if (stagesPos > detailsStart && detailsStart !== -1) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: stage chain should live inside the forensics toggle');
+  }
+}
+
+console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
+{
+  const strip = renderEvidenceStrip({
+    downloaded_label: 'MP3 320',
+    actual_min_bitrate: 245,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 160,
+    existing_min_bitrate: 320,
+  });
+  assertContains(strip, 'class="r-evidence"', 'strip wrapper class');
+  assertContains(strip, 'IN', 'IN side labelled');
+  assertContains(strip, 'MP3 320', 'incoming label rendered');
+  assertContains(strip, '245k', 'incoming measured bitrate rendered');
+  assertContains(strip, '~160k', 'incoming spectral floor rendered');
+  assertContains(strip, 'HAVE', 'HAVE side labelled');
+  assertContains(strip, '320k', 'on-disk bitrate rendered');
+}
+
+console.log('renderEvidenceStrip() returns empty string when no evidence exists');
+{
+  const strip = renderEvidenceStrip({
+    outcome: 'timeout',
+    error_message: 'remote_queue_timeout 3600s exceeded',
+  });
+  if (strip === '') { passed++; } else {
+    failed++;
+    console.error(`  FAIL: no-evidence rows should produce no strip, got '${strip}'`);
+  }
+}
+
+console.log('renderEvidenceStrip() requires a number — a codec label alone is not a comparison');
+{
+  // Failed downloads carry downloaded_label (from slskd filetype) but no
+  // measurements; a label-only strip would spam "IN MP3 HAVE —" on every
+  // failure row in the list.
+  const strip = renderEvidenceStrip({
+    outcome: 'timeout',
+    downloaded_label: 'MP3',
+  });
+  if (strip === '') { passed++; } else {
+    failed++;
+    console.error(`  FAIL: label-only rows should produce no strip, got '${strip}'`);
+  }
+}
+
+console.log('renderEvidenceStrip() escapes injected values');
+{
+  const strip = renderEvidenceStrip({
+    downloaded_label: '<img src=x>',
+    actual_min_bitrate: 200,
+  });
+  assertExcludes(strip, '<img src=x>', 'raw label not rendered');
+  assertContains(strip, '&lt;img src=x&gt;', 'label escaped');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
