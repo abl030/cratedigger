@@ -14,4 +14,5 @@ paths:
 - Static JS served at `/js/*.js` — `node --check` validates syntax in CI
 - Fetch-on-input UI must stamp requests with a module-scoped in-flight token and discard stale responses before rendering
 - The web UI reads download_log JSONB columns (import_result, validation_result) — use the typed field names from the dataclasses, not arbitrary strings
+- **Visible UI changes are verified with the dev-server screenshot loop BEFORE pushing** — live-db dev server + CDP chromium + playwright agent, and the main agent Reads the PNGs itself. Tests+review alone shipped three visually-obvious defects on #575. Full recipe + gotchas: `docs/solutions/ui-dev-server-screenshot-loop.md`
 - After changes: `ssh doc2 'sudo systemctl restart cratedigger-web'`
