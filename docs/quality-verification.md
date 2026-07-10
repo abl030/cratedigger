@@ -244,6 +244,37 @@ Albums that were downloaded as FLAC, converted to V0 at or above the `cfg.mp3_vb
 - `--force` flag: skips the distance check (`MAX_DISTANCE=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade or suspect-lossless rejection, 6=transcode/provisional path (may or may not have imported as an upgrade).
 
+## Comparison basis — the persisted decision explanation
+
+Every `compare_quality()` call returns a `QualityComparisonBasis`
+(`lib/quality/evidence_types.py`): the verdict plus which branch fired
+(`rank`, `metric_tiebreak`, `label_contract_same_rank`,
+`cross_family_same_rank`, `lossless_same_rank`, `metric_missing`,
+`transcode_rank_regression`), the per-side ranks, the values that decided
+that branch (spectral-clamped values on a clamped rank comparison, raw
+configured-metric values on a tiebreak), and the per-side statistic actually
+classified (`min`/`avg`/`median` — the configured metric falls back to min
+when unmeasured). `import_quality_decision()` stamps
+`verified_lossless_bypass=True` only when the bypass changed the outcome
+(an "equivalent" verdict imported).
+
+The basis rides `MeasuredImportDecisionResult.comparison_basis` →
+`ImportResult.comparison_basis` (harness stdout + `download_log.import_result`
+JSONB), the decision dict's `comparison_basis` key (as `msgspec.to_builtins`
+plain dict — the dict crosses json.dumps'd API responses), the evidence
+action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
+back from the dict goes through `comparison_basis_from_decision()` — the one
+converter.
+
+**Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
+rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
+because every UI label re-derived from min bitrate (194 on both sides).
+The web UI (`web/classify.py::_verdict_from_basis`, the Recents evidence
+strip, and the detail grid's "Compared" row) renders the persisted basis
+verbatim when present; rows predating the field fall back to the legacy
+min-based labels. Never re-derive a comparison for display — that
+re-derivation is how the display learned to lie.
+
 ## TODO
 
 - [ ] Integrate spectral gradient check into pipeline (import_one.py or cratedigger.py)

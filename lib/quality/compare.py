@@ -4,10 +4,11 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
-from typing import Literal, Optional
+from typing import Optional
 
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
+    QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
 )
 from lib.quality.ranks import (
@@ -17,6 +18,7 @@ from lib.quality.ranks import (
     _parse_bitrate_label,
     _parse_vbr_level,
     _selected_bitrate,
+    _selected_bitrate_with_source,
     measurement_rank,
     quality_rank,
 )
@@ -180,7 +182,7 @@ def compare_quality(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
     cfg: QualityRankConfig,
-) -> Literal["better", "worse", "equivalent"]:
+) -> QualityComparisonBasis:
     """Codec-aware quality comparison.
 
     Primary key is the QualityRank. Within the same rank:
@@ -207,10 +209,51 @@ def compare_quality(
     non-transcode-grade existing album has one extra guard: if its real
     selected-metric rank is lower before the spectral clamp, it is worse.
 
+    Returns a ``QualityComparisonBasis`` — the verdict plus the branch that
+    fired and the values that decided it, emitted HERE per-branch so the
+    persisted explanation can never disagree with the decision (the request
+    6039 lesson: any re-derivation outside this function eventually lies).
+    Callers that only need the verdict read ``.verdict``.
+
     Pure function. No I/O, no hardcoded numbers — every threshold comes from cfg.
     """
+    new_br, new_metric = _selected_bitrate_with_source(new, cfg)
+    existing_br, existing_metric = _selected_bitrate_with_source(existing, cfg)
+
+    def _basis(
+        verdict: str,
+        branch: str,
+        new_rank: QualityRank,
+        existing_rank: QualityRank,
+        new_value: Optional[int] = None,
+        existing_value: Optional[int] = None,
+        spectral_clamped: bool = False,
+        tolerance_kbps: Optional[int] = None,
+    ) -> QualityComparisonBasis:
+        return QualityComparisonBasis(
+            verdict=verdict,
+            branch=branch,
+            new_rank=new_rank.name.lower(),
+            existing_rank=existing_rank.name.lower(),
+            new_metric=new_metric,
+            existing_metric=existing_metric,
+            new_value_kbps=new_value,
+            existing_value_kbps=existing_value,
+            # Lowercase-normalized: the hint's casing differs between the
+            # simulator and evidence twins ("flac" vs "FLAC") while meaning
+            # the same thing — display upper-cases, parity compares.
+            new_format=new.format.lower() if new.format else None,
+            existing_format=existing.format.lower() if existing.format else None,
+            spectral_clamped=spectral_clamped,
+            tolerance_kbps=tolerance_kbps,
+        )
+
     if _transcode_candidate_real_rank_regresses(new, existing, cfg):
-        return "worse"
+        return _basis(
+            "worse", "transcode_rank_regression",
+            measurement_rank(new, cfg), measurement_rank(existing, cfg),
+            new_value=new_br, existing_value=existing_br,
+        )
 
     shared = _shared_spectral_bitrates(new, existing, cfg)
     if shared is not None:
@@ -218,41 +261,73 @@ def compare_quality(
         new_rank = quality_rank(new.format, clamped_new_br, new.is_cbr, cfg)
         existing_rank = quality_rank(
             existing.format, clamped_existing_br, existing.is_cbr, cfg)
+        rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
+        spectral_clamped = True
     else:
         new_rank = measurement_rank(new, cfg)
         existing_rank = measurement_rank(existing, cfg)
+        rank_new_value, rank_existing_value = new_br, existing_br
+        spectral_clamped = False
 
     if new_rank > existing_rank:
-        return "better"
+        return _basis(
+            "better", "rank", new_rank, existing_rank,
+            new_value=rank_new_value, existing_value=rank_existing_value,
+            spectral_clamped=spectral_clamped,
+        )
     if new_rank < existing_rank:
-        return "worse"
+        return _basis(
+            "worse", "rank", new_rank, existing_rank,
+            new_value=rank_new_value, existing_value=rank_existing_value,
+            spectral_clamped=spectral_clamped,
+        )
 
     # Same rank. LOSSLESS is always equivalent — FLAC bitrates vary with sample
     # rate and bit depth, not quality.
     if new_rank == QualityRank.LOSSLESS:
-        return "equivalent"
+        return _basis(
+            "equivalent", "lossless_same_rank", new_rank, existing_rank,
+            spectral_clamped=spectral_clamped,
+        )
 
     new_family = _codec_family_of(new.format)
     existing_family = _codec_family_of(existing.format)
 
     # Different codec families at the same rank: perceptually equivalent.
     if new_family != existing_family:
-        return "equivalent"
+        return _basis(
+            "equivalent", "cross_family_same_rank", new_rank, existing_rank,
+            new_value=new_br, existing_value=existing_br,
+            spectral_clamped=spectral_clamped,
+        )
 
     # Same codec family. If either side has an explicit label, the label is
     # authoritative — within the same rank tier they are equivalent.
     if _is_explicit_label(new.format) or _is_explicit_label(existing.format):
-        return "equivalent"
+        return _basis(
+            "equivalent", "label_contract_same_rank", new_rank, existing_rank,
+            new_value=new_br, existing_value=existing_br,
+            spectral_clamped=spectral_clamped,
+        )
 
     # Both bare codec names — compare the chosen raw metric with tolerance.
     # When the shared-spectral bucket fired, rank has already been demoted by
     # the spectral floor. The tiebreaker deliberately stays on the raw metric
     # so equal spectral buckets can still converge upward by bitrate.
-    new_br = _selected_bitrate(new, cfg)
-    existing_br = _selected_bitrate(existing, cfg)
     if new_br is None or existing_br is None:
-        return "equivalent"
+        return _basis(
+            "equivalent", "metric_missing", new_rank, existing_rank,
+            new_value=new_br, existing_value=existing_br,
+            spectral_clamped=spectral_clamped,
+        )
     delta = new_br - existing_br
-    if abs(delta) <= cfg.within_rank_tolerance_kbps:
-        return "equivalent"
-    return "better" if delta > 0 else "worse"
+    verdict = (
+        "equivalent" if abs(delta) <= cfg.within_rank_tolerance_kbps
+        else ("better" if delta > 0 else "worse")
+    )
+    return _basis(
+        verdict, "metric_tiebreak", new_rank, existing_rank,
+        new_value=new_br, existing_value=existing_br,
+        spectral_clamped=spectral_clamped,
+        tolerance_kbps=cfg.within_rank_tolerance_kbps,
+    )

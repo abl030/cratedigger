@@ -8,7 +8,11 @@ import json
 from typing import Any, Optional
 import msgspec
 
-from lib.quality.evidence_types import AudioQualityMeasurement, V0ProbeEvidence
+from lib.quality.evidence_types import (
+    AudioQualityMeasurement,
+    QualityComparisonBasis,
+    V0ProbeEvidence,
+)
 
 
 IMPORT_RESULT_SENTINEL = "__IMPORT_RESULT__"
@@ -196,6 +200,11 @@ class ImportResult(msgspec.Struct):
     quality_evidence_provenance: QualityEvidenceActionProvenance = msgspec.field(
         default_factory=QualityEvidenceActionProvenance
     )
+    # The comparison the decision actually performed (request 6039: the UI
+    # re-derived "MP3 V2 to MP3 V2" from min bitrate while the decider ranked
+    # on avg). None on rows predating the field and when no existing album
+    # was compared — the UI falls back to the legacy min-based labels.
+    comparison_basis: Optional[QualityComparisonBasis] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""

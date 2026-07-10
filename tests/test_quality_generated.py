@@ -47,6 +47,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    COMPARISON_BASIS_BRANCHES,
     QUALITY_UPGRADE_TIERS,
     V0_SOURCE_LINEAGE_LOSSLESS_SOURCE,
     V0_SOURCE_LINEAGE_NATIVE_LOSSY_RESEARCH,
@@ -136,6 +137,63 @@ def assert_below_gate_never_stops_search(result: SimResult) -> None:
             f"below-gate outcome stopped the search: {result!r}")
 
 
+_MEASURED_STAGE2_DECISIONS = frozenset({
+    "import", "downgrade", "transcode_upgrade", "transcode_downgrade",
+    "transcode_first",
+})
+_BASIS_SAME_RANK_BRANCHES = frozenset({
+    "lossless_same_rank", "cross_family_same_rank",
+    "label_contract_same_rank", "metric_tiebreak", "metric_missing",
+})
+_BASIS_METRICS = frozenset({"min", "avg", "median"})
+
+
+def assert_basis_consistent(result: SimResult) -> None:
+    """The persisted comparison basis can never contradict the decision it
+    explains (request 6039 — the anti-display-lie invariants I2/I3/I4)."""
+    basis = result.comparison_basis
+    stage2 = result.stage2_import
+    if basis is None:
+        # Only decisions that REQUIRE a comparison must carry one:
+        # downgrade/transcode_downgrade/transcode_upgrade are unreachable
+        # without an existing album; import/transcode_first are not.
+        if stage2 in ("downgrade", "transcode_downgrade", "transcode_upgrade"):
+            raise AssertionError(
+                f"stage2={stage2!r} requires a comparison but lost its basis")
+        return
+    if stage2 not in _MEASURED_STAGE2_DECISIONS or stage2 == "transcode_first":
+        raise AssertionError(
+            f"basis present on non-compared stage2 {stage2!r}")
+    if basis["branch"] not in COMPARISON_BASIS_BRANCHES:
+        raise AssertionError(f"unknown basis branch: {basis['branch']!r}")
+    if (basis["new_metric"] not in _BASIS_METRICS
+            or basis["existing_metric"] not in _BASIS_METRICS):
+        raise AssertionError(f"malformed basis metrics: {basis!r}")
+    verdict = basis["verdict"]
+    if stage2 in ("import", "transcode_upgrade"):
+        imports_ok = verdict == "better" or (
+            verdict == "equivalent" and basis["verified_lossless_bypass"])
+        if not imports_ok:
+            raise AssertionError(
+                f"import decision contradicts basis verdict: {basis!r}")
+    else:  # downgrade / transcode_downgrade
+        if verdict not in ("worse", "equivalent"):
+            raise AssertionError(
+                f"reject decision contradicts basis verdict: {basis!r}")
+        if basis["verified_lossless_bypass"]:
+            raise AssertionError(
+                f"reject decision claims a verified-lossless bypass: {basis!r}")
+    branch = basis["branch"]
+    if branch == "rank" and basis["new_rank"] == basis["existing_rank"]:
+        raise AssertionError(f"rank branch with equal ranks: {basis!r}")
+    if (branch in _BASIS_SAME_RANK_BRANCHES
+            and basis["new_rank"] != basis["existing_rank"]):
+        raise AssertionError(f"same-rank branch with differing ranks: {basis!r}")
+    if branch == "transcode_rank_regression" and verdict != "worse":
+        raise AssertionError(
+            f"transcode rank regression must be worse: {basis!r}")
+
+
 _PARITY_FIELDS = (
     "imported",
     "keep_searching",
@@ -145,6 +203,7 @@ _PARITY_FIELDS = (
     "stage1_spectral",
     "stage2_import",
     "stage3_quality_gate",
+    "comparison_basis",
 )
 
 
@@ -338,6 +397,24 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
             self, download):
         result = simulate(_FRESH_ALBUM, download)
         assert_below_gate_never_stops_search(result)
+
+    @given(album=album_states(), download=download_scenarios())
+    def test_generated_basis_never_contradicts_decision(self, album, download):
+        result = simulate(album, download)
+        assert_basis_consistent(result)
+
+    @given(album=transparent_mp3_albums(), download=download_scenarios())
+    def test_measured_decisions_with_existing_carry_basis(
+            self, album, download):
+        result = simulate(album, download)
+        if result.stage2_import in ("import", "downgrade",
+                                    "transcode_upgrade",
+                                    "transcode_downgrade"):
+            if result.comparison_basis is None:
+                raise AssertionError(
+                    f"measured decision {result.stage2_import!r} against an "
+                    f"existing album lost its comparison basis: {result!r}")
+        assert_basis_consistent(result)
 
 
 # ===========================================================================
@@ -887,6 +964,51 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         }
         with self.assertRaises(AssertionError):
             assert_classification_coherent(bad, "preimport_audio")
+
+    def _planted_basis(self, **overrides):
+        basis = {
+            "verdict": "better", "branch": "rank",
+            "new_rank": "transparent", "existing_rank": "good",
+            "new_metric": "avg", "existing_metric": "avg",
+            "new_value_kbps": 288, "existing_value_kbps": 196,
+            "new_format": "MP3", "existing_format": "MP3",
+            "spectral_clamped": False, "tolerance_kbps": None,
+            "verified_lossless_bypass": False,
+        }
+        basis.update(overrides)
+        return basis
+
+    def _result_with_basis(self, stage2, basis):
+        return SimResult(
+            imported=stage2 in ("import", "transcode_upgrade"),
+            keep_searching=True, denylisted=False, final_status="wanted",
+            stage0_spectral_gate=None, stage1_spectral=None,
+            stage2_import=stage2, stage3_quality_gate=None,
+            backfill_override=None, search_filetype_override_after=None,
+            comparison_basis=basis)
+
+    def test_basis_checker_trips_on_lost_basis(self):
+        with self.assertRaises(AssertionError):
+            assert_basis_consistent(self._result_with_basis("downgrade", None))
+
+    def test_basis_checker_trips_on_verdict_contradiction(self):
+        bad = self._planted_basis(verdict="worse")
+        with self.assertRaises(AssertionError):
+            assert_basis_consistent(self._result_with_basis("import", bad))
+
+    def test_basis_checker_trips_on_rank_incoherence(self):
+        bad = self._planted_basis(existing_rank="transparent")
+        with self.assertRaises(AssertionError):
+            assert_basis_consistent(self._result_with_basis("import", bad))
+
+    def test_basis_checker_trips_on_unknown_branch(self):
+        bad = self._planted_basis(branch="vibes")
+        with self.assertRaises(AssertionError):
+            assert_basis_consistent(self._result_with_basis("import", bad))
+
+    def test_basis_checker_passes_a_coherent_basis(self):
+        good = self._planted_basis()
+        assert_basis_consistent(self._result_with_basis("import", good))
 
     def test_parity_checker_trips_on_divergence(self):
         sim = _planted_bad_import()

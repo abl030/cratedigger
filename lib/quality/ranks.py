@@ -540,6 +540,21 @@ def _selected_bitrate(m: AudioQualityMeasurement,
     Keeps the metric dispatch in one place — compare_quality does not
     peek into m.avg / m.median / m.min directly.
     """
+    return _selected_bitrate_with_source(m, cfg)[0]
+
+
+def _selected_bitrate_with_source(
+    m: AudioQualityMeasurement,
+    cfg: QualityRankConfig,
+) -> "tuple[Optional[int], str]":
+    """(value, stat-name) pair for the metric measurement_rank() classifies.
+
+    The stat name ("min" / "avg" / "median") records the statistic ACTUALLY
+    used — the configured metric falls back to min when its field is
+    unmeasured, and the persisted QualityComparisonBasis must say which one
+    each side really classified (a basis claiming "avg" for a min value is
+    the same display lie the basis exists to kill).
+    """
     # Use `==` not `is`: RankBitrateMetric is a StrEnum. Historically the
     # project loaded modules under two names (``lib.quality`` and bare
     # ``quality`` via a PYTHONPATH ``lib`` entry) — an enum member from
@@ -550,11 +565,11 @@ def _selected_bitrate(m: AudioQualityMeasurement,
     # by tests/test_no_dual_load.py), but `==` remains the correct
     # comparison for a StrEnum either way.
     if cfg.bitrate_metric == RankBitrateMetric.AVG and m.avg_bitrate_kbps is not None:
-        return m.avg_bitrate_kbps
+        return m.avg_bitrate_kbps, RankBitrateMetric.AVG.value
     if (cfg.bitrate_metric == RankBitrateMetric.MEDIAN
             and m.median_bitrate_kbps is not None):
-        return m.median_bitrate_kbps
-    return m.min_bitrate_kbps
+        return m.median_bitrate_kbps, RankBitrateMetric.MEDIAN.value
+    return m.min_bitrate_kbps, RankBitrateMetric.MIN.value
 
 
 # ---------------------------------------------------------------------------

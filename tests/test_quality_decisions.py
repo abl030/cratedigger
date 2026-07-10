@@ -306,7 +306,7 @@ class TestImportQualityDecision(unittest.TestCase):
                         new,
                         existing,
                         is_transcode=is_transcode,
-                    ),
+                    ).decision,
                     expected,
                     f"{desc}: new={new_kwargs} existing={existing_kwargs} "
                     f"is_transcode={is_transcode} expected {expected!r}")
@@ -871,6 +871,9 @@ EXPECTED_RESULT_KEYS = {
     "stage1_spectral", "stage2_import", "stage3_quality_gate",
     "final_status", "imported", "denylisted", "keep_searching",
     "target_final_format", "verified_lossless",
+    # The persisted comparison basis (plain builtins) from stage 2's
+    # measured decision, None when no existing album was compared.
+    "comparison_basis",
 }
 
 # Valid values for each stage (None means stage was skipped)
@@ -2783,7 +2786,7 @@ class TestCompareQuality(unittest.TestCase):
         for desc, new_kw, existing_kw, expected in self.CASES:
             with self.subTest(desc=desc):
                 result = compare_quality(
-                    self._m(**new_kw), self._m(**existing_kw), CFG)
+                    self._m(**new_kw), self._m(**existing_kw), CFG).verdict
                 self.assertEqual(
                     result, expected,
                     f"{desc}: new={new_kw} existing={existing_kw} "
@@ -2795,9 +2798,9 @@ class TestCompareQuality(unittest.TestCase):
         new = self._m(format="MP3", min_bitrate_kbps=240, avg_bitrate_kbps=250)
         existing = self._m(format="MP3", min_bitrate_kbps=210, avg_bitrate_kbps=260)
         # Under MIN: new=240, existing=210 → better
-        self.assertEqual(compare_quality(new, existing, cfg_min), "better")
+        self.assertEqual(compare_quality(new, existing, cfg_min).verdict, "better")
         # Under AVG: new=250, existing=260 → worse
-        self.assertEqual(compare_quality(new, existing, CFG), "worse")
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "worse")
 
     def test_median_metric_honored_in_comparison(self):
         """When cfg uses MEDIAN, compare_quality must use median not avg/min.
@@ -2815,10 +2818,10 @@ class TestCompareQuality(unittest.TestCase):
                            min_bitrate_kbps=210, avg_bitrate_kbps=215,
                            median_bitrate_kbps=215)
         # Under MEDIAN: new=255 (TRANSPARENT) vs existing=215 (EXCELLENT) → better
-        self.assertEqual(compare_quality(new, existing, cfg_med), "better")
+        self.assertEqual(compare_quality(new, existing, cfg_med).verdict, "better")
         # Under MIN: new=60 (POOR) vs existing=210 (EXCELLENT) → worse
         cfg_min = QualityRankConfig(bitrate_metric=RankBitrateMetric.MIN)
-        self.assertEqual(compare_quality(new, existing, cfg_min), "worse")
+        self.assertEqual(compare_quality(new, existing, cfg_min).verdict, "worse")
 
 
 class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
@@ -2909,7 +2912,7 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         for desc, new_kw, existing_kw, expected in self.CASES:
             with self.subTest(desc=desc):
                 result = compare_quality(
-                    self._m(**new_kw), self._m(**existing_kw), CFG)
+                    self._m(**new_kw), self._m(**existing_kw), CFG).verdict
                 self.assertEqual(
                     result, expected,
                     f"{desc}: new={new_kw} existing={existing_kw} "
@@ -2928,7 +2931,7 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
                       spectral_grade="genuine", spectral_bitrate_kbps=96)
         existing = self._m(format="MP3", avg_bitrate_kbps=128,
                            spectral_grade="genuine", spectral_bitrate_kbps=96)
-        self.assertEqual(compare_quality(new, existing, CFG), "better")
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
 
     def test_transcode_candidate_cannot_spectral_floor_past_lower_real_rank(self):
         """Muse live shape: spectral floor improved, real quality rank regressed.
@@ -2958,8 +2961,8 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG), "worse")
-        self.assertEqual(import_quality_decision(new, existing, cfg=CFG),
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "worse")
+        self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "downgrade")
 
     def test_transcode_guard_requires_known_non_transcode_existing_grade(self):
@@ -2976,7 +2979,7 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG), "better")
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
 
     def test_transcode_candidate_can_still_import_when_real_rank_does_not_regress(self):
         """Bay of Biscay shape: spectral and actual selected metric both improve."""
@@ -2999,8 +3002,8 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG), "better")
-        self.assertEqual(import_quality_decision(new, existing, cfg=CFG),
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
+        self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "import")
 
     def test_transcode_over_transcode_still_uses_shared_spectral_floor(self):
@@ -3018,7 +3021,7 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_bitrate_kbps=128,
         )
 
-        self.assertEqual(compare_quality(new, existing, CFG), "better")
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
 
     def test_equal_spectral_bucket_keeps_raw_avg_tiebreaker(self):
         """Grouper live case: equal spectral floor must not erase avg upgrade."""
@@ -3040,7 +3043,7 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
             spectral_grade="likely_transcode",
             spectral_bitrate_kbps=96,
         )
-        self.assertEqual(compare_quality(new, existing, CFG), "better")
+        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
 
 
 class TestQualityRankConfigFromIni(unittest.TestCase):

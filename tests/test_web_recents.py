@@ -10,6 +10,8 @@ import sys
 import unittest
 from dataclasses import replace
 
+import msgspec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from web.classify import (classify_log_entry, quality_label, LogEntry,
@@ -1676,6 +1678,191 @@ class TestParseImportResultTolerantOfMsgspecValidationError(unittest.TestCase):
             "decision": "import",
         }))
         self.assertIsNone(_parse_import_result(entry))
+
+
+# ============================================================================
+# classify_log_entry — persisted comparison basis (request 6039)
+# ============================================================================
+
+class TestClassifyComparisonBasis(unittest.TestCase):
+    """Rows carrying the persisted QualityComparisonBasis render the
+    decision's own story; rows without it keep the legacy min-based labels.
+
+    The motivating row is download_log 36608 (request 6039): a genuine
+    avg 196→288 rank upgrade rendered as the tautology "MP3 V2 to MP3 V2"
+    because every label re-derived from min bitrate (194 on both sides).
+    """
+
+    def _basis_dict(self, new_kw, existing_kw):
+        """Real production basis via compare_quality, as JSONB builtins."""
+        from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
+                                 compare_quality)
+        basis = compare_quality(
+            AudioQualityMeasurement(**new_kw),
+            AudioQualityMeasurement(**existing_kw),
+            QualityRankConfig.defaults(),
+        )
+        return msgspec.to_builtins(basis)
+
+    def _bypass_basis_dict(self, new_kw, existing_kw):
+        from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
+                                 import_quality_decision)
+        result = import_quality_decision(
+            AudioQualityMeasurement(**new_kw),
+            AudioQualityMeasurement(**existing_kw),
+            cfg=QualityRankConfig.defaults(),
+        )
+        assert result.basis is not None
+        return msgspec.to_builtins(result.basis)
+
+    _SAY_HELLO_NEW = dict(min_bitrate_kbps=194, avg_bitrate_kbps=288,
+                          format="MP3")
+    _SAY_HELLO_EXISTING = dict(min_bitrate_kbps=194, avg_bitrate_kbps=196,
+                               format="MP3")
+
+    def test_upgrade_verdict_renders_the_decision_story(self):
+        basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=194,
+            actual_min_bitrate=194,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(c.badge, "Upgraded")
+        self.assertEqual(
+            c.verdict,
+            "Upgrade: MP3 avg 196k (good) → avg 288k (transparent)")
+
+    def test_upgrade_verdict_is_never_a_tautology(self):
+        """I6: with a basis, the two sides of a better-verdict always differ
+        in at least one displayed component."""
+        basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=194,
+            actual_min_bitrate=194,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertNotIn("MP3 V2 to MP3 V2", c.verdict)
+
+    def test_upgrade_without_basis_keeps_legacy_labels(self):
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=194,
+            actual_min_bitrate=194,
+            import_result={"version": 2, "decision": "import"},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(c.badge, "Upgraded")
+        self.assertEqual(c.verdict, "Upgrade: MP3 V2 to MP3 V2")
+
+    def test_cross_format_upgrade_names_both_formats(self):
+        basis = self._basis_dict(
+            dict(avg_bitrate_kbps=192, format="aac"),
+            dict(avg_bitrate_kbps=196, format="MP3"),
+        )
+        entry = _entry(
+            outcome="success",
+            actual_filetype="aac",
+            existing_min_bitrate=196,
+            actual_min_bitrate=192,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(
+            c.verdict,
+            "Upgrade: MP3 avg 196k (good) → AAC avg 192k (transparent)")
+
+    def test_downgrade_verdict_renders_ranks(self):
+        basis = self._basis_dict(self._SAY_HELLO_EXISTING, self._SAY_HELLO_NEW)
+        entry = _entry(
+            outcome="rejected",
+            beets_scenario="downgrade",
+            existing_min_bitrate=194,
+            actual_min_bitrate=194,
+            import_result={"version": 2, "decision": "downgrade",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(
+            c.verdict,
+            "MP3 avg 196k (good) — not better than existing "
+            "avg 288k (transparent)")
+
+    def test_equivalent_tiebreak_reject_shows_tolerance(self):
+        basis = self._basis_dict(
+            dict(avg_bitrate_kbps=250, format="MP3"),
+            dict(avg_bitrate_kbps=248, format="MP3"),
+        )
+        entry = _entry(
+            outcome="rejected",
+            beets_scenario="downgrade",
+            existing_min_bitrate=248,
+            actual_min_bitrate=250,
+            import_result={"version": 2, "decision": "downgrade",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(
+            c.verdict,
+            "Equivalent: MP3 avg 250k vs avg 248k (within 5k)")
+
+    def test_verified_lossless_bypass_names_the_bypass(self):
+        basis = self._bypass_basis_dict(
+            dict(avg_bitrate_kbps=250, format="MP3", verified_lossless=True),
+            dict(avg_bitrate_kbps=248, format="MP3"),
+        )
+        self.assertTrue(basis["verified_lossless_bypass"])
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=248,
+            actual_min_bitrate=250,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(
+            c.verdict,
+            "Equivalent: MP3 avg 250k vs avg 248k (within 5k)"
+            " — imported: verified lossless")
+
+    def test_flac_conversion_suffixes_survive_basis_path(self):
+        basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
+        entry = _entry(
+            outcome="success",
+            was_converted=True,
+            original_filetype="flac",
+            spectral_grade="genuine",
+            existing_min_bitrate=194,
+            actual_min_bitrate=194,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(
+            c.verdict,
+            "Upgrade: MP3 avg 196k (good) → avg 288k (transparent), "
+            "from FLAC, verified lossless")
+
+    def test_classified_entry_carries_basis_for_payloads(self):
+        basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=194,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(c.comparison_basis, basis)
+
+    def test_classified_entry_basis_none_when_absent(self):
+        c = classify_log_entry(_entry(outcome="success"))
+        self.assertIsNone(c.comparison_basis)
 
 
 if __name__ == "__main__":

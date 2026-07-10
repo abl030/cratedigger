@@ -80,6 +80,9 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         # On-disk codec at download time (import_result JSONB) for the
         # strip's HAVE side and the Bitrate (was X) suffix.
         item["existing_format"] = classified.existing_format
+        # The persisted QualityComparisonBasis (plain dict, null on legacy
+        # rows) — the strip renders the decision's own comparison from it.
+        item["comparison_basis"] = classified.comparison_basis
         # Issue #130: surface post-import `beet move` failures so the
         # Recents tab can render a warning chip without forcing the
         # operator to query JSONB manually. Null on clean rows.

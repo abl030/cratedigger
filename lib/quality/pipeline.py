@@ -16,6 +16,7 @@ from lib.quality.evidence_types import (
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
     V0ProbeEvidence,
     V0_PROBE_LOSSLESS_SOURCE,
@@ -123,6 +124,7 @@ def full_pipeline_decision(
             "imported": bool,             # whether files were imported to beets
             "denylisted": bool,           # whether source user gets denylisted
             "keep_searching": bool,       # whether the system keeps looking for better
+            "comparison_basis": dict | None,  # QualityComparisonBasis builtins from stage 2
         }
     """
     if cfg is None:
@@ -152,6 +154,13 @@ def full_pipeline_decision(
         "keep_searching": False,
         "target_final_format": None,
         "verified_lossless": bool(verified_lossless),
+        # The QualityComparisonBasis from measured_import_decision, as plain
+        # builtins (msgspec.to_builtins) — this dict rides json.dumps'd API
+        # responses and preview JSONB, so it must stay JSON-plain. None when
+        # stage 2 never compared against an existing album (early rejects,
+        # provisional lane, no existing). Consumers that persist it onto
+        # ImportResult convert back with msgspec.convert at their boundary.
+        "comparison_basis": None,
     }
 
     # --- Preimport gates (issue #91) ---
@@ -328,6 +337,9 @@ def full_pipeline_decision(
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
         result["stage2_import"] = measured.decision
+        result["comparison_basis"] = (
+            msgspec.to_builtins(measured.comparison_basis)
+            if measured.comparison_basis is not None else None)
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"
@@ -430,6 +442,9 @@ def full_pipeline_decision(
             cfg=cfg,
         )
         result["stage2_import"] = measured.decision
+        result["comparison_basis"] = (
+            msgspec.to_builtins(measured.comparison_basis)
+            if measured.comparison_basis is not None else None)
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
@@ -519,6 +534,9 @@ def full_pipeline_decision(
         measured = measured_import_decision(
             MeasuredImportDecisionInput(new_m, existing_m), cfg=cfg)
         result["stage2_import"] = measured.decision
+        result["comparison_basis"] = (
+            msgspec.to_builtins(measured.comparison_basis)
+            if measured.comparison_basis is not None else None)
 
         if result["stage2_import"] == "downgrade":
             result["final_status"] = "imported"  # keeps existing
@@ -635,6 +653,26 @@ def evidence_decision_name(
     ):
         return "spectral_reject"
     return default
+
+
+def comparison_basis_from_decision(
+    result: "dict[str, Any] | None",
+) -> "QualityComparisonBasis | None":
+    """Re-type the JSON-plain ``comparison_basis`` a decision dict carries.
+
+    The decision dict stores the basis as ``msgspec.to_builtins`` output so
+    it survives json.dumps'd API responses and the evidence-action wire.
+    This is the one converter back to the typed Struct — used by dispatch
+    when synthesizing the reject-side ImportResult and by the harness when
+    consuming the action file. Strict convert: dispatch and harness ship in
+    the same deploy, so shape drift is a bug worth failing on.
+    """
+    if not result:
+        return None
+    raw = result.get("comparison_basis")
+    if raw is None:
+        return None
+    return msgspec.convert(raw, type=QualityComparisonBasis)
 
 
 QUALITY_DECISION_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
@@ -856,6 +894,7 @@ def full_pipeline_decision_from_evidence(
             "keep_searching": bool,
             "target_final_format": str | None,
             "verified_lossless": bool,
+            "comparison_basis": dict | None,  # QualityComparisonBasis builtins
         }
 
     Folder/audio-integrity facts are read directly off ``candidate`` as
@@ -930,6 +969,7 @@ def full_pipeline_decision_from_evidence(
             "keep_searching": bool(auto),
             "target_final_format": None,
             "verified_lossless": False,
+            "comparison_basis": None,
         }
 
     if candidate.audio_corrupt:

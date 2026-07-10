@@ -12,7 +12,8 @@ from typing import Any, Optional
 
 import msgspec
 
-from lib.quality import AudioQualityMeasurement, ImportResult
+from lib.quality import (AudioQualityMeasurement, ImportResult,
+                         QualityComparisonBasis)
 from lib.validation_envelope import decode_validation_envelope
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,10 @@ class ClassifiedEntry:
     # bitrate are unreadable without it (issue #575: AAC 256 replacing
     # unverified MP3 256 rendered as "256kbps (was 256kbps)").
     existing_format: Optional[str] = None
+    # The persisted QualityComparisonBasis as JSON-plain builtins, for the
+    # frontend evidence strip / detail grid. None on rows predating the
+    # field (request 6039 lesson: labels re-derived from min bitrate lie).
+    comparison_basis: Optional[dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -180,10 +185,14 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
     triage = _extract_wrong_match_triage(entry)
+    basis = _entry_comparison_basis(entry)
     return ClassifiedEntry(
         badge=badge, badge_class=badge_class,
         border_color=border_color, verdict=verdict,
         summary=summary, downloaded_label=downloaded_label,
+        comparison_basis=(
+            msgspec.to_builtins(basis) if basis is not None else None
+        ),
         disambiguation_failure=disambig_reason,
         disambiguation_detail=disambig_detail,
         bad_extensions=bad_extensions,
@@ -467,12 +476,18 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         if had_existing:
             if entry.search_filetype_override:
                 return _classify_search_filetype_override(entry, is_verified_lossless)
-            verdict = _upgrade_verdict(
-                entry.existing_min_bitrate,
-                _downloaded_min_bitrate_kbps(entry),
-                entry.was_converted, entry.original_filetype,
-                is_verified_lossless,
-                actual_filetype=entry.actual_filetype)
+            basis = _entry_comparison_basis(entry)
+            if basis is not None:
+                verdict = _upgrade_verdict_from_basis(
+                    basis, entry.was_converted, entry.original_filetype,
+                    is_verified_lossless)
+            else:
+                verdict = _upgrade_verdict(
+                    entry.existing_min_bitrate,
+                    _downloaded_min_bitrate_kbps(entry),
+                    entry.was_converted, entry.original_filetype,
+                    is_verified_lossless,
+                    actual_filetype=entry.actual_filetype)
             return ("Upgraded", "badge-upgraded", "#3a6", verdict)
 
         # New import
@@ -516,6 +531,86 @@ def _entry_decision(entry: LogEntry) -> str | None:
     if ir is not None and ir.decision:
         return ir.decision
     return entry.beets_scenario
+
+
+def _entry_comparison_basis(entry: LogEntry) -> QualityComparisonBasis | None:
+    ir = _parse_import_result(entry)
+    if ir is None:
+        return None
+    return ir.comparison_basis
+
+
+def _basis_value_phrase(metric: str, value: int | None, clamped: bool) -> str:
+    if value is None:
+        return "unmeasured"
+    if clamped:
+        # min(selected metric, spectral floor) — the metric label would lie
+        return f"~{value}k"
+    return f"{metric} {value}k"
+
+
+def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
+    """Render the persisted comparison exactly as the decider performed it.
+
+    This is the whole point of QualityComparisonBasis (request 6039): the
+    verdict names the branch that fired, the per-side stat actually
+    classified, and the ranks — never re-derived from row columns. Rows
+    without a basis keep the legacy min-based rendering elsewhere.
+    """
+    new_fmt = (basis.new_format or "?").upper()
+    ex_fmt = (basis.existing_format or "?").upper()
+    clamped = basis.spectral_clamped and basis.branch == "rank"
+    new_val = _basis_value_phrase(basis.new_metric, basis.new_value_kbps, clamped)
+    ex_val = _basis_value_phrase(
+        basis.existing_metric, basis.existing_value_kbps, clamped)
+
+    if basis.verdict == "better":
+        if basis.branch == "metric_tiebreak":
+            return (f"Upgrade: {ex_fmt} {ex_val} → {new_val} "
+                    f"(both {basis.new_rank})")
+        new_side = new_val if new_fmt == ex_fmt else f"{new_fmt} {new_val}"
+        return (f"Upgrade: {ex_fmt} {ex_val} ({basis.existing_rank}) → "
+                f"{new_side} ({basis.new_rank})")
+
+    if basis.verdict == "worse":
+        prefix = ("Transcode-grade: "
+                  if basis.branch == "transcode_rank_regression" else "")
+        ex_side = ex_val if new_fmt == ex_fmt else f"{ex_fmt} {ex_val}"
+        return (f"{prefix}{new_fmt} {new_val} ({basis.new_rank}) — "
+                f"not better than existing {ex_side} ({basis.existing_rank})")
+
+    # equivalent — the branch is the story
+    if basis.branch == "lossless_same_rank":
+        core = "both lossless"
+    elif basis.branch == "cross_family_same_rank":
+        core = f"{new_fmt} vs {ex_fmt} — both {basis.new_rank}"
+    elif basis.branch == "label_contract_same_rank":
+        core = f"{new_fmt} vs {ex_fmt} — label contract, both {basis.new_rank}"
+    elif basis.branch == "metric_missing":
+        core = "bitrate unmeasurable"
+    else:  # metric_tiebreak
+        tol = (f" (within {basis.tolerance_kbps}k)"
+               if basis.tolerance_kbps is not None else "")
+        core = f"{new_fmt} {new_val} vs {ex_val}{tol}"
+    verdict = f"Equivalent: {core}"
+    if basis.verified_lossless_bypass:
+        verdict += " — imported: verified lossless"
+    return verdict
+
+
+def _upgrade_verdict_from_basis(
+    basis: QualityComparisonBasis,
+    was_converted: bool,
+    original_ft: Optional[str],
+    is_verified_lossless: bool,
+) -> str:
+    """Basis-driven twin of _upgrade_verdict, keeping the legacy suffixes."""
+    parts = [_verdict_from_basis(basis)]
+    if was_converted and original_ft:
+        parts.append(f"from {original_ft.upper()}")
+    if is_verified_lossless and not basis.verified_lossless_bypass:
+        parts.append("verified lossless")
+    return ", ".join(parts)
 
 
 def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
@@ -662,6 +757,16 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
     ir = _parse_import_result(entry)
     if ir is None:
         return None
+
+    # The persisted basis is the decision's own story — render it verbatim
+    # instead of re-deriving a comparison from the measurements (request
+    # 6039: re-derivation is how the display learned to lie).
+    if (ir.comparison_basis is not None
+            and ir.decision in ("downgrade", "transcode_downgrade")):
+        verdict = _verdict_from_basis(ir.comparison_basis)
+        if ir.decision == "transcode_downgrade":
+            return f"Transcode — {verdict}"
+        return verdict
 
     new_m = ir.new_measurement
     existing_m = ir.existing_measurement

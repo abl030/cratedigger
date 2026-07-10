@@ -1871,7 +1871,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         # the critique is the decision call itself, not the dispatch wiring.
         from lib.quality import import_quality_decision
         self.assertEqual(
-            import_quality_decision(new, existing), "import",
+            import_quality_decision(new, existing).decision, "import",
             "compare_quality must rank new above existing on AVG (179>172) "
             "despite MIN regressing and spectral flipping to likely_transcode. "
             "If this fails, the slice below is moot — fix the decision, not "
@@ -1953,7 +1953,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         # just dispatch wiring.
         from lib.quality import import_quality_decision
         self.assertEqual(
-            import_quality_decision(new, existing), "import",
+            import_quality_decision(new, existing).decision, "import",
             "compare_quality must rank new above existing on AVG (225>179). "
             "If this fails, the slice below is moot — fix the decision, not "
             "the slice.")

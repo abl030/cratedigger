@@ -107,6 +107,16 @@ Browser → https://music.ablz.au
   outcome enum. Force imports show `overridden` in the Distance row instead of
   beets' misleading 0.000. Debug internals (Preview / Reason / Stages) sit
   behind a collapsed `forensics` toggle per attempt.
+- **Comparison basis rendering (request 6039)** — rows whose
+  `import_result` JSONB carries the persisted `comparison_basis` render the
+  decision's own comparison: the verdict line names the deciding metric,
+  values, and ranks ("Upgrade: MP3 avg 196k (good) → avg 288k
+  (transparent)"), the strip's IN/HAVE sides show `fmt metric value · rank`,
+  and the detail grid gains a "Compared" row (with a verified-lossless-bypass
+  note when that changed the outcome). Rows predating the field fall back to
+  the legacy min-bitrate labels — the ones that rendered a real avg 196→288
+  rank upgrade as "MP3 V2 to MP3 V2". See docs/quality-verification.md
+  § "Comparison basis".
 - **Wrong Matches Converge** — each release starts with a `180` milli-distance
   loosen threshold. Candidates at or below that threshold turn green; Converge
   queues those folders as force-import jobs and deletes the non-green folders
