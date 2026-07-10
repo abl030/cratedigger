@@ -96,7 +96,6 @@ Browser → https://music.ablz.au
 - **Wrong Matches history** — old rows with
   `download_log.validation_result.wrong_match_triage` still render their
   historical chip/detail in Recents. New cleanup does not write that blob.
-- **Decisions tab** — pipeline decision diagram generated from `get_decision_tree()` with FLAC/MP3 branching paths, all stages/rules/thresholds from live code. Includes a "dispatch" stage showing post-import action mapping (mark_done/failed, denylist, requeue) driven by `dispatch_action()`. Interactive simulator calls the value-preview adapter through `/api/pipeline/simulate` with presets for known scenarios.
 
 ## Dev Server Workflows
 

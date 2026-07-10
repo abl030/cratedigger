@@ -1,4 +1,4 @@
-"""Beets library route handlers — search, album detail, recent, delete."""
+"""Beets library route handlers — album detail, delete."""
 
 from typing import Literal, assert_never
 
@@ -7,20 +7,6 @@ from pydantic import BaseModel, Field
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
-
-
-def get_beets_search(h, params: dict[str, list[str]]) -> None:
-    q = params.get("q", [""])[0].strip()
-    if not q or len(q) < 2:
-        h._error("Query too short")
-        return
-    b = _server()._beets_db()
-    if not b:
-        h._error("Beets DB not available")
-        return
-    albums = b.search_albums(q)
-    _server()._enrich_with_pipeline(albums)
-    h._json({"albums": albums})
 
 
 def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
@@ -41,16 +27,6 @@ def get_beets_album(h, params: dict[str, list[str]], album_id_str: str) -> None:
         h._error("Not found", 404)
         return
     h._json(detail.to_dict())
-
-
-def get_beets_recent(h, params: dict[str, list[str]]) -> None:
-    b = _server()._beets_db()
-    if not b:
-        h._error("Beets DB not available")
-        return
-    albums = b.get_recent()
-    _server()._enrich_with_pipeline(albums)
-    h._json({"albums": albums})
 
 
 class BeetsDeleteRequest(BaseModel):
@@ -135,16 +111,6 @@ def post_beets_delete(h, body: dict) -> None:
 
 
 ROUTES: list[RouteRegistration] = [
-    route(
-        "GET", "/api/beets/search", get_beets_search,
-        "Beets library album search by query string; pipeline-enriched.",
-        classified=True,
-    ),
-    route(
-        "GET", "/api/beets/recent", get_beets_recent,
-        "Recently imported beets albums; pipeline-enriched.",
-        classified=True,
-    ),
     pattern_route(
         "GET", r"^/api/beets/album/(\d+)$", get_beets_album,
         "Beets album detail — full tracks + library / pipeline overlay.",

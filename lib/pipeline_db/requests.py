@@ -1110,17 +1110,6 @@ class _RequestsMixin(_PipelineDBBase):
         return [dict(r) for r in cur.fetchall()]
 
 
-    def get_recent(self, limit=20):
-        """Get recently downloaded/imported albums (must have download history)."""
-        cur = self._execute(
-            "SELECT ar.* FROM album_requests ar "
-            "WHERE EXISTS (SELECT 1 FROM download_log dl WHERE dl.request_id = ar.id) "
-            "ORDER BY ar.updated_at DESC LIMIT %s",
-            (limit,),
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-
     def count_by_status(self):
         cur = self._execute(
             "SELECT status, COUNT(*) as cnt FROM album_requests GROUP BY status"

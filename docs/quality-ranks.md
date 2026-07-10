@@ -328,15 +328,6 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
   uncertain, missing-evidence, and stale-evidence candidates remain visible.
   Historical `download_log.validation_result.wrong_match_triage` blobs are
   still rendered as display-only audit, but new cleanup does not write them.
-- `/api/pipeline/constants` (web) — surfaces `rank_gate_min_rank` and
-  `rank_bitrate_metric` alongside other constants for the Decisions tab UI.
-- `/api/pipeline/simulate?...` (web) — accepts the same params as
-  `full_pipeline_decision()` plus `existing_format`, `existing_is_cbr`,
-  `new_format`, and provisional probe fields
-  (`candidate_v0_probe_avg`, `existing_v0_probe_avg`,
-  `candidate_v0_probe_kind`, `existing_v0_probe_kind`,
-  `supported_lossless_source`) so the web simulator classifies the same way
-  production does.
 - `/api/import-preview` (web) — returns the common preview verdict shape for
   real-folder preview and typed values.
 
@@ -427,5 +418,5 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 
 2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `gate_min_rank`, `bitrate_metric`, and thresholds the simulator is using. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
 
-3. **Visual confirmation** -- open the [Decisions tab at music.ablz.au](https://music.ablz.au). The top of the tab renders three pills (**Gate min rank** / **Bitrate metric** / **Within-rank tolerance**) pulled from the same `_runtime_rank_config()` snapshot. If your tuning is live, the pills show the new values (#68). The transcode stage rule threshold also reflects `bands.mp3Vbr.excellent` live, since `get_decision_tree()` threads `cfg` through (#75).
+3. **Simulate against the live config** -- `ssh doc2 'pipeline-cli import-preview --values --values-json '"'"'{"is_flac": false, "min_bitrate": 200, "is_cbr": false}'"'"''`. The preview path loads the same runtime rank config the importer uses, so the verdict reflects your tuning (the web Decisions tab that used to render these values was removed in #575).
 

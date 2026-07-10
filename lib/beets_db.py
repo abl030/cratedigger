@@ -580,24 +580,6 @@ class BeetsDB:
 
         return result
 
-    def search_albums(self, query: str, limit: int = 100) -> list[dict[str, object]]:
-        """Search albums by artist or album name (LIKE, case-insensitive)."""
-        rows = self._conn.execute(
-            self._ALBUM_SELECT +
-            "WHERE a.albumartist LIKE ? COLLATE NOCASE OR a.album LIKE ? COLLATE NOCASE "
-            "ORDER BY a.albumartist, a.year, a.album LIMIT ?",
-            (f"%{query}%", f"%{query}%", limit),
-        ).fetchall()
-        return [self._album_row_to_dict(r) for r in rows]
-
-    def get_recent(self, limit: int = 50) -> list[dict[str, object]]:
-        """Get most recently added albums."""
-        rows = self._conn.execute(
-            self._ALBUM_SELECT + "ORDER BY a.added DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [self._album_row_to_dict(r) for r in rows]
-
     def get_album_detail(self, album_id: int) -> Optional[dict[str, object]]:
         """Get full album metadata + track list. Returns None if not found."""
         album = self._conn.execute(

@@ -129,49 +129,6 @@ def get_pipeline_status(h, params: dict[str, list[str]]) -> None:
     })
 
 
-def get_pipeline_recent(h, params: dict[str, list[str]]) -> None:
-    s = _server()
-    recent = s._db().get_recent(limit=20)
-    mbids = [r["mb_release_id"] for r in recent if r.get("mb_release_id")]
-    beets_info = s.check_beets_library_detail(mbids) if mbids else {}
-    # Batch fetch track counts and download history
-    ids = [int(r["id"]) for r in recent]
-    track_counts = s._db().get_track_counts(ids)
-    history_batch = s._db().get_download_history_batch(ids)
-    serialized = []
-    for r in recent:
-        item = s._serialize_row(r)
-        mbid = r.get("mb_release_id")
-        item["pipeline_tracks"] = track_counts.get(r["id"], 0)
-        if mbid and mbid in beets_info:
-            item["in_beets"] = True
-            bi = beets_info[mbid]
-            item["beets_tracks"] = bi["beets_tracks"]
-            for k in ("beets_format", "beets_bitrate", "beets_samplerate", "beets_bitdepth"):
-                if bi.get(k):
-                    item[k] = bi[k]
-        else:
-            # Issue #123: artist+album fuzzy fallback deleted. Legacy
-            # rows with an untagged beets copy now honestly read as
-            # 'not in library' — fuzzy LIKE matches could return a
-            # track count for an unrelated sibling pressing by the
-            # same artist, which misled the UI's 'already on disk'
-            # signal.
-            item["in_beets"] = False
-            item["beets_tracks"] = 0
-        history = history_batch.get(r["id"], [])
-        success = next((dl for dl in history if dl.get("outcome") == "success"), None)
-        if success:
-            for k in ("soulseek_username", "filetype", "bitrate",
-                      "sample_rate", "bit_depth", "is_vbr",
-                      "was_converted", "original_filetype"):
-                val = success.get(k)
-                if val is not None:
-                    item["dl_" + k] = val
-        serialized.append(item)
-    h._json({"recent": serialized})
-
-
 def _attach_latest_download_summaries(
     items: list[dict],
     summaries: dict[int, dict],
@@ -450,12 +407,6 @@ ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/pipeline/status", get_pipeline_status,
         "Status counts + the first 50 wanted requests for the dashboard.",
-        classified=True,
-    ),
-    route(
-        "GET", "/api/pipeline/recent", get_pipeline_recent,
-        "Recently updated pipeline requests with beets / pipeline / "
-        "download-history enrichment.",
         classified=True,
     ),
     route(

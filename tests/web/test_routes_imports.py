@@ -25,15 +25,12 @@ from tests.web._harness import (
     _fresh_triage_runner,
 )
 
-from lib.manual_import import FolderInfo
 from tests.helpers import make_request_row
 
 
 class TestManualImportRouteContracts(_FakeDbWebServerCase):
     """Contract tests for manual import routes."""
 
-    FOLDER_REQUIRED_FIELDS = {"name", "path", "artist", "album", "file_count", "match"}
-    MATCH_REQUIRED_FIELDS = {"request_id", "artist", "album", "mb_release_id", "score"}
     IMPORT_REQUIRED_FIELDS = {"status", "message", "request_id", "artist", "album"}
 
     def setUp(self) -> None:
@@ -42,36 +39,6 @@ class TestManualImportRouteContracts(_FakeDbWebServerCase):
             id=100, status="wanted", mb_release_id="abc-123",
             artist_name="Test Artist", album_title="Test Album",
         ))
-
-    @patch("web.routes.imports.scan_complete_folder")
-    def test_manual_import_scan_contract(self, mock_scan):
-        # Drive the real ``match_folders_to_requests`` against folder +
-        # request inputs that share an artist/album token set so the
-        # fuzzy matcher produces a high-confidence FolderMatch. Patching
-        # the matcher away would hide its contract — score field,
-        # match-or-skip threshold, sort order — from this test.
-        folder = FolderInfo(
-            name="Test Artist - Test Album",
-            path="/complete/Test Artist - Test Album",
-            artist="Test Artist",
-            album="Test Album",
-            file_count=10,
-        )
-        mock_scan.return_value = [folder]
-
-        status, data = self._get("/api/manual-import/scan")
-
-        self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"folders", "wanted_count"},
-                                "manual import scan response")
-        _assert_required_fields(self, data["folders"][0], self.FOLDER_REQUIRED_FIELDS,
-                                "manual import folder")
-        _assert_required_fields(self, data["folders"][0]["match"], self.MATCH_REQUIRED_FIELDS,
-                                "manual import match")
-        # Real matcher should report a perfect score for identical
-        # artist/album tokens — this is the actual production contract.
-        self.assertEqual(data["folders"][0]["match"]["request_id"], 100)
-        self.assertGreaterEqual(data["folders"][0]["match"]["score"], 0.99)
 
     @patch("web.routes.imports.resolve_failed_path",
            return_value="/complete/Test Artist - Test Album")

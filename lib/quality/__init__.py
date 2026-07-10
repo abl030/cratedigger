@@ -160,9 +160,6 @@ from lib.quality.dispatch_actions import (
     narrow_override_on_lossless_source_lock,
     rejected_download_tier,
 )
-from lib.quality.decision_tree import (
-    get_decision_tree,
-)
 from lib.quality.pipeline import (
     AlbumQualityEvidenceDecisionFacts,
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
@@ -301,7 +298,6 @@ __all__ = [
     "full_pipeline_decision",
     "full_pipeline_decision_from_evidence",
     "gate_rank",
-    "get_decision_tree",
     "has_mixed_lossless_and_lossy",
     "import_quality_decision",
     "is_comparable_lossless_source_probe",

@@ -84,9 +84,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     STATUS_WANTED_REQUIRED_FIELDS = {
         "id", "artist", "album", "mb_release_id", "source", "created_at",
     }
-    RECENT_REQUIRED_FIELDS = (
-        PIPELINE_ITEM_REQUIRED_FIELDS | {"pipeline_tracks", "in_beets", "beets_tracks"}
-    )
     IMPORT_PREVIEW_REQUIRED_FIELDS = {
         "mode", "verdict", "would_import", "confident_reject", "uncertain",
         "cleanup_eligible", "decision", "reason", "stage_chain",
@@ -488,58 +485,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["wrong_match_triage_stage_chain"],
                          ["stage1_spectral:reject"])
 
-    def test_pipeline_recent_contract(self):
-        self.db.seed_request(make_request_row(
-            id=202, status="imported", album_title="Recent Album"))
-        self.db.set_tracks(202, [
-            {"disc_number": 1, "track_number": n, "title": f"T{n}"}
-            for n in range(1, 12)
-        ])
-        self.db.log_download(
-            202, outcome="success", beets_scenario="strong_match",
-            beets_distance=0.01, soulseek_username="testuser",
-        )
-
-        status, data = self._get("/api/pipeline/recent")
-
-        self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"recent"}, "pipeline recent response")
-        _assert_required_fields(self, data["recent"][0], self.RECENT_REQUIRED_FIELDS,
-                                "pipeline recent item")
-
-    @patch("web.server.check_beets_by_artist_album",
-           create=True, return_value=12)
-    @patch("web.server.check_beets_library_detail", return_value={})
-    def test_pipeline_recent_in_beets_false_when_mbid_not_in_beets(
-            self, _mock_detail, _mock_fuzzy):
-        """No exact MBID hit → ``in_beets`` False, no fuzzy fallback.
-
-        Issue #123: ``get_pipeline_recent`` previously fell back to
-        ``check_beets_by_artist_album`` when the MBID missed the batch
-        lookup. That fuzzy LIKE match could return a track count for
-        an unrelated pressing by the same artist. After deleting the
-        fuzzy path, the recents row honestly reports ``in_beets=False``
-        and ``beets_tracks=0`` when the exact ID is not in beets —
-        even if a shim would have returned 12 tracks (mocked here with
-        ``create=True`` so the test is RED against the current code).
-        """
-        self.db.seed_request(make_request_row(
-            id=303, status="imported", album_title="Recent Album",
-            mb_release_id="no-such-id-in-beets"))
-        self.db.set_tracks(303, [
-            {"disc_number": 1, "track_number": n, "title": f"T{n}"}
-            for n in range(1, 9)
-        ])
-
-        status, data = self._get("/api/pipeline/recent")
-        self.assertEqual(status, 200)
-        item = data["recent"][0]
-        self.assertFalse(
-            item["in_beets"],
-            "Issue #123: no exact ID match → in_beets False "
-            "(artist/album fuzzy fallback was deleted).")
-        self.assertEqual(item["beets_tracks"], 0)
-
     def test_import_preview_values_contract(self):
         status, data = self._post("/api/import-preview", {
             "values": {
@@ -726,44 +671,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/import-jobs?request_id=abc")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
-
-
-class TestApplyPipelineBitrateOverride(unittest.TestCase):
-    """Test the apply_pipeline_bitrate_override helper."""
-
-    def _apply(self, album, pipeline_info):
-        from web.server import apply_pipeline_bitrate_override
-        apply_pipeline_bitrate_override(album, pipeline_info)
-
-    def test_pipeline_higher_overrides_beets(self):
-        album = {"min_bitrate": 192000}
-        self._apply(album, {"min_bitrate": 320})
-        self.assertEqual(album["min_bitrate"], 320000)
-
-    def test_pipeline_lower_no_override(self):
-        album = {"min_bitrate": 320000}
-        self._apply(album, {"min_bitrate": 192})
-        self.assertEqual(album["min_bitrate"], 320000)
-
-    def test_pipeline_none_no_change(self):
-        album = {"min_bitrate": 192000}
-        self._apply(album, {"min_bitrate": None})
-        self.assertEqual(album["min_bitrate"], 192000)
-
-    def test_beets_none_no_change(self):
-        album = {"min_bitrate": None}
-        self._apply(album, {"min_bitrate": 320})
-        self.assertIsNone(album["min_bitrate"])
-
-    def test_upgrade_queued_flag_set(self):
-        album = {}
-        self._apply(album, {"status": "wanted", "search_filetype_override": "flac,mp3 v0"})
-        self.assertTrue(album.get("upgrade_queued"))
-
-    def test_no_upgrade_queued_when_imported(self):
-        album = {}
-        self._apply(album, {"status": "imported", "search_filetype_override": "flac"})
-        self.assertNotIn("upgrade_queued", album)
 
 
 if __name__ == "__main__":

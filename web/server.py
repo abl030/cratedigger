@@ -59,7 +59,6 @@ from lib.pipeline_db import PipelineDB
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
-from web.routes import decisions as _decisions_routes
 from web.routes import disk_coverage as _disk_coverage_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
@@ -89,7 +88,6 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _api_index_routes,
     _beets_distance_routes,
     _browse_routes,
-    _decisions_routes,
     _disk_coverage_routes,
     _labels_routes,
     _long_tail_routes,
@@ -235,7 +233,6 @@ def _db_or_none() -> PipelineDB | None:  # noqa: same nominal type, server-owned
 
 # Pure helpers — re-bound so routes / tests keep their existing names.
 _serialize_row = _overlay.serialize_row
-apply_pipeline_bitrate_override = _overlay.apply_pipeline_bitrate_override
 compute_library_rank = _overlay.compute_library_rank
 
 
@@ -256,10 +253,6 @@ def get_library_artist(
 
 def check_pipeline(mbids):
     return _overlay.check_pipeline(_db_or_none(), mbids)
-
-
-def _enrich_with_pipeline(albums: list[dict[str, object]]) -> None:
-    _overlay.enrich_with_pipeline(_db_or_none(), albums)
 
 
 class Handler(BaseHTTPRequestHandler):

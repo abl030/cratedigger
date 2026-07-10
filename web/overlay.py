@@ -85,38 +85,6 @@ def check_pipeline(pdb: "OverlayPipelineDB | None", mbids) -> dict:
     return pdb.get_pipeline_overlay([str(m) for m in mbids])
 
 
-def enrich_with_pipeline(
-    pdb: "OverlayPipelineDB | None",
-    albums: list[dict[str, object]],
-) -> None:
-    """Add pipeline_status/upgrade_queued to album dicts. Mutates in place."""
-    if pdb is None:
-        return
-    mbids = [str(a["mb_albumid"]) for a in albums if a.get("mb_albumid")]
-    if not mbids:
-        return
-    pipeline_info = check_pipeline(pdb, mbids)
-    for a in albums:
-        pi = pipeline_info.get(a.get("mb_albumid"))
-        if pi:
-            apply_pipeline_bitrate_override(a, pi)
-
-
-def apply_pipeline_bitrate_override(album: dict, pipeline_info: dict) -> None:
-    """Apply pipeline DB min_bitrate and upgrade_queued flag to a beets album dict.
-
-    Pipeline DB stores kbps, beets stores bps. Only overrides when pipeline is higher.
-    """
-    if pipeline_info.get("status") == "wanted" and (pipeline_info.get("search_filetype_override") or pipeline_info.get("target_format")):
-        album["upgrade_queued"] = True
-    pi_br = pipeline_info.get("min_bitrate")
-    a_br = album.get("min_bitrate")
-    if pi_br is not None and a_br is not None:
-        pi_br_bps = pi_br * 1000  # kbps → bps
-        if pi_br_bps > a_br:
-            album["min_bitrate"] = pi_br_bps
-
-
 _rank_cfg_cache = None
 
 

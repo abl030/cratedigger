@@ -273,7 +273,6 @@ _LEAF_SEAM_PATTERNS = [
     # patch the import binding inside the route module.
     re.compile(r"^web\.routes\.\w+\.resolve_failed_path$"),
     re.compile(r"^web\.routes\.pipeline_mutations\.hash_audio_content$"),
-    re.compile(r"^web\.routes\.imports\.scan_complete_folder$"),
 
     # Route-to-transition DI seam. ``web.routes.pipeline_mutations.finalize_request``
     # is the module-level swap point for ``transitions.finalize_request``;
