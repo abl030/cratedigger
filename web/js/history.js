@@ -122,7 +122,9 @@ export function renderEvidenceStrip(h) {
     if (h.actual_min_bitrate) inParts.push(`${esc(h.actual_min_bitrate)}k`);
   }
   if (h.spectral_grade) {
-    const floor = h.spectral_bitrate ? `~${esc(h.spectral_bitrate)}k ` : '';
+    // With a basis, the clamped rank value already carries the floor —
+    // repeating "~250k" in the grade chip would double it up.
+    const floor = (!basis && h.spectral_bitrate) ? `~${esc(h.spectral_bitrate)}k ` : '';
     const sgColor = h.spectral_grade === 'genuine' ? '#6d6'
       : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
     inParts.push(`<span style="color:${sgColor};">${floor}${esc(h.spectral_grade)}</span>`);

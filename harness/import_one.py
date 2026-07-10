@@ -1410,8 +1410,16 @@ def _run_quality_evidence_authorized_import(
             if payload.current is not None else None)
         # The decision dict crossed the action-file wire as plain JSON;
         # comparison_basis_from_decision is the one converter back to the
-        # typed Struct (strict — dispatch and harness ship together).
-        r.comparison_basis = comparison_basis_from_decision(payload.decision)
+        # typed Struct. Tolerant HERE (unlike the same-process dispatch
+        # site): this sits inside the outcome-affecting try, and the basis
+        # is explanation — an explanation must never flip an import to a
+        # reject, so a malformed one degrades to None (legacy rendering),
+        # mirroring web/classify.py's tolerant _parse_import_result.
+        try:
+            r.comparison_basis = comparison_basis_from_decision(
+                payload.decision)
+        except msgspec.ValidationError:
+            r.comparison_basis = None
 
         if not _evidence_action_allows_import(payload):
             r.exit_code = 5

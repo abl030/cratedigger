@@ -319,6 +319,9 @@ class QualityComparisonBasis(msgspec.Struct, frozen=True):
     which rule fired, and ``new_value_kbps`` / ``existing_value_kbps`` are the
     numbers that DECIDED that branch (spectral-clamped values on a clamped
     rank comparison, raw configured-metric values on a same-rank tiebreak).
+    Consumers reading ``(metric, value)`` pairs must suppress the metric
+    label when ``branch == "rank" and spectral_clamped`` — the value there
+    is ``min(metric, spectral floor)``, not the named statistic.
     ``new_metric`` / ``existing_metric`` name the per-side statistic actually
     classified — ``measurement_rank()`` falls back to min when the configured
     metric is unmeasured, and a basis claiming "avg" for a min value would be
