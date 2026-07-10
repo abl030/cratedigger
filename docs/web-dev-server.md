@@ -39,3 +39,11 @@ tunnel.
 
 `--beets-db` is optional in this flow. Wrong Matches does not need it; only
 beets-backed library badges and lookups do.
+
+## Screenshot verification loop
+
+UI changes are verified visually against this dev server (live-db mode)
+before pushing — screenshots of real pipeline data catch what unit tests
+and code review miss. The full agent-driven recipe (CDP chromium,
+playwright agent rounds, gotchas) lives in
+[docs/solutions/ui-dev-server-screenshot-loop.md](solutions/ui-dev-server-screenshot-loop.md).
