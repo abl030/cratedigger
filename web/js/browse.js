@@ -31,6 +31,29 @@ async function findArtistOnSource(name, src) {
 }
 
 /**
+ * Reflect the active metadata source in the toggle buttons + the hint line.
+ * The selected source is the PRIMARY discography; the other source only
+ * fills in releases the primary is missing (the appended "Only on <other>"
+ * section). Called from every place that changes browseSource so the
+ * primary/complement story never goes stale. Single source of truth for
+ * the source-toggle chrome — the two call sites used to duplicate the
+ * button-class flip and neither touched the hint.
+ * @param {string} src - 'mb' | 'discogs'
+ */
+function applySourceUI(src) {
+  const mbBtn = document.getElementById('source-mb');
+  const dgBtn = document.getElementById('source-discogs');
+  if (mbBtn) mbBtn.className = 'p-btn' + (src === 'mb' ? ' active-status' : '');
+  if (dgBtn) dgBtn.className = 'p-btn' + (src === 'discogs' ? ' active-status' : '');
+  const hint = document.getElementById('source-hint');
+  if (hint) {
+    hint.innerHTML = src === 'discogs'
+      ? '<b class="src-primary">Discogs</b> is primary · MusicBrainz fills the rest (shown as "Only on MusicBrainz" below)'
+      : '<b class="src-primary">MusicBrainz</b> is primary · Discogs fills the rest (shown as "Only on Discogs" below)';
+  }
+}
+
+/**
  * Set the browse metadata source (mb or discogs). Preserves artist context
  * when possible: if an artist is currently selected, look up the equivalent
  * on the new source and re-render in place instead of dumping back to search.
@@ -46,10 +69,7 @@ export async function setBrowseSource(src) {
   // changed contexts.
   clearSearchTarget();
   state.browseSource = src;
-  const mbBtn = document.getElementById('source-mb');
-  const dgBtn = document.getElementById('source-discogs');
-  if (mbBtn) mbBtn.className = 'p-btn' + (src === 'mb' ? ' active-status' : '');
-  if (dgBtn) dgBtn.className = 'p-btn' + (src === 'discogs' ? ' active-status' : '');
+  applySourceUI(src);
   state.browseCache = {};
 
   // Sticky artist context across the toggle.
@@ -196,10 +216,7 @@ export async function resolveAndNavigate(q, requestToken) {
   // artist view, otherwise the discography fetch would hit the wrong API.
   if (state.browseSource !== parsed.family) {
     state.browseSource = parsed.family;
-    const mbBtn = document.getElementById('source-mb');
-    const dgBtn = document.getElementById('source-discogs');
-    if (mbBtn) mbBtn.className = 'p-btn' + (parsed.family === 'mb' ? ' active-status' : '');
-    if (dgBtn) dgBtn.className = 'p-btn' + (parsed.family === 'discogs' ? ' active-status' : '');
+    applySourceUI(parsed.family);
     state.browseCache = {};
   }
 

@@ -359,6 +359,9 @@
   .p-btn { padding: 4px 12px; border: 1px solid #444; background: #222; color: #aaa; border-radius: 4px; cursor: pointer; font-size: 0.78em; }
   .p-btn:hover { background: #333; color: #eee; }
   .p-btn.active-status { border-color: #6a9; color: #6a9; background: #2a3a2a; }
+  .source-label { color: #777; font-size: 0.66em; text-transform: uppercase; letter-spacing: 0.6px; }
+  #source-hint { color: #777; font-size: 0.74em; margin: 0 0 10px 2px; }
+  #source-hint .src-primary { color: #6a9; font-weight: 600; }
   .p-btn.delete { border-color: #633; color: #d66; margin-left: auto; }
   .p-btn.delete:hover { background: #3a1a1a; }
   .p-group-header { padding: 8px 12px; color: #6a9; font-size: 0.85em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px; margin-bottom: 4px; display: flex; justify-content: space-between; cursor: pointer; }
@@ -500,11 +503,15 @@
       <button class="p-btn" id="search-type-label" onclick="setSearchType('label')">Label</button>
       <button class="p-btn" id="search-type-id" onclick="setSearchType('id')">ID</button>
     </div>
-    <div style="display:flex;gap:2px;margin-left:8px;border-left:1px solid #444;padding-left:8px;">
-      <button class="p-btn active-status" id="source-mb" onclick="setBrowseSource('mb')">MB</button>
-      <button class="p-btn" id="source-discogs" onclick="setBrowseSource('discogs')">Discogs</button>
+    <div style="display:flex;gap:6px;align-items:center;margin-left:8px;border-left:1px solid #444;padding-left:8px;">
+      <span class="source-label">Source</span>
+      <div style="display:flex;gap:2px;">
+        <button class="p-btn active-status" id="source-mb" title="Use MusicBrainz as the primary discography. Releases found only on Discogs are added at the bottom as “Only on Discogs”." onclick="setBrowseSource('mb')">MB</button>
+        <button class="p-btn" id="source-discogs" title="Use Discogs as the primary discography. Releases found only on MusicBrainz are added at the bottom as “Only on MusicBrainz”." onclick="setBrowseSource('discogs')">Discogs</button>
+      </div>
     </div>
   </div>
+  <div id="source-hint"><b class="src-primary">MusicBrainz</b> is primary · Discogs fills the rest (shown as "Only on Discogs" below)</div>
   <div id="results"></div>
   <div id="browse-artist" style="display:none;">
     <div id="browse-artist-header" style="margin:12px 0 8px;display:flex;align-items:center;gap:12px;">
