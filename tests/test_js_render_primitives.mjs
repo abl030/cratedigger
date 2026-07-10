@@ -112,6 +112,14 @@ console.log('renderExpectedTrackRow()');
 
   const disc1 = renderExpectedTrackRow({ disc_number: 1, track_number: 9, title: 'X' });
   assertContains(disc1, '>9. X', 'no disc prefix on disc 1');
+
+  // Discogs index/heading rows (sub-EP titles on a combined release)
+  // arrive with track_number 0 — render as an unnumbered heading, not
+  // "0. Feather Figure Single".
+  const heading = renderExpectedTrackRow({ disc_number: 1, track_number: 0, title: 'Feather Figure Single' });
+  assertExcludes(heading, '0.', 'no zero prefix on heading rows');
+  assertContains(heading, 'Feather Figure Single', 'heading title rendered');
+  assertContains(heading, 'lib-track-heading', 'heading rows are visually distinct');
 }
 
 console.log('renderReleaseRow()');
