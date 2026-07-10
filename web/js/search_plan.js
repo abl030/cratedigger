@@ -624,8 +624,6 @@ export function snapshotActiveTab() {
     subView = state.pipelineView ?? 'queue';
   } else if (tab === 'recents') {
     subView = state.recentsSub ?? 'history';
-  } else if (tab === 'browse') {
-    subView = state.browseSubView ?? null;
   }
   const scrollY = (typeof window !== 'undefined' && typeof window.scrollY === 'number')
     ? window.scrollY
@@ -739,9 +737,6 @@ export function closeSearchPlanDetail() {
     if (tab === 'recents'
       && (subView === 'history' || subView === 'downloading' || subView === 'queue')) {
       state.recentsSub = subView;
-    }
-    if (tab === 'browse' && typeof subView === 'string') {
-      state.browseSubView = subView;
     }
   }
   state.searchPlanDetailContext = null;

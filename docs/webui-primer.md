@@ -61,10 +61,22 @@ Browser → https://music.ablz.au
 
 - **Source toggle** — MB / Discogs toggle in the browse tab header. Switches all search, artist, and release views between MusicBrainz and Discogs data sources.
 - **Search** — debounced text search, returns artists (or releases in album mode)
-- **Artist discography** — grouped by type (Albums, EPs, Singles, etc.)
-  - Split into "own work" vs "Appearances" using artist-credit matching
-  - Bootleg-only release groups collapsed at bottom
-- **In Library section** — shows what you already own from beets, with MB/Discogs badges
+- **Unified artist page (#575 PR4)** — one scrolling page (the old
+  Discography / Analysis / Library / Compare sub-tabs are gone), sectioned by
+  availability: **In library / In flight / Missing / Appearances /
+  Bootleg-only releases**, each grouped by type (Albums, EPs, Singles, etc.).
+  Ownership ("own work" vs Appearances) uses artist-credit matching; Missing =
+  official own-work release groups the beets library doesn't hold; In flight =
+  requests currently `downloading` or `manual` (`wanted` is ambient after the
+  full-library backfill and stays a badge). Two slow feeds decorate the page
+  after the fast render, without re-rendering: `/api/artist/compare` appends an
+  "Only on Discogs/MusicBrainz" complement section (silently skipped on hosts
+  without the Discogs mirror), and `/api/artist/<id>/disambiguate` adds
+  unique-track / covered-by chips to rows plus colour-dot recordings
+  breakdowns inside expanded release groups (MB artists only). Expanding an
+  in-library pressing's detail offers a lazy **Library detail** panel (path,
+  download history, status / min-bitrate / intent controls) fetched from
+  `/api/beets/album/<id>`.
 - **Release editions** — when you expand a release group, shows all editions sorted by date
   - Official releases first, bootleg/promo collapsed
   - Releases already in pipeline DB or beets library are badged

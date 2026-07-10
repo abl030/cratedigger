@@ -1827,22 +1827,20 @@ console.log('F14: misc test gaps');
     'F14.1: debug line surfaces has_retryable_failure=');
 }
 
-// F14.2 — closeSearchPlanDetail with origin browse + non-null subView.
-// Asserts state.browseSubView is restored.
+// F14.2 — closeSearchPlanDetail with origin browse. Browse has no
+// sub-views since the unified artist page (#575 PR4); the back button
+// just restores the tab.
 {
   withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 42,
       originTab: 'browse',
       originScrollY: 100,
-      originSubView: 'albums',
+      originSubView: null,
     };
-    state.browseSubView = 'singles';
     closeSearchPlanDetail();
-    assertEqual(state.browseSubView, 'albums',
-      'F14.2: browse-origin with subView="albums" restores state.browseSubView');
     assertEqual(calls.showTab[0], 'browse',
-      'F14.2: showTab("browse") still called');
+      'F14.2: browse-origin restores the Browse tab');
   });
 }
 

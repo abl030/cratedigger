@@ -25,15 +25,6 @@
   .artist-name { font-weight: 600; }
   .artist-dis { color: #777; font-size: 0.85em; }
   .rg-list { padding-left: 0; margin-top: 8px; }
-  .library-section { background: #1a1a2a; border-radius: 8px; padding: 10px; margin-bottom: 12px; }
-  .library-header { color: #6af; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
-  .library-album { padding: 6px 10px; background: #222233; border-radius: 4px; margin-bottom: 3px; font-size: 0.85em; display: flex; justify-content: space-between; }
-  .library-album-title { flex: 1; }
-  .library-album-meta { color: #666; font-size: 0.8em; }
-  .library-src { font-size: 0.7em; padding: 1px 6px; border-radius: 3px; }
-  .library-src-mb { background: #1a3a2a; color: #6d6; }
-  .library-src-discogs { background: #3a2a1a; color: #da6; }
-  .library-src-muted { background: #2a2a2a; color: #555; }
   .type-section { margin-bottom: 12px; }
   .type-header { padding: 6px 10px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .type-header:hover { color: #8cb; }
@@ -432,19 +423,6 @@
   .r-date-header { padding: 6px 12px; color: #6a9; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px; margin-bottom: 4px; }
   .r-date-header.recents-date-header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
   .recents-date-metrics { color: #777; text-align: right; }
-  .lib-artist { margin-bottom: 12px; }
-  .lib-artist-header { padding: 10px 12px; background: #1a1a2a; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-  .lib-artist-header:hover { background: #222238; }
-  .lib-artist-name { font-weight: 600; color: #8af; }
-  .lib-artist-count { color: #556; font-size: 0.8em; }
-  .lib-artist-body { display: none; padding-top: 4px; }
-  .lib-artist-body.open { display: block; }
-  .lib-rg { margin-bottom: 4px; }
-  .lib-rg-header { padding: 8px 12px; background: #1e1e2e; border-left: 3px solid #446; border-radius: 0 6px 6px 0; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-size: 0.9em; }
-  .lib-rg-header:hover { background: #252535; }
-  .lib-rg-body { padding-left: 12px; display: none; }
-  .lib-rg-body.open { display: block; }
-  .lib-type-header { padding: 4px 12px; color: #6a9; font-size: 0.75em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px; }
   .lib-item { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #336; margin-bottom: 4px; border-radius: 0 6px 6px 0; cursor: pointer; }
   .lib-item:hover { background: #252525; }
   .lib-detail { background: #191919; padding: 10px 12px; margin: 0 0 4px 0; border-radius: 0 0 6px 6px; display: none; border-left: 3px solid #333; }
@@ -528,16 +506,7 @@
       <span style="cursor:pointer;font-size:18px;" onclick="closeBrowseArtist()">←</span>
       <span id="browse-artist-name" style="font-size:18px;font-weight:bold;"></span>
     </div>
-    <div class="browse-subnav" style="display:flex;gap:2px;margin-bottom:12px;">
-      <button class="p-btn active-status" id="subnav-discography" onclick="switchSubView('discography')">Discography</button>
-      <button class="p-btn" id="subnav-analysis" onclick="switchSubView('analysis')">Analysis</button>
-      <button class="p-btn" id="subnav-library" onclick="switchSubView('library')">Library</button>
-      <button class="p-btn" id="subnav-compare" onclick="switchSubView('compare')">Compare</button>
-    </div>
-    <div id="browse-discography"></div>
-    <div id="browse-analysis" style="display:none;"></div>
-    <div id="browse-library" style="display:none;"></div>
-    <div id="browse-compare" style="display:none;"></div>
+    <div id="browse-artist-body"></div>
   </div>
   <div id="browse-label" style="display:none;">
     <div id="browse-label-header" style="margin:12px 0 8px;display:flex;align-items:center;gap:12px;">

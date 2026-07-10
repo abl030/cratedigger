@@ -1,11 +1,9 @@
 // @ts-check
 import { state, API, toast } from './state.js';
 import { esc, jsArg, parsePastedId } from './util.js';
-import { renderArtistDiscography, loadReleaseGroup, renderReleaseDetail } from './discography.js';
-import { renderTypedSections, classify as groupingClassify } from './grouping.js';
-import { renderStatusBadges } from './badges.js';
-import { renderDisambiguateInto } from './analysis.js';
-import { renderLibraryResultsInto } from './library.js';
+import { loadReleaseGroup, renderReleaseDetail, applySearchTargetAfterDiscography } from './discography.js';
+import { applyAnalysisChips } from './analysis.js';
+import { classifyArtistRows, renderArtistSections, renderOtherSourceSection } from './artist_page.js';
 import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
 
 /**
@@ -61,7 +59,7 @@ export async function setBrowseSource(src) {
     if (match) {
       state.browseArtist = { id: String(match.id), name: match.name };
       document.getElementById('browse-artist-name').textContent = match.name;
-      switchSubView(state.browseSubView || 'discography');
+      loadArtistPage(String(match.id), match.name);
       return;
     }
     toast(`No ${src === 'discogs' ? 'Discogs' : 'MusicBrainz'} match for ${prevName}`, true);
@@ -126,16 +124,10 @@ export function openBrowseArtist(id, name) {
     return;
   }
   state.browseArtist = {id, name};
-  state.browseSubView = 'discography';
   document.getElementById('results').style.display = 'none';
   document.getElementById('browse-artist').style.display = 'block';
   document.getElementById('browse-artist-name').textContent = name;
-  // Reset sub-nav
-  document.getElementById('subnav-discography').className = 'p-btn active-status';
-  document.getElementById('subnav-analysis').className = 'p-btn';
-  document.getElementById('subnav-library').className = 'p-btn';
-  // Load discography (the default view)
-  switchSubView('discography');
+  loadArtistPage(id, name);
 }
 
 /**
@@ -143,6 +135,8 @@ export function openBrowseArtist(id, name) {
  */
 export function closeBrowseArtist() {
   state.browseArtist = null;
+  // Cancel in-flight artist-page loads + decoration fetches.
+  artistPageToken++;
   // Closing the artist view clears any search-by-ID ring (R15).
   clearSearchTarget();
   document.getElementById('browse-artist').style.display = 'none';
@@ -272,7 +266,7 @@ async function openVaFallback(data, parsedId, requestToken) {
   // the hidden artist view DOM is preserved (display:none, not removed).
   document.getElementById('results').style.display = 'none';
   document.getElementById('browse-artist').style.display = 'none';
-  const dgEl = document.getElementById('browse-discography');
+  const dgEl = document.getElementById('browse-artist-body');
   if (dgEl) dgEl.innerHTML = '';
   const browseLabel = document.getElementById('browse-label');
   if (browseLabel) browseLabel.style.display = 'none';
@@ -360,41 +354,50 @@ export function invalidateBrowseArtist() {
 }
 
 /**
- * Switch between sub-views (discography, analysis, library) in the browse artist view.
- * @param {string} view - 'discography', 'analysis', or 'library'
+ * In-flight token for the unified artist page. Incremented on every
+ * load and on close, so stale fast-pair renders and late decoration
+ * fetches (compare / disambiguate) can never write over a newer page.
  */
-export function switchSubView(view) {
-  state.browseSubView = view;
-  ['discography', 'analysis', 'library', 'compare'].forEach(v => {
-    document.getElementById('browse-' + v).style.display = v === view ? 'block' : 'none';
-    document.getElementById('subnav-' + v).className = 'p-btn' + (v === view ? ' active-status' : '');
-  });
+let artistPageToken = 0;
+
+/**
+ * Reload the current browse artist's page from scratch (cache dropped).
+ * Bound on window for post-mutation refreshes (e.g. beets deletion).
+ */
+export function reloadBrowseArtist() {
   if (!state.browseArtist) return;
-  /** @type {string} */
-  const aid = state.browseArtist.id;
-  const name = state.browseArtist.name;
-  if (!state.browseCache[aid]) state.browseCache[aid] = {};
-  if (view === 'discography' && !state.browseCache[aid].discography) {
-    loadBrowseDiscography(aid, name);
-  }
-  if (view === 'analysis' && !state.browseCache[aid].analysis) {
-    loadBrowseAnalysis(aid, name);
-  }
-  if (view === 'library' && !state.browseCache[aid].library) {
-    loadBrowseLibrary(aid, name);
-  }
-  if (view === 'compare' && !state.browseCache[aid].compare) {
-    loadBrowseCompare(aid, name);
-  }
+  delete state.browseCache[state.browseArtist.id];
+  loadArtistPage(state.browseArtist.id, state.browseArtist.name);
 }
 
 /**
- * Load and render the discography for a browse artist.
- * @param {string} aid - MusicBrainz artist ID
+ * Load and render the unified artist page (issue #575 PR4).
+ *
+ * Fast pair first — the source discography (?name= so the backend
+ * annotates in_library) and the library feed — rendered as sections.
+ * Then two slow feeds decorate the rendered page in the background:
+ * the MB↔Discogs compare complement and the unique-track analysis.
+ * Both are token-guarded and cached per artist.
+ *
+ * @param {string} aid - MB artist UUID or numeric Discogs artist ID
  * @param {string} name - Artist name
  */
-export async function loadBrowseDiscography(aid, name) {
-  const el = document.getElementById('browse-discography');
+export async function loadArtistPage(aid, name) {
+  const token = ++artistPageToken;
+  const el = document.getElementById('browse-artist-body');
+  if (!el) return;
+
+  const cached = state.browseCache[aid];
+  if (cached && cached.fast) {
+    renderUnified(el, aid, name, cached.fast.rgRes, cached.fast.libRes);
+    if (cached.disamb) {
+      state.disambData = cached.disamb;
+      applyAnalysisChips(el, cached.disamb);
+    }
+    if (cached.compare) appendOtherSourceSection(el, name, cached.compare);
+    return;
+  }
+
   el.innerHTML = '<div class="loading">Loading discography...</div>';
   try {
     const isDiscogs = state.browseSource === 'discogs';
@@ -416,242 +419,101 @@ export async function loadBrowseDiscography(aid, name) {
       fetch(artistUrl).then(r => r.json()),
       fetch(libUrl).then(r => r.json()),
     ]);
-    if (!state.browseCache[aid]) state.browseCache[aid] = {};
-    state.browseCache[aid].discography = true;
-    renderArtistDiscography(el, aid, name, rgRes, libRes);
-  } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
-}
-
-/**
- * Load and render the disambiguate analysis for a browse artist.
- * @param {string} aid - MusicBrainz artist ID
- * @param {string} name - Artist name
- */
-export async function loadBrowseAnalysis(aid, name) {
-  const el = document.getElementById('browse-analysis');
-  if (state.browseSource === 'discogs') {
-    el.innerHTML = '<div class="loading" style="color:#888;">Analysis is not available for Discogs artists (requires MusicBrainz recording IDs).</div>';
-    return;
+    if (token !== artistPageToken) return;
+    state.browseCache[aid] = { fast: { rgRes, libRes }, compare: null, disamb: null };
+    renderUnified(el, aid, name, rgRes, libRes);
+    // Fire-and-forget decorations; each guards on the token.
+    fireCompareComplement(el, aid, name, token);
+    fireAnalysis(el, aid, token);
+  } catch (e) {
+    if (token !== artistPageToken) return;
+    el.innerHTML = '<div class="loading">Failed to load</div>';
   }
-  el.innerHTML = '<div class="loading">Loading analysis (this may take a few seconds)...</div>';
-  try {
-    const r = await fetch(`${API}/api/artist/${aid}/disambiguate`);
-    const data = await r.json();
-    if (!state.browseCache[aid]) state.browseCache[aid] = {};
-    state.browseCache[aid].analysis = true;
-    state.disambData = data;
-    renderDisambiguateInto(el);
-  } catch (e) { el.innerHTML = '<div style="color:#f66;">Failed to load analysis</div>'; }
 }
 
 /**
- * Load and render library results for a browse artist.
- * @param {string} aid - MusicBrainz artist ID
- * @param {string} name - Artist name
+ * Section + render the fast pair, then apply the search-by-ID hook.
+ * @param {HTMLElement} el
+ * @param {string} aid
+ * @param {string} name
+ * @param {Object} rgRes - /api/[discogs/]artist response
+ * @param {Object} libRes - /api/library/artist response
  */
-export async function loadBrowseLibrary(aid, name) {
-  const el = document.getElementById('browse-library');
-  el.innerHTML = '<div class="loading">Loading library...</div>';
-  try {
-    // See loadBrowseDiscography: skip mbid on Discogs path (numeric ID isn't
-    // a valid MB UUID, would suppress all non-Discogs-tagged albums).
-    const isDiscogs = state.browseSource === 'discogs';
-    const url = isDiscogs
-      ? `${API}/api/library/artist?name=${encodeURIComponent(name)}`
-      : `${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`;
-    const r = await fetch(url);
-    const data = await r.json();
-    if (!state.browseCache[aid]) state.browseCache[aid] = {};
-    state.browseCache[aid].library = true;
-    renderLibraryResultsInto(el, data.albums || []);
-  } catch (e) { el.innerHTML = '<div class="loading">Failed to load</div>'; }
+function renderUnified(el, aid, name, rgRes, libRes) {
+  const sections = classifyArtistRows({
+    artistId: aid,
+    artistName: name,
+    releaseGroups: rgRes.release_groups || [],
+    libraryAlbums: libRes.albums || [],
+  });
+  el.innerHTML = renderArtistSections(sections, { artistId: aid, artistName: name });
+  applySearchTargetAfterDiscography(el);
 }
 
 /**
- * Load the merged MB+Discogs comparison for a browse artist.
- * @param {string} aid - Artist ID (MB UUID or numeric Discogs ID)
- * @param {string} name - Artist name
+ * Background decoration 1: the MB↔Discogs compare complement. Appends
+ * an "Only on <other source>" section with the deduped bucket from
+ * /api/artist/compare. Silent on failure — a mirror-less host 503s and
+ * the page simply stays single-source.
+ * @param {HTMLElement} el
+ * @param {string} aid
+ * @param {string} name
+ * @param {number} token
  */
-export async function loadBrowseCompare(aid, name) {
-  const el = document.getElementById('browse-compare');
-  el.innerHTML = '<div class="loading">Loading both sources (this may take ~5-15s)...</div>';
+async function fireCompareComplement(el, aid, name, token) {
   try {
     const isDiscogs = state.browseSource === 'discogs';
     const idParam = isDiscogs ? `discogs_id=${encodeURIComponent(aid)}` : `mbid=${encodeURIComponent(aid)}`;
-    const url = `${API}/api/artist/compare?name=${encodeURIComponent(name)}&${idParam}`;
-    const r = await fetch(url);
+    const r = await fetch(`${API}/api/artist/compare?name=${encodeURIComponent(name)}&${idParam}`);
+    if (token !== artistPageToken || !r.ok) return;
     const data = await r.json();
-    if (!state.browseCache[aid]) state.browseCache[aid] = {};
-    state.browseCache[aid].compare = true;
-    renderCompare(el, data);
-  } catch (_e) { el.innerHTML = '<div class="loading">Failed to load comparison</div>'; }
+    if (token !== artistPageToken) return;
+    if (state.browseCache[aid]) state.browseCache[aid].compare = data;
+    appendOtherSourceSection(el, name, data);
+    // A search-by-ID target may live in the complement (e.g. a Discogs
+    // release pasted while browsing MB) — re-run the ring hook now that
+    // its row exists.
+    applySearchTargetAfterDiscography(el);
+  } catch (_e) { /* decoration only — the page is already rendered */ }
 }
 
 /**
- * Render a row in the compare view. `mb` and `discogs` may be null when the
- * row only exists on one side. The row header is clickable to expand inline
- * pressings; source badges (MB/Discogs) navigate to that source's full
- * discography view for the same artist.
- *
- * @param {Object|null} mb
- * @param {Object|null} discogs
- */
-function compareRow(mb, discogs) {
-  const ref = mb || discogs;
-  const title = ref.title || '?';
-  const year = (ref.first_release_date || '').slice(0, 4) || '?';
-  const type = ref.type || '';
-  // Stable per-row key for the expansion divs. Use both IDs when present so
-  // each side has its own render target (avoids ID collisions when the same
-  // album appears as both 'both' and 'only' rows for different artists).
-  const slot = `${mb ? mb.id : 'x'}__${discogs ? discogs.id : 'x'}`;
-  // Show only the badges for sources that have this row. No muted
-  // placeholders — single-source rows just show one badge.
-  const badges = [];
-  if (mb) badges.push(`<span class="library-src library-src-mb" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare(${jsArg(mb.primary_artist_id)}, ${jsArg(mb.artist_credit || '')}, ${jsArg('mb')})">MB</span>`);
-  if (discogs) badges.push(`<span class="library-src library-src-discogs" style="cursor:pointer;" onclick="event.stopPropagation(); window.openBrowseArtistFromCompare(${jsArg(discogs.primary_artist_id)}, ${jsArg(discogs.artist_credit || '')}, ${jsArg('discogs')})">Discogs</span>`);
-  // Row-level in-library badge via the unified renderer. Pull quality
-  // fields off whichever side is in library (prefer MB when both — MB
-  // rows are the canonical match key).
-  const libSide = (mb && mb.in_library) ? mb : ((discogs && discogs.in_library) ? discogs : null);
-  const libBadge = libSide ? renderStatusBadges({
-    in_library: true,
-    library_format: libSide.library_format,
-    library_min_bitrate: libSide.library_min_bitrate,
-    library_rank: libSide.library_rank,
-  }) : '';
-  const mbId = mb ? mb.id : '';
-  const dgId = discogs ? discogs.id : '';
-  const dgMasterless = !!(discogs && discogs.is_masterless);
-  return `
-    <div class="rg">
-      <div style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;"
-           onclick="window.toggleCompareRow(${jsArg(slot)}, ${jsArg(mbId)}, ${jsArg(dgId)}, ${dgMasterless})">
-        <span style="color:#888;font-size:0.8em;width:10px;display:inline-block;" id="cmp-chev-${esc(slot)}">▶</span>
-        <span class="rg-year">${year}</span>
-        <span class="rg-title">${esc(title)}</span>
-        ${type ? `<span class="rg-meta" style="color:#777;">(${esc(type)})</span>` : ''}
-        ${libBadge}
-        <span style="margin-left:auto;display:flex;gap:4px;">${badges.join('')}</span>
-      </div>
-      <div id="cmp-pressings-${slot}" style="display:none;padding:4px 0 8px 16px;">
-        ${mb ? `<div style="font-size:0.75em;color:#6d6;margin-top:6px;">MusicBrainz pressings</div>
-                <div class="releases" id="rel-cmp-mb-${slot}"></div>` : ''}
-        ${discogs ? `<div style="font-size:0.75em;color:#da6;margin-top:6px;">Discogs pressings</div>
-                     <div class="releases" id="rel-cmp-dg-${slot}"></div>` : ''}
-      </div>
-    </div>`;
-}
-
-/**
- * Toggle the expansion of a compare row. On first open, fetches MB and/or
- * Discogs pressings via the shared loadReleaseGroup helper (with explicit
- * source so each side renders into its own div). Reusing loadReleaseGroup
- * means Add buttons, in-library badges, and pipelineStore overlays behave
- * identically to the Discography view.
- *
- * @param {string} slot
- * @param {string} mbId - empty string when the row has no MB side
- * @param {string} dgId - empty string when the row has no Discogs side
- * @param {boolean} [dgMasterless] - true when the Discogs side is a
- *   masterless release (id is a release id, not a master id).
- */
-export async function toggleCompareRow(slot, mbId, dgId, dgMasterless) {
-  const wrap = document.getElementById('cmp-pressings-' + slot);
-  const chev = document.getElementById('cmp-chev-' + slot);
-  if (!wrap) return;
-  const isOpen = wrap.style.display !== 'none';
-  wrap.style.display = isOpen ? 'none' : 'block';
-  if (chev) chev.textContent = isOpen ? '▶' : '▼';
-  if (isOpen) return;
-  // First-open fetches. loadReleaseGroup is idempotent — second call on the
-  // same el toggles, so we only call when the target is empty.
-  if (mbId) {
-    const mbEl = document.getElementById('rel-cmp-mb-' + slot);
-    if (mbEl && !mbEl.innerHTML) loadReleaseGroup(mbId, mbEl, { targetEl: mbEl, source: 'mb' });
-  }
-  if (dgId) {
-    const dgEl = document.getElementById('rel-cmp-dg-' + slot);
-    if (dgEl && !dgEl.innerHTML) loadReleaseGroup(dgId, dgEl, {
-      targetEl: dgEl, source: 'discogs', masterless: !!dgMasterless,
-    });
-  }
-}
-
-/**
+ * Append the complement section (idempotent — skipped if present).
  * @param {HTMLElement} el
- * @param {Object} data
+ * @param {string} name - Artist name
+ * @param {Object} data - /api/artist/compare response
  */
-function renderCompare(el, data) {
-  const mbName = data.mb_artist?.name || '—';
-  const dgName = data.discogs_artist?.name || '—';
-
-  // Combine all three buckets into one unified list. Each entry is a
-  // {mb, discogs} pair; either side may be null. Single-source rows
-  // just show the present source's badge (compareRow handles that).
-  const all = [
-    ...(data.both || []),
-    ...(data.mb_only || []).map((r) => ({ mb: r, discogs: null })),
-    ...(data.discogs_only || []).map((r) => ({ mb: null, discogs: r })),
-  ];
-
-  // Bootleg = MB row exists and is not has_official. Discogs CC0 has
-  // no official/bootleg distinction, so Discogs-only rows are always
-  // treated as official.
-  const bootleg = all.filter((p) => p.mb && p.mb.has_official === false);
-  const main = all.filter((p) => !(p.mb && p.mb.has_official === false));
-
-  const pairClassify = (p) => p.mb || p.discogs;
-  const renderRows = (rows, defaultOpen) => renderTypedSections(
-    rows, (p) => compareRow(p.mb, p.discogs),
-    {
-      classify: (p) => groupingClassify(pairClassify(p)),
-      dateOf: (p) => String(pairClassify(p).first_release_date || ''),
-      defaultOpen,
-    },
-  );
-
-  const mainHtml = main.length
-    ? renderRows(main, 'Albums')
-    : '<div style="padding:6px;color:#777;">none</div>';
-
-  const bootlegHtml = bootleg.length
-    ? `<div class="type-section">
-         <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#555;">
-           Bootleg-only releases <span class="type-count">${bootleg.length}</span>
-         </div>
-         <div class="type-body">${renderRows(bootleg, null)}</div>
-       </div>`
-    : '';
-
-  el.innerHTML = `
-    <div style="font-size:13px;color:#888;margin-bottom:10px;">
-      MB artist: <b>${esc(mbName)}</b> · Discogs artist: <b>${esc(dgName)}</b>
-    </div>
-    ${mainHtml}
-    ${bootlegHtml}`;
+function appendOtherSourceSection(el, name, data) {
+  if (el.querySelector('#only-other-source')) return;
+  const isDiscogs = state.browseSource === 'discogs';
+  const rows = isDiscogs ? (data.mb_only || []) : (data.discogs_only || []);
+  const html = renderOtherSourceSection(rows, {
+    artistName: name,
+    source: isDiscogs ? 'mb' : 'discogs',
+  });
+  if (html) el.insertAdjacentHTML('beforeend', html);
 }
 
 /**
- * Switch source then open an artist (used by Compare row badges to jump into
- * the matched-source's discography view).
- * @param {string} id
- * @param {string} name
- * @param {string} src
+ * Background decoration 2: unique-track analysis chips (MB artists
+ * only — the disambiguate route needs MB recording IDs).
+ * @param {HTMLElement} el
+ * @param {string} aid
+ * @param {number} token
  */
-export function openBrowseArtistFromCompare(id, name, src) {
-  // Switch source synchronously without sticky-context lookup; we already
-  // know exactly which artist to open on the new source.
-  state.browseSource = src;
-  const mbBtn = document.getElementById('source-mb');
-  const dgBtn = document.getElementById('source-discogs');
-  if (mbBtn) mbBtn.className = 'p-btn' + (src === 'mb' ? ' active-status' : '');
-  if (dgBtn) dgBtn.className = 'p-btn' + (src === 'discogs' ? ' active-status' : '');
-  state.browseCache = {};
-  state.browseArtist = { id, name };
-  document.getElementById('browse-artist-name').textContent = name;
-  switchSubView('discography');
+async function fireAnalysis(el, aid, token) {
+  if (state.browseSource !== 'mb') return;
+  try {
+    const r = await fetch(`${API}/api/artist/${aid}/disambiguate`);
+    if (token !== artistPageToken || !r.ok) return;
+    const data = await r.json();
+    if (token !== artistPageToken) return;
+    if (state.browseCache[aid]) state.browseCache[aid].disamb = data;
+    state.disambData = data;
+    applyAnalysisChips(el, data);
+  } catch (_e) { /* decoration only */ }
 }
+
 
 /**
  * Search for artists or releases and render results.

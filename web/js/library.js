@@ -18,7 +18,7 @@ function refreshAfterBeetsDeletion(albumId) {
 
   const browseArtist = document.getElementById('browse-artist');
   if (browseArtist && browseArtist.style.display !== 'none' && state.browseArtist) {
-    window.switchSubView?.(state.browseSubView || 'discography');
+    window.reloadBrowseArtist?.();
     return;
   }
 
@@ -40,164 +40,116 @@ function refreshAfterBeetsDeletion(albumId) {
 }
 
 /**
- * Render library results into a target element (thin wrapper).
- * @param {HTMLElement} targetEl
- * @param {Object[]} albums
+ * One library-album (or pipeline-only request) row with its detail
+ * placeholder. Feeds the unified artist page's In-flight section
+ * (issue #575 PR4); in-library rows expand via toggleLibDetail,
+ * pipeline-only rows via the pipeline toggleDetail.
+ * @param {Object} a - LibraryAlbumRow-shaped row from /api/library/artist
+ * @returns {string}
  */
-export function renderLibraryResultsInto(targetEl, albums) {
-  renderLibraryResults(albums, targetEl);
-}
+export function renderLibraryAlbumRow(a) {
+  const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
+  const mbid = normalizeReleaseId(a.mb_albumid);
+  const inLibrary = a.in_library !== false;
+  const beetsAlbumId = a.beets_album_id ?? null;
+  const pipelineId = a.pipeline_id || null;
+  const detailId = inLibrary
+    ? `lib-${beetsAlbumId}`
+    : `lib-pipeline-${pipelineId || a.id}`;
+  const detailToggle = inLibrary && beetsAlbumId
+    ? `window.toggleLibDetail(${beetsAlbumId})`
+    : `window.toggleDetail('${detailId}', ${pipelineId || a.id})`;
 
-/**
- * Render library albums grouped by artist, then by release group.
- * @param {Object[]} albums
- * @param {HTMLElement} [targetEl]
- */
-export function renderLibraryResults(albums, targetEl) {
-  const el = targetEl || document.getElementById('library-content');
-  if (albums.length === 0) {
-    el.innerHTML = '<div class="loading">No results</div>';
-    return;
-  }
-  // Group by artist
-  const byArtist = {};
-  for (const a of albums) {
-    const artist = a.artist || 'Unknown';
-    if (!byArtist[artist]) byArtist[artist] = [];
-    byArtist[artist].push(a);
-  }
-  const artists = Object.keys(byArtist).sort((a, b) => a.localeCompare(b));
-  // Sort albums within each artist by year
-  for (const a of artists) {
-    byArtist[a].sort((x, y) => (x.year || 0) - (y.year || 0));
-  }
+  const actionState = mbid ? buildReleaseActionState({
+    id: mbid,
+    in_library: inLibrary,
+    beets_album_id: beetsAlbumId,
+    pipeline_status: a.pipeline_status || null,
+    pipeline_id: pipelineId,
+    artist: a.artist || '',
+    album: a.album || '',
+    track_count: a.track_count || 0,
+  }) : null;
+  const toolbar = actionState ? renderActionToolbar(actionState, { size: 'small' }) : '';
 
-  // Auto-expand if only one artist
-  const autoOpen = artists.length === 1;
-
-  el.innerHTML = artists.map(artist => {
-    const artistAlbums = byArtist[artist];
-
-    // Group by release group within artist
-    const rgOrder = [];
-    const byRG = {};
-    for (const a of artistAlbums) {
-      const rgKey = a.mb_releasegroupid || ('_' + a.id);
-      if (!byRG[rgKey]) {
-        byRG[rgKey] = { title: a.release_group_title || a.album, year: a.year, albums: [] };
-        rgOrder.push(rgKey);
-      }
-      byRG[rgKey].albums.push(a);
-    }
-    const rgCount = rgOrder.length;
-
-    function renderAlbum(a) {
-      const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
-      const mbid = normalizeReleaseId(a.mb_albumid);
-      const inLibrary = a.in_library !== false;
-      const beetsAlbumId = a.beets_album_id ?? null;
-      const pipelineId = a.pipeline_id || null;
-      const detailId = inLibrary
-        ? `lib-${beetsAlbumId}`
-        : `lib-pipeline-${pipelineId || a.id}`;
-      const detailToggle = inLibrary && beetsAlbumId
-        ? `window.toggleLibDetail(${beetsAlbumId})`
-        : `window.toggleDetail('${detailId}', ${pipelineId || a.id})`;
-
-      const actionState = mbid ? buildReleaseActionState({
-        id: mbid,
-        in_library: inLibrary,
-        beets_album_id: beetsAlbumId,
-        pipeline_status: a.pipeline_status || null,
-        pipeline_id: pipelineId,
-        artist: a.artist || '',
-        album: a.album || '',
-        track_count: a.track_count || 0,
-      }) : null;
-      const toolbar = actionState ? renderActionToolbar(actionState, { size: 'small' }) : '';
-
-      const badges = renderStatusBadges({
-        id: mbid,
-        in_library: inLibrary,
-        library_format: a.formats,
-        library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
-        library_rank: a.library_rank,
-        pipeline_status: a.pipeline_status,
-      });
-      return `
-        <div class="lib-item" onclick="${detailToggle}">
-          <div class="p-top">
-            <div>
-              <div class="p-title">${esc(a.album)}${badges}</div>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;">
-              ${toolbar}
-              <span style="font-size:0.75em;color:#666;">${a.track_count}t</span>
-            </div>
-          </div>
-          <div class="p-meta">
-            <span>${a.year || '?'}</span>
-            ${a.country ? `<span>${a.country}</span>` : ''}
-            ${a.type ? `<span>${a.type}</span>` : ''}
-            <span>added ${added}</span>
-          </div>
+  const badges = renderStatusBadges({
+    id: mbid,
+    in_library: inLibrary,
+    library_format: a.formats,
+    library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
+    library_rank: a.library_rank,
+    pipeline_status: a.pipeline_status,
+  });
+  return `
+    <div class="lib-item" onclick="${detailToggle}">
+      <div class="p-top">
+        <div>
+          <div class="p-title">${esc(a.album)}${badges}</div>
         </div>
-        <div class="lib-detail" id="${detailId}"></div>
-      `;
-    }
-
-    // Build per-RG display rows, then group them by Album/EP/Single/etc.
-    // so an artist with mixed types renders the same sectioning the
-    // Discography sub-tab uses. Within a section, sort by year.
-    const rgRows = rgOrder.map(rgKey => {
-      const rg = byRG[rgKey];
-      const sample = rg.albums[0];
-      const html = rg.albums.length === 1
-        ? renderAlbum(sample)
-        : `<div class="lib-rg">
-             <div class="lib-rg-header" onclick="window.toggleSection(this)">
-               <span>${rg.year || '?'} ${esc(rg.title)}</span>
-               <span class="lib-artist-count">${rg.albums.length} versions</span>
-             </div>
-             <div class="lib-rg-body">
-               ${rg.albums.map(renderAlbum).join('')}
-             </div>
-           </div>`;
-      return {
-        // Fields classify() reads
-        type: sample.type || '',
-        secondary_types: [],
-        // Sort key
-        first_release_date: String(rg.year || ''),
-        _html: html,
-      };
-    });
-    const albumsHtml = renderTypedSections(rgRows, (r) => r._html);
-
-    return `
-      <div class="lib-artist">
-        <div class="lib-artist-header" onclick="window.toggleSection(this)">
-          <span class="lib-artist-name">${esc(artist)}</span>
-          <span class="lib-artist-count">${rgCount} release${rgCount !== 1 ? 's' : ''}</span>
-        </div>
-        <div class="lib-artist-body${autoOpen ? ' open' : ''}">
-          ${albumsHtml}
+        <div style="display:flex;align-items:center;gap:6px;">
+          ${toolbar}
+          <span style="font-size:0.75em;color:#666;">${a.track_count}t</span>
         </div>
       </div>
-    `;
-  }).join('');
+      <div class="p-meta">
+        <span>${a.year || '?'}</span>
+        ${a.country ? `<span>${a.country}</span>` : ''}
+        ${a.type ? `<span>${a.type}</span>` : ''}
+        <span>added ${added}</span>
+      </div>
+    </div>
+    <div class="lib-detail" id="${detailId}"></div>
+  `;
 }
 
 /**
- * Toggle the detail panel for a library album.
+ * Fetch /api/beets/album/<id> and render the deep library detail body.
+ * Shared by toggleLibDetail (album rows) and toggleReleaseLibDetail
+ * (the release-detail sub-panel on the unified artist page).
+ * @param {number} id - Beets album ID
+ * @returns {Promise<string>}
+ */
+async function fetchLibraryDetailBody(id) {
+  const r = await fetch(`${API}/api/beets/album/${id}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  return renderLibraryDetailBody(data, id);
+}
+
+/**
+ * Toggle the detail panel for a library album row.
  * @param {number} id - Beets album ID
  */
 export async function toggleLibDetail(id) {
   const el = document.getElementById('lib-' + id);
   await toggleExpand(el, async (target) => {
-    const r = await fetch(`${API}/api/beets/album/${id}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
+    target.innerHTML = await fetchLibraryDetailBody(id);
+  });
+}
+
+/**
+ * Toggle the deep library detail inside an expanded release-detail panel
+ * (the unified artist page's replacement for the old Library sub-view's
+ * album detail). Targets the `libdet-<id>` placeholder emitted by
+ * renderReleaseDetail.
+ * @param {number} id - Beets album ID
+ */
+export async function toggleReleaseLibDetail(id) {
+  const el = document.getElementById('libdet-' + id);
+  await toggleExpand(el, async (target) => {
+    target.innerHTML = await fetchLibraryDetailBody(id);
+  });
+}
+
+/**
+ * The deep library detail body: path, source link, label, tracks,
+ * download history, pipeline status / min-bitrate / intent controls,
+ * acquire + delete + bad-rip actions.
+ * @param {Object} data - /api/beets/album/<id> payload
+ * @param {number} id - Beets album ID
+ * @returns {string}
+ */
+export function renderLibraryDetailBody(data, id) {
     const releaseId = normalizeReleaseId(data.mb_albumid);
     let html = '';
     if (data.path) {
@@ -281,8 +233,7 @@ export async function toggleLibDetail(id) {
       stopPropagation: true,
     });
     html += '</div>';
-    target.innerHTML = html;
-  });
+    return html;
 }
 
 /**
