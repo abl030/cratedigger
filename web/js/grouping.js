@@ -84,7 +84,7 @@ export function renderTypedSections(rows, renderRow, opts = {}) {
       const hStyle = headerStyle ? ` style="${headerStyle}"` : '';
       return `
         <div class="type-section">
-          <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')"${hStyle}>
+          <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)"${hStyle}>
             ${s} <span class="type-count">${items.length}</span>
           </div>
           <div class="type-body${isOpen ? ' open' : ''}">

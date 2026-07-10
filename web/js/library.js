@@ -1,11 +1,14 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
-import { esc, jsArg, qualityLabel, overrideToIntent, externalReleaseUrl, normalizeReleaseId, sourceLabel } from './util.js';
+import { esc, jsArg, overrideToIntent, normalizeReleaseId } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderBadRipButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
+import {
+  renderBeetsTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
+} from './render_primitives.js';
 
 
 function refreshAfterBeetsDeletion(albumId) {
@@ -152,7 +155,7 @@ export function renderLibraryResults(albums, targetEl) {
       const html = rg.albums.length === 1
         ? renderAlbum(sample)
         : `<div class="lib-rg">
-             <div class="lib-rg-header" onclick="this.nextElementSibling.classList.toggle('open')">
+             <div class="lib-rg-header" onclick="window.toggleSection(this)">
                <span>${rg.year || '?'} ${esc(rg.title)}</span>
                <span class="lib-artist-count">${rg.albums.length} versions</span>
              </div>
@@ -173,7 +176,7 @@ export function renderLibraryResults(albums, targetEl) {
 
     return `
       <div class="lib-artist">
-        <div class="lib-artist-header" onclick="this.nextElementSibling.classList.toggle('open')">
+        <div class="lib-artist-header" onclick="window.toggleSection(this)">
           <span class="lib-artist-name">${esc(artist)}</span>
           <span class="lib-artist-count">${rgCount} release${rgCount !== 1 ? 's' : ''}</span>
         </div>
@@ -191,42 +194,23 @@ export function renderLibraryResults(albums, targetEl) {
  */
 export async function toggleLibDetail(id) {
   const el = document.getElementById('lib-' + id);
-  if (el.classList.contains('open')) { el.classList.remove('open'); return; }
-  el.innerHTML = '<div class="loading" style="padding:8px;">Loading...</div>';
-  el.classList.add('open');
-  try {
+  await toggleExpand(el, async (target) => {
     const r = await fetch(`${API}/api/beets/album/${id}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const releaseId = normalizeReleaseId(data.mb_albumid);
     let html = '';
     if (data.path) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.85em;word-break:break-all;">${esc(data.path)}</span></div>`;
+      html += renderDetailRow('Path', esc(data.path), { valueStyle: 'font-size:0.85em;word-break:break-all;' });
     }
-    if (releaseId) {
-      const label = sourceLabel(releaseId);
-      const url = externalReleaseUrl(releaseId);
-      if (label && url) {
-        html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${releaseId.slice(0,8)}...</a></span></div>`;
-      }
-    }
+    html += renderExternalLinkRow(releaseId);
     if (data.label) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(data.label)}</span></div>`;
+      html += renderDetailRow('Label', esc(data.label));
     }
     // Tracks
     if (data.tracks && data.tracks.length > 0) {
       html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Tracks (' + data.tracks.length + ')</div>';
-      html += data.tracks.map(t => {
-        const dur = t.length ? `${Math.floor(t.length/60)}:${String(Math.round(t.length%60)).padStart(2,'0')}` : '';
-        const br = t.bitrate ? `${Math.round(t.bitrate/1000)}kbps` : '';
-        const depth = t.bitdepth && t.bitdepth > 16 ? `${t.bitdepth}bit` : '';
-        const sr = t.samplerate && t.samplerate > 44100 ? `${(t.samplerate/1000).toFixed(1)}kHz` : '';
-        const meta = [t.format, br, depth, sr].filter(Boolean).join(' ');
-        return `<div class="lib-track">
-          <span>${t.disc > 1 ? t.disc + '.' : ''}${t.track}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-          <span class="lib-track-meta">${meta}</span>
-        </div>`;
-      }).join('');
+      html += data.tracks.map(renderBeetsTrackRow).join('');
       html += '</div>';
     }
     // Pipeline download history
@@ -236,7 +220,7 @@ export async function toggleLibDetail(id) {
       html += history.map(renderDownloadHistoryItem).join('');
       html += '</div>';
     } else if (data.pipeline_status) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">Pipeline</span><span class="p-detail-value">${data.pipeline_status} (${data.pipeline_source || '?'})</span></div>`;
+      html += renderDetailRow('Pipeline', `${data.pipeline_status} (${data.pipeline_source || '?'})`);
     }
     // Pipeline controls (status + quality override)
     if (releaseId && data.pipeline_id) {
@@ -297,8 +281,8 @@ export async function toggleLibDetail(id) {
       stopPropagation: true,
     });
     html += '</div>';
-    el.innerHTML = html;
-  } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
+    target.innerHTML = html;
+  });
 }
 
 /**

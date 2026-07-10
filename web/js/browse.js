@@ -617,7 +617,7 @@ function renderCompare(el, data) {
 
   const bootlegHtml = bootleg.length
     ? `<div class="type-section">
-         <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#555;">
+         <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#555;">
            Bootleg-only releases <span class="type-count">${bootleg.length}</span>
          </div>
          <div class="type-body">${renderRows(bootleg, null)}</div>
