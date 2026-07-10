@@ -20,7 +20,7 @@
  * Run with: node tests/test_js_artist_page.mjs
  */
 
-import { classifyArtistRows, renderArtistSections } from '../web/js/artist_page.js';
+import { classifyArtistRows, renderArtistSections, renderOtherSourceSection } from '../web/js/artist_page.js';
 
 let passed = 0;
 let failed = 0;
@@ -186,8 +186,64 @@ console.log('classifyArtistRows — empty world');
 {
   const s = classify([], []);
   assertEqual(
-    s.inLibrary.length + s.missing.length + s.appearances.length + s.bootlegs.length + s.inFlight.length,
+    s.inLibrary.length + s.inLibraryOrphans.length + s.missing.length
+    + s.appearances.length + s.bootlegs.length + s.inFlight.length,
     0, 'all sections empty');
+}
+
+console.log('I6 — owned albums absent from the discography become orphans');
+{
+  const rgs = [
+    rg('rg-owned', { in_library: true, title: 'Matched Album' }),
+  ];
+  const albums = [
+    // rg id matches a rendered rg → covered by the rg row, not an orphan.
+    libRow({ id: 1, album: 'Matched Album', mb_releasegroupid: 'rg-owned' }),
+    // Backend title-fallback case: no rg id, but an in-library rg row
+    // with the same title rendered → not an orphan (no double-show).
+    libRow({ id: 2, album: 'Matched Album', mb_releasegroupid: null }),
+    // Genuinely absent from the source discography → orphan.
+    libRow({ id: 3, album: 'Long Tail Demo', mb_releasegroupid: 'rg-not-listed' }),
+    // Pipeline-only row (not actually in the library) → never an orphan.
+    libRow({ id: 4, album: 'Wanted Ghost', in_library: false, beets_album_id: null, pipeline_status: 'wanted' }),
+  ];
+  const s = classify(rgs, albums);
+  assertEqual(s.inLibraryOrphans.map(a => a.album).join(','), 'Long Tail Demo',
+    'only the unmatched owned album is an orphan');
+
+  const html = renderArtistSections(s, { artistId: ARTIST_ID, artistName: ARTIST_NAME });
+  assertContains(html, 'In library <span class="type-count">2</span>',
+    'section count includes orphans');
+  assertContains(html, 'Library-only editions <span class="type-count">1</span>',
+    'orphan subheader with count');
+  assertContains(html, 'Long Tail Demo', 'orphan album row rendered');
+}
+
+console.log('I6 — orphans alone still render the In library section');
+{
+  const s = classify([], [libRow({ id: 7, album: 'Only Orphan', mb_releasegroupid: null })]);
+  const html = renderArtistSections(s, { artistId: ARTIST_ID, artistName: ARTIST_NAME });
+  assertContains(html, 'In library <span class="type-count">1</span>',
+    'orphan-only In library section renders');
+  assertContains(html, 'Only Orphan', 'orphan row rendered');
+}
+
+console.log('renderOtherSourceSection — complement rows force the other source');
+{
+  const rows = [
+    { id: '999111', title: 'Discogs Only LP', type: 'Album', first_release_date: '1999-01-01' },
+    { id: '999222', title: 'Masterless Single', type: 'Single', first_release_date: '2000-01-01', is_masterless: true },
+  ];
+  const html = renderOtherSourceSection(rows, { artistName: ARTIST_NAME, source: 'discogs' });
+  assertContains(html, 'Only on Discogs <span class="type-count">2</span>', 'header + count');
+  assertContains(html, 'id="only-other-source"', 'idempotency marker id');
+  assertContains(html, "{source:'discogs'}", 'rows force the complement source');
+  assertContains(html, "{masterless:true,source:'discogs'}", 'masterless keeps its flag');
+  assertContains(html, 'data-release-id="999222"', 'masterless leaf carries data-release-id');
+  assertEqual(renderOtherSourceSection([], { artistName: ARTIST_NAME, source: 'discogs' }), '',
+    'empty bucket -> empty string');
+  const mbSide = renderOtherSourceSection([rows[0]], { artistName: ARTIST_NAME, source: 'mb' });
+  assertContains(mbSide, 'Only on MusicBrainz', 'mb complement label');
 }
 
 console.log('renderArtistSections — section headers, counts, defaults');
@@ -203,7 +259,9 @@ console.log('renderArtistSections — section headers, counts, defaults');
   ]);
   const html = renderArtistSections(sections, { artistId: ARTIST_ID, artistName: ARTIST_NAME });
 
-  assertContains(html, 'In library <span class="type-count">1</span>', 'In library header with count');
+  // The downloading row's rg isn't in the discography, so it also
+  // counts as a library-only orphan (in-flight is a lens — I5/I6).
+  assertContains(html, 'In library <span class="type-count">2</span>', 'In library header with count');
   assertContains(html, 'In flight <span class="type-count">1</span>', 'In flight header with count');
   assertContains(html, 'Missing <span class="type-count">2</span>', 'Missing header with count');
   assertContains(html, 'Appearances <span class="type-count">1</span>', 'Appearances header with count');

@@ -64,6 +64,7 @@ export async function setBrowseSource(src) {
     }
     toast(`No ${src === 'discogs' ? 'Discogs' : 'MusicBrainz'} match for ${prevName}`, true);
     state.browseArtist = null;
+    artistPageToken++;
     document.getElementById('browse-artist').style.display = 'none';
   }
 
@@ -266,6 +267,7 @@ async function openVaFallback(data, parsedId, requestToken) {
   // the hidden artist view DOM is preserved (display:none, not removed).
   document.getElementById('results').style.display = 'none';
   document.getElementById('browse-artist').style.display = 'none';
+  artistPageToken++;
   const dgEl = document.getElementById('browse-artist-body');
   if (dgEl) dgEl.innerHTML = '';
   const browseLabel = document.getElementById('browse-label');
@@ -390,11 +392,20 @@ export async function loadArtistPage(aid, name) {
   const cached = state.browseCache[aid];
   if (cached && cached.fast) {
     renderUnified(el, aid, name, cached.fast.rgRes, cached.fast.libRes);
+    // Re-fire any decoration that never landed (navigated away before
+    // the fetch returned, or a transient failure) — a null slot must
+    // not become null-forever on cache hits.
     if (cached.disamb) {
       state.disambData = cached.disamb;
       applyAnalysisChips(el, cached.disamb);
+    } else {
+      fireAnalysis(el, aid, token);
     }
-    if (cached.compare) appendOtherSourceSection(el, name, cached.compare);
+    if (cached.compare) {
+      appendOtherSourceSection(el, name, cached.compare);
+    } else {
+      fireCompareComplement(el, aid, name, token);
+    }
     return;
   }
 

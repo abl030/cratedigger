@@ -129,7 +129,7 @@ export function updatePipelineStatus(mbid, status, pipelineId) {
   // Browse-search inverted Replace button cache so the next render
   // re-fetches.
   invalidateActiveRgs();
-  // Update disambData pressings (analysis tab)
+  // Update disambData pressings (the artist page's analysis overlay)
   if (state.disambData) {
     for (const rg of state.disambData.release_groups) {
       for (const p of (rg.pressings || [])) {

@@ -1,7 +1,6 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, jsArg, overrideToIntent, normalizeReleaseId } from './util.js';
-import { renderTypedSections } from './grouping.js';
 import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderBadRipButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
@@ -149,7 +148,7 @@ export async function toggleReleaseLibDetail(id) {
  * @param {number} id - Beets album ID
  * @returns {string}
  */
-export function renderLibraryDetailBody(data, id) {
+function renderLibraryDetailBody(data, id) {
     const releaseId = normalizeReleaseId(data.mb_albumid);
     let html = '';
     if (data.path) {

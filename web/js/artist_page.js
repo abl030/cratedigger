@@ -24,7 +24,10 @@
  *      the credit rules; I4 in_library === true is the only inLibrary
  *      ticket; I5 inFlight is a lens over the library feed
  *      (downloading/manual only — "wanted" is ambient after the
- *      full-library backfill and stays a badge).
+ *      full-library backfill and stays a badge); I6 no owned album is
+ *      invisible — a library-feed row whose release group is absent
+ *      from the source discography renders as an orphan album row
+ *      inside the In library section.
  */
 import { renderTypedSections } from './grouping.js';
 import { renderRgRow } from './discography.js';
@@ -56,7 +59,19 @@ export function classifyArtistRows({ artistId, artistName, releaseGroups, librar
   }
   const inFlight = (libraryAlbums || []).filter(
     a => a.pipeline_status === 'downloading' || a.pipeline_status === 'manual');
-  return { inLibrary, inFlight, missing, appearances, bootlegs };
+  // I6 — owned albums whose release group never made it into the source
+  // discography (MB lacks the release, or the backend's title-fallback
+  // match missed). Without this they'd be invisible on the whole page.
+  // The title checks approximate the backend fallback so an album whose
+  // rg row DID render (under a different rg id) isn't shown twice.
+  const rgIds = new Set((releaseGroups || []).map(r => String(r.id)));
+  const inLibTitles = new Set(inLibrary.map(r => (r.title || '').toLowerCase()));
+  const inLibraryOrphans = (libraryAlbums || []).filter(a =>
+    a.in_library !== false
+    && !(a.mb_releasegroupid && rgIds.has(String(a.mb_releasegroupid)))
+    && !inLibTitles.has((a.album || '').toLowerCase())
+    && !inLibTitles.has((a.release_group_title || '').toLowerCase()));
+  return { inLibrary, inLibraryOrphans, inFlight, missing, appearances, bootlegs };
 }
 
 /**
@@ -96,9 +111,18 @@ export function renderArtistSections(sections, ctx) {
     { defaultOpen: defaultOpen ? 'Albums' : null });
 
   let html = '';
-  if (sections.inLibrary.length > 0) {
-    html += sectionWrap('In library', sections.inLibrary.length,
-      typed(sections.inLibrary, true), { open: true });
+  const orphans = sections.inLibraryOrphans || [];
+  if (sections.inLibrary.length > 0 || orphans.length > 0) {
+    let body = sections.inLibrary.length > 0 ? typed(sections.inLibrary, true) : '';
+    if (orphans.length > 0) {
+      body += `
+        <div class="type-header" style="color:#777;margin-top:6px;cursor:default;" onclick="event.stopPropagation()">
+          Library-only editions <span class="type-count">${orphans.length}</span>
+        </div>
+        ${orphans.map(renderLibraryAlbumRow).join('')}`;
+    }
+    html += sectionWrap('In library', sections.inLibrary.length + orphans.length,
+      body, { open: true });
   }
   if (sections.inFlight.length > 0) {
     html += sectionWrap('In flight', sections.inFlight.length,
