@@ -132,6 +132,11 @@ class ClassifiedEntry:
     wrong_match_triage_preview_decision: Optional[str] = None
     wrong_match_triage_stage_chain: list[str] = field(default_factory=list)
     wrong_match_triage_detail: Optional[str] = None
+    # The on-disk codec at download time, from import_result JSONB
+    # (existing_measurement.format). Rank-driven upgrades at equal
+    # bitrate are unreadable without it (issue #575: AAC 256 replacing
+    # unverified MP3 256 rendered as "256kbps (was 256kbps)").
+    existing_format: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +176,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     badge, badge_class, border_color, verdict = _classify(entry)
     summary = _build_summary(entry, badge, verdict)
     downloaded_label = _build_downloaded_label(entry)
+    existing_format = _extract_existing_format(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
     triage = _extract_wrong_match_triage(entry)
@@ -188,7 +194,18 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         wrong_match_triage_preview_decision=triage["preview_decision"],
         wrong_match_triage_stage_chain=triage["stage_chain"],
         wrong_match_triage_detail=triage["detail"],
+        existing_format=existing_format,
     )
+
+
+def _extract_existing_format(entry: LogEntry) -> Optional[str]:
+    """The on-disk codec at download time, from
+    ``import_result.existing_measurement.format``. None when the blob is
+    missing/legacy — renderers fall back to the bare bitrate suffix."""
+    ir = _parse_import_result(entry)
+    if ir is None or ir.existing_measurement is None:
+        return None
+    return ir.existing_measurement.format
 
 
 def _extract_disambiguation_failure(

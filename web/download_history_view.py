@@ -60,6 +60,7 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     spectral_bitrate: int | None
     existing_min_bitrate: int | None
     existing_spectral_bitrate: int | None
+    existing_format: str | None
     final_format: str | None
     v0_probe_kind: str | None
     v0_probe_min_bitrate: int | None
@@ -115,6 +116,7 @@ def build_download_history_row(
             "badge_class": classified.badge_class,
             "border_color": classified.border_color,
             "downloaded_label": classified.downloaded_label,
+            "existing_format": classified.existing_format,
             "verdict": classified.verdict,
             "disambiguation_failure": classified.disambiguation_failure,
             "disambiguation_detail": classified.disambiguation_detail,

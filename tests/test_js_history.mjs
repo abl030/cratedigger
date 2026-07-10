@@ -458,6 +458,48 @@ console.log('renderEvidenceStrip() requires a number — a codec label alone is 
   }
 }
 
+console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
+{
+  // The Mothertongue case (#575): AAC 256 replacing unverified MP3 256.
+  // Without the format, "IN M4A V0 · 256k HAVE 256k" reads as a
+  // pointless re-download; the codec class WAS the upgrade.
+  const strip = renderEvidenceStrip({
+    downloaded_label: 'M4A V0',
+    actual_min_bitrate: 256,
+    spectral_grade: 'genuine',
+    existing_format: 'MP3',
+    existing_min_bitrate: 256,
+  });
+  assertContains(strip, 'MP3 256k', 'HAVE side leads with the on-disk format');
+}
+
+console.log('renderDownloadHistoryItem() includes the on-disk format in the Bitrate (was X) suffix');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'japanman797',
+    created_at: '2026-07-10T10:30:00+00:00',
+    downloaded_label: 'M4A V0',
+    actual_min_bitrate: 256,
+    existing_format: 'MP3',
+    existing_min_bitrate: 256,
+  });
+  assertContains(html, '(was MP3 256kbps)',
+    'Bitrate was-suffix names the on-disk codec');
+}
+
+console.log('renderDownloadHistoryItem() keeps the bare (was X) when existing format unknown');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-10T10:30:00+00:00',
+    actual_min_bitrate: 320,
+    existing_min_bitrate: 256,
+  });
+  assertContains(html, '(was 256kbps)', 'legacy rows keep the bare suffix');
+}
+
 console.log('renderEvidenceStrip() escapes injected values');
 {
   const strip = renderEvidenceStrip({

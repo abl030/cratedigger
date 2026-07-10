@@ -92,7 +92,16 @@ export function renderEvidenceStrip(h) {
   }
 
   const haveParts = [];
-  if (h.existing_min_bitrate) haveParts.push(`${esc(h.existing_min_bitrate)}k`);
+  // Lead with "MP3 256k" as one piece — the codec class is often the
+  // deciding metric (a rank upgrade at equal bitrate is unreadable
+  // without it).
+  if (h.existing_format && h.existing_min_bitrate) {
+    haveParts.push(`${esc(h.existing_format)} ${esc(h.existing_min_bitrate)}k`);
+  } else if (h.existing_format) {
+    haveParts.push(esc(h.existing_format));
+  } else if (h.existing_min_bitrate) {
+    haveParts.push(`${esc(h.existing_min_bitrate)}k`);
+  }
   if (h.existing_spectral_bitrate) haveParts.push(`~${esc(h.existing_spectral_bitrate)}k`);
   if (
     h.existing_v0_probe_avg_bitrate
@@ -190,12 +199,15 @@ export function renderDownloadHistoryItem(h) {
   }
 
   // Bitrate row — apples-to-apples between candidate and existing on
-  // min bitrate (kbps).
+  // min bitrate (kbps). The was-side names the on-disk codec when known:
+  // "256kbps (was MP3 256kbps)" explains a rank upgrade that the bare
+  // numbers would contradict.
   const candidateMin = h.actual_min_bitrate;
   const existingMin = h.existing_min_bitrate;
   if (candidateMin || existingMin) {
     const candidate = candidateMin ? `${esc(candidateMin)}kbps` : '—';
-    const was = existingMin ? `${esc(existingMin)}kbps` : null;
+    const wasFmt = h.existing_format ? `${esc(h.existing_format)} ` : '';
+    const was = existingMin ? `${wasFmt}${esc(existingMin)}kbps` : null;
     rows.push(['Bitrate', withWas(candidate, was)]);
   } else {
     rows.push(['Bitrate', '—']);

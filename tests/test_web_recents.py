@@ -420,6 +420,41 @@ class TestQualityLabel(unittest.TestCase):
 # classify_log_entry — badge classification
 # ============================================================================
 
+class TestClassifyExistingFormat(unittest.TestCase):
+    """existing_format surfaces the on-disk codec from import_result so
+    rank-driven upgrades at equal bitrate read coherently (issue #575:
+    a 'Bitrate 256kbps (was 256kbps)' upgrade was really AAC replacing
+    unverified MP3 — the format was the deciding metric and was never
+    shown)."""
+
+    def test_existing_format_derived_from_import_result(self):
+        result = classify_log_entry(_entry(
+            outcome="success",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "existing_measurement": {
+                    "format": "MP3",
+                    "is_cbr": True,
+                    "min_bitrate_kbps": 256,
+                    "avg_bitrate_kbps": 256,
+                },
+            },
+        ))
+        self.assertEqual(result.existing_format, "MP3")
+
+    def test_existing_format_none_without_import_result(self):
+        result = classify_log_entry(_entry(outcome="success"))
+        self.assertIsNone(result.existing_format)
+
+    def test_existing_format_none_when_measurement_absent(self):
+        result = classify_log_entry(_entry(
+            outcome="success",
+            import_result={"version": 2, "decision": "import"},
+        ))
+        self.assertIsNone(result.existing_format)
+
+
 class TestClassifyBadge(unittest.TestCase):
     """Test that classify_log_entry returns the correct badge for each scenario."""
 
