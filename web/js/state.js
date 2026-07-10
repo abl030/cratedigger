@@ -40,7 +40,7 @@ import { invalidateActiveRgs } from './active_rgs.js';
  * @property {string} query             Current search-box substring filter.
  */
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseSubView: string, browseCache: Object, pipelineData: Object|null, pipelineSearchQuery: string, pipelineSearchResults: Array<Object>|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'queue', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineData: Object|null, pipelineSearchQuery: string, pipelineSearchResults: Array<Object>|null, pipelineDashboardData: Object|null, pipelineView: string, pipelineFilter: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'queue', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -48,7 +48,6 @@ export const state = {
   browseLabel: null,
   labelFilters: { yearMin: null, yearMax: null, format: '', hideHeld: false },
   labelPage: 1,
-  browseSubView: 'discography',
   browseCache: {},
   pipelineData: null,
   pipelineSearchQuery: '',
@@ -130,7 +129,7 @@ export function updatePipelineStatus(mbid, status, pipelineId) {
   // Browse-search inverted Replace button cache so the next render
   // re-fetches.
   invalidateActiveRgs();
-  // Update disambData pressings (analysis tab)
+  // Update disambData pressings (the artist page's analysis overlay)
   if (state.disambData) {
     for (const rg of state.disambData.release_groups) {
       for (const p of (rg.pressings || [])) {

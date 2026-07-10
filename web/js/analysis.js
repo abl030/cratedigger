@@ -1,105 +1,70 @@
 // @ts-check
+/**
+ * Unique-track analysis overlay (issue #575 PR4).
+ *
+ * The old Analysis sub-view is gone; its intelligence now decorates the
+ * unified artist page. The disambiguate payload (state.disambData, from
+ * /api/artist/<id>/disambiguate) drives two decorations:
+ *
+ *  - applyAnalysisChips: "N unique" / "covered by X" chips on the
+ *    release-group rows (matched by data-rg-id), applied when the
+ *    payload lands — never a re-render, so expansion state survives.
+ *  - applyAnalysisToExpansion: colour dots + exclusive counts on the
+ *    pressing rows inside an expanded release group, plus the
+ *    recordings breakdown block, applied by loadReleaseGroup's
+ *    post-render hook.
+ */
 import { state, API, toast, updatePipelineStatus } from './state.js';
 import { esc } from './util.js';
-import { renderTypedSections } from './grouping.js';
-import { buildReleaseActionState } from './release_action_state.js';
-import { renderActionToolbar } from './release_actions.js';
-import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
-import { renderReleaseRow, toggleExpand } from './render_primitives.js';
+import { cssEscape } from './discography.js';
 
 /** @type {string[]} */
 export const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
 
 /**
- * Render disambiguate/analysis results into a target element.
- * @param {HTMLElement} [targetEl]
+ * The per-release-group analysis chip: unique-track count or coverage.
+ * @param {Object} rg - Disambiguate release-group row
+ * @returns {string}
  */
-export function renderDisambiguateInto(targetEl) {
-  if (!state.disambData) return;
-  const el = targetEl || document.getElementById('disamb-content');
-  if (!el) return;
-  const d = state.disambData;
-  const rgs = d.release_groups || [];
-
-  const withUnique = rgs.filter(rg => rg.unique_track_count > 0).length;
-  const covered = rgs.filter(rg => rg.covered_by).length;
-
-  let html = `<div style="margin:12px 0;">
-    <strong>${esc(d.artist_name)}</strong> — ${rgs.length} release groups (excl. live), ${withUnique} with unique tracks, ${covered} fully covered
-  </div>`;
-
-  // Same Albums/EPs/Singles sectioning the other browse sub-tabs use.
-  // Analysis rows expose `primary_type` and `first_date` (not the
-  // standard `first_release_date`), so override the date extractor.
-  html += renderTypedSections(rgs, renderDisambRG, {
-    dateOf: (r) => String(r.first_date || ''),
-  });
-  el.innerHTML = html;
-}
-
-/**
- * Render a single release group row.
- * @param {Object} rg - Release group data
- * @returns {string} HTML string
- */
-export function renderDisambRG(rg) {
-  // Unified renderer. Analysis row uses `library_status` (truthy when
-  // any pressing is in library) — normalize to in_library so the
-  // shared renderer reads the same shape.
-  const badges = renderStatusBadges({
-    in_library: !!rg.library_status,
-    library_format: rg.library_format,
-    library_min_bitrate: rg.library_min_bitrate,
-    library_rank: rg.library_rank,
-    pipeline_status: rg.pipeline_status,
-  });
-
-  let statusBadge;
+export function analysisChipHtml(rg) {
   if (rg.covered_by) {
-    statusBadge = `<span style="color:#777;font-size:0.85em;margin-left:6px;">covered by ${esc(rg.covered_by)}</span>`;
-  } else if (rg.unique_track_count > 0) {
-    statusBadge = `<span style="color:#6d6;font-weight:600;margin-left:6px;">${rg.unique_track_count} unique</span>`;
-  } else {
-    statusBadge = '<span style="color:#555;margin-left:6px;">0 unique</span>';
+    return `<span style="color:#777;font-size:0.85em;margin-left:6px;">covered by ${esc(rg.covered_by)}</span>`;
   }
-
-  const opacity = rg.covered_by ? '0.5' : '1';
-
-  return renderReleaseRow({
-    onclick: `event.stopPropagation(); window.toggleDisambRGTracks('${rg.release_group_id}')`,
-    style: `cursor:pointer;opacity:${opacity};`,
-    titleHtml: `${esc(rg.title)}${badges}${statusBadge}`,
-    metaLines: [`${rg.first_date || '?'} — ${esc(rg.primary_type)} — ${rg.track_count}t — ${rg.release_ids.length} pressing${rg.release_ids.length > 1 ? 's' : ''}`],
-    detail: { id: `disamb-rg-${rg.release_group_id}` },
-  });
+  if (rg.unique_track_count > 0) {
+    return `<span style="color:#6d6;font-weight:600;margin-left:6px;">${rg.unique_track_count} unique</span>`;
+  }
+  return '<span style="color:#555;margin-left:6px;">0 unique</span>';
 }
 
 /**
- * Toggle track listing for a release group in the disambiguate view.
- * @param {string} rgId - Release group ID
+ * Decorate rendered release-group rows with analysis chips. Idempotent —
+ * a row that already carries a chip is skipped, so late re-application
+ * (cache-hit re-render) is safe.
+ * @param {HTMLElement} containerEl - The artist-page container.
+ * @param {Object} disambData - /api/artist/<id>/disambiguate payload.
  */
-export function toggleDisambRGTracks(rgId) {
-  const el = document.getElementById('disamb-rg-' + rgId);
-  toggleExpand(el, (target) => renderDisambRGTracksInto(target, rgId));
+export function applyAnalysisChips(containerEl, disambData) {
+  for (const rg of disambData.release_groups || []) {
+    const row = containerEl.querySelector(`.rg[data-rg-id="${cssEscape(rg.release_group_id)}"]`);
+    if (!row || row.querySelector('.disamb-chip')) continue;
+    const title = row.querySelector('.rg-title');
+    if (!title) continue;
+    title.insertAdjacentHTML('afterend', `<span class="disamb-chip">${analysisChipHtml(rg)}</span>`);
+  }
 }
 
 /**
- * Render the pressing/recording breakdown for one release group into a
- * detail panel. Sync loader for toggleExpand — reads the already-loaded
- * state.disambData, no fetch.
- * @param {HTMLElement} el
- * @param {string} rgId - Release group ID
+ * Per-recording pressing membership + per-pressing exclusive counts.
+ * Pure — Node-testable.
+ * @param {Object} rg - Disambiguate release-group row (pressings + tracks)
+ * @returns {{trackToPressings: Object<string, number[]>, pressingExclusiveCounts: number[], totalPressings: number}}
  */
-function renderDisambRGTracksInto(el, rgId) {
-  const rg = state.disambData.release_groups.find(rg => rg.release_group_id === rgId);
-  if (!rg) { el.innerHTML = ''; return; }
-
+export function computeRecordingDots(rg) {
   const pressingRecSets = (rg.pressings || []).map(p => new Set(p.recording_ids || []));
-
-  // For each recording, find which pressing(s) contain it
+  /** @type {Object<string, number[]>} */
   const trackToPressings = {};
-  for (const t of rg.tracks) {
+  for (const t of rg.tracks || []) {
     trackToPressings[t.recording_id] = [];
     for (let i = 0; i < pressingRecSets.length; i++) {
       if (pressingRecSets[i].has(t.recording_id)) {
@@ -107,8 +72,6 @@ function renderDisambRGTracksInto(el, rgId) {
       }
     }
   }
-
-  // "Exclusive" = tracks on this pressing that NO other pressing has
   const pressingExclusiveCounts = pressingRecSets.map((recSet, i) => {
     let count = 0;
     for (const recId of recSet) {
@@ -117,79 +80,103 @@ function renderDisambRGTracksInto(el, rgId) {
     }
     return count;
   });
-
-  let html = '';
-
-  // Show pressings with colour dots and unique counts
-  if (rg.pressings && rg.pressings.length > 0) {
-    html += '<div style="margin-bottom:8px;color:#888;font-size:0.85em;">Pressings:</div>';
-    html += rg.pressings.map((p, i) => {
-      const color = _PRESSING_COLORS[i % _PRESSING_COLORS.length];
-      const badges = renderStatusBadges({
-        id: p.release_id,
-        in_library: p.in_library,
-        library_format: p.library_format,
-        library_min_bitrate: p.library_min_bitrate,
-        library_rank: p.library_rank,
-        pipeline_status: p.pipeline_status,
-      });
-      const actionState = buildReleaseActionState({
-        id: p.release_id,
-        in_library: p.in_library,
-        beets_album_id: p.beets_album_id,
-        pipeline_status: p.pipeline_status,
-        pipeline_id: p.pipeline_id,
-        artist: state.disambData?.artist_name || '',
-        album: p.title || '',
-        track_count: p.track_count || 0,
-      });
-      const toolbar = renderActionToolbar(actionState, { size: 'small' });
-
-      const exCount = pressingExclusiveCounts[i];
-      const uLabel = exCount > 0 ? `<span style="color:${color};font-weight:600;margin-left:6px;">${exCount} exclusive</span>` : '';
-
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;gap:8px;">
-        <span><span style="color:${color};font-weight:bold;">●</span> ${esc(p.title)}${badges} <span style="color:#777;">${p.country || '?'} ${p.date || '?'} — ${esc(p.format)} — ${p.track_count}t</span>${uLabel}</span>
-        ${toolbar}
-      </div>`;
-    }).join('');
-  }
-
-  // Show tracks with colour dots matching which pressing(s) contain them
-  if (rg.tracks && rg.tracks.length > 0) {
-    html += '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings:</div>';
-    const totalPressings = pressingRecSets.length;
-    // One span per row — .lib-track is flex justify-between, so marker
-    // and title must live together or they get pushed to opposite edges.
-    html += rg.tracks.map(t => {
-      if (!t.unique) {
-        const alsoOn = t.also_on && t.also_on.length > 0
-          ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
-          : '';
-        return `<div class="lib-track" style="opacity:0.5;">
-          <span>${esc(t.title)}${alsoOn}</span>
-        </div>`;
-      }
-      const pIdxs = trackToPressings[t.recording_id] || [];
-      // If on all pressings, it's a common track — no dots needed
-      if (pIdxs.length === totalPressings) {
-        return `<div class="lib-track">
-          <span><span style="color:#6d6;font-weight:bold;">★</span> ${esc(t.title)}</span>
-        </div>`;
-      }
-      // Colour dots for tracks only on some pressings
-      const dots = pIdxs.map(i => `<span style="color:${_PRESSING_COLORS[i % _PRESSING_COLORS.length]};">●</span>`).join('');
-      return `<div class="lib-track">
-        <span><span style="margin-right:4px;">${dots || '★'}</span>${esc(t.title)}</span>
-      </div>`;
-    }).join('');
-  }
-
-  el.innerHTML = html;
+  return { trackToPressings, pressingExclusiveCounts, totalPressings: pressingRecSets.length };
 }
 
 /**
- * Remove a pipeline request from the disambiguate view.
+ * The recordings breakdown for an expanded release group: one row per
+ * recording, colour dots matching the pressing rows above it. Pure —
+ * Node-testable.
+ * @param {Object} rg - Disambiguate release-group row
+ * @returns {string}
+ */
+export function renderRecordingsBlock(rg) {
+  if (!rg.tracks || rg.tracks.length === 0) return '';
+  const { trackToPressings, totalPressings } = computeRecordingDots(rg);
+  let html = '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings:</div>';
+  // One span per row — .lib-track is flex justify-between, so marker
+  // and title must live together or they get pushed to opposite edges.
+  html += rg.tracks.map(t => {
+    if (!t.unique) {
+      const alsoOn = t.also_on && t.also_on.length > 0
+        ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
+        : '';
+      return `<div class="lib-track" style="opacity:0.5;">
+        <span>${esc(t.title)}${alsoOn}</span>
+      </div>`;
+    }
+    const pIdxs = trackToPressings[t.recording_id] || [];
+    // If on all pressings, it's a common track — no dots needed
+    if (pIdxs.length === totalPressings) {
+      return `<div class="lib-track">
+        <span><span style="color:#6d6;font-weight:bold;">★</span> ${esc(t.title)}</span>
+      </div>`;
+    }
+    // Colour dots for tracks only on some pressings
+    const dots = pIdxs.map(i => `<span style="color:${_PRESSING_COLORS[i % _PRESSING_COLORS.length]};">●</span>`).join('');
+    return `<div class="lib-track">
+      <span><span style="margin-right:4px;">${dots || '★'}</span>${esc(t.title)}</span>
+    </div>`;
+  }).join('');
+  return html;
+}
+
+/**
+ * Decorate an expanded release group's pressing rows with colour dots +
+ * exclusive counts and append the recordings breakdown. Called by
+ * loadReleaseGroup's post-render hook; no-op unless disambiguate data
+ * for this release group is loaded. Idempotent via the marker class on
+ * the appended block.
+ * @param {HTMLElement} relEl - The .releases container that just rendered.
+ * @param {string} rgId - Release-group id that was expanded.
+ */
+export function applyAnalysisToExpansion(relEl, rgId) {
+  const rg = state.disambData?.release_groups?.find(
+    (g) => g.release_group_id === rgId);
+  if (!rg) return;
+  if (relEl.querySelector('.disamb-recordings')) return;
+  const { pressingExclusiveCounts } = computeRecordingDots(rg);
+  (rg.pressings || []).forEach((p, i) => {
+    const row = relEl.querySelector(`.release[data-release-id="${cssEscape(String(p.release_id))}"]`);
+    if (!row) return;
+    const title = row.querySelector('.release-title');
+    if (!title) return;
+    const color = _PRESSING_COLORS[i % _PRESSING_COLORS.length];
+    title.insertAdjacentHTML('afterbegin', `<span style="color:${color};font-weight:bold;">● </span>`);
+    const exCount = pressingExclusiveCounts[i];
+    if (exCount > 0) {
+      title.insertAdjacentHTML('beforeend',
+        `<span style="color:${color};font-weight:600;margin-left:6px;">${exCount} exclusive</span>`);
+    }
+  });
+  const block = renderRecordingsBlock(rg);
+  if (block) {
+    relEl.insertAdjacentHTML('beforeend',
+      `<div class="disamb-recordings" style="padding:4px 10px 8px;">${block}</div>`);
+  }
+}
+
+/**
+ * Decorate every ALREADY-EXPANDED release group once the disambiguate
+ * payload lands. The manual-expand path decorates via loadReleaseGroup's
+ * post-render hook, but an expansion that rendered BEFORE the payload
+ * arrived (search-by-ID auto-expand, or a fast manual click) would
+ * otherwise stay bare until collapsed and re-opened.
+ * @param {HTMLElement} containerEl - The artist-page container.
+ * @param {Object} disambData - /api/artist/<id>/disambiguate payload.
+ */
+export function applyAnalysisToOpenExpansions(containerEl, disambData) {
+  for (const rg of disambData.release_groups || []) {
+    const relEl = /** @type {HTMLElement|null} */ (
+      containerEl.querySelector(`#rel-${cssEscape(rg.release_group_id)}`));
+    if (relEl && relEl.innerHTML && !relEl.querySelector('.loading')) {
+      applyAnalysisToExpansion(relEl, rg.release_group_id);
+    }
+  }
+}
+
+/**
+ * Remove a pipeline request from an artist-page row.
  * @param {number} pipelineId
  * @param {HTMLButtonElement} btn
  */

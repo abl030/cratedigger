@@ -1,11 +1,11 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, detectSource, normalizeReleaseId } from './util.js';
-import { renderTypedSections } from './grouping.js';
 import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderReplaceButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
+import { applyAnalysisToExpansion } from './analysis.js';
 import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
 import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
@@ -14,118 +14,49 @@ import {
 } from './render_primitives.js';
 
 /**
- * Render the artist discography into a target element.
- * @param {HTMLElement} rgEl - Container element
- * @param {string} id - MusicBrainz artist ID
- * @param {string} artistName - Artist name
- * @param {Object} data - API response with release_groups
- * @param {Object} libData - API response with library albums
+ * One release-group row: year + title + badges + expansion target.
+ * Shared by every section of the unified artist page (issue #575 PR4) —
+ * In library, Missing, Appearances, Bootlegs, and the late-appended
+ * "Only on <other source>" complement.
+ *
+ * @param {Object} rg - Release-group row from /api/artist or /api/discogs/artist
+ *   (or a compare-bucket row for complement sections).
+ * @param {{artistName: string, nameLC: string, source?: string}} ctx -
+ *   nameLC is the lowercased artist name (credit-note suppression);
+ *   source forces loadReleaseGroup onto 'mb'/'discogs' for rows that do
+ *   not belong to state.browseSource (compare complement rows).
+ * @returns {string}
  */
-export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
-    const groups = data.release_groups || [];
-    const libraryAlbums = libData.albums || [];
-
-    // Split: own work vs appearances, filter bootleg-only release groups
-    // Compare by artist ID (handles name changes like Kanye West → Ye)
-    const nameLC = artistName.toLowerCase();
-    const own = [], appearances = [], bootlegOnly = [];
-    for (const rg of groups) {
-      const credit = (rg.artist_credit || '').toLowerCase();
-      const isOwn = rg.primary_artist_id === id
-        || credit === nameLC || credit.startsWith(nameLC + ' /') || credit.startsWith(nameLC + ',') || !credit;
-
-      if (!rg.has_official) {
-        bootlegOnly.push(rg);
-      } else if (isOwn) {
-        own.push(rg);
-      } else {
-        appearances.push(rg);
-      }
-    }
-
-    function renderRgRow(rg) {
-      const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
-      const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== nameLC
-        ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
-      const badges = renderStatusBadges(rg);
-      // Masterless Discogs releases have no child master to expand; the rg row
-      // is the leaf, so it carries data-release-id for search-by-ID ringing.
-      const leafAttr = rg.is_masterless ? ` data-release-id="${rg.id}"` : '';
-      // Search-plan inspector button — only when this rg has a pipeline
-      // request. RG-level pipeline_id surfaces from the analysis tab's
-      // disambData snapshot via pipelineStore (see release_action_state.js).
-      const spBtn = renderSearchPlanButton({
-        pipelineId: buildReleaseActionState({
-          ...rg,
-          artist: artistName,
-          album: rg.title,
-        }).pipelineId,
-      });
-      const opts = rg.is_masterless ? "{masterless:true}" : "{}";
-      return `
-        <div class="rg"${leafAttr}>
-          <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this, ${opts})">
-            <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
-          </div>
-          <div class="releases" id="rel-${rg.id}"></div>
-        </div>
-      `;
-    }
-
-    function renderSection(rgs, defaultOpen) {
-      return renderTypedSections(rgs, renderRgRow,
-        { defaultOpen: defaultOpen ? 'Albums' : null });
-    }
-
-    // Library section — what you already own
-    let html = '';
-    if (libraryAlbums.length > 0) {
-      const discogs = libraryAlbums.filter(a => a.source === 'discogs');
-      const mb = libraryAlbums.filter(a => a.source === 'musicbrainz');
-      html += `<div class="library-section">
-        <div class="library-header">In Library (${libraryAlbums.length})</div>
-        ${mb.map(a => `
-          <div class="library-album">
-            <span class="library-album-title">${a.year || '?'} ${esc(a.album)} (${a.track_count}t)</span>
-            <span class="library-src library-src-mb">MB</span>
-          </div>
-        `).join('')}
-        ${discogs.map(a => `
-          <div class="library-album">
-            <span class="library-album-title">${a.year || '?'} ${esc(a.album)} (${a.track_count}t)</span>
-            <span class="library-src library-src-discogs">Discogs</span>
-          </div>
-        `).join('')}
-      </div>`;
-    }
-
-    html += renderSection(own, true);
-    if (appearances.length > 0) {
-      html += `
-        <div class="type-section">
-          <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#777;">
-            Appearances <span class="type-count">${appearances.length}</span>
-          </div>
-          <div class="type-body">
-            ${renderSection(appearances, false)}
-          </div>
-        </div>
-      `;
-    }
-    if (bootlegOnly.length > 0) {
-      html += `
-        <div class="type-section">
-          <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#555;">
-            Bootleg-only releases <span class="type-count">${bootlegOnly.length}</span>
-          </div>
-          <div class="type-body">
-            ${renderSection(bootlegOnly, false)}
-          </div>
-        </div>
-      `;
-    }
-    rgEl.innerHTML = html;
-    applySearchTargetAfterDiscography(rgEl);
+export function renderRgRow(rg, ctx) {
+  const year = rg.first_release_date ? rg.first_release_date.slice(0, 4) : '';
+  const creditNote = rg.artist_credit && rg.artist_credit.toLowerCase() !== ctx.nameLC
+    ? `<span class="rg-meta"> - ${esc(rg.artist_credit)}</span>` : '';
+  const badges = renderStatusBadges(rg);
+  // Masterless Discogs releases have no child master to expand; the rg row
+  // is the leaf, so it carries data-release-id for search-by-ID ringing.
+  const leafAttr = rg.is_masterless ? ` data-release-id="${rg.id}"` : '';
+  // Search-plan inspector button — only when this rg has a pipeline
+  // request. RG-level pipeline_id surfaces from the analysis overlay's
+  // disambData snapshot via pipelineStore (see release_action_state.js).
+  const spBtn = renderSearchPlanButton({
+    pipelineId: buildReleaseActionState({
+      ...rg,
+      artist: ctx.artistName,
+      album: rg.title,
+    }).pipelineId,
+  });
+  const optParts = [];
+  if (rg.is_masterless) optParts.push('masterless:true');
+  if (ctx.source) optParts.push(`source:'${ctx.source}'`);
+  const opts = `{${optParts.join(',')}}`;
+  return `
+    <div class="rg" data-rg-id="${esc(rg.id)}"${leafAttr}>
+      <div onclick="event.stopPropagation(); window.loadReleaseGroup('${rg.id}', this, ${opts})">
+        <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
+      </div>
+      <div class="releases" id="rel-${rg.id}"></div>
+    </div>
+  `;
 }
 
 /**
@@ -144,9 +75,9 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
  * typed section is invisible even after the inner releases load (those
  * wrappers default to display:none until the .open class is added).
  *
- * @param {HTMLElement} rgEl - The discography container that just rendered.
+ * @param {HTMLElement} rgEl - The artist-page container that just rendered.
  */
-function applySearchTargetAfterDiscography(rgEl) {
+export function applySearchTargetAfterDiscography(rgEl) {
   const expandId = state.searchTargetExpandId;
   if (!expandId) return;
   // Source guard: only apply ring when the discography source matches
@@ -205,7 +136,7 @@ function openCollapsedAncestors(el, stopEl) {
  * @param {string} s
  * @returns {string}
  */
-function cssEscape(s) {
+export function cssEscape(s) {
   if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(s);
   return String(s).replace(/[^a-zA-Z0-9_-]/g, ch => `\\${ch}`);
 }
@@ -366,6 +297,10 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     if (isStale()) return;
     relEl.innerHTML = html;
     applySearchTargetAfterReleases(relEl);
+    // Analysis overlay (unified artist page): when disambiguate data for
+    // this release group is loaded, decorate pressing rows with colour
+    // dots / exclusive counts and append the recordings breakdown.
+    applyAnalysisToExpansion(relEl, id);
   } catch (e) {
     if (isStale()) return;
     relEl.innerHTML = '<div class="loading">Failed to load</div>';
@@ -525,6 +460,17 @@ export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
     hideDisabled: true,
   });
   html += '</div>';
+
+  // Deep library detail (path, download history, status / min-bitrate /
+  // intent controls) — absorbed from the old Library sub-view (#575 PR4).
+  // Lazy: fetches /api/beets/album/<id> on first open.
+  if (data.beets_album_id) {
+    html += `
+      <div class="type-header" style="margin-top:8px;padding:4px 0;" onclick="event.stopPropagation(); window.toggleReleaseLibDetail(${Number(data.beets_album_id)})">
+        Library detail <span class="type-count">history · controls</span>
+      </div>
+      <div class="lib-detail" id="libdet-${Number(data.beets_album_id)}"></div>`;
+  }
 
   targetEl.innerHTML = html;
 }

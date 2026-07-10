@@ -338,7 +338,6 @@ export function openLabelDetailFromList(rowEl, index) {
 export async function openLabelDetail(labelId, labelName) {
   const requestToken = ++labelDetailRequestToken;
   state.browseLabel = { id: labelId, name: labelName };
-  state.browseSubView = 'label';
   state.labelPage = 1;
 
   const results = document.getElementById('results');

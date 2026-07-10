@@ -6,14 +6,14 @@
  */
 
 import { state } from './state.js';
-import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, switchSubView, invalidateBrowseArtist, openBrowseArtistFromCompare, toggleCompareRow, closeVaFallback } from './browse.js';
-import { renderArtistDiscography, loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
+import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, reloadBrowseArtist, invalidateBrowseArtist, closeVaFallback } from './browse.js';
+import { loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, setPipelineView, setFilter, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus, togglePipelineReplacedFilter, onPipelineSearchInput } from './pipeline.js';
 import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tail.js';
 import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
-import { renderLibraryResults, renderLibraryResultsInto, toggleLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
-import { renderDisambiguateInto, toggleDisambRGTracks, disambRemove } from './analysis.js';
+import { toggleLibDetail, toggleReleaseLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
+import { disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
@@ -149,13 +149,10 @@ Object.assign(window, {
   setSearchType,
   setBrowseSource,
   openBrowseArtist,
-  openBrowseArtistFromCompare,
-  toggleCompareRow,
   closeBrowseArtist,
+  reloadBrowseArtist,
   closeVaFallback,
-  switchSubView,
   searchArtists,
-  renderArtistDiscography,
   loadReleaseGroup,
   addRelease,
   toggleReleaseDetail,
@@ -182,17 +179,14 @@ Object.assign(window, {
   onLongTailSearchInput,
   toggleLongTailDetail,
   toggleLongTailPeers,
-  renderLibraryResults,
-  renderLibraryResultsInto,
   toggleLibDetail,
+  toggleReleaseLibDetail,
   banSource,
   setLibQuality,
   upgradeAlbum,
   setIntent,
   confirmDeleteBeets,
   executeBeetsDeletion,
-  renderDisambiguateInto,
-  toggleDisambRGTracks,
   disambRemove,
   loadWrongMatches,
   toggleWrongMatchGroup,

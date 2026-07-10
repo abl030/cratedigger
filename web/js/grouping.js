@@ -1,8 +1,8 @@
 // @ts-check
 
 /**
- * Shared release-grouping helpers used by every browse-artist sub-tab
- * (Discography / Library / Analysis / Compare). Centralises the
+ * Shared release-grouping helpers used by the unified artist page and
+ * the label view. Centralises the
  * Albums/EPs/Singles/Compilations/Live/Remixes/DJ Mixes/Demos/Other
  * sectioning so every view sorts the same way.
  *
