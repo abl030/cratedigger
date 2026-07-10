@@ -219,6 +219,39 @@ console.log('I6 — owned albums absent from the discography become orphans');
   assertContains(html, 'Long Tail Demo', 'orphan album row rendered');
 }
 
+console.log('I6 — title-matched RG in ANY bucket suppresses the orphan (live 1998-split bug)');
+{
+  // The live case: an owned Discogs-tagged split 7" (no MB rg id) whose
+  // MB twin has no Official release — the RG lands in bootlegs with the
+  // in-library badge, and the owned album must NOT re-emit as an orphan.
+  const s = classify(
+    [rg('rg-split', { has_official: false, in_library: true, title: 'Split 7 Inch' })],
+    [libRow({ id: 11, album: 'Split 7 Inch', mb_releasegroupid: null, mb_albumid: '461708' })]);
+  assertEqual(s.bootlegs.length, 1, 'unofficial RG stays in bootlegs');
+  assertEqual(s.inLibraryOrphans.length, 0,
+    'owned album title-matched to a bootleg-bucket RG is not an orphan');
+
+  // Same shape via the appearances bucket (guest-credit RG in library).
+  const s2 = classify(
+    [rg('rg-guest', {
+      in_library: true, title: 'Guest Comp',
+      primary_artist_id: 'other', artist_credit: 'Someone Else',
+    })],
+    [libRow({ id: 12, album: 'Guest Comp', mb_releasegroupid: null })]);
+  assertEqual(s2.appearances.length, 1, 'guest RG stays in appearances');
+  assertEqual(s2.inLibraryOrphans.length, 0,
+    'owned album title-matched to an appearances-bucket RG is not an orphan');
+
+  // Known-bad self-test: a NOT-in-library bootleg RG with the same title
+  // must not suppress a genuine orphan — the dedupe keys on the
+  // annotation, not on mere title co-existence.
+  const s3 = classify(
+    [rg('rg-unowned', { has_official: false, in_library: false, title: 'Same Name' })],
+    [libRow({ id: 13, album: 'Same Name', mb_releasegroupid: null })]);
+  assertEqual(s3.inLibraryOrphans.length, 1,
+    'un-annotated same-title RG does not hide the owned album');
+}
+
 console.log('I6 — orphans alone still render the In library section');
 {
   const s = classify([], [libRow({ id: 7, album: 'Only Orphan', mb_releasegroupid: null })]);

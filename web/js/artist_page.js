@@ -63,9 +63,16 @@ export function classifyArtistRows({ artistId, artistName, releaseGroups, librar
   // discography (MB lacks the release, or the backend's title-fallback
   // match missed). Without this they'd be invisible on the whole page.
   // The title checks approximate the backend fallback so an album whose
-  // rg row DID render (under a different rg id) isn't shown twice.
+  // rg row DID render (under a different rg id) isn't shown twice. The
+  // dedupe set spans EVERY bucket that can carry an in-library-annotated
+  // RG — an owned split 7" whose MB twin is unofficial renders (badged)
+  // under Bootleg-only, and a guest-credit one under Appearances; both
+  // previously re-emitted as orphans because only the inLibrary bucket
+  // fed the set.
   const rgIds = new Set((releaseGroups || []).map(r => String(r.id)));
-  const inLibTitles = new Set(inLibrary.map(r => (r.title || '').toLowerCase()));
+  const inLibTitles = new Set((releaseGroups || [])
+    .filter(r => r.in_library === true)
+    .map(r => (r.title || '').toLowerCase()));
   const inLibraryOrphans = (libraryAlbums || []).filter(a =>
     a.in_library !== false
     && !(a.mb_releasegroupid && rgIds.has(String(a.mb_releasegroupid)))
