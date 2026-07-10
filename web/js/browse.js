@@ -2,7 +2,7 @@
 import { state, API, toast } from './state.js';
 import { esc, jsArg, parsePastedId } from './util.js';
 import { loadReleaseGroup, renderReleaseDetail, applySearchTargetAfterDiscography } from './discography.js';
-import { applyAnalysisChips } from './analysis.js';
+import { applyAnalysisChips, applyAnalysisToOpenExpansions } from './analysis.js';
 import { classifyArtistRows, renderArtistSections, renderOtherSourceSection } from './artist_page.js';
 import { searchLabels, renderLabelSearchResults, openLabelDetail, closeLabelDetail } from './labels.js';
 
@@ -511,6 +511,9 @@ async function fireAnalysis(el, aid, token) {
     if (state.browseCache[aid]) state.browseCache[aid].disamb = data;
     state.disambData = data;
     applyAnalysisChips(el, data);
+    // Expansions that rendered before the payload arrived (search-by-ID
+    // auto-expand) get their dots + recordings breakdown now.
+    applyAnalysisToOpenExpansions(el, data);
   } catch (_e) { /* decoration only */ }
 }
 

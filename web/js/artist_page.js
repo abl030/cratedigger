@@ -72,7 +72,7 @@ function sectionWrap(title, count, bodyHtml, opts = {}) {
   const idAttr = opts.id ? ` id="${opts.id}"` : '';
   return `
     <div class="type-section"${idAttr}>
-      <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)"${style}>
+      <div class="type-header section-header" onclick="event.stopPropagation(); window.toggleSection(this)"${style}>
         ${title} <span class="type-count">${count}</span>
       </div>
       <div class="type-body${opts.open ? ' open' : ''}">

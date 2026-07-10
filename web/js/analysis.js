@@ -157,6 +157,25 @@ export function applyAnalysisToExpansion(relEl, rgId) {
 }
 
 /**
+ * Decorate every ALREADY-EXPANDED release group once the disambiguate
+ * payload lands. The manual-expand path decorates via loadReleaseGroup's
+ * post-render hook, but an expansion that rendered BEFORE the payload
+ * arrived (search-by-ID auto-expand, or a fast manual click) would
+ * otherwise stay bare until collapsed and re-opened.
+ * @param {HTMLElement} containerEl - The artist-page container.
+ * @param {Object} disambData - /api/artist/<id>/disambiguate payload.
+ */
+export function applyAnalysisToOpenExpansions(containerEl, disambData) {
+  for (const rg of disambData.release_groups || []) {
+    const relEl = /** @type {HTMLElement|null} */ (
+      containerEl.querySelector(`#rel-${cssEscape(rg.release_group_id)}`));
+    if (relEl && relEl.innerHTML && !relEl.querySelector('.loading')) {
+      applyAnalysisToExpansion(relEl, rg.release_group_id);
+    }
+  }
+}
+
+/**
  * Remove a pipeline request from an artist-page row.
  * @param {number} pipelineId
  * @param {HTMLButtonElement} btn

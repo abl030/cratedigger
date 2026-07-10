@@ -31,6 +31,11 @@
   .type-count { color: #555; font-weight: 400; }
   .type-body { display: none; }
   .type-body.open { display: block; }
+  /* Top-level availability sections on the unified artist page (#575
+     PR4) — heavier than the nested Albums/EPs/Singles type headers so
+     the two levels read as a hierarchy. */
+  .type-header.section-header { font-size: 0.95em; color: #9dc; border-bottom: 1px solid #263; padding-bottom: 4px; }
+  .type-header.section-header:hover { color: #bef; }
   .rg { padding: 10px 12px; background: #1e1e1e; border-left: 3px solid #444; margin-bottom: 4px; cursor: pointer; border-radius: 0 6px 6px 0; }
   .rg:hover { background: #252525; }
   .rg-title { font-weight: 500; }
