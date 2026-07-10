@@ -64,6 +64,49 @@ def get_library_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]]) 
     h._json({"albums": [row.to_dict() for row in albums]})  # type: ignore[attr-defined]
 
 
+# Badge priority when several requests map to one release group — show
+# the most active state.
+_PIPELINE_BADGE_PRIORITY = {"downloading": 0, "wanted": 1, "manual": 2, "imported": 3}
+
+
+def _artist_pipeline_maps(name: str, mb_artist_id: str = "") -> tuple[dict, dict]:
+    """Best-status non-replaced request per release-group id and per
+    release id for one artist. Feeds the rg-row badge overlay (#575) —
+    the same state the pressing rows already show, surfaced one level up."""
+    srv = _server()
+    by_rg: dict[str, dict] = {}
+    by_release: dict[str, dict] = {}
+    for row in srv.list_artist_requests(name, mb_artist_id):
+        status = str(row["status"])
+        if status == "replaced":
+            continue
+        prio = _PIPELINE_BADGE_PRIORITY.get(status, 9)
+        hit = {"status": status, "id": row["id"], "_prio": prio}
+        for key, target in (
+            (row.get("mb_release_group_id"), by_rg),
+            (row.get("mb_release_id"), by_release),
+        ):
+            if not key:
+                continue
+            cur = target.get(str(key))
+            if cur is None or prio < cur["_prio"]:
+                target[str(key)] = hit
+    return by_rg, by_release
+
+
+def _apply_rg_pipeline_overlay(rows: list[dict], by_rg: dict, by_release: dict) -> None:
+    """Badge rg-shaped rows with the artist's request state. Masterless
+    Discogs rows' ``id`` IS a release id, so fall through to the
+    release-id map; Discogs master ids match neither (requests key on
+    release ids), which is the accepted gap."""
+    for rg in rows:
+        rid = str(rg.get("id"))
+        hit = by_rg.get(rid) or by_release.get(rid)
+        if hit:
+            rg["pipeline_status"] = hit["status"]
+            rg["pipeline_id"] = hit["id"]
+
+
 def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
     rgs = srv.mb_api.get_artist_release_groups(artist_id)
@@ -79,6 +122,8 @@ def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_i
     if name:
         lib = srv.get_library_artist(name, artist_id)
         annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
+        by_rg, by_release = _artist_pipeline_maps(name, artist_id)
+        _apply_rg_pipeline_overlay(rgs, by_rg, by_release)
     h._json({"release_groups": rgs})  # type: ignore[attr-defined]
 
 
@@ -303,6 +348,8 @@ def get_discogs_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], 
     if name:
         lib = srv.get_library_artist(name, "")
         annotate_in_library([], masters, lib, rank_fn=srv.compute_library_rank)
+        by_rg, by_release = _artist_pipeline_maps(name)
+        _apply_rg_pipeline_overlay(masters, by_rg, by_release)
     h._json({  # type: ignore[attr-defined]
         "artist_id": artist_id,
         "artist_name": artist_name,
@@ -457,6 +504,9 @@ def _overlay_compare(skeleton: dict, name: str, mbid: str) -> dict:
 
     annotate_in_library(mb_groups, discogs_groups, lib,
                         rank_fn=srv.compute_library_rank)
+    by_rg, by_release = _artist_pipeline_maps(name, mbid)
+    _apply_rg_pipeline_overlay(mb_groups, by_rg, by_release)
+    _apply_rg_pipeline_overlay(discogs_groups, by_rg, by_release)
     return response
 
 

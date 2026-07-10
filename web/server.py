@@ -255,6 +255,17 @@ def check_pipeline(mbids):
     return _overlay.check_pipeline(_db_or_none(), mbids)
 
 
+def list_artist_requests(
+    artist_name: str,
+    mb_artist_id: str = "",
+) -> list[dict[str, object]]:
+    """One artist's request rows, for the rg-row badge overlay (#575)."""
+    db = _db_or_none()
+    if db is None or not artist_name:
+        return []
+    return db.list_requests_by_artist(artist_name, mb_artist_id)
+
+
 class Handler(BaseHTTPRequestHandler):
 
     # HTTP/1.1 keep-alive: a browser's persistent connections each pin

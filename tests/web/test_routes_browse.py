@@ -465,6 +465,102 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["release_groups"][0]["in_library"])
 
+    def test_artist_release_groups_pipeline_overlay_when_name_passed(self):
+        """RG rows carry the request badge fields (#575): a non-replaced
+        request targeting the release group surfaces as pipeline_status +
+        pipeline_id on the row, next to the in-library annotation."""
+        release_group = {
+            "id": self.RG_ID, "title": "Wanted Album", "type": "Album",
+            "secondary_types": [], "first_release_date": "2024",
+            "artist_credit": "Test Artist", "primary_artist_id": self.ARTIST_ID,
+        }
+        self.db.seed_request(make_request_row(
+            id=8838,
+            artist_name="Test Artist",
+            album_title="Wanted Album",
+            mb_artist_id=self.ARTIST_ID,
+            mb_release_group_id=self.RG_ID,
+            status="wanted",
+        ))
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.get_library_artist", return_value=[]):
+            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            status, data = self._get(
+                f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
+            )
+
+        self.assertEqual(status, 200)
+        rg = data["release_groups"][0]
+        self.assertEqual(rg["pipeline_status"], "wanted")
+        self.assertEqual(rg["pipeline_id"], 8838)
+
+    def test_artist_release_groups_pipeline_overlay_skips_replaced(self):
+        """Replaced rows are frozen audit — they must not badge the rg."""
+        release_group = {
+            "id": self.RG_ID, "title": "Old Album", "type": "Album",
+            "secondary_types": [], "first_release_date": "2024",
+            "artist_credit": "Test Artist", "primary_artist_id": self.ARTIST_ID,
+        }
+        self.db.seed_request(make_request_row(
+            id=77,
+            artist_name="Test Artist",
+            album_title="Old Album",
+            mb_artist_id=self.ARTIST_ID,
+            mb_release_group_id=self.RG_ID,
+            status="replaced",
+        ))
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.server.get_library_artist", return_value=[]):
+            mock_mb.get_artist_release_groups.return_value = [release_group]
+            mock_mb.get_official_release_group_ids.return_value = {self.RG_ID}
+            status, data = self._get(
+                f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["release_groups"][0].get("pipeline_status"))
+
+    def test_artist_compare_discogs_only_pipeline_overlay(self):
+        """A masterless discogs_only row (its id IS the release id) carries
+        the request badge fields when a request targets that release id —
+        the Deloris 'Feather Figure/Elastic Bones' case (#575)."""
+        discogs_rg = {
+            "id": "8317023",
+            "title": "Feather Figure/Elastic Bones",
+            "type": "EP",
+            "secondary_types": [],
+            "first_release_date": "2005-06-00",
+            "artist_credit": "Deloris",
+            "primary_artist_id": "361476",
+            "is_masterless": True,
+            "discogs_release_id": "8317023",
+        }
+        self.db.seed_request(make_request_row(
+            id=8838,
+            artist_name="Deloris",
+            album_title="Feather Figure/Elastic Bones",
+            mb_release_id="8317023",
+            mb_release_group_id=None,
+            status="wanted",
+        ))
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.routes.browse.discogs_api") as mock_dg:
+            mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Deloris"}]
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_official_release_group_ids.return_value = set()
+            mock_mb.get_artist_name.return_value = "Deloris"
+            mock_dg.search_artists.return_value = [{"id": "361476", "name": "Deloris"}]
+            mock_dg.get_artist_releases.return_value = [discogs_rg]
+            mock_dg.get_artist_name.return_value = "Deloris"
+            status, data = self._get("/api/artist/compare?name=Deloris")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["discogs_only"]), 1)
+        row = data["discogs_only"][0]
+        self.assertEqual(row["pipeline_status"], "wanted")
+        self.assertEqual(row["pipeline_id"], 8838)
+
     def test_release_group_contract(self):
         release = {
             "id": self.RELEASE_ID,
@@ -764,6 +860,41 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.DISCOGS_ARTIST_REQUIRED_FIELDS,
                                 "discogs artist response")
+
+    def test_discogs_artist_masterless_pipeline_overlay(self):
+        """Masterless rows (id IS the release id) carry the request badge
+        fields when ?name= is passed — the rg-level twin of the pressing
+        overlay (#575, Deloris 'Feather Figure/Elastic Bones')."""
+        self.db.seed_request(make_request_row(
+            id=8838,
+            artist_name="Deloris",
+            album_title="Feather Figure/Elastic Bones",
+            mb_release_id="8317023",
+            mb_release_group_id=None,
+            status="wanted",
+        ))
+        with patch("web.routes.browse.discogs_api") as mock_dg, \
+                patch("web.server.get_library_artist", return_value=[]):
+            mock_dg.get_artist_name.return_value = "Deloris"
+            mock_dg.get_artist_releases.return_value = [
+                {
+                    "id": "8317023",
+                    "title": "Feather Figure/Elastic Bones",
+                    "type": "EP",
+                    "secondary_types": [],
+                    "first_release_date": "2005-06-00",
+                    "artist_credit": "Deloris",
+                    "primary_artist_id": "361476",
+                    "is_masterless": True,
+                    "discogs_release_id": "8317023",
+                },
+            ]
+            status, data = self._get("/api/discogs/artist/361476?name=Deloris")
+
+        self.assertEqual(status, 200)
+        row = data["release_groups"][0]
+        self.assertEqual(row["pipeline_status"], "wanted")
+        self.assertEqual(row["pipeline_id"], 8838)
 
     def test_discogs_master_contract(self):
         beets_db = FakeBeetsDB()
