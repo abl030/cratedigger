@@ -363,7 +363,6 @@ def configure_live_db(config: DevConfig) -> None:
         raise SystemExit("--dsn or PIPELINE_DB_DSN is required for --data live-db")
 
     import web.server as web_server
-    from lib.beets_db import BeetsDB
     from lib.pipeline_db import PipelineDB
 
     def connect_readonly() -> None:
@@ -383,11 +382,15 @@ def configure_live_db(config: DevConfig) -> None:
     connect_readonly()
     web_server._try_reconnect_db = connect_readonly  # type: ignore[assignment]
 
+    # Only set the path — never inject a shared BeetsDB handle. sqlite3
+    # connections are bound to their opening thread, and the dev server
+    # is the same ThreadingHTTPServer as production, so a shared handle
+    # 500s on the second worker thread ("SQLite objects created in a
+    # thread can only be used in that same thread"). With `_beets` left
+    # None and the path set, `_beets_db()` opens per-thread read-only
+    # handles exactly like production.
     web_server.beets_db_path = config.beets_db
-    if config.beets_db and os.path.exists(config.beets_db):
-        web_server._beets = BeetsDB(config.beets_db)
-    else:
-        web_server._beets = None
+    web_server._beets = None
 
     if config.redis_host:
         web_server.cache.init(config.redis_host, config.redis_port)

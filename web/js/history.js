@@ -57,38 +57,102 @@ function withWas(value, wasValue) {
 }
 
 /**
+ * Compact one-line IN/HAVE evidence comparison for list rows.
+ *
+ * Same numbers as the detail grid (measured incoming vs on-disk at the
+ * time of THIS download), compressed for glance-ability: the Recents
+ * list renders it under the title so quality decisions read without
+ * expanding the card. Returns '' when neither side has measurements
+ * (download-phase failures have nothing to compare).
+ * @param {Object} h - Download history entry / recents log item from the API
+ * @returns {string} HTML string, or '' when there is no evidence
+ */
+export function renderEvidenceStrip(h) {
+  // A strip is a comparison — it needs at least one NUMBER. A codec
+  // label alone (failed downloads carry a filetype but no measurements)
+  // would render a noisy "IN MP3 HAVE —" on every failure row.
+  const hasMeasurement = Boolean(
+    h.actual_min_bitrate || h.spectral_bitrate || h.spectral_grade
+    || h.v0_probe_avg_bitrate || h.existing_min_bitrate
+    || h.existing_spectral_bitrate || h.existing_v0_probe_avg_bitrate,
+  );
+  if (!hasMeasurement) return '';
+
+  const inParts = [];
+  if (h.downloaded_label) inParts.push(esc(h.downloaded_label));
+  if (h.actual_min_bitrate) inParts.push(`${esc(h.actual_min_bitrate)}k`);
+  if (h.spectral_grade) {
+    const floor = h.spectral_bitrate ? `~${esc(h.spectral_bitrate)}k ` : '';
+    const sgColor = h.spectral_grade === 'genuine' ? '#6d6'
+      : h.spectral_grade === 'suspect' ? '#d66' : '#aa8';
+    inParts.push(`<span style="color:${sgColor};">${floor}${esc(h.spectral_grade)}</span>`);
+  }
+  if (h.v0_probe_avg_bitrate && h.v0_probe_kind === 'lossless_source_v0') {
+    inParts.push(`V0 ${esc(h.v0_probe_avg_bitrate)}k avg`);
+  }
+
+  const haveParts = [];
+  if (h.existing_min_bitrate) haveParts.push(`${esc(h.existing_min_bitrate)}k`);
+  if (h.existing_spectral_bitrate) haveParts.push(`~${esc(h.existing_spectral_bitrate)}k`);
+  if (
+    h.existing_v0_probe_avg_bitrate
+    && h.existing_v0_probe_kind === 'lossless_source_v0'
+  ) {
+    haveParts.push(`V0 ${esc(h.existing_v0_probe_avg_bitrate)}k avg`);
+  }
+
+  if (inParts.length === 0 && haveParts.length === 0) return '';
+  const inHtml = inParts.length ? inParts.join(' · ') : '—';
+  const haveHtml = haveParts.length ? haveParts.join(' · ') : '—';
+  return `<span class="r-evidence"><span class="r-ev-tag">IN</span> ${inHtml}`
+    + ` <span class="r-ev-tag">HAVE</span> ${haveHtml}</span>`;
+}
+
+/**
  * Render a single download history item as one consistent label/value grid.
  *
- * Every entry uses the same row vocabulary regardless of source codec:
- *   Source / Spectral / V0 probe / Bitrate / Stored as
- * Existing-side data appears inline as "(was Xkbps)" inside the value
- * cell, so each metric is apples-to-apples on the same row. The grid is
- * a 4-cell row (label/value/label/value), which collapses to 2-cell on
- * narrow viewports. The V0 probe row only renders for true lossless-
- * source probes (kind=lossless_source_v0); for non-lossless candidates
- * the same data already shows in the Bitrate row, so a second "(measurement)"
- * row would be redundant.
+ * Fixed schema (issue #575): the core vocabulary — Source / Spectral /
+ * Bitrate / Distance — renders on EVERY entry, with an em-dash when a
+ * side has no data, so adjacent entries never jump shape. Existing-side
+ * data appears inline as "(was Xkbps)" inside the value cell, so each
+ * metric is apples-to-apples on the same row. Semantic extras (V0 probe
+ * for lossless sources, Stored as, Bad extension, the Triage operator
+ * audit) render only when present; internal debug rows (Preview /
+ * Reason / Stages) live behind a collapsed forensics toggle.
+ *
+ * The header uses the server-classified badge — the SAME vocabulary as
+ * the Recents list rows — so a row the list calls "Failed" is never
+ * relabelled "timeout" in the detail panel.
+ *
+ * Force imports render "overridden" in the Distance row: beets records
+ * distance 0.0 when the operator forces a match, and painting that as a
+ * perfect 0.000 misled operators (issue #575).
  * @param {Object} h - Download history entry from the API
  * @returns {string} HTML string
  */
 export function renderDownloadHistoryItem(h) {
   const outcome = h.outcome || '?';
-  const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88'
-    : outcome === 'force_import' ? '#6af' : '#aa8';
   const user = h.soulseek_username || '?';
   const date = awstDateTime(h.created_at || '');
 
+  let status;
+  if (h.badge && h.badge_class) {
+    status = `<span class="badge ${esc(h.badge_class)}">${esc(h.badge)}</span>`;
+  } else {
+    const color = outcome === 'success' ? '#6d6' : outcome === 'rejected' ? '#d88'
+      : outcome === 'force_import' ? '#6af' : '#aa8';
+    status = `<span style="color:${color};">${outcome === 'force_import' ? 'force imported' : esc(outcome)}</span>`;
+  }
+
   let html = `<div class="p-hist-header">
-    <span style="color:${color};">${outcome === 'force_import' ? 'force imported' : outcome}</span>
+    ${status}
     <span style="color:#888;">${esc(user)}</span>
     <span style="color:#555;">${date}</span>
   </div>`;
 
   const rows = [];
 
-  if (h.downloaded_label) {
-    rows.push(['Source', h.downloaded_label]);
-  }
+  rows.push(['Source', h.downloaded_label ? esc(h.downloaded_label) : '—']);
 
   if (h.spectral_grade) {
     const candidate = formatSpectral(h.spectral_grade, h.spectral_bitrate);
@@ -96,6 +160,8 @@ export function renderDownloadHistoryItem(h) {
       ? `<span style="color:#aa8;">~${esc(h.existing_spectral_bitrate)}kbps</span>`
       : null;
     rows.push(['Spectral', withWas(candidate, was)]);
+  } else {
+    rows.push(['Spectral', '—']);
   }
 
   // V0 probe row: only for true lossless-source probes (kind ==
@@ -124,21 +190,27 @@ export function renderDownloadHistoryItem(h) {
   }
 
   // Bitrate row — apples-to-apples between candidate and existing on
-  // min bitrate (kbps). Always present when either side has data.
+  // min bitrate (kbps).
   const candidateMin = h.actual_min_bitrate;
   const existingMin = h.existing_min_bitrate;
   if (candidateMin || existingMin) {
     const candidate = candidateMin ? `${esc(candidateMin)}kbps` : '—';
     const was = existingMin ? `${esc(existingMin)}kbps` : null;
     rows.push(['Bitrate', withWas(candidate, was)]);
+  } else {
+    rows.push(['Bitrate', '—']);
   }
 
   if (h.final_format) {
     rows.push(['Stored as', esc(h.final_format)]);
   }
 
-  if (h.beets_distance != null) {
+  if (outcome === 'force_import') {
+    rows.push(['Distance', '<span style="color:#6af;">overridden</span>']);
+  } else if (h.beets_distance != null) {
     rows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
+  } else {
+    rows.push(['Distance', '—']);
   }
 
   const badExtensions = Array.isArray(h.bad_extensions) ? h.bad_extensions : [];
@@ -149,6 +221,9 @@ export function renderDownloadHistoryItem(h) {
     ]);
   }
 
+  // Triage is the operator-action audit — it stays visible. The
+  // internal decision internals (Preview / Reason / Stages) go behind
+  // the forensics toggle below.
   if (h.wrong_match_triage_summary) {
     rows.push([
       'Triage',
@@ -156,34 +231,42 @@ export function renderDownloadHistoryItem(h) {
     ]);
   }
 
+  const forensicRows = [];
   const previewParts = [
     h.wrong_match_triage_preview_verdict,
     h.wrong_match_triage_preview_decision,
   ].filter(Boolean);
   if (previewParts.length > 0) {
-    rows.push(['Preview', esc(previewParts.join(' / '))]);
+    forensicRows.push(['Preview', esc(previewParts.join(' / '))]);
   }
 
   if (
     h.wrong_match_triage_reason
     && !previewParts.includes(h.wrong_match_triage_reason)
   ) {
-    rows.push(['Reason', esc(h.wrong_match_triage_reason)]);
+    forensicRows.push(['Reason', esc(h.wrong_match_triage_reason)]);
   }
 
   const triageStages = Array.isArray(h.wrong_match_triage_stage_chain)
     ? h.wrong_match_triage_stage_chain
     : [];
   if (triageStages.length > 0) {
-    rows.push(['Stages', esc(triageStages.join(' · '))]);
+    forensicRows.push(['Stages', esc(triageStages.join(' · '))]);
   }
 
-  if (rows.length > 0) {
-    html += '<div class="p-hist-grid">';
-    for (const [label, value] of rows) {
-      html += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
+  html += '<div class="p-hist-grid">';
+  for (const [label, value] of rows) {
+    html += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
+  }
+  html += '</div>';
+
+  if (forensicRows.length > 0) {
+    let fhtml = '<div class="p-hist-grid">';
+    for (const [label, value] of forensicRows) {
+      fhtml += `<span class="p-hist-label">${label}</span><span class="p-hist-value">${value}</span>`;
     }
-    html += '</div>';
+    fhtml += '</div>';
+    html += `<details class="p-hist-forensics"><summary>forensics</summary>${fhtml}</details>`;
   }
 
   const verdict = h.verdict || h.beets_scenario || '';

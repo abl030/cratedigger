@@ -462,8 +462,12 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         verdict = _new_import_verdict(entry, is_verified_lossless)
         return ("Imported", "badge-new", "#1a4a2a", verdict)
 
-    # --- Unknown outcome ---
-    label = str(entry.outcome).capitalize() if entry.outcome else "Unknown"
+    # --- Unknown outcome --- (humanize: raw enum values like
+    # "measurement_failed" must not leak underscores into a badge)
+    label = (
+        str(entry.outcome).replace("_", " ").capitalize()
+        if entry.outcome else "Unknown"
+    )
     return (label, "badge-rejected", "#444", str(entry.outcome or "Unknown outcome"))
 
 

@@ -423,6 +423,14 @@ class TestQualityLabel(unittest.TestCase):
 class TestClassifyBadge(unittest.TestCase):
     """Test that classify_log_entry returns the correct badge for each scenario."""
 
+    def test_unknown_outcome_badge_is_humanized(self):
+        """Raw enum outcomes must not leak underscores into the badge
+        (the live Recents tab showed a literal "Measurement_failed" pill,
+        issue #575 PR2)."""
+        result = classify_log_entry(_entry(outcome="measurement_failed"))
+        self.assertEqual(result.badge, "Measurement failed")
+        self.assertEqual(result.badge_class, "badge-rejected")
+
     def test_new_import(self):
         """First-time import, nothing on disk before."""
         result = classify_log_entry(_entry(outcome="success"))

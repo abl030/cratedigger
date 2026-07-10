@@ -2,6 +2,7 @@
 import { state, API } from './state.js';
 import { awstDate, awstTime, esc } from './util.js';
 import { toggleDetail } from './pipeline.js';
+import { renderEvidenceStrip } from './history.js';
 import { renderSearchPlanButton } from './search_plan.js';
 
 const RECENTS_HISTORY_LIMIT = 500;
@@ -96,6 +97,11 @@ export function renderRecentsItems(items, matchRates = null) {
       // download_log row's id (item.id) is the wrong cursor space.
       const spBtn = renderSearchPlanButton({ pipelineId: item.request_id });
 
+      // Glance-able IN/HAVE evidence strip (issue #575) — same numbers
+      // the detail grid shows, compressed to one line. Empty for rows
+      // with no measurements (download-phase failures).
+      const evidence = renderEvidenceStrip(item);
+
       return `
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
@@ -105,9 +111,10 @@ export function renderRecentsItems(items, matchRates = null) {
             </div>
             <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>
           </div>
+          ${evidence ? `<div class="p-meta">${evidence}</div>` : ''}
           <div class="p-meta">
             ${triageLabel}
-            <span>${esc(summary)}</span>
+            <span class="r-summary" title="${esc(summary)}">${esc(summary)}</span>
           </div>
         </div>
         <div class="p-detail" id="dl-${item.id}"></div>
