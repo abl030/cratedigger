@@ -59,6 +59,13 @@ export function renderBeetsTrackRow(t) {
  * @returns {string}
  */
 export function renderExpectedTrackRow(t) {
+  // Discogs index/heading rows (sub-EP or side titles) carry
+  // track_number 0 — render as an unnumbered heading, not "0. <title>".
+  if (!t.track_number) {
+    return `<div class="lib-track lib-track-heading">
+      <span>${esc(t.title)}</span>
+    </div>`;
+  }
   const dur = formatDuration(t.length_seconds);
   return `<div class="lib-track">
       <span>${t.disc_number && t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>

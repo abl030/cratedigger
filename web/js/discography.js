@@ -142,6 +142,38 @@ export function cssEscape(s) {
 }
 
 /**
+ * Synthesize the single pressing row for a masterless Discogs release
+ * from its /api/discogs/release payload, so the rest of the rendering
+ * path is unchanged. MUST forward the pipeline/library overlay fields —
+ * dropping them rendered an already-requested masterless release with a
+ * green "Add request" button and no badge (Deloris "Feather
+ * Figure/Elastic Bones", request 8838).
+ * @param {Object} data - /api/discogs/release payload
+ * @returns {Object} A release row shaped like /api/discogs/master rows.
+ */
+export function synthesizeMasterlessRow(data) {
+  return {
+    id: data.id,
+    title: data.title || '',
+    date: data.date || '',
+    country: data.country || '',
+    status: data.status || 'Official',
+    track_count: (data.tracks || []).length,
+    format: (data.formats || []).map(f => f && f.name).filter(Boolean).join(', ') || '?',
+    media_count: (data.formats || []).length,
+    labels: data.labels || [],
+    release_group_id: data.release_group_id ?? null,
+    in_library: data.in_library,
+    beets_album_id: data.beets_album_id ?? null,
+    pipeline_status: data.pipeline_status ?? null,
+    pipeline_id: data.pipeline_id ?? null,
+    library_format: data.library_format,
+    library_min_bitrate: data.library_min_bitrate,
+    library_rank: data.library_rank,
+  };
+}
+
+/**
  * Load and display releases for a release group.
  *
  * @param {string} id - MusicBrainz release group ID or Discogs master ID
@@ -193,17 +225,7 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     if (data.error) throw new Error(data.error);
     /** @type {Array<any>} */
     const releaseRows = masterless
-      ? [{
-          id: data.id,
-          title: data.title || '',
-          date: data.date || '',
-          country: data.country || '',
-          status: data.status || 'Official',
-          track_count: (data.tracks || []).length,
-          format: (data.formats || []).map(f => f && f.name).filter(Boolean).join(', ') || '?',
-          media_count: (data.formats || []).length,
-          labels: data.labels || [],
-        }]
+      ? [synthesizeMasterlessRow(data)]
       : (data.releases || []);
     const all = releaseRows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const official = all.filter(r => r.status === 'Official' || !r.status);
