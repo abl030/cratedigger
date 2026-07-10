@@ -359,6 +359,19 @@
   .p-btn { padding: 4px 12px; border: 1px solid #444; background: #222; color: #aaa; border-radius: 4px; cursor: pointer; font-size: 0.78em; }
   .p-btn:hover { background: #333; color: #eee; }
   .p-btn.active-status { border-color: #6a9; color: #6a9; background: #2a3a2a; }
+  /* Browse search bar: one wrapping flex row. On narrow screens the
+     input claims a full-width row of its own so it stays typeable —
+     the type buttons and source toggle flow beneath it. */
+  .browse-search-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  /* flex-basis 0 (not auto): the global input[type=text] width:100% would
+     otherwise size the basis to the full row and wrap the buttons at
+     every viewport, not just narrow ones. */
+  .browse-search-row #q { flex: 1 1 0; min-width: 0; margin-bottom: 0; }
+  .browse-source-toggle { display: flex; gap: 6px; align-items: center; margin-left: 8px; border-left: 1px solid #444; padding-left: 8px; }
+  @media (max-width: 640px) {
+    .browse-search-row #q { flex-basis: 100%; }
+    .browse-source-toggle { margin-left: 0; border-left: none; padding-left: 0; }
+  }
   .source-label { color: #777; font-size: 0.66em; text-transform: uppercase; letter-spacing: 0.6px; }
   #source-hint { color: #777; font-size: 0.74em; margin: 0 0 10px 2px; }
   #source-hint .src-primary { color: #6a9; font-weight: 600; }
@@ -499,15 +512,15 @@
 </div>
 
 <div id="browse-section" class="section active">
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-    <input type="text" id="q" placeholder="Search artists or albums..." autofocus style="flex:1;">
+  <div class="browse-search-row">
+    <input type="text" id="q" placeholder="Search artists or albums..." autofocus>
     <div style="display:flex;gap:2px;">
       <button class="p-btn active-status" id="search-type-artist" onclick="setSearchType('artist')">Artist</button>
       <button class="p-btn" id="search-type-release" onclick="setSearchType('release')">Album</button>
       <button class="p-btn" id="search-type-label" onclick="setSearchType('label')">Label</button>
       <button class="p-btn" id="search-type-id" onclick="setSearchType('id')">ID</button>
     </div>
-    <div style="display:flex;gap:6px;align-items:center;margin-left:8px;border-left:1px solid #444;padding-left:8px;">
+    <div class="browse-source-toggle">
       <span class="source-label">Source</span>
       <div style="display:flex;gap:2px;">
         <button class="p-btn active-status" id="source-mb" title="Use MusicBrainz as the primary discography. Releases found only on Discogs are added at the bottom as “Only on Discogs”." onclick="setBrowseSource('mb')">MB</button>
