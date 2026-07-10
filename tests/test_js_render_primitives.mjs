@@ -170,6 +170,8 @@ console.log('renderExternalLinkRow()');
   assertContains(mb, 'https://musicbrainz.org/release/9a7c2e1b-2f4d-4b3a-9c8d-1e2f3a4b5c6d', 'MB url');
   assertContains(mb, '9a7c2e1b...', 'truncated id as link text');
   assertContains(mb, 'target="_blank" rel="noopener"', 'link opens externally');
+  assertContains(mb, 'onclick="event.stopPropagation()"',
+    'link click must not bubble into the row toggle');
 
   const dg = renderExternalLinkRow('123456');
   assertContains(dg, 'Discogs', 'Discogs label');
