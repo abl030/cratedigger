@@ -19,6 +19,7 @@ import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilt
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
 import { openReplacePicker } from './replace_picker.js';
 import { invalidateActiveRgs } from './active_rgs.js';
+import { toggleSection } from './render_primitives.js';
 import { toast } from './state.js';
 
 /**
@@ -144,6 +145,7 @@ if (qInput) {
 Object.assign(window, {
   showTab,
   showTabPreservingDetail,
+  toggleSection,
   setSearchType,
   setBrowseSource,
   openBrowseArtist,

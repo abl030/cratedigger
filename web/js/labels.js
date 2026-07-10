@@ -18,6 +18,7 @@ import { state, API, toast } from './state.js';
 import { esc, jsArg } from './util.js';
 import { renderTypedSections } from './grouping.js';
 import { renderStatusBadges } from './badges.js';
+import { renderReleaseRow } from './render_primitives.js';
 
 /**
  * Threshold above which the initial label-detail fetch defaults to
@@ -617,19 +618,12 @@ export function renderLabelRows(containerEl) {
     const fmt = rel.format ? `<span class="rg-meta"> — ${esc(rel.format)}</span>` : '';
     const artist = rel.artist_name ? `<span class="rg-meta" style="color:#999;"> — ${esc(rel.artist_name)}</span>` : '';
     const releaseId = String(rel.id);
-    return `
-      <div class="rg" onclick="event.stopPropagation(); window.toggleReleaseDetail(${jsArg(releaseId)})">
-        <div>
-          <span class="rg-year">${yearStr}</span>
-          <span class="rg-title">${esc(rel.title || '')}</span>
-          ${artist}
-          ${fmt}
-          ${subBadge}
-          ${badges}
-        </div>
-      </div>
-      <div class="release-detail" id="reldet-${esc(releaseId)}"></div>
-    `;
+    return renderReleaseRow({
+      rowClass: 'rg',
+      onclick: `event.stopPropagation(); window.toggleReleaseDetail(${jsArg(releaseId)})`,
+      titleHtml: `<span class="rg-year">${yearStr}</span> <span class="rg-title">${esc(rel.title || '')}</span>${artist}${fmt}${subBadge}${badges}`,
+      detail: { id: `reldet-${releaseId}` },
+    });
   };
 
   body.innerHTML = renderTypedSections(visible, renderRow, {

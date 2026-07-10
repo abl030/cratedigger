@@ -9,6 +9,9 @@ import { invalidateBrowseArtist } from './browse.js';
 import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
 import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
+import {
+  renderReleaseRow, renderBeetsTrackRow, renderExpectedTrackRow, toggleExpand,
+} from './render_primitives.js';
 
 /**
  * Render the artist discography into a target element.
@@ -100,7 +103,7 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
     if (appearances.length > 0) {
       html += `
         <div class="type-section">
-          <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#777;">
+          <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#777;">
             Appearances <span class="type-count">${appearances.length}</span>
           </div>
           <div class="type-body">
@@ -112,7 +115,7 @@ export function renderArtistDiscography(rgEl, id, artistName, data, libData) {
     if (bootlegOnly.length > 0) {
       html += `
         <div class="type-section">
-          <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#555;">
+          <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#555;">
             Bootleg-only releases <span class="type-count">${bootlegOnly.length}</span>
           </div>
           <div class="type-body">
@@ -339,22 +342,20 @@ export async function loadReleaseGroup(id, el, opts = {}) {
           stopPropagation: true,
         });
       }
-      return `
-        <div class="release" data-release-id="${rel.id}" onclick="event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')">
-          <div class="release-info">
-            <div class="release-title">${esc(rel.title)}${badges}</div>
-            <div class="release-meta" style="color:#777;">${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}</div>
-          </div>
-          ${toolbar}${replaceBtn}${spBtn}
-        </div>
-        <div class="release-detail" id="reldet-${rel.id}"></div>
-      `;
+      return renderReleaseRow({
+        dataReleaseId: rel.id,
+        onclick: `event.stopPropagation(); window.toggleReleaseDetail('${rel.id}')`,
+        titleHtml: `${esc(rel.title)}${badges}`,
+        metaLines: [`${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}`],
+        actionsHtml: `${toolbar}${replaceBtn}${spBtn}`,
+        detail: { id: `reldet-${rel.id}` },
+      });
     }
 
     let html = official.map(renderRelease).join('');
     if (bootleg.length > 0) {
       html += `
-        <div class="type-header" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')" style="color:#777;margin-top:6px;">
+        <div class="type-header" onclick="event.stopPropagation(); window.toggleSection(this)" style="color:#777;margin-top:6px;">
           Bootleg / Promo <span class="type-count">${bootleg.length}</span>
         </div>
         <div class="type-body">
@@ -486,24 +487,7 @@ export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
 
   if (tracks.length > 0) {
     html += '<div style="margin-bottom:6px;color:#666;font-size:0.8em;">Tracks (' + tracks.length + ')' + (hasBeets ? ' — from library' : '') + '</div>';
-    html += tracks.map(t => {
-      if (hasBeets) {
-        const dur = t.length ? `${Math.floor(t.length/60)}:${String(Math.round(t.length%60)).padStart(2,'0')}` : '';
-        const br = t.bitrate ? `${Math.round(t.bitrate/1000)}kbps` : '';
-        const depth = t.bitdepth && t.bitdepth > 16 ? `${t.bitdepth}bit` : '';
-        const sr = t.samplerate && t.samplerate > 44100 ? `${(t.samplerate/1000).toFixed(1)}kHz` : '';
-        const meta = [t.format, br, depth, sr].filter(Boolean).join(' ');
-        return `<div class="lib-track">
-          <span>${t.disc > 1 ? t.disc + '.' : ''}${t.track}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-          <span class="lib-track-meta">${meta}</span>
-        </div>`;
-      } else {
-        const dur = t.length_seconds ? `${Math.floor(t.length_seconds/60)}:${String(Math.round(t.length_seconds%60)).padStart(2,'0')}` : '';
-        return `<div class="lib-track">
-          <span>${t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-        </div>`;
-      }
-    }).join('');
+    html += tracks.map(t => hasBeets ? renderBeetsTrackRow(t) : renderExpectedTrackRow(t)).join('');
   }
 
   // Label links (U7) — Discogs releases carry `labels: [{id, name}]`;
@@ -556,15 +540,12 @@ export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
 export async function toggleReleaseDetail(mbid) {
   const releaseId = normalizeReleaseId(mbid) || mbid;
   const el = document.getElementById('reldet-' + mbid);
-  if (el.classList.contains('open')) { el.classList.remove('open'); return; }
-  el.innerHTML = '<div class="loading" style="padding:8px;">Loading...</div>';
-  el.classList.add('open');
-  try {
+  await toggleExpand(el, async (target) => {
     const isDiscogs = detectSource(releaseId) === 'discogs';
     const url = isDiscogs ? `${API}/api/discogs/release/${releaseId}` : `${API}/api/release/${releaseId}`;
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    renderReleaseDetail(el, releaseId, data);
-  } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load</div>'; }
+    renderReleaseDetail(target, releaseId, data);
+  });
 }

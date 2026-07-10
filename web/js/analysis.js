@@ -6,6 +6,7 @@ import { buildReleaseActionState } from './release_action_state.js';
 import { renderActionToolbar } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
+import { renderReleaseRow, toggleExpand } from './render_primitives.js';
 
 /** @type {string[]} */
 export const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
@@ -65,15 +66,13 @@ export function renderDisambRG(rg) {
 
   const opacity = rg.covered_by ? '0.5' : '1';
 
-  return `
-    <div class="release" onclick="event.stopPropagation(); window.toggleDisambRGTracks('${rg.release_group_id}')" style="cursor:pointer;opacity:${opacity};">
-      <div class="release-info">
-        <div class="release-title">${esc(rg.title)}${badges}${statusBadge}</div>
-        <div class="release-meta" style="color:#777;">${rg.first_date || '?'} — ${esc(rg.primary_type)} — ${rg.track_count}t — ${rg.release_ids.length} pressing${rg.release_ids.length > 1 ? 's' : ''}</div>
-      </div>
-    </div>
-    <div id="disamb-rg-${rg.release_group_id}" style="display:none;padding:4px 0 8px 16px;"></div>
-  `;
+  return renderReleaseRow({
+    onclick: `event.stopPropagation(); window.toggleDisambRGTracks('${rg.release_group_id}')`,
+    style: `cursor:pointer;opacity:${opacity};`,
+    titleHtml: `${esc(rg.title)}${badges}${statusBadge}`,
+    metaLines: [`${rg.first_date || '?'} — ${esc(rg.primary_type)} — ${rg.track_count}t — ${rg.release_ids.length} pressing${rg.release_ids.length > 1 ? 's' : ''}`],
+    detail: { id: `disamb-rg-${rg.release_group_id}` },
+  });
 }
 
 /**
@@ -82,10 +81,19 @@ export function renderDisambRG(rg) {
  */
 export function toggleDisambRGTracks(rgId) {
   const el = document.getElementById('disamb-rg-' + rgId);
-  if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+  toggleExpand(el, (target) => renderDisambRGTracksInto(target, rgId));
+}
 
+/**
+ * Render the pressing/recording breakdown for one release group into a
+ * detail panel. Sync loader for toggleExpand — reads the already-loaded
+ * state.disambData, no fetch.
+ * @param {HTMLElement} el
+ * @param {string} rgId - Release group ID
+ */
+function renderDisambRGTracksInto(el, rgId) {
   const rg = state.disambData.release_groups.find(rg => rg.release_group_id === rgId);
-  if (!rg) { el.style.display = 'none'; return; }
+  if (!rg) { el.innerHTML = ''; return; }
 
   const pressingRecSets = (rg.pressings || []).map(p => new Set(p.recording_ids || []));
 
@@ -151,32 +159,33 @@ export function toggleDisambRGTracks(rgId) {
   if (rg.tracks && rg.tracks.length > 0) {
     html += '<div style="margin:8px 0 4px;color:#888;font-size:0.85em;">Recordings:</div>';
     const totalPressings = pressingRecSets.length;
+    // One span per row — .lib-track is flex justify-between, so marker
+    // and title must live together or they get pushed to opposite edges.
     html += rg.tracks.map(t => {
       if (!t.unique) {
         const alsoOn = t.also_on && t.also_on.length > 0
           ? `<span style="color:#777;font-size:0.85em;margin-left:8px;">also on: ${t.also_on.map(esc).join(', ')}</span>`
           : '';
         return `<div class="lib-track" style="opacity:0.5;">
-          <span style="color:#555;">  </span><span>${esc(t.title)}${alsoOn}</span>
+          <span>${esc(t.title)}${alsoOn}</span>
         </div>`;
       }
       const pIdxs = trackToPressings[t.recording_id] || [];
       // If on all pressings, it's a common track — no dots needed
       if (pIdxs.length === totalPressings) {
         return `<div class="lib-track">
-          <span style="color:#6d6;font-weight:bold;">★ </span><span>${esc(t.title)}</span>
+          <span><span style="color:#6d6;font-weight:bold;">★</span> ${esc(t.title)}</span>
         </div>`;
       }
       // Colour dots for tracks only on some pressings
       const dots = pIdxs.map(i => `<span style="color:${_PRESSING_COLORS[i % _PRESSING_COLORS.length]};">●</span>`).join('');
       return `<div class="lib-track">
-        <span style="margin-right:4px;">${dots || '★'}</span><span>${esc(t.title)}</span>
+        <span><span style="margin-right:4px;">${dots || '★'}</span>${esc(t.title)}</span>
       </div>`;
     }).join('');
   }
 
   el.innerHTML = html;
-  el.style.display = 'block';
 }
 
 /**

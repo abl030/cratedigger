@@ -1,7 +1,10 @@
 // @ts-check
 import { state, API, toast } from './state.js';
-import { esc, awstDate, qualityLabel, externalReleaseUrl, sourceLabel, manualReasonLabel, renderForensicBlock } from './util.js';
+import { esc, awstDate, qualityLabel, manualReasonLabel, renderForensicBlock } from './util.js';
 import { renderDownloadHistoryItem } from './history.js';
+import {
+  renderBeetsTrackRow, renderExpectedTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
+} from './render_primitives.js';
 import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 import { renderSearchPlanButton, renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
@@ -402,14 +405,7 @@ export async function toggleDetail(elId, requestId) {
   // requestId: album_requests.id for the API fetch (optional, defaults to elId for pipeline tab)
   const id = requestId || elId;
   const el = document.getElementById(/** @type {string} */ (elId)) || document.getElementById('detail-' + elId);
-  if (!el) return;
-  if (el.classList.contains('open')) {
-    el.classList.remove('open');
-    return;
-  }
-  el.innerHTML = '<div class="loading" style="padding:8px;">Loading...</div>';
-  el.classList.add('open');
-  try {
+  await toggleExpand(el, async (target) => {
     const r = await fetch(`${API}/api/pipeline/${id}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
@@ -423,18 +419,12 @@ export async function toggleDetail(elId, requestId) {
     // JSONB. Hidden when null (manually-set or pre-U7 rows).
     const reasonLabel = manualReasonLabel(data.manual_reason);
     if (reasonLabel) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">Manual reason</span><span class="p-detail-value"><span class="p-manual-chip">${esc(reasonLabel)}</span></span></div>`;
+      html += renderDetailRow('Manual reason', `<span class="p-manual-chip">${esc(reasonLabel)}</span>`);
     }
     // External link (MB or Discogs)
-    if (req.mb_release_id) {
-      const label = sourceLabel(req.mb_release_id);
-      const url = externalReleaseUrl(req.mb_release_id);
-      if (label && url) {
-        html += `<div class="p-detail-row"><span class="p-detail-label">${label}</span><span class="p-detail-value"><a href="${url}" target="_blank" rel="noopener" style="color:#6af;">${req.mb_release_id.slice(0,8)}...</a></span></div>`;
-      }
-    }
+    html += renderExternalLinkRow(req.mb_release_id || '');
     if (req.imported_path) {
-      html += `<div class="p-detail-row"><span class="p-detail-label">Imported to</span><span class="p-detail-value" style="font-size:0.9em;">${esc(req.imported_path)}</span></div>`;
+      html += renderDetailRow('Imported to', esc(req.imported_path), { valueStyle: 'font-size:0.9em;' });
     }
 
     // Quality summary — show spectral reality if it differs from nominal
@@ -466,30 +456,17 @@ export async function toggleDetail(elId, requestId) {
         const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
         qualitySummary += ` <span style="color:#6d6;">spectral: genuine${brStr}</span>`;
       }
-      html += `<div class="p-detail-row"><span class="p-detail-label">Quality</span><span class="p-detail-value">${qualitySummary}</span></div>`;
+      html += renderDetailRow('Quality', qualitySummary);
     }
 
     // Tracks — labeled to clarify what we're looking at
     if (beetsTracks.length > 0) {
       html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">In Library (' + beetsTracks.length + ' tracks)</div>';
-      html += beetsTracks.map(t => {
-        const dur = t.length ? `${Math.floor(t.length/60)}:${String(Math.round(t.length%60)).padStart(2,'0')}` : '';
-        const br = t.bitrate ? `${Math.round(t.bitrate/1000)}kbps` : '';
-        const depth = t.bitdepth && t.bitdepth > 16 ? `${t.bitdepth}bit` : '';
-        const sr = t.samplerate && t.samplerate > 44100 ? `${(t.samplerate/1000).toFixed(1)}kHz` : '';
-        const meta = [t.format, br, depth, sr].filter(Boolean).join(' ');
-        return `<div class="lib-track">
-          <span>${t.disc > 1 ? t.disc + '.' : ''}${t.track}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-          <span class="lib-track-meta">${meta}</span>
-        </div>`;
-      }).join('');
+      html += beetsTracks.map(renderBeetsTrackRow).join('');
       html += '</div>';
     } else if (tracks.length > 0) {
       html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Expected Tracks from MusicBrainz (' + tracks.length + ')</div>';
-      html += tracks.map(t => {
-        const dur = t.length_seconds ? `${Math.floor(t.length_seconds/60)}:${String(Math.round(t.length_seconds%60)).padStart(2,'0')}` : '';
-        return `<div class="p-track">${t.disc_number > 1 ? t.disc_number + '.' : ''}${t.track_number}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</div>`;
-      }).join('');
+      html += tracks.map(renderExpectedTrackRow).join('');
       html += '</div>';
     }
 
@@ -532,8 +509,8 @@ export async function toggleDetail(elId, requestId) {
     html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>
     </div>`;
 
-    el.innerHTML = html;
-  } catch (e) { el.innerHTML = '<div class="loading" style="padding:8px;">Failed to load details</div>'; }
+    target.innerHTML = html;
+  }, { errorText: 'Failed to load details' });
 }
 
 /**
