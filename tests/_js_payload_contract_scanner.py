@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import glob
 import os
 import re
@@ -63,7 +64,37 @@ def _mask_strings_and_comments(source: str) -> str:
             block_comment = True
             i += 2
             continue
-        if ch in "'\"`":
+        if ch == "`":
+            chars[i] = " "
+            i += 1
+            while i < len(chars):
+                ch = chars[i]
+                nxt = chars[i + 1] if i + 1 < len(chars) else ""
+                if ch == "\\":
+                    chars[i] = " "
+                    if i + 1 < len(chars):
+                        chars[i + 1] = " "
+                    i += 2
+                    continue
+                if ch == "`":
+                    chars[i] = " "
+                    i += 1
+                    break
+                if ch == "$" and nxt == "{":
+                    end = _matching_delimiter(source, i + 1, "{", "}")
+                    chars[i] = chars[i + 1] = " "
+                    chars[i + 2:end] = _mask_strings_and_comments(
+                        source[i + 2:end]
+                    )
+                    chars[end] = " "
+                    i = end + 1
+                    continue
+                chars[i] = " "
+                i += 1
+            else:
+                raise ValueError("unclosed template literal")
+            continue
+        if ch in "'\"":
             chars[i] = " "
             quote = ch
         i += 1
@@ -124,12 +155,13 @@ def _matching_delimiter(source: str, start: int, opening: str, closing: str) -> 
     raise ValueError(f"unclosed {opening!r} at offset {start}")
 
 
-def _direct_object_keys(object_source: str) -> set[str]:
-    """Extract direct identifier keys from one JavaScript object literal."""
-    if not object_source.startswith("{") or not object_source.endswith("}"):
-        raise ValueError("expected a complete object literal")
-    chars = list(object_source[1:-1])
-    nested = 0
+def _direct_segments(delimited_source: str) -> list[str]:
+    """Split one delimited literal at direct commas, blanking comments."""
+    if len(delimited_source) < 2:
+        raise ValueError("expected a complete delimited literal")
+    chars = list(delimited_source[1:-1])
+    depths = {"{": 0, "[": 0, "(": 0}
+    closing_to_opening = {"}": "{", "]": "[", ")": "("}
     quote: str | None = None
     escaped = False
     line_comment = False
@@ -154,7 +186,6 @@ def _direct_object_keys(object_source: str) -> set[str]:
                 i += 1
             continue
         if quote is not None:
-            chars[i] = " "
             if escaped:
                 escaped = False
             elif ch == "\\":
@@ -174,32 +205,123 @@ def _direct_object_keys(object_source: str) -> set[str]:
             i += 2
             continue
         if ch in "'\"`":
-            chars[i] = " "
             quote = ch
             i += 1
             continue
         if ch in "{[(":
-            nested += 1
-            chars[i] = " "
+            depths[ch] += 1
         elif ch in "}])":
-            chars[i] = " "
-            nested -= 1
-        elif nested:
-            chars[i] = " "
+            opening = closing_to_opening[ch]
+            depths[opening] -= 1
+            if depths[opening] < 0:
+                raise ValueError(f"unexpected {ch!r} in literal fixture")
         i += 1
-    flattened = "".join(chars)
-    if "..." in flattened:
-        raise ValueError(
-            "spread properties hide seeded fixture fields; use an explicit "
-            "literal in audited download-payload fixtures"
-        )
-    keyed = set(re.findall(
-        r"(?:^|,)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:", flattened,
-    ))
-    shorthand = set(re.findall(
-        r"(?:^|,)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?=,|$)", flattened,
-    ))
-    return keyed | shorthand
+    if quote is not None or block_comment or any(depths.values()):
+        raise ValueError("unclosed syntax in literal fixture")
+
+    cleaned = "".join(chars)
+    segments: list[str] = []
+    start = 0
+    depths = {"{": 0, "[": 0, "(": 0}
+    quote = None
+    escaped = False
+    for i, ch in enumerate(cleaned):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "'\"`":
+            quote = ch
+            continue
+        if ch in "{[(":
+            depths[ch] += 1
+            continue
+        if ch in "}])":
+            depths[closing_to_opening[ch]] -= 1
+            continue
+        if ch == "," and not any(depths.values()):
+            segments.append(cleaned[start:i].strip())
+            start = i + 1
+    tail = cleaned[start:].strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _static_quoted_key(source: str) -> tuple[str, int]:
+    """Resolve a single/double-quoted key at the start of ``source``."""
+    if not source or source[0] not in "'\"":
+        raise ValueError("expected a static quoted fixture key")
+    quote = source[0]
+    escaped = False
+    for i in range(1, len(source)):
+        ch = source[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            try:
+                value = ast.literal_eval(source[:i + 1])
+            except (SyntaxError, ValueError) as exc:
+                raise ValueError("unsupported quoted fixture key") from exc
+            if not isinstance(value, str):
+                raise ValueError("fixture key did not resolve to a string")
+            return value, i + 1
+    raise ValueError("unclosed quoted fixture key")
+
+
+def _require_property_colon(remainder: str) -> None:
+    if not remainder.lstrip().startswith(":"):
+        raise ValueError("fixture object key must be followed by a colon")
+
+
+def _direct_object_keys(object_source: str) -> set[str]:
+    """Extract statically-known direct keys from one JS object literal."""
+    if not object_source.startswith("{") or not object_source.endswith("}"):
+        raise ValueError("expected a complete object literal")
+    keys: set[str] = set()
+    for prop in _direct_segments(object_source):
+        if not prop:
+            raise ValueError("empty property in literal fixture")
+        if prop.startswith("..."):
+            raise ValueError(
+                "spread properties hide seeded fixture fields; use an explicit "
+                "literal in audited download-payload fixtures"
+            )
+        if prop[0] in "'\"":
+            key, end = _static_quoted_key(prop)
+            _require_property_colon(prop[end:])
+            keys.add(key)
+            continue
+        if prop[0] == "[":
+            end = _matching_delimiter(prop, 0, "[", "]")
+            expression = prop[1:end].strip()
+            if not expression or expression[0] not in "'\"":
+                raise ValueError(
+                    "computed fixture keys must be statically quoted strings"
+                )
+            key, consumed = _static_quoted_key(expression)
+            if expression[consumed:].strip():
+                raise ValueError(
+                    "computed fixture keys must be statically quoted strings"
+                )
+            _require_property_colon(prop[end + 1:])
+            keys.add(key)
+            continue
+        match = re.match(r"[A-Za-z_$][A-Za-z0-9_$]*", prop)
+        if match is None:
+            raise ValueError("unsupported fixture object key syntax")
+        key = match.group(0)
+        remainder = prop[match.end():]
+        if remainder.strip():
+            _require_property_colon(remainder)
+        keys.add(key)
+    return keys
 
 
 def fixture_fields_for_call(source: str, call_name: str) -> set[str]:
@@ -223,21 +345,19 @@ def fixture_fields_for_call(source: str, call_name: str) -> set[str]:
                 "indirection hides seeded payload fields"
             )
         array_end = _matching_delimiter(source, i, "[", "]")
-        j = i + 1
-        while j < array_end:
-            ch = code[j]
-            if ch.isspace() or ch == ",":
-                j += 1
-                continue
-            if ch == "{":
-                end = _matching_delimiter(source, j, "{", "}")
-                fields.update(_direct_object_keys(source[j:end + 1]))
-                j = end + 1
-                continue
-            raise ValueError(
-                f"{call_name} array fixtures must contain direct object "
-                "literals only; spread/indirect elements hide seeded fields"
-            )
+        for element in _direct_segments(source[i:array_end + 1]):
+            if not element or element[0] != "{":
+                raise ValueError(
+                    f"{call_name} array fixtures must contain direct object "
+                    "literals only; spread/indirect elements hide seeded fields"
+                )
+            end = _matching_delimiter(element, 0, "{", "}")
+            if element[end + 1:].strip():
+                raise ValueError(
+                    f"{call_name} array fixtures must contain direct object "
+                    "literals only; spread/indirect elements hide seeded fields"
+                )
+            fields.update(_direct_object_keys(element))
     return fields
 
 
