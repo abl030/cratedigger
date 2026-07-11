@@ -17,7 +17,7 @@ Observe state with `browser_snapshot` (DOM a11y tree — primary interaction sur
 
 **Profile is persistent**, so cookies and logged-in sessions survive between MCP sessions. To force a clean state, delete `~/.cache/ms-playwright/mcp-*` (profiles live there even though the browsers themselves come from the nix store).
 
-## Tools (deferred — use ToolSearch with +playwright to load)
+## Playwright tools
 
 Common workflow:
 - `browser_navigate` — go to a URL
@@ -68,7 +68,7 @@ This is the current focus. The Discogs source came from a CC0 mirror at `discogs
 - Discogs mirror: `https://discogs.ablz.au/api/search?artist=X&title=Y`, `/api/releases/{id}`, `/api/masters/{id}`, `/api/artists/{id}`, `/api/artists/{id}/releases`.
 - Pipeline API surface (same host as web UI): see `web/routes/*.py` and `tests/web/` for the authoritative list; every route has a contract test.
 
-Prefer `curl` / `WebFetch` when you only need JSON. Drive Playwright when the *UI* is what's being tested — tab switching, rendering, source-aware link generation, form submission, loading-state handling.
+Prefer `curl` when you only need JSON. Drive Playwright when the *UI* is what's being tested — tab switching, rendering, source-aware link generation, form submission, loading-state handling.
 
 ## General Principles
 
@@ -81,7 +81,7 @@ Prefer `curl` / `WebFetch` when you only need JSON. Drive Playwright when the *U
 
 ## When NOT to use this agent
 
-- Fetching static HTML or JSON — use `WebFetch` or `curl` instead.
+- Fetching static HTML or JSON — use `curl` instead.
 - Querying the pipeline DB — SSH doc2 and use `pipeline-cli`.
 - Querying the Discogs mirror for data (not rendering) — `curl https://discogs.ablz.au/api/...` is cheaper.
 - Running the test suite — use `nix-shell --run "bash scripts/run_tests.sh"` on the CLI.

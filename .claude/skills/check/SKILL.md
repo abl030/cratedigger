@@ -1,3 +1,8 @@
+---
+name: check
+description: Run Cratedigger's pre-commit type, invariant, and full-suite quality gates.
+---
+
 # Pre-commit Quality Check
 
 Run pyright + full test suite + type safety grep gate. Use this before committing.
@@ -13,7 +18,7 @@ Must be **0 errors**. Do not proceed if there are new errors (psycopg2/slskd_api
 
 2. Dict access grep gate — catch missed dict→attribute conversions on typed objects:
 ```bash
-grep -rn 'album\["\|album\['"'"'' --include='*.py' cratedigger.py lib/download.py album_source.py
+rg 'album\["|album\['"'"'' cratedigger.py lib/download.py album_source.py
 ```
 
 Must return **0 matches**. `album` in cratedigger.py/download.py is a typed `AlbumRecord` dataclass. Note: `req["field"]` is fine — `get_request()` returns `dict[str, Any]`. `release["field"]` in web routes is fine — those are raw MusicBrainz API dicts.
@@ -29,6 +34,7 @@ grep -E "^Ran |^OK|^FAILED" /tmp/cratedigger-test-output.txt
 grep "^FAIL:\|^ERROR:" /tmp/cratedigger-test-output.txt
 ```
 
-Must show `OK`. slskd live test skips (Docker not running) are acceptable. The `test_calls_refresh_endpoint` error is a known pre-existing issue.
+Must show `OK` with no skipped tests. Investigate every failure; do not carry a
+chat-era "known issue" exemption forward without current repository evidence.
 
 5. If all pass, safe to commit.

@@ -1,10 +1,15 @@
+---
+name: debug-download
+description: Query the live Cratedigger audit trail for a download-log ID or album name.
+---
+
 # Debug Download
 
 Query full audit trail for a download_log entry. Pass the download_log ID or an album name.
 
 ## Usage
 
-`/debug-download 265` or `/debug-download "Mono Masters"`
+Use an ID (`265`) or album name (`"Mono Masters"`) as the skill argument.
 
 ## Steps
 

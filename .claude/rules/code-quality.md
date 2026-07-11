@@ -382,8 +382,8 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
 - **No new bespoke harnesses.** If existing fakes/builders/helpers don't fit, extend them and update this rule. Don't write a one-off.
 
 ## Pre-Commit Review Gate
-- For non-trivial changes (new dataclasses, refactored function signatures, new pipeline paths), spawn an Opus agent to review the diff before committing.
-- The agent should check: correctness bugs, test gaps, callers you missed, type errors, unfinished wiring.
+- For non-trivial changes (new structs, refactored function signatures, new pipeline paths), review the complete diff before committing.
+- Check correctness bugs, test gaps, missed callers, type errors, unfinished wiring, and production-shape drift. Use the active agent's native review capability; no specialist review workflow is required.
 - Docs freshness: does this diff make any README / `docs/` / `examples/` / CLAUDE.md statement wrong or incomplete, or ship a documented surface (a new option / plugin / CLI subcommand / behavior) undocumented? `test_docs_audit.py` catches structural gaps; the reviewer catches stale prose the audit can't see.
 - Fix everything it finds before committing. This is not optional.
 
