@@ -164,13 +164,18 @@ export function renderEvidenceStrip(h) {
 /**
  * Render a single download history item as one consistent label/value grid.
  *
+ * The verdict (the entry's story — "mbid_missing", "Upgrade: …") renders
+ * FIRST, under the header, red on failure-family rows: the evidence grid
+ * is context, not the outcome, and a rejection whose quality evidence all
+ * reads positive must not bury its reason below the grid.
+ *
  * Fixed schema (issue #575): the core vocabulary — Source / Spectral /
  * Bitrate / Distance — renders on EVERY entry, with an em-dash when a
  * side has no data, so adjacent entries never jump shape. Existing-side
  * data appears inline as "(was Xkbps)" inside the value cell, so each
  * metric is apples-to-apples on the same row. Semantic extras (V0 probe
  * for lossless sources, Stored as, Bad extension, the Triage operator
- * audit) render only when present; internal debug rows (Preview /
+ * audit) render only when present; internal debug rows (Detail / Preview /
  * Reason / Stages) live behind a collapsed forensics toggle.
  *
  * The header uses the server-classified badge — the SAME vocabulary as
@@ -202,6 +207,19 @@ export function renderDownloadHistoryItem(h) {
     <span style="color:#888;">${esc(user)}</span>
     <span style="color:#555;">${date}</span>
   </div>`;
+
+  // The verdict is the entry's story — it leads, before the evidence
+  // grid. On failure-family rows it takes the reject colour: a rejected
+  // download whose quality evidence all reads positive (transparent vs
+  // transparent, verified lossless bypass) must not tell a quality
+  // success story with the actual reason buried as a dim line below
+  // the grid (request 8781 / download_log 36660: mbid_missing).
+  const FAILURE_OUTCOMES = ['rejected', 'failed', 'timeout', 'user_offline', 'curator_ban'];
+  const verdict = h.verdict || h.beets_scenario || '';
+  if (verdict) {
+    const rejectCls = FAILURE_OUTCOMES.includes(outcome) ? ' p-hist-verdict-reject' : '';
+    html += `<div class="p-hist-verdict${rejectCls}">${esc(verdict)}</div>`;
+  }
 
   const rows = [];
 
@@ -301,6 +319,12 @@ export function renderDownloadHistoryItem(h) {
   }
 
   const forensicRows = [];
+  // The raw beets/harness detail (e.g. "Target MBID … not in candidates")
+  // explains WHY a match-failure verdict fired — reachable, but debug-tier.
+  // Skipped when it just repeats the verdict.
+  if (h.beets_detail && h.beets_detail !== verdict) {
+    forensicRows.push(['Detail', esc(h.beets_detail)]);
+  }
   const previewParts = [
     h.wrong_match_triage_preview_verdict,
     h.wrong_match_triage_preview_decision,
@@ -336,11 +360,6 @@ export function renderDownloadHistoryItem(h) {
     }
     fhtml += '</div>';
     html += `<details class="p-hist-forensics"><summary>forensics</summary>${fhtml}</details>`;
-  }
-
-  const verdict = h.verdict || h.beets_scenario || '';
-  if (verdict) {
-    html += `<div class="p-hist-verdict">${esc(verdict)}</div>`;
   }
 
   return `<div class="p-hist-item">${html}</div>`;

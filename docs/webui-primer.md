@@ -104,9 +104,15 @@ Browser → https://music.ablz.au
   Source / Spectral / Bitrate / Distance vocabulary (em-dash when unknown, one
   label/value pair per row so columns never shift), with the server-classified
   badge as the header — the same words as the list badges, never the raw
-  outcome enum. Force imports show `overridden` in the Distance row instead of
-  beets' misleading 0.000. Debug internals (Preview / Reason / Stages) sit
-  behind a collapsed `forensics` toggle per attempt.
+  outcome enum. The verdict (the entry's story) renders first, directly under
+  the header and red on failure-family rows, so a rejection whose quality
+  evidence all reads positive never buries its reason below the grid (request
+  8781: `mbid_missing` under a "transparent vs transparent" comparison). The
+  expanded pipeline/Recents detail panel puts Download History above the
+  track list for the same reason. Force imports show `overridden` in the
+  Distance row instead of beets' misleading 0.000. Debug internals (Detail /
+  Preview / Reason / Stages) sit behind a collapsed `forensics` toggle per
+  attempt.
 - **Comparison basis rendering (request 6039)** — rows whose
   `import_result` JSONB carries the persisted `comparison_basis` render the
   decision's own comparison: the verdict line names the deciding metric,

@@ -459,6 +459,17 @@ export async function toggleDetail(elId, requestId) {
       html += renderDetailRow('Quality', qualitySummary);
     }
 
+    // Download history — before the track list. The history is why the
+    // operator expanded the row (a Recents card IS a download event); on
+    // mobile a 14-track library listing pushed a rejection's story three
+    // screens down, so the detail read as a healthy library album
+    // (request 8781: mbid_missing invisible without scrolling).
+    if (history.length > 0) {
+      html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
+      html += history.map(renderDownloadHistoryItem).join('');
+      html += '</div>';
+    }
+
     // Tracks — labeled to clarify what we're looking at
     if (beetsTracks.length > 0) {
       html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">In Library (' + beetsTracks.length + ' tracks)</div>';
@@ -467,13 +478,6 @@ export async function toggleDetail(elId, requestId) {
     } else if (tracks.length > 0) {
       html += '<div class="p-tracks"><div class="p-detail-label" style="margin-bottom:4px;">Expected Tracks from MusicBrainz (' + tracks.length + ')</div>';
       html += tracks.map(renderExpectedTrackRow).join('');
-      html += '</div>';
-    }
-
-    // Download history
-    if (history.length > 0) {
-      html += '<div class="p-history"><div class="p-detail-label" style="margin-bottom:4px;">Download History (' + history.length + ')</div>';
-      html += history.map(renderDownloadHistoryItem).join('');
       html += '</div>';
     }
 
