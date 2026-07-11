@@ -166,11 +166,13 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 
 Set `ARTIFACT` to the directory printed at the start and completion of that
 invocation. It contains the full gate stream in `output.log` and exact
-worktree/HEAD/count provenance in `summary.json`; there is deliberately no
-global "latest output" alias. The verifier only accepts a completed green run
-that started and ended clean at the expected HEAD. To cite it during a push,
-run `CRATEDIGGER_TEST_ARTIFACT="$ARTIFACT" git push`; the hook checks it against
-every distinct peeled target commit before running its other gates.
+worktree/HEAD/count provenance plus the completed output's byte count and
+SHA-256 in `summary.json`; there is deliberately no global "latest output"
+alias. The verifier only accepts a completed green run that started and ended
+clean at the expected HEAD and whose output still matches that integrity
+record. To cite it during a push, run
+`CRATEDIGGER_TEST_ARTIFACT="$ARTIFACT" git push`; the hook checks it against every
+distinct peeled target commit before running its other gates.
 
 **ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the printed artifact's `output.log`. The suite gates: JS syntax + JS tests, Ruff's source-local `F401`/`F811` import check, the aggregate vulture sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand ships undocumented** (or a doc link goes dead); docs are part of "done". `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, the new-work checklist, and the docs-freshness rule.
 

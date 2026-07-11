@@ -20,7 +20,7 @@ import msgspec
 
 SUMMARY_NAME = "summary.json"
 OUTPUT_NAME = "output.log"
-SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_SCHEMA_VERSION = 2
 
 
 class GitSnapshot(msgspec.Struct, frozen=True):
@@ -52,8 +52,12 @@ class TestRunSummary(msgspec.Struct, frozen=True):
     end_dirty: bool | None
     status: Literal["running", "passed", "failed"]
     exit_code: int | None
+    gate_exit_code: int | None
+    capture_exit_code: int | None
     discovered_tests: int
     run_tests: int
+    output_bytes: int | None
+    output_sha256: str | None
 
 
 class ArtifactVerificationError(ValueError):
@@ -139,8 +143,12 @@ def create_artifact(
         end_dirty=None,
         status="running",
         exit_code=None,
+        gate_exit_code=None,
+        capture_exit_code=None,
         discovered_tests=0,
         run_tests=0,
+        output_bytes=None,
+        output_sha256=None,
     )
     _write_struct(artifact / SUMMARY_NAME, summary)
     return artifact
@@ -163,11 +171,12 @@ def finalize_artifact(
     artifact: Path,
     worktree: Path,
     *,
-    exit_code: int,
+    gate_exit_code: int,
+    capture_exit_code: int,
     discovered_tests: int,
     run_tests: int,
 ) -> TestRunSummary:
-    """Finalize a run even when an early gate failed."""
+    """Finalize only after the gate-output capture process has completed."""
     initial = read_summary(artifact)
     root = canonical_worktree(worktree)
     if str(root) != initial.worktree_path:
@@ -177,8 +186,28 @@ def finalize_artifact(
         )
     end = git_snapshot(root)
     counts_coherent = discovered_tests > 0 and run_tests == discovered_tests
-    passed = exit_code == 0 and counts_coherent
-    recorded_exit = exit_code if exit_code != 0 or passed else 1
+    output_path = artifact.resolve() / OUTPUT_NAME
+    try:
+        output = output_path.read_bytes()
+    except OSError:
+        output_bytes = None
+        output_sha256 = None
+    else:
+        output_bytes = len(output)
+        output_sha256 = hashlib.sha256(output).hexdigest()
+    output_complete = output_bytes is not None and output_bytes > 0
+    passed = (
+        gate_exit_code == 0
+        and capture_exit_code == 0
+        and counts_coherent
+        and output_complete
+    )
+    if capture_exit_code != 0:
+        recorded_exit = capture_exit_code
+    elif gate_exit_code != 0:
+        recorded_exit = gate_exit_code
+    else:
+        recorded_exit = 0 if passed else 1
     summary = TestRunSummary(
         schema_version=initial.schema_version,
         artifact_path=initial.artifact_path,
@@ -192,8 +221,12 @@ def finalize_artifact(
         end_dirty=end.dirty,
         status="passed" if passed else "failed",
         exit_code=recorded_exit,
+        gate_exit_code=gate_exit_code,
+        capture_exit_code=capture_exit_code,
         discovered_tests=discovered_tests,
         run_tests=run_tests,
+        output_bytes=output_bytes,
+        output_sha256=output_sha256,
     )
     _write_struct(artifact.resolve() / SUMMARY_NAME, summary)
     return summary
@@ -224,6 +257,15 @@ def summary_rejection_reasons(
             "artifact is not a completed green run: "
             f"status={summary.status!r}, exit_code={summary.exit_code!r}"
         )
+    if summary.gate_exit_code != 0:
+        reasons.append(
+            f"gate process failed with exit code {summary.gate_exit_code!r}"
+        )
+    if summary.capture_exit_code != 0:
+        reasons.append(
+            "output capture failed with exit code "
+            f"{summary.capture_exit_code!r}"
+        )
     if summary.ended_at is None or summary.end_head is None:
         reasons.append("artifact has not completed with end provenance")
     if summary.end_dirty is None:
@@ -249,6 +291,21 @@ def summary_rejection_reasons(
         reasons.append(
             "Python test counts are incoherent: "
             f"discovered={summary.discovered_tests}, run={summary.run_tests}"
+        )
+    if summary.output_bytes is None or summary.output_bytes <= 0:
+        reasons.append(
+            f"recorded output byte count is invalid: {summary.output_bytes!r}"
+        )
+    if (
+        summary.output_sha256 is None
+        or len(summary.output_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in summary.output_sha256
+        )
+    ):
+        reasons.append(
+            f"recorded output SHA-256 is invalid: {summary.output_sha256!r}"
         )
 
     started, start_error = _timestamp(summary.started_at, "started_at")
@@ -286,12 +343,22 @@ def verify_artifact(
             f"worktree path is not canonical and absolute: {summary.worktree_path}"
         )
     try:
-        output_size = expected_output.stat().st_size
+        output = expected_output.read_bytes()
     except OSError as exc:
         reasons.append(f"full gate output is missing: {exc}")
     else:
-        if output_size == 0:
-            reasons.append("full gate output is empty")
+        actual_size = len(output)
+        actual_sha256 = hashlib.sha256(output).hexdigest()
+        if actual_size != summary.output_bytes:
+            reasons.append(
+                "full gate output byte count changed after finalization: "
+                f"recorded={summary.output_bytes!r}, actual={actual_size}"
+            )
+        if actual_sha256 != summary.output_sha256:
+            reasons.append(
+                "full gate output SHA-256 changed after finalization: "
+                f"recorded={summary.output_sha256!r}, actual={actual_sha256}"
+            )
     if reasons:
         raise ArtifactVerificationError(
             f"suite artifact {artifact} cannot prove expected HEAD "
@@ -335,7 +402,8 @@ def _parser() -> argparse.ArgumentParser:
     finalize = subparsers.add_parser("finalize")
     finalize.add_argument("--artifact", type=Path, required=True)
     finalize.add_argument("--worktree", type=Path, required=True)
-    finalize.add_argument("--exit-code", type=int, required=True)
+    finalize.add_argument("--gate-exit-code", type=int, required=True)
+    finalize.add_argument("--capture-exit-code", type=int, required=True)
     finalize.add_argument("--counts-file", type=Path, required=True)
 
     run_python = subparsers.add_parser("run-python")
@@ -361,17 +429,28 @@ def main(argv: list[str] | None = None) -> int:
             summary = finalize_artifact(
                 args.artifact,
                 args.worktree,
-                exit_code=args.exit_code,
+                gate_exit_code=args.gate_exit_code,
+                capture_exit_code=args.capture_exit_code,
                 discovered_tests=counts.discovered_tests,
                 run_tests=counts.run_tests,
             )
             print(
                 f"summary={args.artifact / SUMMARY_NAME} "
                 f"status={summary.status} "
+                f"gate_exit={summary.gate_exit_code} "
+                f"capture_exit={summary.capture_exit_code} "
                 f"discovered={summary.discovered_tests} "
-                f"run={summary.run_tests}"
+                f"run={summary.run_tests} "
+                f"output_bytes={summary.output_bytes} "
+                f"output_sha256={summary.output_sha256}"
             )
-            return 0 if args.exit_code != 0 or summary.status == "passed" else 1
+            return (
+                0
+                if summary.status == "passed"
+                or args.gate_exit_code != 0
+                or args.capture_exit_code != 0
+                else 1
+            )
         if args.command == "verify":
             summary = verify_artifact(args.artifact, args.expected_head)
             print(

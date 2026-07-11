@@ -18,4 +18,4 @@ After applying review findings (ce-code-review's fixer, or any edit pass), re-ru
 - Big parallel SSH/`$(...)` batches error out ("API killing us in agents mode") — run doc2 DB/ops commands one at a time.
 - `test_beets_album_op::test_no_file_outside_allowlist_constructs_beet_argv` greps the whole repo tree and FALSE-fails on stale `.claude/worktrees/*` copies. Check `git worktree list` before trusting that one failure.
 
-**How to apply:** review edits → `pyright` (0 errors) → full `run_tests.sh` (ends `OK`) → read `/tmp/cratedigger-test-output.txt`, count only `FAIL/ERROR: test_*` lines (ignore `ERROR: cratedigger` logger lines) → THEN commit/push/merge. See [[feedback-deploy-via-master-worktree]].
+**How to apply:** review edits → `pyright` (0 errors) → full `run_tests.sh` (ends `OK`) → copy the artifact directory printed by that invocation and read its `output.log`, counting only `FAIL/ERROR: test_*` lines (ignore `ERROR: cratedigger` logger lines) → THEN commit/push/merge. See [[feedback-deploy-via-master-worktree]].

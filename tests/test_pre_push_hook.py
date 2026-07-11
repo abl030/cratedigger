@@ -121,7 +121,8 @@ class TestPrePushHook(unittest.TestCase):
         finalize_artifact(
             artifact,
             self.repo,
-            exit_code=0,
+            gate_exit_code=0,
+            capture_exit_code=0,
             discovered_tests=1,
             run_tests=1,
         )

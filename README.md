@@ -168,9 +168,10 @@ nix-shell --run "pyright"                     # 0 errors, enforced
 ```
 
 Each suite invocation stores its complete gate output and structured
-worktree/commit/count provenance in the printed directory. Read that run's
-`output.log`; there is no shared latest-output file that concurrent worktrees
-can overwrite. A clean committed run can be checked with
+worktree/commit/count provenance plus the output byte count and SHA-256 in the
+printed directory. Read that run's `output.log`; there is no shared
+latest-output file that concurrent worktrees can overwrite. A clean committed
+run can be checked with
 the `verify` subcommand of `scripts/test_artifact.py`, and cited to the push
 hook via `CRATEDIGGER_TEST_ARTIFACT=<printed-directory> git push`.
 

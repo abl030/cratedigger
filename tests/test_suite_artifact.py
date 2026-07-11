@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
+
+import msgspec
 
 from scripts.test_artifact import (
     ArtifactVerificationError,
@@ -22,6 +26,7 @@ from scripts.test_artifact import (
 
 
 RUNNER = Path(__file__).parents[1] / "scripts" / "run_tests.sh"
+REPO_ROOT = RUNNER.parents[1]
 
 
 class TestSuiteArtifact(unittest.TestCase):
@@ -60,7 +65,8 @@ class TestSuiteArtifact(unittest.TestCase):
         finalize_artifact(
             artifact,
             worktree,
-            exit_code=0,
+            gate_exit_code=0,
+            capture_exit_code=0,
             discovered_tests=2,
             run_tests=2,
         )
@@ -113,7 +119,8 @@ class TestSuiteArtifact(unittest.TestCase):
         finalize_artifact(
             artifact,
             self.repo,
-            exit_code=0,
+            gate_exit_code=0,
+            capture_exit_code=0,
             discovered_tests=1,
             run_tests=1,
         )
@@ -132,12 +139,44 @@ class TestSuiteArtifact(unittest.TestCase):
         finalize_artifact(
             incoherent,
             self.repo,
-            exit_code=0,
+            gate_exit_code=0,
+            capture_exit_code=0,
             discovered_tests=2,
             run_tests=1,
         )
         with self.assertRaisesRegex(ArtifactVerificationError, "counts"):
             verify_artifact(incoherent, self.head)
+
+    def test_output_mutation_after_finalization_is_rejected(self) -> None:
+        artifact = self._complete_green(self.repo)
+        with (artifact / "output.log").open("ab") as output:
+            output.write(b"late writer bytes\n")
+
+        with self.assertRaisesRegex(
+            ArtifactVerificationError, "changed after finalization"
+        ):
+            verify_artifact(artifact, self.head)
+
+    def test_v1_summary_is_rejected_without_a_compatibility_path(self) -> None:
+        artifact = create_artifact(self.repo, self.artifact_root)
+        summary_path = artifact / "summary.json"
+        payload = msgspec.json.decode(summary_path.read_bytes())
+        self.assertIsInstance(payload, dict)
+        assert isinstance(payload, dict)
+        payload["schema_version"] = 1
+        for field in (
+            "gate_exit_code",
+            "capture_exit_code",
+            "output_bytes",
+            "output_sha256",
+        ):
+            payload.pop(field)
+        summary_path.write_bytes(msgspec.json.encode(payload))
+
+        with self.assertRaisesRegex(
+            ArtifactVerificationError, "invalid or missing suite summary"
+        ):
+            read_summary(artifact)
 
     def test_runner_prints_unique_path_and_finalizes_early_gate_failure(self) -> None:
         stub_dir = self.root / "bin"
@@ -149,19 +188,25 @@ class TestSuiteArtifact(unittest.TestCase):
             "exit 17\n"
         )
         node.chmod(0o755)
-        result = subprocess.run(
-            ["bash", str(RUNNER)],
-            cwd=RUNNER.parents[1],
-            text=True,
-            capture_output=True,
-            env={
-                **os.environ,
-                "PATH": f"{stub_dir}:{os.environ['PATH']}",
-            },
-        )
+        artifact_root = self.root / "runner-artifacts"
+        stdout_path = self.root / "runner.stdout"
+        with stdout_path.open("w") as stdout:
+            result = subprocess.run(
+                ["bash", str(RUNNER)],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+                env={
+                    **os.environ,
+                    "CRATEDIGGER_TEST_ARTIFACT_ROOT": str(artifact_root),
+                    "PATH": f"{stub_dir}:{os.environ['PATH']}",
+                },
+            )
         self.assertNotEqual(result.returncode, 0)
-        paths = re.findall(r"^Artifact directory: (.+)$", result.stdout, re.M)
-        self.assertEqual(len(paths), 2, result.stdout)
+        runner_stdout = stdout_path.read_text()
+        paths = re.findall(r"^Artifact directory: (.+)$", runner_stdout, re.M)
+        self.assertEqual(len(paths), 2, runner_stdout)
         self.assertEqual(paths[0], paths[1])
         artifact = Path(paths[0])
         self.addCleanup(shutil.rmtree, artifact, True)
@@ -170,7 +215,7 @@ class TestSuiteArtifact(unittest.TestCase):
         self.assertIn("=== TEST ARTIFACT ===", output)
         self.assertIn("=== JS syntax check ===", output)
         self.assertIn("PLANTED EARLY JS FAILURE", output)
-        self.assertIn("=== TEST ARTIFACT COMPLETE ===", output)
+        self.assertIn("=== TEST ARTIFACT COMPLETE ===", runner_stdout)
         summary = read_summary(artifact)
         self.assertEqual(summary.status, "failed")
         self.assertIsNotNone(summary.ended_at)
@@ -178,6 +223,126 @@ class TestSuiteArtifact(unittest.TestCase):
         self.assertIsNotNone(summary.end_dirty)
         self.assertEqual(summary.discovered_tests, 0)
         self.assertEqual(summary.run_tests, 0)
+
+    def test_runner_waits_for_delayed_capture_before_finalizing(self) -> None:
+        stub_dir = self.root / "delayed-bin"
+        stub_dir.mkdir()
+        real_tee = shutil.which("tee")
+        self.assertIsNotNone(real_tee)
+        assert real_tee is not None
+        tee = stub_dir / "tee"
+        tee.write_text(
+            "#!/usr/bin/env bash\n"
+            "sleep 0.5\n"
+            f'exec "{real_tee}" "$@"\n'
+        )
+        tee.chmod(0o755)
+        node = stub_dir / "node"
+        node.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'PLANTED DELAYED CAPTURE FAILURE'\n"
+            "exit 17\n"
+        )
+        node.chmod(0o755)
+        artifact_root = self.root / "delayed-artifacts"
+        stdout_path = self.root / "delayed.stdout"
+        started = time.monotonic()
+        with stdout_path.open("w") as stdout:
+            process = subprocess.Popen(
+                ["bash", str(RUNNER)],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+                env={
+                    **os.environ,
+                    "CRATEDIGGER_TEST_ARTIFACT_ROOT": str(artifact_root),
+                    "PATH": f"{stub_dir}:{os.environ['PATH']}",
+                },
+            )
+            deadline = time.monotonic() + 2
+            artifacts: list[Path] = []
+            while time.monotonic() < deadline:
+                artifacts = list(artifact_root.glob("*"))
+                if (
+                    len(artifacts) == 1
+                    and (artifacts[0] / "summary.json").exists()
+                ):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(len(artifacts), 1)
+            during_capture = read_summary(artifacts[0])
+            returncode = process.wait(timeout=5)
+        elapsed = time.monotonic() - started
+        # Let the old asynchronous implementation's orphaned tee finish before
+        # TemporaryDirectory cleanup; the assertions below remain RED there.
+        if elapsed < 0.45:
+            time.sleep(0.6)
+
+        self.assertEqual(during_capture.status, "running")
+        self.assertGreaterEqual(elapsed, 0.45)
+        self.assertNotEqual(returncode, 0)
+        summary = read_summary(artifacts[0])
+        output = (artifacts[0] / "output.log").read_bytes()
+        self.assertEqual(summary.capture_exit_code, 0)
+        self.assertEqual(summary.output_bytes, len(output))
+        self.assertEqual(
+            summary.output_sha256,
+            hashlib.sha256(output).hexdigest(),
+        )
+        self.assertIn(b"PLANTED DELAYED CAPTURE FAILURE", output)
+
+    def test_runner_records_and_propagates_capture_failure(self) -> None:
+        stub_dir = self.root / "failing-bin"
+        stub_dir.mkdir()
+        tee = stub_dir / "tee"
+        tee.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"
+            "exit 23\n"
+        )
+        tee.chmod(0o755)
+        node = stub_dir / "node"
+        node.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'PLANTED CAPTURE FAILURE'\n"
+            "exit 17\n"
+        )
+        node.chmod(0o755)
+        artifact_root = self.root / "failing-artifacts"
+        with (self.root / "failing.stdout").open("w") as stdout:
+            result = subprocess.run(
+                ["bash", str(RUNNER)],
+                cwd=REPO_ROOT,
+                text=True,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+                timeout=5,
+                env={
+                    **os.environ,
+                    "CRATEDIGGER_TEST_ARTIFACT_ROOT": str(artifact_root),
+                    "PATH": f"{stub_dir}:{os.environ['PATH']}",
+                },
+            )
+
+        self.assertEqual(result.returncode, 23)
+        artifacts = list(artifact_root.glob("*"))
+        self.assertEqual(len(artifacts), 1)
+        summary = read_summary(artifacts[0])
+        self.assertEqual(summary.status, "failed")
+        self.assertEqual(summary.gate_exit_code, 1)
+        self.assertEqual(summary.capture_exit_code, 23)
+
+    def test_authoritative_guidance_uses_emitted_artifact_path(self) -> None:
+        authoritative = (
+            REPO_ROOT / ".claude/memory/feedback_use_nix_shell.md",
+            REPO_ROOT / ".claude/memory/feedback_full_suite_before_merge.md",
+        )
+        for path in authoritative:
+            with self.subTest(path=path.name):
+                text = path.read_text()
+                self.assertNotIn("/tmp/cratedigger-test-output.txt", text)
+                self.assertIn("output.log", text)
 
     def test_ephemeral_tmpdir_does_not_control_default_artifact_root(self) -> None:
         hostile_tmpdir = self.root / "nix-shell-ephemeral"

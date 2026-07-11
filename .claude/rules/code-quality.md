@@ -155,7 +155,8 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - Copy the unique artifact directory printed at start/completion; read its
   `output.log` instead of re-running the 2-minute suite. `summary.json` records
   the canonical worktree, start/end HEAD and cleanliness, timestamps, status,
-  and Python discovered/run counts. There is no global latest-output alias.
+  Python discovered/run counts, capture exit status, and the completed
+  output's exact byte count and SHA-256. There is no global latest-output alias.
 - An exact-target citation must pass the `verify` subcommand of
   `scripts/test_artifact.py` for the expected commit. Set
   `CRATEDIGGER_TEST_ARTIFACT` on `git push` when the hook must require that
