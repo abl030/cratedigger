@@ -165,7 +165,7 @@ def find_slskd_orphans(
         ledgered: ``(username, filename)`` pairs present in
             ``slskd_transfer_ledger`` — cratedigger's write-ahead record
             of every transfer it ever enqueued
-            (``lib.pipeline_db.transfer_ledger.get_owned_transfers``).
+            (``lib.pipeline_db.transfer_ledger.get_owned_transfer_keys``).
 
     A live, non-terminal transfer classifies as exactly one of:
 

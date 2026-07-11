@@ -867,13 +867,13 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
 
         self.assertEqual(outcome.status, "accepted")
         self.assertEqual(order, ["ledger:2", "post:2"])
-        rows = db.get_owned_transfers(request_id=42)
+        rows = db.record_transfer_enqueue_calls
         self.assertEqual(len(rows), 2)
         self.assertEqual(
-            {r["filename"] for r in rows}, {"01.flac", "02.flac"})
+            {r.filename for r in rows}, {"01.flac", "02.flac"})
         for row in rows:
-            self.assertEqual(row["attempt_fingerprint"], "fp-1")
-            self.assertEqual(row["request_id"], 42)
+            self.assertEqual(row.attempt_fingerprint, "fp-1")
+            self.assertEqual(row.request_id, 42)
 
     def test_ledger_row_survives_a_simulated_kill_at_the_post(self):
         """Kill-safety: the POST raising AFTER the ledger write still
@@ -893,9 +893,9 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
                 "user1\\Music", ctx, request_id=7)
 
         self.assertEqual(outcome.status, "unknown")
-        rows = db.get_owned_transfers(request_id=7)
+        rows = db.record_transfer_enqueue_calls
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["filename"], "a.flac")
+        self.assertEqual(rows[0].filename, "a.flac")
 
     def test_no_request_id_skips_ledger_but_still_enqueues(self):
         """Documents the guard: the legacy/test fallback shape (no
@@ -921,7 +921,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
                 "user1\\Music", ctx, request_id=None)
 
         self.assertEqual(outcome.status, "accepted")
-        self.assertEqual(db.get_owned_transfers(), [])
+        self.assertEqual(db.record_transfer_enqueue_calls, [])
 
     def test_no_download_ownership_skips_ledger_but_still_enqueues(self):
         from lib.slskd_transfers import slskd_enqueue_with_outcome
@@ -953,7 +953,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
         with patch("time.sleep"):
             slskd_do_enqueue("user1", [], "dir", ctx, request_id=1)
 
-        self.assertEqual(db.get_owned_transfers(), [])
+        self.assertEqual(db.record_transfer_enqueue_calls, [])
 
     # --- T1.5: enqueue-response transfer_id capture (issue #571 PR 5) --
 
@@ -983,9 +983,9 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
                 "user1", files, "user1\\Music", ctx, request_id=42)
 
         self.assertEqual(outcome.status, "accepted")
-        rows = {r["filename"]: r for r in db.get_owned_transfers(request_id=42)}
-        self.assertEqual(rows["01.flac"]["transfer_id"], "tid-1")
-        self.assertEqual(rows["02.flac"]["transfer_id"], "tid-2")
+        rows = {r.filename: r for r in db._transfer_ledger.values()}
+        self.assertEqual(rows["01.flac"].transfer_id, "tid-1")
+        self.assertEqual(rows["02.flac"].transfer_id, "tid-2")
 
     def test_unreconciled_file_leaves_transfer_id_null_for_the_t2_fallback(self):
         """A file whose id never reconciled within the wait window (empty
@@ -1004,8 +1004,8 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
                 "user1\\Music", ctx, request_id=7)
 
         self.assertEqual(outcome.status, "accepted")
-        row = db.get_owned_transfers(request_id=7)[0]
-        self.assertIsNone(row["transfer_id"])
+        row = next(iter(db._transfer_ledger.values()))
+        self.assertIsNone(row.transfer_id)
         self.assertEqual(db.stamp_transfer_id_calls, [])
 
     def test_no_download_ownership_skips_id_capture_but_still_enqueues(self):

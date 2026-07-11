@@ -137,8 +137,8 @@ class FakeTransferLedgerRow:
     write-ahead fields (``request_id``/``username``/``filename``/
     ``attempt_fingerprint``); this fake row carries the FULL table shape
     (``id``/``transfer_id``/``enqueued_at``/``local_path``/
-    ``completed_at``) so ``get_owned_transfers``/``get_owned_local_paths``
-    have something real to read back.
+    ``completed_at``) so the purpose-shaped ownership reads and fake
+    write-method self-tests observe production-shaped state.
     """
     id: int
     request_id: int

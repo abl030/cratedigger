@@ -4346,28 +4346,6 @@ class FakePipelineDB:
             newest.transfer_id = transfer_id
         return 1
 
-    def get_owned_transfers(
-        self, request_id: int | None = None,
-    ) -> list[dict[str, Any]]:
-        rows = list(self._transfer_ledger.values())
-        if request_id is not None:
-            rows = [r for r in rows if r.request_id == request_id]
-        rows.sort(key=lambda r: r.enqueued_at)
-        return [
-            {
-                "id": r.id,
-                "request_id": r.request_id,
-                "username": r.username,
-                "filename": r.filename,
-                "transfer_id": r.transfer_id,
-                "attempt_fingerprint": r.attempt_fingerprint,
-                "enqueued_at": r.enqueued_at,
-                "local_path": r.local_path,
-                "completed_at": r.completed_at,
-            }
-            for r in rows
-        ]
-
     def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
         """Mirrors the real SELECT username, filename -- an unordered
         membership set over ALL ledger rows, stamped or not."""

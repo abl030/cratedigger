@@ -161,7 +161,7 @@ def assert_write_ahead_holds(world: EnqueueWorld, order: list[str], db: FakePipe
     if not post_entries:
         raise AssertionError(f"enqueue POST was never issued for {world!r}")
     if not owned:
-        rows = db.get_owned_transfers()
+        rows = db.record_transfer_enqueue_calls
         if rows:
             raise AssertionError(
                 f"un-owned world wrote ledger rows it shouldn't have: {rows!r}")
@@ -172,14 +172,14 @@ def assert_write_ahead_holds(world: EnqueueWorld, order: list[str], db: FakePipe
     if order.index(ledger_entries[0]) > order.index(post_entries[0]):
         raise AssertionError(
             f"ledger write did not precede the POST: order={order!r}")
-    rows = db.get_owned_transfers(request_id=world.request_id)
-    ledgered_filenames = {r["filename"] for r in rows}
+    rows = db.record_transfer_enqueue_calls
+    ledgered_filenames = {r.filename for r in rows}
     if ledgered_filenames != set(world.filenames):
         raise AssertionError(
             f"ledgered filenames {ledgered_filenames!r} != "
             f"enqueued filenames {set(world.filenames)!r}")
     for row in rows:
-        if row["attempt_fingerprint"] != world.attempt_fp:
+        if row.attempt_fingerprint != world.attempt_fp:
             raise AssertionError(
                 f"attempt_fingerprint drifted: {row!r} vs {world.attempt_fp!r}")
 
@@ -359,9 +359,9 @@ class TestGeneratedTransferIdCapture(unittest.TestCase):
     def test_first_known_transfer_id_wins(self, ops):
         db = _run_capture_sequence(ops)
 
-        rows = db.get_owned_transfers(request_id=1)
+        rows = list(db._transfer_ledger.values())
         self.assertEqual(len(rows), 1)
-        assert_transfer_id_capture_matches_oracle(ops, rows[0]["transfer_id"])
+        assert_transfer_id_capture_matches_oracle(ops, rows[0].transfer_id)
 
 
 class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):

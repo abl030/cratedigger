@@ -17,10 +17,9 @@ The methods this mixin adds:
   in from the completion event when T1.5 hasn't set it yet (a reconciled-
   timeout fallback -- see ``transfer_id`` parameter below) -- never
   clobbers an already-known value.
-* ``get_owned_transfers`` / ``get_owned_transfer_keys`` /
-  ``get_owned_transfer_id_sets`` / ``get_owned_local_paths`` -- read
-  surface shaped for what the reaper/convergence/purge flips need: full
-  rows for forensic inspection, the bare "is this (username, filename)
+* ``get_owned_transfer_keys`` / ``get_owned_transfer_id_sets`` /
+  ``get_owned_local_paths`` -- purpose-shaped read surfaces for the
+  reaper/convergence/purge flips: the bare "is this (username, filename)
   mine?" membership set the #571 PR 3 convergence flip consumes each
   cycle, the stamped/unstamped ``transfer_id`` membership sets the #571
   PR 5 completed-transfer purge consumes each cycle, and "is this
@@ -179,48 +178,15 @@ class _TransferLedgerMixin(_PipelineDBBase):
         )
         return cur.rowcount
 
-    def get_owned_transfers(
-        self, request_id: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Ledger rows, optionally filtered to one ``request_id``.
-
-        Shaped for the future convergence flip's "is this transfer
-        mine?" lookup: every row exposes the full column set so the
-        caller can match by (username, filename) or inspect
-        attempt_fingerprint/completion state.
-        """
-        if request_id is not None:
-            cur = self._execute(
-                """
-                SELECT id, request_id, username, filename, transfer_id,
-                       attempt_fingerprint, enqueued_at, local_path, completed_at
-                FROM slskd_transfer_ledger
-                WHERE request_id = %s
-                ORDER BY enqueued_at ASC
-                """,
-                (request_id,),
-            )
-        else:
-            cur = self._execute(
-                """
-                SELECT id, request_id, username, filename, transfer_id,
-                       attempt_fingerprint, enqueued_at, local_path, completed_at
-                FROM slskd_transfer_ledger
-                ORDER BY enqueued_at ASC
-                """,
-            )
-        return [dict(r) for r in cur.fetchall()]
-
     def get_owned_transfer_keys(self) -> set[tuple[str, str]]:
         """Every ``(username, filename)`` pair in the ledger -- the
         convergence flip's "is this live transfer mine?" membership set
         (#571 PR 3).
 
         Purpose-shaped: callers only need an unordered key set, so this
-        skips ``get_owned_transfers``'s 9-column projection and ``ORDER
-        BY enqueued_at`` (wasteful every 5-min cycle). Includes stamped
-        and unstamped rows alike -- ledger membership, not completion
-        state, is what proves cratedigger created a transfer.
+        queries only the two required columns and does not sort. Includes
+        stamped and unstamped rows alike -- ledger membership, not
+        completion state, is what proves cratedigger created a transfer.
         """
         cur = self._execute(
             "SELECT username, filename FROM slskd_transfer_ledger",

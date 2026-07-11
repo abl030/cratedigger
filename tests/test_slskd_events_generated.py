@@ -357,10 +357,10 @@ def expected_ledger_stamps(world: EventWorld) -> dict[tuple[str, str], str | Non
 def _owned_local_paths(db: FakePipelineDB, world: EventWorld) -> dict[tuple[str, str], str | None]:
     """Ledgered key -> stamped local_path (None if not yet stamped)."""
     actual: dict[tuple[str, str], str | None] = {key: None for key in world.ledgered_keys}
-    for row in db.get_owned_transfers():
-        key = (row["username"], row["filename"])
+    for row in db._transfer_ledger.values():
+        key = (row.username, row.filename)
         if key in actual:
-            actual[key] = row["local_path"]
+            actual[key] = row.local_path
     return actual
 
 
