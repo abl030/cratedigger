@@ -5,6 +5,12 @@ set -euo pipefail
 
 OUT="/tmp/cratedigger-test-output.txt"
 
+# Truncate up front: an early gate failure (JS/vulture) exits before the
+# Python tee ever writes $OUT, leaving the PREVIOUS run's green unittest
+# output behind — "grep the output file" then reads as a false pass
+# (bit the 2026-07-11 honest-metrics session mid-review).
+: > "$OUT"
+
 # JS syntax check
 echo "=== JS syntax check ==="
 for f in web/js/*.js; do
