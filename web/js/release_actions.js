@@ -221,6 +221,7 @@ export function renderReplaceButton(args, opts = {}) {
  * @param {ReleaseActionState} state
  * @param {Object} [opts]
  * @param {string} [opts.size] - 'normal' or 'small' for compact layouts
+ * @param {boolean} [opts.hideDisabledRemove] - omit beets removal when unavailable
  * @returns {string}
  */
 export function renderActionToolbar(state, opts = {}) {
@@ -240,6 +241,7 @@ export function renderActionToolbar(state, opts = {}) {
     enabledStyle: `${baseStyle}background:#3a2a2a;color:#f88;`,
     disabledStyle: baseStyle,
     stopPropagation: true,
+    hideDisabled: opts.hideDisabledRemove,
   });
 
   return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${acquireBtn}${removeBeetsBtn}</span>`;

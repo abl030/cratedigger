@@ -148,8 +148,9 @@ export async function toggleReleaseLibDetail(id) {
  * @param {number} id - Beets album ID
  * @returns {string}
  */
-function renderLibraryDetailBody(data, id) {
+export function renderLibraryDetailBody(data, id) {
     const releaseId = normalizeReleaseId(data.mb_albumid);
+    const releaseArg = jsArg(releaseId);
     let html = '';
     if (data.path) {
       html += renderDetailRow('Path', esc(data.path), { valueStyle: 'font-size:0.85em;word-break:break-all;' });
@@ -178,15 +179,15 @@ function renderLibraryDetailBody(data, id) {
       const pStatus = data.pipeline_status || '';
       html += `<div class="p-actions" style="margin-top:10px;">
         <span class="p-detail-label" style="line-height:28px;">Status:</span>
-        <button class="p-btn ${pStatus === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'wanted', null)">wanted</button>
-        <button class="p-btn ${pStatus === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'imported', null)">imported</button>
-        <button class="p-btn ${pStatus === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'manual', null)">manual</button>
+        <button class="p-btn ${pStatus === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'wanted', null)">wanted</button>
+        <button class="p-btn ${pStatus === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">imported</button>
+        <button class="p-btn ${pStatus === 'manual' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'manual', null)">manual</button>
       </div>`;
       html += `<div class="p-actions" style="margin-top:6px;">
         <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
         <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
-        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality('${releaseId}', null, parseInt(v))">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); window.setLibQuality('${releaseId}', 'imported', null)">Accept</button>
+        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality(${releaseArg}, null, parseInt(v))">Set</button>
+        <button class="p-btn" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">Accept</button>
       </div>`;
       const currentIntent = overrideToIntent(data.target_format);
       html += `<div class="p-actions" style="margin-top:6px;">
