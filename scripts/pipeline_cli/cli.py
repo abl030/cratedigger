@@ -42,7 +42,11 @@ from scripts.pipeline_cli.search_plan import (
     cmd_search_plan_show,
 )
 from scripts.pipeline_cli.show import cmd_show
-from scripts.pipeline_cli.triage import cmd_triage_list, cmd_triage_show
+from scripts.pipeline_cli.triage import (
+    cmd_triage_list,
+    cmd_triage_quarantine,
+    cmd_triage_show,
+)
 from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
     cmd_wrong_match_delete_group,
@@ -121,6 +125,7 @@ def main():
     triage_commands = {
         "show": cmd_triage_show,
         "list": cmd_triage_list,
+        "quarantine": cmd_triage_quarantine,
     }
     try:
         if args.command == "search-plan":

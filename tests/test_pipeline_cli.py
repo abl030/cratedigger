@@ -3297,6 +3297,69 @@ class TestPipelineCliTriage(unittest.TestCase):
             rc = pipeline_cli.cmd_triage_show(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
+    def _run_quarantine(self, db, root, *, json_out=False):
+        config_path = os.path.join(root, "config.ini")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(f"[Slskd]\ndownload_dir = {root}\n")
+        args = SimpleNamespace(json=json_out)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            clear=False,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_quarantine(db, args)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_quarantine_json_matches_typed_service_shape(self):
+        from lib.quarantine_triage_service import QuarantineTriageResult
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as root:
+            quarantine = os.path.join(root, "failed_imports")
+            referenced = os.path.join(quarantine, "Referenced")
+            orphan = os.path.join(quarantine, "Orphan")
+            os.makedirs(referenced)
+            os.makedirs(orphan)
+            _seed_id = db.add_request("Artist", "Album", "request")
+            db.log_download(
+                _seed_id,
+                outcome="rejected",
+                validation_result={
+                    "failed_path": "failed_imports/Referenced",
+                    "scenario": "high_distance",
+                },
+            )
+
+            rc, out, err = self._run_quarantine(db, root, json_out=True)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        result = msgspec.convert(json.loads(out), type=QuarantineTriageResult)
+        self.assertEqual([folder.name for folder in result.folders], ["Orphan"])
+
+    def test_quarantine_human_output_names_folder(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "failed_imports", "Visible Orphan"))
+            rc, out, err = self._run_quarantine(
+                FakePipelineDB(), root,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Visible Orphan", out)
+
+    def test_quarantine_scan_error_returns_5_with_json_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
+                f.write("not a directory")
+            rc, out, err = self._run_quarantine(
+                FakePipelineDB(), root, json_out=True,
+            )
+        self.assertEqual(rc, 5)
+        self.assertEqual(err, "")
+        self.assertIn("error", json.loads(out))
+
     def test_show_human_renders_request_meta_and_search_log(self):
         from lib.triage_service import TriageResult  # noqa: F401
         db = FakePipelineDB()
@@ -3681,6 +3744,7 @@ class TestPipelineCliRoutes(unittest.TestCase):
         # Nested commands are emitted as space-separated leaves.
         self.assertIn("search-plan show", output)
         self.assertIn("triage list", output)
+        self.assertIn("triage quarantine", output)
         # The ``routes`` command must self-describe.
         self.assertIn("routes", output)
 
@@ -3698,7 +3762,10 @@ class TestPipelineCliRoutes(unittest.TestCase):
             self.assertIsInstance(entry["description"], str)
         names_list = [entry["subcommand"] for entry in data]
         names_set = set(names_list)
-        for expected in ("list", "search-plan show", "triage list", "routes"):
+        for expected in (
+            "list", "search-plan show", "triage list",
+            "triage quarantine", "routes",
+        ):
             self.assertIn(expected, names_set)
 
         # Sort invariant — operators consume this as a stable index.

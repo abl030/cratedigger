@@ -139,6 +139,20 @@ class TestApiIndexRouteContract(_WebServerCase):
             post_models,
             f"PipelineAddRequest not surfaced in post_models: {post_models}",
         )
+        quarantine_entry = next(
+            (
+                entry for entry in data
+                if entry["path"] == "/api/triage/quarantine"
+            ),
+            None,
+        )
+        self.assertIsNotNone(
+            quarantine_entry,
+            "read-only quarantine lifecycle route must be discoverable",
+        )
+        assert quarantine_entry is not None
+        self.assertEqual(quarantine_entry["method"], "GET")
+        self.assertIn("unreferenced", quarantine_entry["description"])
 
         # Sort invariant — operators consume this as a stable index.
         sorted_entries = sorted(

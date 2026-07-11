@@ -9,7 +9,9 @@ tests/web/_harness.py.
 from datetime import datetime, timezone
 import os
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import msgspec
 
@@ -57,6 +59,64 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
     }
 
     LIST_REQUIRED_FIELDS = {"results", "next_after", "page_size", "filter"}
+    QUARANTINE_REQUIRED_FIELDS = {
+        "quarantine_root", "folders", "special_buckets",
+    }
+    QUARANTINE_FOLDER_REQUIRED_FIELDS = {"name", "path", "mtime_ns"}
+
+    def _get_quarantine(self, root: str):
+        config_path = os.path.join(root, "config.ini")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(f"[Slskd]\ndownload_dir = {root}\n")
+        with patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            clear=False,
+        ):
+            return self._get("/api/triage/quarantine")
+
+    def test_quarantine_returns_200_with_typed_required_fields(self):
+        from lib.quarantine_triage_service import QuarantineTriageResult
+
+        with tempfile.TemporaryDirectory() as root:
+            quarantine = os.path.join(root, "failed_imports")
+            referenced = os.path.join(quarantine, "Referenced")
+            orphan = os.path.join(quarantine, "Orphan")
+            os.makedirs(referenced)
+            os.makedirs(orphan)
+            request_id = self.db.add_request("Artist", "Album", "request")
+            self.db.log_download(
+                request_id,
+                outcome="rejected",
+                validation_result={
+                    "failed_path": "failed_imports/Referenced",
+                    "scenario": "high_distance",
+                },
+            )
+
+            status, data = self._get_quarantine(root)
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.QUARANTINE_REQUIRED_FIELDS,
+            "quarantine triage response",
+        )
+        self.assertEqual(len(data["folders"]), 1)
+        _assert_required_fields(
+            self, data["folders"][0], self.QUARANTINE_FOLDER_REQUIRED_FIELDS,
+            "quarantine folder",
+        )
+        result = msgspec.convert(data, type=QuarantineTriageResult)
+        self.assertEqual(result.folders[0].name, "Orphan")
+
+    def test_quarantine_filesystem_failure_returns_503(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
+                f.write("not a directory")
+            status, data = self._get_quarantine(root)
+
+        self.assertEqual(status, 503)
+        self.assertIn("error", data)
 
     # --- /api/triage/<id> -------------------------------------------------
 

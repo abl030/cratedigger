@@ -1,9 +1,13 @@
 """pipeline-cli ``triage`` command family (#495 carve; issue #U16).
 
-Two subcommands wrap the U15 triage service:
+The request/cohort subcommands wrap the U15 triage service:
 
   * ``pipeline-cli triage show <id>`` — per-request composition.
   * ``pipeline-cli triage list --filter=<spec>`` — cohort listing.
+
+Issue #573 W2 adds ``pipeline-cli triage quarantine``. It wraps the separate
+read-only ``lib.quarantine_triage_service`` lifecycle view and mirrors
+``GET /api/triage/quarantine``.
 
 Both adhere to CLAUDE.md § "CLI ⇄ API surface symmetry": each one is a
 thin wrapper around ``lib.triage_service``; the matching HTTP routes
@@ -323,6 +327,47 @@ def cmd_triage_list(db, args):
     return 0
 
 
+def cmd_triage_quarantine(db, args):
+    """List unreferenced immediate folders under ``failed_imports``.
+
+    Exit codes:
+      * 0 — complete read-only scan (including an empty result)
+      * 5 — configuration, DB, decode, or filesystem scan unavailable
+    """
+    from lib.quarantine_triage_service import (
+        QuarantineScanError,
+        list_unreferenced_quarantine_folders,
+    )
+
+    json_mode = bool(getattr(args, "json", False))
+    try:
+        result = list_unreferenced_quarantine_folders(db)
+    except QuarantineScanError as exc:
+        if json_mode:
+            print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+        else:
+            print(f"  Quarantine scan unavailable: {exc}", file=sys.stderr)
+        return 5
+
+    if json_mode:
+        print(json.dumps(
+            msgspec.to_builtins(result),
+            indent=2,
+            sort_keys=True,
+        ))
+        return 0
+
+    print(f"  Quarantine root: {result.quarantine_root}")
+    if not result.folders:
+        print("  No unreferenced quarantine folders.")
+        return 0
+    for folder in result.folders:
+        print(f"  {folder.name}  mtime_ns={folder.mtime_ns}")
+        print(f"    {folder.path}")
+    print(f"  ({len(result.folders)} folders)")
+    return 0
+
+
 def add_triage_subparser(
     sub: argparse._SubParsersAction,
 ) -> argparse.ArgumentParser:
@@ -332,15 +377,16 @@ def add_triage_subparser(
     Returns the ``triage`` subparser itself so ``main()`` can print its
     help when invoked without a nested subcommand.
     """
-    # triage (U16) — operator-facing composition of unfindable + field-quality
-    # + search-forensics. Wraps ``lib.triage_service`` (U15). Nested under a
+    # triage (U16 + #573 W2) — operator-facing composition of unfindable +
+    # field-quality + search-forensics, plus read-only quarantine lifecycle.
+    # Nested under a
     # subparser for the same reason ``search-plan`` is: the per-request view
     # and the cohort list share enough state to benefit from a shared
     # namespace, and the convention is consistent with the rest of this CLI.
     p_triage_op = sub.add_parser(
         "triage",
-        help="Operator triage (U16) — compose unfindable + field-quality + "
-             "search-forensics for one request, or list a cohort by filter")
+        help="Operator triage — compose request/search forensics, list a "
+             "cohort, or surface unreferenced quarantine folders")
     tr_sub = p_triage_op.add_subparsers(dest="triage_command")
 
     p_tr_show = tr_sub.add_parser(
@@ -369,4 +415,14 @@ def add_triage_subparser(
         help="Resume cursor: last request_id from prior page")
     p_tr_list.add_argument("--json", action="store_true",
                             help="Print structured JSON instead of text")
+
+    p_tr_quarantine = tr_sub.add_parser(
+        "quarantine",
+        help="Read-only list of immediate failed_imports album folders with "
+             "no visible Wrong Matches reference",
+    )
+    p_tr_quarantine.add_argument(
+        "--json", action="store_true",
+        help="Print structured JSON instead of text",
+    )
     return p_triage_op

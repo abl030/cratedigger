@@ -1,6 +1,8 @@
-"""Triage routes — cohort + per-request composition over
-``lib.triage_service`` (unfindable categorisation, field-resolution
-telemetry, search-log forensics).
+"""Triage routes — request/cohort composition plus quarantine lifecycle.
+
+Request and cohort routes wrap ``lib.triage_service`` (unfindable
+categorisation, field-resolution telemetry, search-log forensics). The
+read-only quarantine route wraps ``lib.quarantine_triage_service``.
 
 Split from web/routes/pipeline.py (#481 item 3). Not to be confused with
 the unrelated "wrong-match triage" console in web/routes/imports.py
@@ -33,6 +35,9 @@ from web.routes._server_access import _server
 # Both surfaces route through the same service entrypoints
 # (``compose_triage_for_request`` / ``list_triage``) so the CLI ⇄ API
 # symmetry rule holds — see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
+# ``GET /api/triage/quarantine`` separately mirrors
+# ``pipeline-cli triage quarantine`` through one shared read-only lifecycle
+# service; both map an unavailable complete scan to 503 / exit 5.
 
 # Filter forms surfaced in the 400 body — single source of truth lives
 # in ``lib.triage_service.VALID_FILTER_FORMS`` so the CLI and the HTTP
@@ -51,6 +56,29 @@ from lib.triage_service import (  # noqa: E402
     TRIAGE_LIMIT_MAX as _TRIAGE_LIST_MAX_LIMIT,
     TRIAGE_LIMIT_MIN as _TRIAGE_LIST_MIN_LIMIT,
 )
+
+
+def get_triage_quarantine(
+    h, params: dict[str, list[str]],
+) -> None:
+    """Return unreferenced immediate ``failed_imports`` album folders.
+
+    Mirrors ``pipeline-cli triage quarantine``. A complete scan returns 200;
+    any configuration, DB, decode, or filesystem uncertainty returns 503
+    rather than a misleading partial/empty list.
+    """
+    from lib.quarantine_triage_service import (
+        QuarantineScanError,
+        list_unreferenced_quarantine_folders,
+    )
+
+    db = _server()._db()
+    try:
+        result = list_unreferenced_quarantine_folders(db)
+    except QuarantineScanError as exc:
+        h._json({"error": str(exc)}, status=503)
+        return
+    h._json(msgspec.to_builtins(result))
 
 
 def get_triage_for_request(
@@ -200,6 +228,13 @@ def get_triage_list(
 
 
 ROUTES: list[RouteRegistration] = [
+    route(
+        "GET", "/api/triage/quarantine", get_triage_quarantine,
+        "Read-only quarantine lifecycle view — unreferenced immediate "
+        "failed_imports album folders with no visible Wrong Matches reference; excludes "
+        "code-owned bad_files and untracked_audio buckets.",
+        classified=True,
+    ),
     route(
         "GET", "/api/triage/list", get_triage_list,
         # U17: /api/triage HTTP endpoints. Per-request composition and
