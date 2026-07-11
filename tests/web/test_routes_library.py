@@ -10,6 +10,8 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+import msgspec
+
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -20,6 +22,7 @@ from tests.web._harness import (
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from web.classify import ClassifiedEntry
 
 
 class _FailingDeleteDB(FakePipelineDB):
@@ -58,7 +61,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         "beets_distance", "beets_detail", "soulseek_username",
         "error_message", "import_result", "validation_result", "filetype",
         "bitrate", "was_converted", "original_filetype", "actual_filetype",
-        "actual_min_bitrate", "slskd_filetype", "slskd_bitrate",
+        "actual_min_bitrate", "slskd_filetype",
         "downloaded_label", "verdict", "comparison_basis",
         "disambiguation_failure",
         "disambiguation_detail", "bad_extensions", "spectral_grade",
@@ -70,7 +73,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
         "wrong_match_triage_preview_decision",
         "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
-    }
+    } | {field.name for field in msgspec.structs.fields(ClassifiedEntry)}
     DELETE_REQUIRED_FIELDS = {
         "status", "id", "album", "artist", "deleted_files",
         "pipeline_deleted", "pipeline_id",
@@ -101,7 +104,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
             beets_distance=0.012, soulseek_username="testuser",
             filetype="mp3", bitrate=320000, was_converted=False,
             actual_filetype="mp3", actual_min_bitrate=320,
-            slskd_filetype="mp3", slskd_bitrate=320000, valid=True,
+            slskd_filetype="mp3", valid=True,
         )
 
     def tearDown(self) -> None:

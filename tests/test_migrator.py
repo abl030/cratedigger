@@ -3263,7 +3263,7 @@ class TestPinStatusDomainMigration(unittest.TestCase):
         dsn = _create_fresh_database(name)
         try:
             applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
-            self.assertEqual(applied[-1].version, 47)
+            self.assertEqual(applied[-1].version, 48)
             self.assertEqual(
                 self._query(
                     dsn,
@@ -3322,6 +3322,31 @@ class TestPinStatusDomainMigration(unittest.TestCase):
                         )
                 finally:
                     _drop_database(name)
+
+
+@requires_postgres
+class TestDropDeadSlskdBitrateMigration(unittest.TestCase):
+    """Migration 048 removes the never-populated advertised bitrate only."""
+
+    def test_records_048_and_preserves_slskd_filetype(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM schema_migrations WHERE version = 48"
+                )
+                self.assertEqual(cur.fetchone(), ("drop_dead_slskd_bitrate",))
+                cur.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'download_log'
+                      AND column_name IN ('slskd_bitrate', 'slskd_filetype')
+                    ORDER BY column_name
+                """)
+                self.assertEqual(cur.fetchall(), [("slskd_filetype",)])
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

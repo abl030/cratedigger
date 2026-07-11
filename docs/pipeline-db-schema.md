@@ -80,7 +80,9 @@ that audit trail.
 
 ## `download_log` — quality-tracking fields
 
-- `slskd_filetype TEXT` — what Soulseek advertised (`"flac"`, `"mp3"`).
+- `slskd_filetype TEXT` — the captured source filetype (`"flac"`, `"mp3"`)
+  used to build the downloaded-quality label. Peer-advertised bitrate is not
+  stored; quality decisions and displays use measured evidence.
 - `actual_filetype TEXT` — what's on disk after download/conversion.
 - `spectral_grade TEXT` — spectral analysis of the downloaded files.
 - `spectral_bitrate INTEGER` — estimated original bitrate from spectral.
