@@ -167,7 +167,7 @@ For force/manual jobs the path is `payload.failed_path`. For automation
 jobs, extract a new helper — `derive_canonical_import_folder(db, job, row, state)` —
 from `_materialize_automation_preview_path` that runs ONLY the path
 computation (`reconstruct_grab_list_entry` →
-`_canonical_import_folder_path`), not the actual materialization. The
+`canonical_folder_for_row`), not the actual materialization. The
 existing `_materialize_processing_dir` step stays inside the measuring
 path and only runs when the front-gate misses. This keeps AE4 honest for
 automation jobs: a re-claim of valid evidence skips both materialization

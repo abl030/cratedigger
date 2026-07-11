@@ -2406,9 +2406,9 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
     def test_materialize_never_blends_files_from_a_different_attempt(self):
         from lib.download_processing import (
             Materialized,
-            _canonical_import_folder_path,
             _materialize_processing_dir,
         )
+        from lib.processing_paths import canonical_folder_for_row
         from lib.staged_album import StagedAlbum
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2454,7 +2454,7 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
 
             staged_album = StagedAlbum.from_entry(
                 album,
-                default_path=_canonical_import_folder_path(
+                default_path=canonical_folder_for_row(
                     album, ctx.cfg.slskd_download_dir),
             )
             result = _materialize_processing_dir(album, staged_album, ctx)
@@ -2489,9 +2489,9 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
     def test_untracked_audio_reject_persists_null_distance_not_fabricated_zero(self):
         from lib.download_processing import (
             CompletionDispatched,
-            _canonical_import_folder_path,
             process_completed_album,
         )
+        from lib.processing_paths import canonical_folder_for_row
         from lib.quality import ValidationResult
         import msgspec
         import tempfile
@@ -2549,7 +2549,7 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
             # The manifest guard fires BEFORE beets_validate ever runs, so
             # no beets distance has been — or ever will be — measured for
             # this reject.
-            canonical_path = _canonical_import_folder_path(album, download_root)
+            canonical_path = canonical_folder_for_row(album, download_root)
             os.makedirs(canonical_path, exist_ok=True)
             with open(os.path.join(canonical_path, "leftover.mp3"), "wb") as fp:
                 fp.write(b"stale leftover audio from a different attempt")

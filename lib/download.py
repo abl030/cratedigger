@@ -29,7 +29,6 @@ from lib.download_processing import (
     MaterializeFailed,
     MaterializeGuarded,
     MaterializeResult,
-    _canonical_import_folder_path,
     _evaluate_staged_path_readiness,
     _materialize_processing_dir,
 )
@@ -38,7 +37,11 @@ from lib.download_recovery import (
     reconcile_processing_current_path,
 )
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.processing_paths import attempt_fingerprint, directory_has_entries
+from lib.processing_paths import (
+    attempt_fingerprint,
+    canonical_folder_for_row,
+    directory_has_entries,
+)
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
                          DownloadDecision,
@@ -633,7 +636,7 @@ def _run_completed_processing(
 
     if state.processing_started_at is None:
         if entry.import_folder is None:
-            entry.import_folder = _canonical_import_folder_path(
+            entry.import_folder = canonical_folder_for_row(
                 entry,
                 ctx.cfg.slskd_download_dir,
             )
@@ -752,7 +755,7 @@ def _enqueue_completed_processing(
     """Submit completed-download processing to the shared import queue."""
     if state.processing_started_at is None:
         if entry.import_folder is None:
-            entry.import_folder = _canonical_import_folder_path(
+            entry.import_folder = canonical_folder_for_row(
                 entry,
                 ctx.cfg.slskd_download_dir,
             )
@@ -761,11 +764,11 @@ def _enqueue_completed_processing(
     if entry.import_folder is None:
         entry.import_folder = (
             state.current_path
-            or _canonical_import_folder_path(entry, ctx.cfg.slskd_download_dir)
+            or canonical_folder_for_row(entry, ctx.cfg.slskd_download_dir)
         )
     staged_album = StagedAlbum.from_entry(
         entry,
-        default_path=_canonical_import_folder_path(
+        default_path=canonical_folder_for_row(
             entry,
             ctx.cfg.slskd_download_dir,
         ),
@@ -1208,7 +1211,7 @@ def _poll_one_active_download(
                         # T1 (issue #571): the retry is still within THIS
                         # attempt (not a new one), so the fingerprint is
                         # computed from the whole entry, matching what
-                        # canonical_processing_path derives from the same
+                        # canonical_folder_for_row derives from the same
                         # manifest elsewhere (issue #550 phase 2).
                         requeue = slskd_do_enqueue(
                             file.username,
