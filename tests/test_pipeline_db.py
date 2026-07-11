@@ -3814,7 +3814,6 @@ class TestSpectralColumns(unittest.TestCase):
             spectral_grade="suspect",
             spectral_bitrate=128,
             slskd_filetype="mp3",
-            slskd_bitrate=320000,
             actual_filetype="mp3",
             actual_min_bitrate=320000,
             existing_min_bitrate=92,
@@ -3826,7 +3825,6 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertEqual(h["spectral_grade"], "suspect")
         self.assertEqual(h["spectral_bitrate"], 128)
         self.assertEqual(h["slskd_filetype"], "mp3")
-        self.assertEqual(h["slskd_bitrate"], 320000)
         self.assertEqual(h["actual_filetype"], "mp3")
         self.assertEqual(h["actual_min_bitrate"], 320000)
         self.assertEqual(h["existing_min_bitrate"], 92)

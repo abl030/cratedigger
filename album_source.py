@@ -287,7 +287,6 @@ class DatabaseSource:
             was_converted=dl.was_converted,
             original_filetype=dl.original_filetype,
             slskd_filetype=dl.slskd_filetype,
-            slskd_bitrate=dl.slskd_bitrate,
             actual_filetype=dl.actual_filetype,
             actual_min_bitrate=dl.actual_min_bitrate,
             spectral_grade=dl.download_spectral.grade if dl.download_spectral else None,

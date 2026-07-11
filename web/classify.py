@@ -7,7 +7,7 @@ No I/O, no database — fully unit-testable.
 """
 
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from typing import Any, Optional
 
 import msgspec
@@ -54,7 +54,6 @@ class LogEntry:
     actual_filetype: Optional[str] = None
     actual_min_bitrate: Optional[int] = None   # kbps
     slskd_filetype: Optional[str] = None
-    slskd_bitrate: Optional[int] = None        # bps
     spectral_grade: Optional[str] = None
     spectral_bitrate: Optional[int] = None     # kbps
     existing_min_bitrate: Optional[int] = None  # kbps
@@ -108,8 +107,7 @@ class LogEntry:
         return result
 
 
-@dataclass
-class ClassifiedEntry:
+class ClassifiedEntry(msgspec.Struct):
     """Classification result for a LogEntry — badge, verdict, and summary."""
     badge: str
     badge_class: str
@@ -125,13 +123,13 @@ class ClassifiedEntry:
     # ``detail`` for hover/tooltip — do not parse it.
     disambiguation_failure: Optional[str] = None
     disambiguation_detail: Optional[str] = None
-    bad_extensions: list[str] = field(default_factory=list)
+    bad_extensions: list[str] = msgspec.field(default_factory=list)
     wrong_match_triage_action: Optional[str] = None
     wrong_match_triage_summary: Optional[str] = None
     wrong_match_triage_reason: Optional[str] = None
     wrong_match_triage_preview_verdict: Optional[str] = None
     wrong_match_triage_preview_decision: Optional[str] = None
-    wrong_match_triage_stage_chain: list[str] = field(default_factory=list)
+    wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=list)
     wrong_match_triage_detail: Optional[str] = None
     # The on-disk codec at download time, from import_result JSONB
     # (existing_measurement.format). Rank-driven upgrades at equal
@@ -141,7 +139,16 @@ class ClassifiedEntry:
     # The persisted QualityComparisonBasis as JSON-plain builtins, for the
     # frontend evidence strip / detail grid. None on rows predating the
     # field (request 6039 lesson: labels re-derived from min bitrate lie).
-    comparison_basis: Optional[dict[str, Any]] = None
+    comparison_basis: dict[str, object] | None = None
+
+
+class _Classification(msgspec.Struct, frozen=True):
+    """Typed core outcome used to finish a ``ClassifiedEntry``."""
+
+    badge: str
+    badge_class: str
+    border_color: str
+    verdict: str
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +185,8 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
 
     Returns a ClassifiedEntry with badge, verdict, summary, and downloaded_label.
     """
-    badge, badge_class, border_color, verdict = _classify(entry)
-    summary = _build_summary(entry, badge, verdict)
+    core = _classify(entry)
+    summary = _build_summary(entry, core.badge, core.verdict)
     downloaded_label = _build_downloaded_label(entry)
     existing_format = _extract_existing_format(entry)
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
@@ -187,8 +194,8 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     triage = _extract_wrong_match_triage(entry)
     basis = _entry_comparison_basis(entry)
     return ClassifiedEntry(
-        badge=badge, badge_class=badge_class,
-        border_color=border_color, verdict=verdict,
+        badge=core.badge, badge_class=core.badge_class,
+        border_color=core.border_color, verdict=core.verdict,
         summary=summary, downloaded_label=downloaded_label,
         comparison_basis=(
             msgspec.to_builtins(basis) if basis is not None else None
@@ -400,13 +407,13 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
     }
 
 
-def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
-    """Core classification. Returns (badge, badge_class, border_color, verdict)."""
+def _classify(entry: LogEntry) -> _Classification:
+    """Build the typed core classification for one log entry."""
 
     # --- Rejected ---
     if entry.outcome == "rejected":
         verdict = _rejection_verdict(entry)
-        return ("Rejected", "badge-rejected", "#a33", verdict)
+        return _Classification("Rejected", "badge-rejected", "#a33", verdict)
 
     # --- Timeout (download-phase; outcome="timeout" is written ONLY by
     # lib/download.py::_timeout_album — error_message is the real
@@ -417,7 +424,7 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
             if entry.error_message
             else "Download failed"
         )
-        return ("Failed", "badge-failed", "#a33", verdict)
+        return _Classification("Failed", "badge-failed", "#a33", verdict)
 
     # --- Failed (import-phase) ---
     if entry.outcome == "failed":
@@ -427,12 +434,14 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
             verdict = f"Import error: {entry.error_message}"
         else:
             verdict = _quality_verdict_from_import_result(entry) or "Import error"
-        return ("Failed", "badge-failed", "#a33", verdict)
+        return _Classification("Failed", "badge-failed", "#a33", verdict)
 
     # --- Force import ---
     if entry.outcome == "force_import":
-        return ("Force imported", "badge-force", "#46a",
-                "Force imported after manual review")
+        return _Classification(
+            "Force imported", "badge-force", "#46a",
+            "Force imported after manual review",
+        )
 
     # --- Curator ban (#188 follow-up: bad-rip click is just another event) ---
     if entry.outcome == "curator_ban":
@@ -443,14 +452,16 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         verdict = "Marked bad rip"
         if entry.soulseek_username:
             verdict = f"Marked bad rip — denylisted {entry.soulseek_username}"
-        return ("Bad rip", "badge-rejected", "#a33", verdict)
+        return _Classification("Bad rip", "badge-rejected", "#a33", verdict)
 
     # --- Peer offline at enqueue (verified rejection written by
     # lib/enqueue.py; issue #564 — previously fell through to the
     # generic "Unknown outcome" branch below) ---
     if entry.outcome == "user_offline":
         verdict = entry.error_message or "Peer offline at enqueue"
-        return ("Peer offline", "badge-rejected", "#a33", verdict)
+        return _Classification(
+            "Peer offline", "badge-rejected", "#a33", verdict,
+        )
 
     # --- Success ---
     if entry.outcome == "success":
@@ -488,11 +499,13 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
                     entry.was_converted, entry.original_filetype,
                     is_verified_lossless,
                     actual_filetype=entry.actual_filetype)
-            return ("Upgraded", "badge-upgraded", "#3a6", verdict)
+            return _Classification(
+                "Upgraded", "badge-upgraded", "#3a6", verdict,
+            )
 
         # New import
         verdict = _new_import_verdict(entry, is_verified_lossless)
-        return ("Imported", "badge-new", "#1a4a2a", verdict)
+        return _Classification("Imported", "badge-new", "#1a4a2a", verdict)
 
     # --- Unknown outcome --- (humanize: raw enum values like
     # "measurement_failed" must not leak underscores into a badge)
@@ -500,7 +513,12 @@ def _classify(entry: LogEntry) -> tuple[str, str, str, str]:
         str(entry.outcome).replace("_", " ").capitalize()
         if entry.outcome else "Unknown"
     )
-    return (label, "badge-rejected", "#444", str(entry.outcome or "Unknown outcome"))
+    return _Classification(
+        label,
+        "badge-rejected",
+        "#444",
+        str(entry.outcome or "Unknown outcome"),
+    )
 
 
 def _parse_import_result(entry: LogEntry) -> ImportResult | None:
@@ -832,7 +850,7 @@ def _quality_verdict_from_import_result(entry: LogEntry) -> str | None:
     return None
 
 
-def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
+def _classify_transcode(entry: LogEntry) -> _Classification:
     """Classify a transcode_upgrade or transcode_first success."""
     br = _downloaded_min_bitrate_kbps(entry)
     br_str = f"{br}kbps" if br else "unknown bitrate"
@@ -842,7 +860,7 @@ def _classify_transcode(entry: LogEntry) -> tuple[str, str, str, str]:
         verdict = f"Transcode at {br_str} — imported as upgrade{ex_str}, searching for better"
     else:
         verdict = f"Transcode at {br_str} — imported (nothing on disk), searching for better"
-    return ("Transcode", "badge-transcode", "#a93", verdict)
+    return _Classification("Transcode", "badge-transcode", "#a93", verdict)
 
 
 def _probe_values(entry: LogEntry) -> tuple[int | None, int | None, str | None]:
@@ -920,8 +938,8 @@ def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
     return "Suspect lossless source rejected: " + "; ".join(parts)
 
 
-def _classify_provisional(entry: LogEntry) -> tuple[str, str, str, str]:
-    return (
+def _classify_provisional(entry: LogEntry) -> _Classification:
+    return _Classification(
         "Provisional",
         "badge-provisional",
         "#6a5",
@@ -932,7 +950,7 @@ def _classify_provisional(entry: LogEntry) -> tuple[str, str, str, str]:
 def _classify_search_filetype_override(
     entry: LogEntry,
     is_verified_lossless: bool,
-) -> tuple[str, str, str, str]:
+) -> _Classification:
     """Classify a search_filetype_override upgrade (replacing unverified CBR)."""
     fmt = entry.actual_filetype or entry.filetype or "mp3"
     cur_label = quality_label(fmt, _downloaded_min_bitrate_kbps(entry) or 0)
@@ -941,7 +959,9 @@ def _classify_search_filetype_override(
         parts.append(f"from {entry.original_filetype.upper()}")
     if is_verified_lossless:
         parts.append("verified lossless")
-    return ("Upgraded", "badge-upgraded", "#3a6", ", ".join(parts))
+    return _Classification(
+        "Upgraded", "badge-upgraded", "#3a6", ", ".join(parts),
+    )
 
 
 def _new_import_verdict(entry: LogEntry, is_verified_lossless: bool) -> str:

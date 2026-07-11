@@ -22,6 +22,7 @@ import unittest
 from unittest.mock import patch
 
 import msgspec
+from web.classify import ClassifiedEntry
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -78,7 +79,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
         "wrong_match_triage_preview_decision",
         "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
-    }
+    } | {field.name for field in msgspec.structs.fields(ClassifiedEntry)}
     HISTORY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "created_at", "soulseek_username",
         "badge", "badge_class", "border_color",
@@ -91,7 +92,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "wrong_match_triage_reason", "wrong_match_triage_preview_verdict",
         "wrong_match_triage_preview_decision",
         "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
-    }
+    } | {field.name for field in msgspec.structs.fields(ClassifiedEntry)}
     STATUS_WANTED_REQUIRED_FIELDS = {
         "id", "artist", "album", "mb_release_id", "source", "created_at",
     }

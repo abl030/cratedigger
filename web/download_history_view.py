@@ -43,9 +43,9 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     actual_filetype: str | None
     actual_min_bitrate: int | None
     slskd_filetype: str | None
-    slskd_bitrate: int | None
     downloaded_label: str
     verdict: str
+    summary: str
     # Persisted QualityComparisonBasis as a plain dict (null on rows
     # predating the field) — the detail grid's "Compared" row.
     comparison_basis: dict[str, object] | None
@@ -115,29 +115,8 @@ def build_download_history_row(
     return msgspec.convert(
         {
             **entry.to_json_dict(),
-            "badge": classified.badge,
-            "badge_class": classified.badge_class,
-            "border_color": classified.border_color,
-            "downloaded_label": classified.downloaded_label,
-            "existing_format": classified.existing_format,
-            "verdict": classified.verdict,
-            "comparison_basis": classified.comparison_basis,
-            "disambiguation_failure": classified.disambiguation_failure,
-            "disambiguation_detail": classified.disambiguation_detail,
-            "bad_extensions": classified.bad_extensions,
-            "wrong_match_triage_action": classified.wrong_match_triage_action,
-            "wrong_match_triage_summary": classified.wrong_match_triage_summary,
-            "wrong_match_triage_reason": classified.wrong_match_triage_reason,
-            "wrong_match_triage_preview_verdict": (
-                classified.wrong_match_triage_preview_verdict
-            ),
-            "wrong_match_triage_preview_decision": (
-                classified.wrong_match_triage_preview_decision
-            ),
-            "wrong_match_triage_stage_chain": (
-                classified.wrong_match_triage_stage_chain
-            ),
-            "wrong_match_triage_detail": classified.wrong_match_triage_detail,
+            **cast(dict[str, object], msgspec.to_builtins(classified)),
         },
         type=DownloadHistoryViewRow,
+        strict=True,
     )

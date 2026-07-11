@@ -67,7 +67,6 @@ def _history_row(**overrides: object) -> dict[str, object]:
         "beets_distance": 0.012,
         "bitrate": 320000,
         "slskd_filetype": "mp3",
-        "slskd_bitrate": 320000,
         "actual_filetype": "mp3",
         "actual_min_bitrate": 320,
         "spectral_grade": None,
@@ -164,7 +163,6 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.download_history[0].downloaded_label, "MP3 320")
         self.assertTrue(detail.download_history[0].verdict)
         self.assertEqual(detail.download_history[0].actual_min_bitrate, 320)
-        self.assertEqual(detail.download_history[0].slskd_bitrate, 320000)
         self.assertEqual(detail.download_history[0].disambiguation_failure, "timeout")
         self.assertEqual(
             detail.download_history[0].disambiguation_detail,
@@ -320,7 +318,6 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
             actual_filetype="mp3",
             actual_min_bitrate=245,
             slskd_filetype="mp3",
-            slskd_bitrate=245000,
         )
         lookup = _StubLibraryLookup(_beets_detail(
             album="Discogs Import",
