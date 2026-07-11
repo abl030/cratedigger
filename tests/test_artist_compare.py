@@ -291,12 +291,34 @@ class TestAnnotateInLibrary(unittest.TestCase):
         up library_rank from it."""
         rg = {"id": "rg", "title": "X"}
         lib = [{"mb_releasegroupid": "rg", "album": "X",
-                "formats": "Opus", "min_bitrate": 128000}]
+                "formats": "Opus", "min_bitrate": 96000,
+                "avg_bitrate": 128000}]
         # Stub rank_fn — would be the real quality_rank wrapper in prod
         def rank_fn(fmt, kbps):
             return "transparent" if (fmt == "Opus" and kbps == 128) else "unknown"
         annotate_in_library([rg], [], lib, rank_fn=rank_fn)
         self.assertEqual(rg["library_rank"], "transparent")
+
+    def test_request_6039_rank_uses_average_and_preserves_floor(self):
+        rg = {"id": "rg-6039", "title": "Request 6039"}
+        lib = [{
+            "mb_releasegroupid": "rg-6039",
+            "album": "Request 6039",
+            "formats": "MP3",
+            "min_bitrate": 194000,
+            "avg_bitrate": 288000,
+        }]
+        seen = []
+
+        def rank_fn(fmt, kbps):
+            seen.append((fmt, kbps))
+            return "transparent"
+
+        annotate_in_library([rg], [], lib, rank_fn=rank_fn)
+
+        self.assertEqual(rg["library_min_bitrate"], 194)
+        self.assertEqual(rg["library_avg_bitrate"], 288)
+        self.assertEqual(seen, [("MP3", 288)])
 
     def test_no_quality_fields_when_unmatched(self):
         rg = {"id": "rg", "title": "Unowned"}

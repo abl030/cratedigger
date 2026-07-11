@@ -131,6 +131,16 @@ Browser → https://music.ablz.au
   the legacy min-bitrate labels — the ones that rendered a real avg 196→288
   rank upgrade as "MP3 V2 to MP3 V2". See docs/quality-verification.md
   § "Comparison basis".
+- **Current quality labels and ranks** — request-card Quality rows, library
+  badges, artist/release/pressing/label overlays, and current Wrong Matches
+  summaries use the mean of positive beets track bitrates. The request-6039
+  on-disk shape (min 194k, avg 288k, median 320k) therefore renders MP3 V0,
+  never the old min-derived MP3 V2. Wire fields keep both meanings explicit:
+  `beets_bitrate` / `library_min_bitrate` / `min_bitrate` remain floor and
+  control/audit values, while `beets_avg_bitrate` / `library_avg_bitrate` /
+  `avg_bitrate` drive current labels and codec-aware rank colour. Legacy
+  history rows without `comparison_basis` remain frozen on the old floor
+  vocabulary.
 - **Wrong Matches Converge** — each release starts with a `180` milli-distance
   loosen threshold. Candidates at or below that threshold turn green; Converge
   queues those folders as force-import jobs and deletes the non-green folders
@@ -262,6 +272,8 @@ Reads `/mnt/virtio/Music/beets-library.db` (SQLite, read-only) to show what you 
 - Queries `albums` table by `albumartist LIKE %name%`
 - Distinguishes MB imports (UUID in `mb_albumid`) from Discogs imports (numeric ID or `discogs_albumid` set)
 - Also checks individual release MBIDs against beets for the "in library" badge on editions
+- Batches minimum and positive-track-average bitrate projections with those
+  identity lookups; no per-release quality query is added
 
 ## Known Issues
 

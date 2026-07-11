@@ -29,8 +29,8 @@ class TestLabelRouteContracts(_WebServerCase):
     # Required fields the frontend reads on each release row in the
     # label-detail response. Mirrors `web/js/discography.js` and
     # `web/js/badges.js`. The overlay sets `library_format` /
-    # `library_min_bitrate` / `library_rank` only when a row is in
-    # the beets library — same convention as the existing
+    # `library_min_bitrate` / `library_avg_bitrate` / `library_rank` only
+    # when a row is in the beets library — same convention as the existing
     # `DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS`. The JS reads them
     # defensively (`item.library_format || ''`), so the contract
     # asserts only the always-present overlay fields here, plus the
@@ -168,7 +168,8 @@ class TestLabelRouteContracts(_WebServerCase):
         beets_db = FakeBeetsDB()
         beets_db.set_album_ids_for_release(held_id, [17])
         beets_db.set_mbid_detail(
-            held_id, {"beets_format": "FLAC", "beets_bitrate": 1100})
+            held_id, {"beets_format": "FLAC", "beets_bitrate": 900,
+                      "beets_avg_bitrate": 1100})
 
         def _compute_rank(fmt, br):
             return "lossless" if fmt == "FLAC" else "transparent"
@@ -202,7 +203,8 @@ class TestLabelRouteContracts(_WebServerCase):
         self.assertTrue(held_row["in_library"])
         self.assertEqual(held_row["beets_album_id"], 17)
         self.assertEqual(held_row["library_format"], "FLAC")
-        self.assertEqual(held_row["library_min_bitrate"], 1100)
+        self.assertEqual(held_row["library_min_bitrate"], 900)
+        self.assertEqual(held_row["library_avg_bitrate"], 1100)
         self.assertEqual(held_row["library_rank"], "lossless")
         self.assertIsNone(held_row["pipeline_status"])
         self.assertIsNone(held_row["pipeline_id"])

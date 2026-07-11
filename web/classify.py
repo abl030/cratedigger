@@ -155,25 +155,39 @@ class _Classification(msgspec.Struct, frozen=True):
 # Quality label
 # ---------------------------------------------------------------------------
 
-def quality_label(fmt: str, min_bitrate_kbps: int) -> str:
-    """Human-readable quality label from format + bitrate in kbps.
+def _quality_label_from_bitrate(fmt: str, bitrate_kbps: int) -> str:
+    """Human-readable codec label from one context-selected bitrate.
 
-    Examples: "MP3 V0", "MP3 320", "FLAC", "MP3 197k"
+    Examples: "MP3 V0", "MP3 320", "FLAC", "MP3 197k".
     """
     if not fmt:
         return "?"
     fmt = fmt.strip().split(",")[0].strip().upper()
     if fmt in ("FLAC", "ALAC"):
         return fmt
-    if not min_bitrate_kbps or min_bitrate_kbps <= 0:
+    if not bitrate_kbps or bitrate_kbps <= 0:
         return fmt
-    if min_bitrate_kbps >= 295:
+    if bitrate_kbps >= 295:
         return f"{fmt} 320"
-    if min_bitrate_kbps >= 220:
+    if bitrate_kbps >= 220:
         return f"{fmt} V0"
-    if min_bitrate_kbps >= 170:
+    if bitrate_kbps >= 170:
         return f"{fmt} V2"
-    return f"{fmt} {min_bitrate_kbps}k"
+    return f"{fmt} {bitrate_kbps}k"
+
+
+def average_quality_label(fmt: str, avg_bitrate_kbps: int) -> str:
+    """Current-state label from the average positive track bitrate."""
+    return _quality_label_from_bitrate(fmt, avg_bitrate_kbps)
+
+
+def legacy_floor_quality_label(fmt: str, min_bitrate_kbps: int) -> str:
+    """Frozen history label derived from a legacy minimum-track floor.
+
+    Rows without ``comparison_basis`` must retain this vocabulary byte for
+    byte. Current-state surfaces must use ``average_quality_label`` instead.
+    """
+    return _quality_label_from_bitrate(fmt, min_bitrate_kbps)
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +967,7 @@ def _classify_search_filetype_override(
 ) -> _Classification:
     """Classify a search_filetype_override upgrade (replacing unverified CBR)."""
     fmt = entry.actual_filetype or entry.filetype or "mp3"
-    cur_label = quality_label(fmt, _downloaded_min_bitrate_kbps(entry) or 0)
+    cur_label = legacy_floor_quality_label(fmt, _downloaded_min_bitrate_kbps(entry) or 0)
     parts = [f"Replaced unverified CBR with {cur_label}"]
     if entry.was_converted and entry.original_filetype:
         parts.append(f"from {entry.original_filetype.upper()}")
@@ -968,7 +982,7 @@ def _new_import_verdict(entry: LogEntry, is_verified_lossless: bool) -> str:
     """Build verdict for a new import (nothing on disk before)."""
     br = _downloaded_min_bitrate_kbps(entry)
     fmt = entry.actual_filetype or entry.filetype or "mp3"
-    label = quality_label(fmt, br or 0)
+    label = legacy_floor_quality_label(fmt, br or 0)
     parts = [label]
     if entry.was_converted and entry.original_filetype:
         parts.append(f"from {entry.original_filetype.upper()}")
@@ -1086,8 +1100,8 @@ def _upgrade_verdict(prev_br: Optional[int], cur_br: Optional[int],
                      actual_filetype: Optional[str] = None) -> str:
     """Build verdict for a successful upgrade."""
     fmt = actual_filetype or "mp3"
-    prev_label = quality_label("mp3", prev_br) if prev_br else "?"
-    cur_label = quality_label(fmt, cur_br) if cur_br else "?"
+    prev_label = legacy_floor_quality_label("mp3", prev_br) if prev_br else "?"
+    cur_label = legacy_floor_quality_label(fmt, cur_br) if cur_br else "?"
     parts = [f"{prev_label} to {cur_label}"]
     if was_converted and original_ft:
         parts.append(f"from {original_ft.upper()}")
@@ -1111,7 +1125,7 @@ def _build_summary(entry: LogEntry, badge: str, verdict: str) -> str:
         # Show format label for new imports
         br = _downloaded_min_bitrate_kbps(entry)
         fmt = entry.actual_filetype or entry.filetype or "mp3"
-        label = quality_label(fmt, br or 0)
+        label = legacy_floor_quality_label(fmt, br or 0)
         if entry.was_converted and entry.original_filetype:
             label += f" from {entry.original_filetype.upper()}"
         parts.append(label)
@@ -1140,7 +1154,7 @@ def _build_downloaded_label(entry: LogEntry) -> str:
     br_kbps = _downloaded_min_bitrate_kbps(entry) or 0
 
     if entry.was_converted and entry.original_filetype:
-        conv_label = quality_label(fmt, br_kbps)
+        conv_label = legacy_floor_quality_label(fmt, br_kbps)
         return f"{entry.original_filetype.upper()} (converted to {conv_label})"
 
-    return quality_label(fmt, br_kbps) if br_kbps else fmt.upper()
+    return legacy_floor_quality_label(fmt, br_kbps) if br_kbps else fmt.upper()

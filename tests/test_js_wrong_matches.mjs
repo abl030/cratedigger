@@ -586,6 +586,17 @@ console.log('bulkTriageWrongMatches() surfaces a failed sweep and restores the b
 
 console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells');
 {
+  const request6039 = __test__.formatEntryEvidence({
+    format: 'MP3',
+    min_bitrate: 194,
+    avg_bitrate: 288,
+  });
+  assertEqual(
+    request6039.format,
+    'MP3 avg 288k · min 194k',
+    'current candidate summary labels average and retains the floor',
+  );
+
   // Happy path: AE1 — both pieces of evidence present.
   let cells = __test__.formatEntryEvidence({
     spectral_grade: 'genuine',

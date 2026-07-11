@@ -190,6 +190,7 @@ def _quality_summary(row: dict[str, object],
         return {
             "status": status,
             "min_bitrate": None,
+            "avg_bitrate": None,
             "format": None,
             "verified_lossless": False,
             "current_spectral_grade": None,
@@ -202,9 +203,8 @@ def _quality_summary(row: dict[str, object],
     mbid = row.get("mb_release_id")
     detail = beets_info.get(mbid) if isinstance(mbid, str) and mbid else None
 
-    # Bitrate: prefer pipeline DB (kbps, always authoritative for spectral
-    # classification), fall back to beets. For the quality label + rank,
-    # prefer beets's actual value once imported.
+    # Preserve the pipeline/beets minimum as explicit floor data. Current
+    # labels and ranks use beets's positive-track average once imported.
     def _as_int(val: object) -> int | None:
         return val if isinstance(val, int) and not isinstance(val, bool) else None
 
@@ -212,7 +212,8 @@ def _quality_summary(row: dict[str, object],
         return val if isinstance(val, str) else None
 
     db_kbps = _as_int(row.get("request_min_bitrate"))
-    beets_kbps = _as_int(detail.get("beets_bitrate")) if detail else None
+    beets_min_kbps = _as_int(detail.get("beets_bitrate")) if detail else None
+    beets_avg_kbps = _as_int(detail.get("beets_avg_bitrate")) if detail else None
     fmt = _as_str(detail.get("beets_format")) if detail else None
 
     label: str | None = None
@@ -220,14 +221,15 @@ def _quality_summary(row: dict[str, object],
     if fmt:
         # Label is only meaningful with a bitrate; rank is meaningful from
         # format alone (falls through to the bare-codec band table).
-        if beets_kbps:
-            from web.classify import quality_label as _ql
-            label = _ql(fmt, beets_kbps)
-        rank = srv.compute_library_rank(fmt, beets_kbps)
+        if beets_avg_kbps:
+            from web.classify import average_quality_label
+            label = average_quality_label(fmt, beets_avg_kbps)
+        rank = srv.compute_library_rank(fmt, beets_avg_kbps)
 
     return {
         "status": status,
-        "min_bitrate": db_kbps if db_kbps is not None else beets_kbps,
+        "min_bitrate": beets_min_kbps if beets_min_kbps is not None else db_kbps,
+        "avg_bitrate": beets_avg_kbps,
         "format": fmt,
         "verified_lossless": bool(row.get("request_verified_lossless") or False),
         "current_spectral_grade": row.get("request_current_spectral_grade"),
@@ -378,9 +380,12 @@ def _build_wrong_match_groups(
         # pre-evidence rows still surface what little they have.
         evidence_format = row.get("evidence_storage_format")
         evidence_min_bitrate = row.get("evidence_min_bitrate")
+        evidence_avg_bitrate = row.get("evidence_avg_bitrate")
+        # Current candidate ranking uses the evidence mean; min remains an
+        # explicit floor in the payload for review/audit.
         entry_quality_rank = srv.compute_library_rank(
             evidence_format if isinstance(evidence_format, str) else None,
-            evidence_min_bitrate if isinstance(evidence_min_bitrate, int) else None,
+            evidence_avg_bitrate if isinstance(evidence_avg_bitrate, int) else None,
         )
         entries_list.append({
             "download_log_id": log_id,
@@ -403,6 +408,8 @@ def _build_wrong_match_groups(
                 if isinstance(evidence_format, str) else None,
             "min_bitrate": evidence_min_bitrate
                 if isinstance(evidence_min_bitrate, int) else None,
+            "avg_bitrate": evidence_avg_bitrate
+                if isinstance(evidence_avg_bitrate, int) else None,
             "verified_lossless": bool(row.get("evidence_verified_lossless")),
             "quality_rank": entry_quality_rank,
         })

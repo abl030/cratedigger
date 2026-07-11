@@ -24,6 +24,7 @@ def _valid_row_dict(**overrides: object) -> dict[str, object]:
         "added": 1773651901.0,
         "formats": "MP3",
         "min_bitrate": 320000,
+        "avg_bitrate": 320000,
         "type": "album",
         "label": "Test Label",
         "country": "US",
@@ -40,6 +41,39 @@ def _valid_row_dict(**overrides: object) -> dict[str, object]:
 
 
 class TestLibraryAlbumRow(unittest.TestCase):
+    def test_request_6039_rank_uses_average_and_preserves_floor(self) -> None:
+        seen: list[tuple[str | None, int | None]] = []
+
+        def rank_fn(fmt: str | None, kbps: int | None) -> str:
+            seen.append((fmt, kbps))
+            return "transparent"
+
+        row = LibraryAlbumRow.from_beets_album(
+            {
+                "id": 6039,
+                "album": "Request 6039",
+                "artist": "Test Artist",
+                "year": 2024,
+                "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_albumid": None,
+                "track_count": 3,
+                "mb_releasegroupid": "11111111-1111-1111-1111-111111111111",
+                "release_group_title": "Request 6039",
+                "added": 1773651901.0,
+                "formats": "MP3",
+                "min_bitrate": 194000,
+                "avg_bitrate": 288000,
+                "type": "album",
+                "label": "Test Label",
+                "country": "AU",
+            },
+            rank_fn=rank_fn,
+        )
+
+        self.assertEqual(row.min_bitrate, 194000)
+        self.assertEqual(row.avg_bitrate, 288000)
+        self.assertEqual(seen, [("MP3", 288)])
+
     def test_from_beets_album_with_pipeline_none_keeps_library_defaults(self) -> None:
         row = LibraryAlbumRow.from_beets_album_with_pipeline(
             {
@@ -55,6 +89,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "added": 1773651901.0,
                 "formats": "MP3",
                 "min_bitrate": 320000,
+                "avg_bitrate": 320000,
                 "type": "album",
                 "label": "Test Label",
                 "country": "US",
@@ -83,6 +118,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "added": 1773651901.0,
                 "formats": "MP3",
                 "min_bitrate": 320000,
+                "avg_bitrate": 320000,
                 "type": "album",
                 "label": "Test Label",
                 "country": "US",
@@ -115,6 +151,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "added": 1773651902.0,
                 "formats": "MP3",
                 "min_bitrate": 320000,
+                "avg_bitrate": 320000,
                 "type": "album",
                 "label": "Test Label",
                 "country": "AU",
@@ -143,6 +180,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "added": 1773651901.0,
                 "formats": "MP3",
                 "min_bitrate": 320000,
+                "avg_bitrate": 320000,
                 "type": "album",
                 "label": "Test Label",
                 "country": "US",
@@ -256,6 +294,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "added": 1773651901.0,
                 "formats": "MP3",
                 "min_bitrate": None,
+                "avg_bitrate": None,
                 "type": "album",
                 "label": "Test Label",
                 "country": "US",
@@ -350,6 +389,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "added": 1773651901.0,
                 "formats": "MP3",
                 "min_bitrate": 320000,
+                "avg_bitrate": 320000,
                 "type": "album",
                 "label": "Test Label",
                 "country": "US",

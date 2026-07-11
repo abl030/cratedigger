@@ -14,6 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.beets_db import BeetsDB, AlbumInfo
+from lib.quality import QualityRankConfig
 
 
 def _create_test_db(path: str) -> None:
@@ -1052,6 +1053,27 @@ class TestCheckMbidsDetail(unittest.TestCase):
         self.assertEqual(detail["bbb-222"]["beets_format"], "FLAC")
         self.assertEqual(detail["bbb-222"]["beets_bitdepth"], 16)
 
+    def test_request_6039_projection_keeps_floor_and_exposes_average(self) -> None:
+        bitrates = [320000] * 6 + [196000, 194000]
+        _insert_album_full(self.db_path, 6039, "request-6039", [
+            {"bitrate": bitrate, "path": f"/m/6039/{index:02d}.mp3",
+             "format": "MP3"}
+            for index, bitrate in enumerate(bitrates, start=1)
+        ])
+
+        with BeetsDB(self.db_path) as db:
+            detail = db.check_mbids_detail(["request-6039"])["request-6039"]
+            info = db.get_album_info(
+                "request-6039", QualityRankConfig.defaults()
+            )
+
+        self.assertEqual(detail["beets_bitrate"], 194)
+        self.assertEqual(detail["beets_avg_bitrate"], 288)
+        assert info is not None
+        self.assertEqual(info.min_bitrate_kbps, 194)
+        self.assertEqual(info.avg_bitrate_kbps, 288)
+        self.assertEqual(info.median_bitrate_kbps, 320)
+
     def test_missing_mbid_not_in_result(self) -> None:
         with BeetsDB(self.db_path) as db:
             detail = db.check_mbids_detail(["zzz-999"])
@@ -1170,6 +1192,27 @@ class TestGetAlbumsByArtist(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             results = db.get_albums_by_artist("Radiohead")
         self.assertEqual(len(results), 2)
+
+    def test_artist_projection_keeps_min_and_exposes_average(self) -> None:
+        _insert_album(
+            self.db_path,
+            4,
+            "request-6039",
+            [
+                (bitrate, f"/m/d/{index:02d}.mp3")
+                for index, bitrate in enumerate(
+                    [320000] * 6 + [196000, 194000], start=1
+                )
+            ],
+            album="Request 6039", albumartist="Radiohead",
+        )
+        with BeetsDB(self.db_path) as db:
+            row = next(
+                album for album in db.get_albums_by_artist("Radiohead")
+                if album["album"] == "Request 6039"
+            )
+        self.assertEqual(row["min_bitrate"], 194000)
+        self.assertEqual(row["avg_bitrate"], 288750)
 
     def test_empty_result(self) -> None:
         with BeetsDB(self.db_path) as db:

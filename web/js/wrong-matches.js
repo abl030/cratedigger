@@ -464,7 +464,7 @@ function convergeRequestBody(requestId, thresholdMilli) {
  * Format the per-candidate stored evidence cells for a wrong-match
  * entry. Pure — input is the entry payload, output is a `{format,
  * spectral, v0}` triple of short display strings. The format cell
- * reads the canonical evidence row (storage_format + min_bitrate kbps)
+ * reads the canonical evidence row (storage_format + explicit min/avg kbps)
  * surfaced by /api/wrong-matches via album_quality_evidence; the
  * candidate row never starts a preview job from the UI (R3) and never
  * exposes a preview button.
@@ -476,10 +476,18 @@ function formatEntryEvidence(entry) {
     ? entry.format : null;
   const minBr = entry && Number.isFinite(entry.min_bitrate)
     ? entry.min_bitrate : null;
+  const avgBr = entry && Number.isFinite(entry.avg_bitrate)
+    ? entry.avg_bitrate : null;
   let format = '—';
-  if (fmt && minBr != null && minBr > 0) format = `${fmt} ${minBr}k`;
+  if (fmt && avgBr != null && avgBr > 0 && minBr != null && minBr > 0) {
+    format = `${fmt} avg ${avgBr}k · min ${minBr}k`;
+  } else if (fmt && avgBr != null && avgBr > 0) format = `${fmt} avg ${avgBr}k`;
+  else if (fmt && minBr != null && minBr > 0) format = `${fmt} min ${minBr}k`;
   else if (fmt) format = fmt;
-  else if (minBr != null && minBr > 0) format = `${minBr}k`;
+  else if (avgBr != null && avgBr > 0 && minBr != null && minBr > 0) {
+    format = `avg ${avgBr}k · min ${minBr}k`;
+  } else if (avgBr != null && avgBr > 0) format = `avg ${avgBr}k`;
+  else if (minBr != null && minBr > 0) format = `min ${minBr}k`;
 
   const grade = entry && typeof entry.spectral_grade === 'string'
     ? entry.spectral_grade : null;

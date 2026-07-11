@@ -85,6 +85,7 @@ function libRow(overrides = {}) {
     added: 0,
     formats: 'MP3',
     min_bitrate: 320000,
+    avg_bitrate: 320000,
     type: 'album',
     label: '',
     country: 'AU',

@@ -484,6 +484,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             "album": "OK Computer",
             "formats": "MP3",
             "min_bitrate": 320000,
+            "avg_bitrate": 320000,
         }
         second = _run([lib_album])
         self.assertTrue(

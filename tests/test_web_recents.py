@@ -14,7 +14,7 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from web.classify import (classify_log_entry, quality_label, LogEntry,
+from web.classify import (classify_log_entry, legacy_floor_quality_label, LogEntry,
                           ClassifiedEntry, _parse_import_result)
 from lib.quality import (
     DuplicateRemoveCandidate,
@@ -382,40 +382,40 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
 
 
 # ============================================================================
-# quality_label
+# legacy_floor_quality_label
 # ============================================================================
 
 class TestQualityLabel(unittest.TestCase):
 
     def test_flac(self):
-        self.assertEqual(quality_label("flac", 0), "FLAC")
+        self.assertEqual(legacy_floor_quality_label("flac", 0), "FLAC")
 
     def test_mp3_320(self):
-        self.assertEqual(quality_label("mp3", 320), "MP3 320")
+        self.assertEqual(legacy_floor_quality_label("mp3", 320), "MP3 320")
 
     def test_mp3_v0(self):
-        self.assertEqual(quality_label("mp3", 243), "MP3 V0")
+        self.assertEqual(legacy_floor_quality_label("mp3", 243), "MP3 V0")
 
     def test_mp3_v2(self):
-        self.assertEqual(quality_label("mp3", 192), "MP3 V2")
+        self.assertEqual(legacy_floor_quality_label("mp3", 192), "MP3 V2")
 
     def test_mp3_low(self):
-        self.assertEqual(quality_label("mp3", 128), "MP3 128k")
+        self.assertEqual(legacy_floor_quality_label("mp3", 128), "MP3 128k")
 
     def test_no_format(self):
-        self.assertEqual(quality_label("", 320), "?")
+        self.assertEqual(legacy_floor_quality_label("", 320), "?")
 
     def test_no_bitrate(self):
-        self.assertEqual(quality_label("mp3", 0), "MP3")
+        self.assertEqual(legacy_floor_quality_label("mp3", 0), "MP3")
 
     def test_high_v0_boundary(self):
-        self.assertEqual(quality_label("mp3", 220), "MP3 V0")
+        self.assertEqual(legacy_floor_quality_label("mp3", 220), "MP3 V0")
 
     def test_just_below_v0(self):
-        self.assertEqual(quality_label("mp3", 219), "MP3 V2")
+        self.assertEqual(legacy_floor_quality_label("mp3", 219), "MP3 V2")
 
     def test_alac(self):
-        self.assertEqual(quality_label("alac", 0), "ALAC")
+        self.assertEqual(legacy_floor_quality_label("alac", 0), "ALAC")
 
 
 # ============================================================================
@@ -1597,7 +1597,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         contains the request_min_bitrate value. Guards against adding a new
         display call site that copies the old or-chain.
 
-        ALIEN must be in the range quality_label renders literally (<170kbps,
+        ALIEN must be in the range legacy_floor_quality_label renders literally (<170kbps,
         otherwise it would be aliased to a tier name like 'V0' or '320' and
         hide the leak). Point-in-time values are chosen in a different
         tier range so the bug is unambiguous.

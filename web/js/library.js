@@ -76,6 +76,7 @@ export function renderLibraryAlbumRow(a) {
     in_library: inLibrary,
     library_format: a.formats,
     library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
+    library_avg_bitrate: a.avg_bitrate ? Math.floor(a.avg_bitrate / 1000) : 0,
     library_rank: a.library_rank,
     pipeline_status: a.pipeline_status,
   });

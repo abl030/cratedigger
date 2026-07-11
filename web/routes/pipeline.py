@@ -73,6 +73,7 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         if bi:
             item["beets_format"] = bi.get("beets_format")
             item["beets_bitrate"] = bi.get("beets_bitrate")
+            item["beets_avg_bitrate"] = bi.get("beets_avg_bitrate")
         result.append(item)
     # Count recents filters plus found-search enqueue rates (single query).
     counts = _server()._db().get_download_log_counts()

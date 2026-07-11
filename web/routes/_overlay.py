@@ -4,6 +4,7 @@ Every "list of releases" route (release-group pressings, Discogs master
 releases, label catalogue) overlays the same library + pipeline state
 onto each row. The exact shape of those fields — `in_library`,
 `beets_album_id`, `library_format`, `library_min_bitrate`,
+`library_avg_bitrate`,
 `library_rank`, `pipeline_status`, `pipeline_id` — is the contract the
 frontend reads (see `web/js/badges.js`). Keeping a single helper
 prevents drift across routes when new fields are added.
@@ -101,8 +102,8 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
         key (string release id, MB UUID or stringified Discogs id).
         After overlay each row carries:
         `in_library`, `beets_album_id`, `library_format`,
-        `library_min_bitrate`, `library_rank`, `pipeline_status`,
-        `pipeline_id`. Library quality fields are only set when the
+        `library_min_bitrate`, `library_avg_bitrate`, `library_rank`,
+        `pipeline_status`, `pipeline_id`. Library quality fields are only set when the
         release is in the beets library AND the beets DB returned
         details for it.
     release_ids
@@ -113,6 +114,7 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
     # Local import keeps the routes._overlay → server.py edge consistent
     # with the rest of routes/* (which all use the lazy `_server()` shim).
     from web import server as srv
+    from lib.banding import current_library_bitrate
 
     ids_list = list(release_ids)
     in_library = srv.check_beets_library(ids_list) if ids_list else set()
@@ -131,8 +133,10 @@ def overlay_release_rows_in_place(rows: list[dict], release_ids: Iterable[str]) 
             fmt = fmt_raw if isinstance(fmt_raw, str) else ""
             br_raw = q.get("beets_bitrate")
             br = br_raw if isinstance(br_raw, int) else 0
+            avg_br = current_library_bitrate(q)
             r["library_format"] = fmt
             r["library_min_bitrate"] = br
+            r["library_avg_bitrate"] = avg_br
             # Band through the one shared decision so the overlay's
             # ``library_rank`` and the long-tail worklist's band can
             # never diverge. ``rid`` is in ``in_library`` here (we're

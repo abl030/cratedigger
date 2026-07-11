@@ -427,37 +427,8 @@ export async function toggleDetail(elId, requestId) {
       html += renderDetailRow('Imported to', esc(req.imported_path), { valueStyle: 'font-size:0.9em;' });
     }
 
-    // Quality summary — show spectral reality if it differs from nominal
     const beetsTracks = data.beets_tracks || [];
-    if (beetsTracks.length > 0) {
-      const minBr = Math.min(...beetsTracks.filter(t => t.bitrate).map(t => t.bitrate));
-      const minBrKbps = minBr ? Math.round(minBr / 1000) : 0;
-      const fmt = beetsTracks[0]?.format || '';
-      const nominal = minBrKbps ? qualityLabel(fmt, minBrKbps) : fmt;
-      // Current spectral data describes the files currently in beets.
-      // Fall back to the most recent download's measurement for older rows.
-      const spectralBr =
-        req.current_spectral_bitrate || req.last_download_spectral_bitrate || null;
-      const spectralGrade =
-        req.current_spectral_grade || req.last_download_spectral_grade || null;
-      const verified = req.verified_lossless === true || req.verified_lossless === 'True';
-      let qualitySummary = nominal;
-      if (verified) {
-        qualitySummary += ' <span style="color:#6d6;">verified lossless</span>';
-      } else if (spectralGrade === 'suspect' || spectralGrade === 'likely_transcode') {
-        const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
-        qualitySummary += ` <span style="color:#d88;">spectral: ${spectralGrade}${brStr}</span>`;
-      } else if (spectralGrade === 'genuine') {
-        // Show the spectral floor even on a genuine rollup. A non-null
-        // spectral_bitrate under genuine means some tracks tripped the
-        // cliff detector but the album-level grade stayed below the
-        // suspect-pct threshold — the 96k signal is what the shared-
-        // spectral clamp in compare_quality now consults (Eno case).
-        const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
-        qualitySummary += ` <span style="color:#6d6;">spectral: genuine${brStr}</span>`;
-      }
-      html += renderDetailRow('Quality', qualitySummary);
-    }
+    html += renderCurrentQualityRow(req, beetsTracks);
 
     // Download history — before the track list. The history is why the
     // operator expanded the row (a Recents card IS a download event); on
@@ -518,6 +489,51 @@ export async function toggleDetail(elId, requestId) {
 }
 
 /**
+ * Render the current on-disk Quality row from positive beets track bitrates.
+ * The average drives the nominal VBR label; minimum remains floor/audit data.
+ * @param {Object} req
+ * @param {Array<Object>} beetsTracks
+ * @returns {string}
+ */
+function renderCurrentQualityRow(req, beetsTracks) {
+  if (beetsTracks.length === 0) return '';
+  const positiveBitrates = beetsTracks
+    .map(t => Number(t.bitrate))
+    .filter(bitrate => Number.isFinite(bitrate) && bitrate > 0);
+  const avgBrKbps = positiveBitrates.length > 0
+    ? Math.floor(
+      positiveBitrates.reduce((total, bitrate) => total + bitrate, 0)
+        / positiveBitrates.length / 1000,
+    )
+    : 0;
+  const fmt = beetsTracks[0]?.format || '';
+  const nominal = avgBrKbps ? qualityLabel(fmt, avgBrKbps) : fmt;
+  // Current spectral data describes the files currently in beets.
+  // Fall back to the most recent download's measurement for older rows.
+  const spectralBr =
+    req.current_spectral_bitrate || req.last_download_spectral_bitrate || null;
+  const spectralGrade =
+    req.current_spectral_grade || req.last_download_spectral_grade || null;
+  const verified = req.verified_lossless === true || req.verified_lossless === 'True';
+  let qualitySummary = nominal;
+  if (verified) {
+    qualitySummary += ' <span style="color:#6d6;">verified lossless</span>';
+  } else if (spectralGrade === 'suspect' || spectralGrade === 'likely_transcode') {
+    const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
+    qualitySummary += ` <span style="color:#d88;">spectral: ${spectralGrade}${brStr}</span>`;
+  } else if (spectralGrade === 'genuine') {
+    // Show the spectral floor even on a genuine rollup. A non-null
+    // spectral_bitrate under genuine means some tracks tripped the
+    // cliff detector but the album-level grade stayed below the
+    // suspect-pct threshold — the 96k signal is what the shared-
+    // spectral clamp in compare_quality now consults (Eno case).
+    const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
+    qualitySummary += ` <span style="color:#6d6;">spectral: genuine${brStr}</span>`;
+  }
+  return renderDetailRow('Quality', qualitySummary);
+}
+
+/**
  * Delete a pipeline request.
  * @param {number} id
  * @returns {Promise<void>}
@@ -567,4 +583,5 @@ export const __test__ = {
   renderPipelineListBody,
   clearPipelineSearch,
   renderPipelineNav,
+  renderCurrentQualityRow,
 };

@@ -57,6 +57,7 @@ def annotate_in_library(
       - in_library: bool
       - library_format: str (e.g. "MP3", "FLAC") — only when matched
       - library_min_bitrate: int (kbps) — only when matched
+      - library_avg_bitrate: int (kbps) — current label/rank signal
       - library_rank: str — only when matched and rank_fn provided
         (lowercase rank name from lib.quality.QualityRank, e.g.
         "transparent", "lossless", "poor")
@@ -97,6 +98,7 @@ def annotate_in_library(
       reports show up in practice, the smallest structural change is
       to keep `in_library=True` on title-fallback matches but drop the
       quality fields (`library_format` / `library_min_bitrate` /
+      `library_avg_bitrate` /
       `library_rank`). That sharpens the invariant "quality numbers
       attach only to exact-ID matches" without losing the cross-source
       presence signal.
@@ -129,14 +131,17 @@ def annotate_in_library(
     def _attach(row: dict, match: dict) -> None:
         row["in_library"] = True
         fmt = match.get("formats") or ""
-        # min_bitrate from beets is in bps; convert to kbps for display
-        # consistency.
-        br_bps = match.get("min_bitrate") or 0
-        kbps = (br_bps // 1000) if br_bps else 0
+        # Beets artist projections are bps. Keep the explicit minimum as a
+        # floor, while current labels/ranks consume the positive-track mean.
+        min_br_bps = match.get("min_bitrate") or 0
+        avg_br_bps = match.get("avg_bitrate") or 0
+        min_kbps = (min_br_bps // 1000) if min_br_bps else 0
+        avg_kbps = (avg_br_bps // 1000) if avg_br_bps else 0
         row["library_format"] = fmt
-        row["library_min_bitrate"] = kbps
+        row["library_min_bitrate"] = min_kbps
+        row["library_avg_bitrate"] = avg_kbps
         if rank_fn:
-            row["library_rank"] = rank_fn(fmt, kbps)
+            row["library_rank"] = rank_fn(fmt, avg_kbps)
 
     # Exact-ID match primary, title fallback secondary. The `or` ordering
     # is load-bearing — see docstring "Risk is narrowed" notes.

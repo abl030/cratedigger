@@ -172,6 +172,25 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "pipeline log counts",
         )
 
+    def test_pipeline_log_current_beets_projection_keeps_min_and_average(self):
+        import web.server as srv
+
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail(
+            "test-mbid-0100",
+            {
+                "beets_format": "MP3",
+                "beets_bitrate": 194,
+                "beets_avg_bitrate": 288,
+            },
+        )
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["log"][0]["beets_bitrate"], 194)
+        self.assertEqual(data["log"][0]["beets_avg_bitrate"], 288)
+
     def test_disk_coverage_contract(self):
         import web.server as srv
 
