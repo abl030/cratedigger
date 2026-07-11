@@ -319,7 +319,8 @@ _LEAF_SEAM_PATTERNS = [
 
     # ``lib.download`` formerly had module-local DI seams for the chain
     # ``poll_active_downloads`` → ``process_completed_album`` →
-    # ``_process_beets_validation`` → ``_handle_valid_result`` →
+    # ``download_validation._process_beets_validation`` →
+    # ``_handle_valid_result`` →
     # ``dispatch_import_core``. The chain now exposes opt-in kwarg DI
     # (``validate_fn``, ``handle_valid_fn``, ``dispatch_fn``) on each
     # downstream step; tests pass stubs by value. Defensive guards
@@ -351,7 +352,7 @@ _LEAF_SEAM_PATTERNS = [
     # tests; queue tests are about the dispatcher around it.
     re.compile(r"^scripts\.import_preview_worker\.run_once$"),
 
-    # ``lib.download._handle_valid_result`` migrated to kwarg DI alongside
+    # ``lib.download_validation._handle_valid_result`` uses kwarg DI alongside
     # the rest of the lib.download chain (see comment above).
 
     # Broadened ``resolve_failed_path`` re-export allowlist. The pattern
@@ -431,7 +432,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.dispatch.entry_points.ensure_candidate_evidence_for_action': 3,
     'lib.dispatch.evidence_gate.load_current_evidence_for_action': 2,
     'lib.download._run_completed_processing': 3,
-    'lib.download_processing._handle_valid_result': 1,
+    'lib.download_validation._handle_valid_result': 1,
     'lib.download_materialization._materialize_processing_dir': 2,
     'lib.download_processing.process_completed_album': 8,
     'lib.enqueue.check_for_match': 1,

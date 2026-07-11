@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 import re
 import unittest
@@ -41,17 +42,37 @@ def assert_vulture_production_roots(roots: tuple[str, ...]) -> None:
     assert "tests" not in roots
 
 
+def assert_completion_orchestrator_responsibilities(source: str) -> None:
+    """Keep completion orchestration free of validation implementation."""
+    tree = ast.parse(source, filename="lib/download_processing.py")
+    classes = {
+        node.name for node in tree.body if isinstance(node, ast.ClassDef)
+    }
+    functions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert classes == {
+        "Completed",
+        "CompletionFailed",
+        "CompletionDispatched",
+        "CompletionDeferred",
+    }
+    assert functions == {"process_completed_album"}
+
+
 class TestDispatchImportCoreCallBoundary(unittest.TestCase):
     def test_production_calls_use_explicit_typed_keywords(self) -> None:
         """Production must not hide dispatch arguments behind ``Any`` splats."""
         for relative_path in (
             "lib/dispatch/entry_points.py",
-            "lib/download_processing.py",
+            "lib/download_validation.py",
         ):
             source = Path(relative_path).read_text(encoding="utf-8")
             tree = ast.parse(source, filename=relative_path)
             self.assertNotIn("core_kwargs", source, relative_path)
-            if relative_path == "lib/download_processing.py":
+            if relative_path == "lib/download_validation.py":
                 self.assertIn("dispatch_fn: DispatchCoreFn | None", source)
             calls = [
                 node for node in ast.walk(tree)
@@ -73,6 +94,39 @@ class TestDispatchImportCoreCallBoundary(unittest.TestCase):
             "_dispatch_core_conformance: DispatchCoreFn = dispatch_import_core",
             source,
         )
+
+
+class TestDownloadCompletionOwnership(unittest.TestCase):
+    def test_processing_is_only_the_completion_orchestrator(self) -> None:
+        source = Path("lib/download_processing.py").read_text(encoding="utf-8")
+        assert_completion_orchestrator_responsibilities(source)
+        self.assertIn("from lib import download_validation", source)
+
+    def test_processing_does_not_compatibly_export_moved_validation_names(self) -> None:
+        processing = importlib.import_module("lib.download_processing")
+        for moved_name in (
+            "_check_staged_audio_manifest",
+            "_process_beets_validation",
+            "_handle_valid_result",
+        ):
+            self.assertFalse(hasattr(processing, moved_name), moved_name)
+
+    def test_validation_functions_have_executable_protocol_bindings(self) -> None:
+        source = Path("lib/download_validation.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "_validate_conformance: ValidateFn = _process_beets_validation",
+            source,
+        )
+        self.assertIn(
+            "_handle_valid_conformance: HandleValidFn = _handle_valid_result",
+            source,
+        )
+
+    def test_responsibility_checker_rejects_validation_creep(self) -> None:
+        source = Path("lib/download_processing.py").read_text(encoding="utf-8")
+        planted = source + "\ndef _process_beets_validation():\n    pass\n"
+        with self.assertRaises(AssertionError):
+            assert_completion_orchestrator_responsibilities(planted)
 
 
 class TestVultureProductionLivenessPolicy(unittest.TestCase):

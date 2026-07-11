@@ -368,16 +368,16 @@ class TestDownloadRejectionExtraction(unittest.TestCase):
         self.assertTrue(shared_names.isdisjoint(processing_defs | rejection_defs))
         self.assertTrue(shared_names.issubset(paths_defs))
 
-    def test_processing_imports_only_rejection_handoffs(self):
+    def test_validation_imports_only_rejection_handoffs(self):
         import ast
         from pathlib import Path
 
-        processing_tree = ast.parse(
-            Path("lib/download_processing.py").read_text(encoding="utf-8")
+        validation_tree = ast.parse(
+            Path("lib/download_validation.py").read_text(encoding="utf-8")
         )
         imported = {
             alias.name
-            for node in ast.walk(processing_tree)
+            for node in ast.walk(validation_tree)
             if isinstance(node, ast.ImportFrom)
             and node.module == "lib.download_rejection"
             for alias in node.names
@@ -1587,7 +1587,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
             self.assertIsInstance(result, Completed)
 
     def test_dispatch_outcome_summary_is_returned_to_queue_owner(
@@ -1617,19 +1617,36 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 success=True,
                 message="Import successful",
             )
-            validate_calls: list[dict] = []
+            from lib.context import CratediggerContext
+            from lib.dispatch import DispatchCoreFn
+            from lib.download_validation import HandleValidFn, ValidateFn
+            from lib.grab_list import GrabListEntry
+            from lib.staged_album import StagedAlbum
 
-            def _stub_validate(*args, **kwargs):
-                validate_calls.append(kwargs)
+            validate_calls: list[int] = []
+
+            def _stub_validate(
+                album_data: GrabListEntry,
+                staged_album: StagedAlbum,
+                ctx: CratediggerContext,
+                *,
+                import_job_id: int,
+                handle_valid_fn: HandleValidFn | None = None,
+                dispatch_fn: DispatchCoreFn | None = None,
+            ) -> DispatchOutcome | None:
+                del album_data, staged_album, ctx, handle_valid_fn, dispatch_fn
+                validate_calls.append(import_job_id)
                 return stub_outcome
 
+            validate_recorder: ValidateFn = _stub_validate
+
             result = process_completed_album(
-                album, [], ctx, import_job_id=1, validate_fn=_stub_validate,
+                album, ctx, import_job_id=1, validate_fn=validate_recorder,
             )
 
             assert isinstance(result, CompletionDispatched)
             self.assertIs(result.outcome, stub_outcome)
-            self.assertEqual(len(validate_calls), 1)
+            self.assertEqual(validate_calls, [1])
 
     @patch("lib.beets.beets_validate")
     def test_beets_rejection_summary_is_returned_to_queue_owner(
@@ -1684,7 +1701,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 db_source="request",
             )
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             assert isinstance(result, CompletionDispatched)
             outcome = result.outcome
@@ -1734,7 +1751,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             with patch("lib.download_materialization.shutil.move", side_effect=_failing_move):
                 result = process_completed_album(
-                    album, [], ctx, import_job_id=1)
+                    album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
             # Rollback restored the first file to its stamped source.
@@ -1771,7 +1788,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(files[0].import_path, resumed_file)
@@ -1809,7 +1826,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(file.import_path, resumed_file)
@@ -1851,7 +1868,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             fp = attempt_fingerprint([("user1", "user1\\Music\\01 - Track.mp3")])
             self.assertIsInstance(result, Completed)
@@ -1913,7 +1930,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             dispatch = RecordingDispatchCore()
             with self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(
-                    album, [], ctx, import_job_id=1,
+                    album, ctx, import_job_id=1,
                     dispatch_fn=dispatch,
                 )
 
@@ -1962,7 +1979,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
             with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, [], ctx, import_job_id=1)
+                result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionDeferred)
             self.assertIn("missing db_request_id", "\n".join(logs.output))
@@ -2008,7 +2025,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(album.files[0].import_path, resumed_file)
@@ -2053,7 +2070,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             dispatch = RecordingDispatchCore()
             with self.assertLogs("cratedigger", level="ERROR") as logs:
                 result = process_completed_album(
-                    album, [], ctx, import_job_id=1,
+                    album, ctx, import_job_id=1,
                     dispatch_fn=dispatch,
                 )
 
@@ -2083,7 +2100,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
             cfg.beets_validation_enabled = False
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
 
@@ -2111,7 +2128,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.beets_validation_enabled = False
             os.makedirs(cfg.slskd_download_dir, exist_ok=True)
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
 
@@ -2121,7 +2138,7 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
 
     def test_request_source_without_mbid_requeues_instead_of_marking_done(self):
         """Request rows without an MBID must requeue, not mark imported."""
-        from lib.download_processing import _handle_valid_result
+        from lib.download_validation import _handle_valid_result
         from lib.staged_album import StagedAlbum
         import tempfile
 
@@ -2177,7 +2194,7 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
         not be confused for 'unmeasured' and nulled — 0.0 is falsy in
         Python, so a naive ``if bv_result.distance`` check would silently
         drop it. Same missing-mbid reject path, distance=0.0 instead."""
-        from lib.download_processing import _handle_valid_result
+        from lib.download_validation import _handle_valid_result
         from lib.staged_album import StagedAlbum
         import tempfile
 
@@ -2266,7 +2283,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 fp.write("fake audio")
             album, ctx = self._album(tmpdir, local_path=event_path)
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertFalse(os.path.exists(event_path))
@@ -2296,7 +2313,7 @@ class TestEventPathMaterialization(unittest.TestCase):
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
@@ -2318,7 +2335,7 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             with self.assertLogs("cratedigger", level=logging.ERROR) as logs:
                 result = process_completed_album(
-                    album, [], ctx, import_job_id=1)
+                    album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
             self.assertTrue(os.path.exists(src))
@@ -2337,7 +2354,7 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             with self.assertLogs("cratedigger", level=logging.ERROR) as logs:
                 result = process_completed_album(
-                    album, [], ctx, import_job_id=1)
+                    album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
             joined = "\n".join(logs.output)
@@ -2379,7 +2396,7 @@ class TestEventPathMaterialization(unittest.TestCase):
 
             with self.assertLogs("cratedigger", level=logging.ERROR) as logs:
                 result = process_completed_album(
-                    album, [], ctx, import_job_id=1)
+                    album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
             self.assertTrue(os.path.exists(event_src))
@@ -2401,7 +2418,7 @@ class TestEventPathMaterialization(unittest.TestCase):
             with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
                 fp.write("fake audio")
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
@@ -2418,7 +2435,7 @@ class TestEventPathMaterialization(unittest.TestCase):
             with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
                 fp.write("fake audio")
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(self._moved(tmpdir, album.files), [self.FNAME])
@@ -2589,7 +2606,7 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
             with open(os.path.join(canonical_path, "leftover.mp3"), "wb") as fp:
                 fp.write(b"stale leftover audio from a different attempt")
 
-            result = process_completed_album(album, [], ctx, import_job_id=1)
+            result = process_completed_album(album, ctx, import_job_id=1)
 
         self.assertIsInstance(result, CompletionDispatched)
         self.assertEqual(len(db.download_logs), 1)

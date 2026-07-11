@@ -43,6 +43,7 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -53,6 +54,7 @@ from hypothesis import strategies as st
 
 from lib.download import build_active_download_state
 from lib.download_reconstruction import reconstruct_grab_list_entry
+from lib.download_validation import _check_staged_audio_manifest
 from lib.grab_list import DownloadFile
 from lib.import_manifest import (
     ManifestCheck,
@@ -61,6 +63,7 @@ from lib.import_manifest import (
     tracked_audio_paths_for_downloads,
 )
 from lib.quality import ActiveDownloadState
+from lib.staged_album import StagedAlbum
 from tests.helpers import make_grab_list_entry, make_request_row
 
 # ============================================================================
@@ -201,7 +204,7 @@ class TestGeneratedManifestRoundTrip(unittest.TestCase):
 #
 # check_audio_manifest's allowed_audio comes, in production, from
 # tracked_audio_paths_for_downloads(album_data.files) (see
-# lib/download_processing.py::_check_staged_audio_manifest). Relative paths
+# lib/download_validation.py::_check_staged_audio_manifest). Relative paths
 # are constrained to a safe vocabulary (posix separators, no ".."/absolute
 # paths, no backslashes) so the "what's really on disk" oracle can be read
 # straight off what the test wrote, instead of re-deriving _safe_relpath's
@@ -278,7 +281,9 @@ def _write_relative(root: str, rel: str) -> None:
     open(full, "wb").close()
 
 
-def _run_disk_world(world: ManifestDiskWorld) -> tuple[ManifestCheck, set[str]]:
+def _run_disk_world(
+    world: ManifestDiskWorld,
+) -> tuple[ManifestCheck, set[str], bool]:
     root = tempfile.mkdtemp(prefix="cratedigger-manifest-gen-")
     try:
         for rel in world.present:
@@ -288,9 +293,25 @@ def _run_disk_world(world: ManifestDiskWorld) -> tuple[ManifestCheck, set[str]]:
         for rel in world.noise:
             _write_relative(root, rel)
 
+        manifest_files = [
+            DownloadFile(
+                filename=rel,
+                id="",
+                file_dir="",
+                username="peer",
+                size=1000,
+            )
+            for rel in world.manifest
+        ]
+        album = make_grab_list_entry(files=manifest_files)
+        with patch("lib.download_validation.logger.error"):
+            production_ok, _detail = _check_staged_audio_manifest(
+                album,
+                StagedAlbum(current_path=root),
+            )
         check = check_audio_manifest(root, world.manifest)
         on_disk_audio = set(audio_relative_paths(root))
-        return check, on_disk_audio
+        return check, on_disk_audio, production_ok
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -299,6 +320,7 @@ def assert_manifest_check_oracle(
     world: ManifestDiskWorld,
     check: ManifestCheck,
     on_disk_audio: set[str],
+    production_ok: bool,
 ) -> None:
     """On-disk check oracle (module-level for the known-bad self-test)."""
     expected_on_disk = set(world.present) | set(world.extra_audio)
@@ -323,6 +345,10 @@ def assert_manifest_check_oracle(
         raise AssertionError(
             f"check.ok={check.ok} expected={expected_ok} "
             f"(extra={expected_extra}, missing={expected_missing})")
+    if production_ok != expected_ok:
+        raise AssertionError(
+            f"validation manifest gate={production_ok} expected={expected_ok}"
+        )
 
 
 # Pinned regression: a two-track manifest with one file missing, one extra
@@ -342,8 +368,13 @@ class TestGeneratedManifestDiskOracle(unittest.TestCase):
     @given(world=manifest_disk_worlds())
     @example(world=_PINNED_DISK_WORLD)
     def test_check_passes_iff_disk_matches_manifest_exactly(self, world):
-        check, on_disk_audio = _run_disk_world(world)
-        assert_manifest_check_oracle(world, check, on_disk_audio)
+        check, on_disk_audio, production_ok = _run_disk_world(world)
+        assert_manifest_check_oracle(
+            world,
+            check,
+            on_disk_audio,
+            production_ok,
+        )
 
 
 # ============================================================================
@@ -383,7 +414,7 @@ class TestManifestCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             # The materialized world wrote 01.flac, but the walk claims
             # nothing is there.
-            assert_manifest_check_oracle(world, check, set())
+            assert_manifest_check_oracle(world, check, set(), True)
 
     def test_disk_oracle_checker_trips_on_missed_extra_audio(self):
         world = ManifestDiskWorld(
@@ -392,7 +423,7 @@ class TestManifestCheckersTripOnViolations(unittest.TestCase):
         check = ManifestCheck(extra_audio=[], missing_audio=[])  # wrongly "clean"
         with self.assertRaises(AssertionError):
             assert_manifest_check_oracle(
-                world, check, {"01.flac", "bonus.flac"})
+                world, check, {"01.flac", "bonus.flac"}, True)
 
     def test_disk_oracle_checker_trips_on_missed_missing_audio(self):
         world = ManifestDiskWorld(
@@ -400,7 +431,7 @@ class TestManifestCheckersTripOnViolations(unittest.TestCase):
             extra_audio=(), noise=())
         check = ManifestCheck(extra_audio=[], missing_audio=[])  # wrongly "clean"
         with self.assertRaises(AssertionError):
-            assert_manifest_check_oracle(world, check, {"01.flac"})
+            assert_manifest_check_oracle(world, check, {"01.flac"}, True)
 
     def test_disk_oracle_checker_trips_on_wrong_ok_flag(self):
         """``ok`` is a derived property on the real ManifestCheck, so a
@@ -414,7 +445,22 @@ class TestManifestCheckersTripOnViolations(unittest.TestCase):
         broken_check = SimpleNamespace(extra_audio=[], missing_audio=[], ok=False)
         with self.assertRaises(AssertionError):
             assert_manifest_check_oracle(
-                world, cast(ManifestCheck, broken_check), {"01.flac"})
+                world,
+                cast(ManifestCheck, broken_check),
+                {"01.flac"},
+                True,
+            )
+
+    def test_disk_oracle_checker_trips_on_validation_gate_drift(self):
+        world = ManifestDiskWorld(
+            manifest=("01.flac",),
+            present=("01.flac",),
+            extra_audio=(),
+            noise=(),
+        )
+        check = ManifestCheck(extra_audio=[], missing_audio=[])
+        with self.assertRaises(AssertionError):
+            assert_manifest_check_oracle(world, check, {"01.flac"}, False)
 
 
 if __name__ == "__main__":

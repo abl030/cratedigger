@@ -426,7 +426,6 @@ def execute_youtube_import_job(
     try:
         result = process_completed_album(
             entry,
-            [],
             runtime_ctx,
             import_job_id=job.id,
         )

@@ -3,7 +3,7 @@
 Orchestration tests (TestDispatchImport, TestQualityGate*) use FakePipelineDB
 and assert domain state. Seam tests (TestOverrideMinBitrate, TestOpus*,
 TestTargetFormat*) exercise the surviving auto-import seam in
-``lib.download_processing._handle_valid_result`` and the core subprocess wiring.
+``lib.download_validation._handle_valid_result`` and the core subprocess wiring.
 Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 
@@ -100,7 +100,7 @@ def _dispatch_valid_result_cmd(
     ir=None,
 ):
     """Run the surviving auto-import seam and return the harness argv."""
-    from lib.download_processing import _handle_valid_result
+    from lib.download_validation import _handle_valid_result
     from lib.staged_album import StagedAlbum
 
     album_data = album_data or _make_album_data()
@@ -129,7 +129,7 @@ def _dispatch_valid_result_cmd(
         # directory itself, so we just need the staging root to exist.
         ctx.cfg.beets_staging_dir = tmpdir
 
-        with patch("lib.download_processing.log_validation_result"), \
+        with patch("lib.download_validation.log_validation_result"), \
              patch_dispatch_externals() as ext, \
              patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
             _handle_valid_result(
