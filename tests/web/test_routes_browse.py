@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -440,6 +440,76 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data["release_groups"][0], self.ARTIST_RG_REQUIRED_FIELDS,
                                 "artist release group")
 
+    def test_artist_release_groups_transport_failure_is_clean_retryable_503(self):
+        raw_reason = "[SSL: UNEXPECTED_EOF_WHILE_READING] private adapter detail"
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {
+            "error": "MusicBrainz fallback unavailable, retry",
+            "retryable": True,
+        })
+        self.assertNotIn(raw_reason, str(data))
+        mock_mb.get_official_release_group_ids.assert_not_called()
+
+    def test_official_release_lookup_transport_failure_is_clean_retryable_503(self):
+        raw_reason = "socket reset by peer: private upstream address"
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_official_release_group_ids.side_effect = URLError(raw_reason)
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {
+            "error": "MusicBrainz fallback unavailable, retry",
+            "retryable": True,
+        })
+        self.assertNotIn(raw_reason, str(data))
+
+    def test_artist_release_groups_not_found_is_clean_non_retryable_404(self):
+        raw_reason = "raw upstream artist lookup details"
+        error = HTTPError(
+            url="https://musicbrainz.invalid/artist",
+            code=404,
+            msg=raw_reason,
+            hdrs=email.message.Message(),
+            fp=None,
+        )
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.side_effect = error
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {
+            "error": "MusicBrainz artist not found",
+            "retryable": False,
+        })
+        self.assertNotIn(raw_reason, str(data))
+        mock_mb.get_official_release_group_ids.assert_not_called()
+
+    def test_official_release_lookup_not_found_is_clean_non_retryable_404(self):
+        raw_reason = "raw official release lookup details"
+        error = HTTPError(
+            url="https://musicbrainz.invalid/releases",
+            code=404,
+            msg=raw_reason,
+            hdrs=email.message.Message(),
+            fp=None,
+        )
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_official_release_group_ids.side_effect = error
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {
+            "error": "MusicBrainz artist not found",
+            "retryable": False,
+        })
+        self.assertNotIn(raw_reason, str(data))
+
     def test_artist_release_groups_in_library_when_name_passed(self):
         """When the frontend passes ?name=, each RG gets in_library: bool
         based on a beets lookup. Without name, the field stays absent
@@ -770,6 +840,34 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                                 "disambiguate pressing")
         _assert_required_fields(self, rg["tracks"][0], self.DISAMBIGUATE_TRACK_REQUIRED_FIELDS,
                                 "disambiguate track")
+
+
+class _FailingArtistRequestsDB(FakePipelineDB):
+    def list_requests_by_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[dict[str, object]]:
+        raise RuntimeError("downstream artist overlay unavailable")
+
+
+class TestArtistFailureBoundary(_FakeDbWebServerCase):
+    """Only MusicBrainz transport calls belong to the retryable mapping."""
+
+    DB_FACTORY = _FailingArtistRequestsDB
+    ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
+
+    def test_downstream_db_overlay_failure_is_not_remapped_as_musicbrainz(self):
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_official_release_group_ids.return_value = set()
+            status, data = self._get(
+                f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
+            )
+
+        self.assertEqual(status, 500)
+        self.assertEqual(data, {"error": "downstream artist overlay unavailable"})
+        self.assertNotIn("retryable", data)
 
 
 class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):

@@ -62,6 +62,10 @@ function applySourceUI(src) {
 export async function setBrowseSource(src) {
   if (state.browseSource === src) return;
   searchArtistsRequestToken++;
+  // Invalidate the current artist page BEFORE the cross-source lookup
+  // awaits. Otherwise an old-source fast-pair failure can paint Retry
+  // while the new source is already selected but its artist ID is pending.
+  const sourceSwitchToken = ++artistPageToken;
   // Explicit user source-toggle clears any active search-by-ID ring.
   // The source-guard in applySearchTargetAfterDiscography would mask
   // the immediate symptom, but a paste→toggle-twice sequence (away
@@ -76,6 +80,7 @@ export async function setBrowseSource(src) {
   if (state.browseArtist) {
     const prevName = state.browseArtist.name;
     const match = await findArtistOnSource(prevName, src);
+    if (sourceSwitchToken !== artistPageToken || state.browseSource !== src) return;
     if (match) {
       state.browseArtist = { id: String(match.id), name: match.name };
       document.getElementById('browse-artist-name').textContent = match.name;
@@ -84,7 +89,6 @@ export async function setBrowseSource(src) {
     }
     toast(`No ${src === 'discogs' ? 'Discogs' : 'MusicBrainz'} match for ${prevName}`, true);
     state.browseArtist = null;
-    artistPageToken++;
     document.getElementById('browse-artist').style.display = 'none';
   }
 
@@ -390,6 +394,29 @@ export function reloadBrowseArtist() {
 }
 
 /**
+ * Fetch one half of the artist page's fast pair as JSON.
+ * A JSON error body is not artist data: reject it before the pair can be
+ * cached or rendered. The caller deliberately renders a stable message
+ * instead of exposing response or exception details.
+ * @param {string} url
+ * @returns {Promise<Object>}
+ */
+async function fetchArtistPageJson(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`artist page request failed (${response.status})`);
+  return response.json();
+}
+
+/** Render the stable, retryable artist-page failure state. */
+function renderArtistPageFailure(el) {
+  el.innerHTML = `
+    <div class="loading artist-load-error">
+      <div>Artist page temporarily unavailable.</div>
+      <button class="p-btn" style="margin-top:10px" onclick="window.reloadBrowseArtist()">Retry</button>
+    </div>`;
+}
+
+/**
  * Load and render the unified artist page (issue #575 PR4).
  *
  * Fast pair first — the source discography (?name= so the backend
@@ -444,8 +471,8 @@ export async function loadArtistPage(aid, name) {
       ? `${API}/api/library/artist?name=${encodeURIComponent(name)}`
       : `${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`;
     const [rgRes, libRes] = await Promise.all([
-      fetch(artistUrl).then(r => r.json()),
-      fetch(libUrl).then(r => r.json()),
+      fetchArtistPageJson(artistUrl),
+      fetchArtistPageJson(libUrl),
     ]);
     if (token !== artistPageToken) return;
     state.browseCache[aid] = { fast: { rgRes, libRes }, compare: null, disamb: null };
@@ -453,9 +480,9 @@ export async function loadArtistPage(aid, name) {
     // Fire-and-forget decorations; each guards on the token.
     fireCompareComplement(el, aid, name, token);
     fireAnalysis(el, aid, token);
-  } catch (e) {
+  } catch (_e) {
     if (token !== artistPageToken) return;
-    el.innerHTML = '<div class="loading">Failed to load</div>';
+    renderArtistPageFailure(el);
   }
 }
 
