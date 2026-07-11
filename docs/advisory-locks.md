@@ -192,7 +192,7 @@ RELEASE key is therefore just a no-op reentrant acquire against the
 outer lock already held by the auto path:
 
 ```
-AUTO (_handle_valid_result in lib/download.py)
+AUTO (_handle_valid_result in lib/download_validation.py)
   └─ acquire RELEASE(release_id_to_lock_key(mbid))             ← outer
       └─ staged_album.move_to(...)                             ← moves files + current_path
       └─ dispatch_import_core
@@ -336,7 +336,7 @@ session and returns False — revisit the ordering rules.
 
 | Path | File | Function | Namespace | Key expression |
 |---|---|---|---|---|
-| Auto-import outer | `lib/download.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
+| Auto-import outer | `lib/download_validation.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
 | Auto + force/manual inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Force/manual outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |

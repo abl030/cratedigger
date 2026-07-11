@@ -54,7 +54,7 @@ def _requeue_import_job_to_preview(
     """Shared requeue helper for the two outer evidence-required branches.
 
     Called from ``_dispatch_import_from_db_locked`` (force/manual) and from
-    ``lib.download_processing._process_beets_validation`` (automation) when
+    ``lib.download_validation._process_beets_validation`` (automation) when
     ``ensure_candidate_evidence_for_action`` reports the candidate row is
     missing, stale, or incomplete.
 

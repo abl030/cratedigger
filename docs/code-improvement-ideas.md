@@ -88,8 +88,7 @@ This would also make integration testing the full `main()` flow possible — cur
 
 This catches CHECK constraint issues, column migration bugs, and status visibility invariants that mocks hide.
 
-## 7. `failed_grab` parameter is vestigial
+## 7. ~~`failed_grab` parameter is vestigial~~ — resolved in #573
 
-**Problem**: `process_completed_album` accepts `failed_grab: list[Any]` but never reads it. Every caller passes `[]`. It's been dead since the function was extracted from `cratedigger.py`.
-
-**Fix**: Remove the parameter. Update the 3 callers. One-line diff per caller.
+`process_completed_album` no longer accepts the unused argument; all production
+and test callers use the typed completion boundary directly.

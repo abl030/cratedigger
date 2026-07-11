@@ -237,7 +237,7 @@ def dispatch_import_core(
                 and evidence_gate.candidate is None
             ):
                 # U4: outer callers (``_dispatch_import_from_db_locked`` and
-                # ``lib/download.py::_process_beets_validation``) already
+                # ``lib/download_validation.py::_process_beets_validation``) already
                 # call ``ensure_candidate_evidence_for_action`` and requeue
                 # via ``_requeue_import_job_to_preview`` when evidence is
                 # missing. Reaching this inner site means a caller bypassed

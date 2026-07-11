@@ -96,7 +96,7 @@ def _make_failed_import_source() -> tuple[str, str]:
 
 class TestAutomationEvidenceReuse(unittest.TestCase):
     def test_previewed_automation_job_skips_preimport_gates(self):
-        from lib.download_processing import _process_beets_validation
+        from lib.download_validation import _process_beets_validation
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -154,7 +154,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 scenario="strong_match",
             )), \
                  patch(
-                     "lib.download_processing._handle_valid_result",
+                     "lib.download_validation._handle_valid_result",
                      return_value=DispatchOutcome(True, "imported"),
                  ) as handle_valid:
                 result = _process_beets_validation(
@@ -170,7 +170,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         self.assertEqual(handle_valid.call_args.kwargs["import_job_id"], job.id)
 
     def test_stale_previewed_automation_evidence_fails_before_preimport(self):
-        from lib.download_processing import _process_beets_validation
+        from lib.download_validation import _process_beets_validation
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -225,11 +225,40 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
             )
             staged_album = StagedAlbum(current_path=tmpdir, request_id=42)
 
-            handle_valid_calls: list[tuple] = []
+            from lib.context import CratediggerContext
+            from lib.dispatch import DispatchCoreFn, QualityGateFn
+            from lib.download_validation import HandleValidFn
+            from lib.grab_list import GrabListEntry
+            from lib.import_evidence import CandidateEvidenceActionResult
 
-            def _record_handle_valid(*args, **kwargs):
-                handle_valid_calls.append((args, kwargs))
+            handle_valid_calls: list[int | None] = []
+
+            def _record_handle_valid(
+                album_data: GrabListEntry,
+                bv_result: ValidationResult,
+                staged_album: StagedAlbum,
+                ctx: CratediggerContext,
+                *,
+                import_job_id: int | None = None,
+                prevalidated_candidate_result: (
+                    CandidateEvidenceActionResult | None
+                ) = None,
+                quality_gate_fn: QualityGateFn | None = None,
+                dispatch_fn: DispatchCoreFn | None = None,
+            ) -> DispatchOutcome | None:
+                del (
+                    album_data,
+                    bv_result,
+                    staged_album,
+                    ctx,
+                    prevalidated_candidate_result,
+                    quality_gate_fn,
+                    dispatch_fn,
+                )
+                handle_valid_calls.append(import_job_id)
                 return None
+
+            handle_valid_recorder: HandleValidFn = _record_handle_valid
 
             with patch("lib.beets.beets_validate", return_value=ValidationResult(
                 valid=True,
@@ -241,7 +270,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     staged_album,
                     ctx,
                     import_job_id=job.id,
-                    handle_valid_fn=_record_handle_valid,
+                    handle_valid_fn=handle_valid_recorder,
                 )
 
         assert result is not None

@@ -2,9 +2,10 @@
 
 All functions receive a CratediggerContext instead of reading
 module-level globals. Split (issue #146 phase 3): materialization and
-recovery live in lib/download_materialization.py; validation/dispatch
-orchestration lives in lib/download_processing.py; slskd transfer helpers in
-lib/slskd_transfers.py; event-feed ingestion in
+recovery live in lib/download_materialization.py; exact-release validation and
+dispatch live in lib/download_validation.py; completion orchestration lives in
+lib/download_processing.py; slskd transfer helpers in lib/slskd_transfers.py;
+event-feed ingestion in
 lib/slskd_events.py.
 """
 
@@ -504,7 +505,6 @@ def _run_completed_processing(
     try:
         result = _process(
             entry,
-            [],
             ctx,
             import_job_id=import_job_id,
         )

@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.grab_list import GrabListEntry
 from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     QUALITY_LOSSLESS,
@@ -31,6 +32,7 @@ from lib.quality import (
     PostflightInfo,
     ValidationResult,
 )
+from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
     make_album_quality_evidence,
@@ -2327,7 +2329,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 
     def test_contention_returns_deferred_without_staging(self):
-        from lib import download_processing as dp_mod
+        from lib import download_validation as validation_mod
         from lib.grab_list import GrabListEntry
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
@@ -2365,11 +2367,11 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         import_folder_fullpath = "/tmp/test-import-folder"
         from tests.fakes import RecordingDispatchCore
         dispatch = RecordingDispatchCore()
-        with patch.object(dp_mod.StagedAlbum, "move_to") as mock_move:
-            outcome = dp_mod._handle_valid_result(
+        with patch.object(StagedAlbum, "move_to") as mock_move:
+            outcome = validation_mod._handle_valid_result(
                 entry,
                 bv_result,
-                dp_mod.StagedAlbum(
+                StagedAlbum(
                     current_path=import_folder_fullpath,
                     request_id=42,
                 ),
@@ -2392,7 +2394,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         harness, so no cross-process race applies. Pre-fix this was
         implicitly true; pinning it so a future refactor doesn't
         accidentally broaden the lock scope."""
-        from lib import download_processing as dp_mod
+        from lib import download_validation as validation_mod
         from lib.grab_list import GrabListEntry
         from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE
         from lib.quality import ValidationResult
@@ -2419,12 +2421,12 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         bv_result = ValidationResult(
             valid=True, distance=0.05, scenario="strong_match")
 
-        with patch.object(dp_mod.StagedAlbum, "move_to",
+        with patch.object(StagedAlbum, "move_to",
                           return_value="/tmp/staged"):
-            dp_mod._handle_valid_result(
+            validation_mod._handle_valid_result(
                 entry,
                 bv_result,
-                dp_mod.StagedAlbum(current_path="/tmp/import", request_id=42),
+                StagedAlbum(current_path="/tmp/import", request_id=42),
                 ctx,
             )
 
@@ -2433,7 +2435,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
     def test_auto_path_persists_current_path_after_staging(self):
-        from lib import download_processing as dp_mod
+        from lib import download_validation as validation_mod
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
         from lib.quality import ValidationResult
@@ -2468,7 +2470,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 beets_staging_dir=os.path.join(tmpdir, "beets-staging"),
             )
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            entry = dp_mod.GrabListEntry(
+            entry = GrabListEntry(
                 album_id=42,
                 artist="Test Artist",
                 title="Test Album",
@@ -2480,7 +2482,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 db_request_id=42,
                 import_folder=processing_dir,
             )
-            staged_album = dp_mod.StagedAlbum.from_entry(
+            staged_album = StagedAlbum.from_entry(
                 entry,
                 default_path=processing_dir,
             )
@@ -2510,7 +2512,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                     else:
                         yield acquired
 
-            original_move_to = dp_mod.StagedAlbum.move_to
+            original_move_to = StagedAlbum.move_to
 
             def checked_move_to(album, dest, db=None):
                 self.assertTrue(move_saw_release_lock)
@@ -2522,12 +2524,12 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 "advisory_lock",
                 side_effect=tracking_advisory_lock,
             ), patch.object(
-                dp_mod.StagedAlbum,
+                StagedAlbum,
                 "move_to",
                 autospec=True,
                 side_effect=checked_move_to,
             ):
-                outcome = dp_mod._handle_valid_result(
+                outcome = validation_mod._handle_valid_result(
                     entry,
                     bv_result,
                     staged_album,
@@ -2556,7 +2558,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""
-        from lib import download_processing as dp_mod
+        from lib import download_validation as validation_mod
         from lib.dispatch import DispatchOutcome
         from lib.quality import ValidationResult
 
@@ -2590,7 +2592,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 slskd_download_dir=os.path.join(staging_root, "downloads"),
             )
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            entry = dp_mod.GrabListEntry(
+            entry = GrabListEntry(
                 album_id=42,
                 artist="Test Artist",
                 title="Test Album",
@@ -2602,7 +2604,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 db_request_id=42,
                 import_folder=processing_dir,
             )
-            staged_album = dp_mod.StagedAlbum.from_entry(
+            staged_album = StagedAlbum.from_entry(
                 entry,
                 default_path=processing_dir,
             )
@@ -2613,11 +2615,11 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             )
 
             with patch.object(
-                dp_mod,
+                validation_mod,
                 "dispatch_import_core",
                 return_value=DispatchOutcome(success=True, message="ok"),
             ) as mock_dispatch:
-                outcome = dp_mod._handle_valid_result(
+                outcome = validation_mod._handle_valid_result(
                     entry,
                     bv_result,
                     staged_album,
