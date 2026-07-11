@@ -89,7 +89,8 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         # MP3 @ 256 kbps classifies TRANSPARENT in the default rank model
         # (Opus 128 / MP3 V0 are transparent; see docs/quality-ranks.md).
         beets_db.set_mbid_detail(
-            "rel-1", {"beets_format": "MP3", "beets_bitrate": 256})
+            "rel-1", {"beets_format": "MP3", "beets_bitrate": 194,
+                      "beets_avg_bitrate": 256})
         with patch("web.server.check_beets_library",
                    return_value={"rel-1"}), \
                 patch("web.server._beets_db", return_value=beets_db):

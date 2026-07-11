@@ -113,6 +113,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "added": 1773651901.0,
             "formats": "MP3",
             "min_bitrate": 320000,
+            "avg_bitrate": 320000,
             "type": "album",
             "label": "Test Label",
             "country": "US",
@@ -197,6 +198,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "added": 1773651901.0,
             "formats": "MP3",
             "min_bitrate": 320000,
+            "avg_bitrate": 320000,
             "type": "album",
             "label": "Test Label",
             "country": "US",
@@ -243,6 +245,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "added": 1773651902.0,
             "formats": "MP3",
             "min_bitrate": 320000,
+            "avg_bitrate": 320000,
             "type": "album",
             "label": "Test Label",
             "country": "AU",
@@ -278,6 +281,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "added": 1773651904.0,
             "formats": "MP3",
             "min_bitrate": 192000,
+            "avg_bitrate": 192000,
             "type": "album",
             "label": "Test Label",
             "country": "AU",
@@ -322,6 +326,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "added": 1773651903.0,
             "formats": "MP3",
             "min_bitrate": 320000,
+            "avg_bitrate": 320000,
             "type": "album",
             "label": "Test Label",
             "country": "US",
@@ -643,7 +648,11 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         }
         beets_db = FakeBeetsDB()
         beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
-        beets_db.set_mbid_detail(self.RELEASE_ID, {})
+        beets_db.set_mbid_detail(self.RELEASE_ID, {
+            "beets_format": "MP3",
+            "beets_bitrate": 194,
+            "beets_avg_bitrate": 288,
+        })
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
                 patch("web.server._beets_db", return_value=beets_db), \
@@ -657,6 +666,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data["releases"][0], self.RELEASE_GROUP_REQUIRED_FIELDS,
                                 "release group release")
         self.assertEqual(data["releases"][0]["beets_album_id"], 7)
+        self.assertEqual(data["releases"][0]["library_min_bitrate"], 194)
+        self.assertEqual(data["releases"][0]["library_avg_bitrate"], 288)
+        self.assertEqual(data["releases"][0]["library_rank"], "transparent")
 
     def test_release_detail_contract(self):
         release = {
@@ -673,7 +685,11 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         }
         beets_db = FakeBeetsDB()
         beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
-        beets_db.set_mbid_detail(self.RELEASE_ID, {})
+        beets_db.set_mbid_detail(self.RELEASE_ID, {
+            "beets_format": "MP3",
+            "beets_bitrate": 194,
+            "beets_avg_bitrate": 288,
+        })
         self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id=self.RELEASE_ID,
         ))
@@ -689,6 +705,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data["tracks"][0], self.RELEASE_TRACK_REQUIRED_FIELDS,
                                 "release detail track")
         self.assertEqual(data["beets_album_id"], 7)
+        self.assertEqual(data["library_min_bitrate"], 194)
+        self.assertEqual(data["library_avg_bitrate"], 288)
+        self.assertEqual(data["library_rank"], "transparent")
 
     def test_release_detail_includes_beets_tracks_when_in_library(self):
         """In-library release with beets item rows → the payload carries
@@ -1346,12 +1365,13 @@ class TestLibraryArtistContract(unittest.TestCase):
     REQUIRED_FIELDS = {
         "id", "album", "artist", "year", "mb_albumid", "track_count",
         "mb_releasegroupid", "release_group_title", "added",
-        "formats", "min_bitrate", "type", "label", "country", "source",
+        "formats", "min_bitrate", "avg_bitrate", "type", "label", "country", "source",
     }
 
     FIELD_TYPES = {
         "id": int, "album": str, "artist": str, "year": int,
-        "track_count": int, "min_bitrate": int, "added": float,
+        "track_count": int, "min_bitrate": int, "avg_bitrate": int,
+        "added": float,
     }
 
     def test_response_has_all_required_fields(self):

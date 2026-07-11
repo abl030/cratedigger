@@ -11,7 +11,7 @@
  *
  * The in-library badge is "expanded" with a compact on-disk quality
  * suffix (e.g. "in library · M V2", "in library · F", "in library ·
- * O 128") when the caller passes library_format / library_min_bitrate.
+ * O 128") when the caller passes library_format / library_avg_bitrate.
  * Falls back to plain "in library" when those fields are absent.
  */
 
@@ -23,7 +23,8 @@ import { qualityLabelShort } from './util.js';
  * @property {string} [id] - Used to look up live mutations in pipelineStore
  * @property {boolean} [in_library]
  * @property {string|null|undefined} [library_format] - "MP3", "FLAC", etc.
- * @property {number|null|undefined} [library_min_bitrate] - kbps
+ * @property {number|null|undefined} [library_min_bitrate] - kbps floor; not a rank signal
+ * @property {number|null|undefined} [library_avg_bitrate] - positive-track mean kbps
  * @property {string|null|undefined} [library_rank] - lowercase QualityRank
  *   name from the codec-aware rank gate ('lossless' | 'transparent' |
  *   'excellent' | 'good' | 'acceptable' | 'poor' | 'unknown'). When
@@ -50,7 +51,7 @@ export function renderStatusBadges(item) {
   if (item.in_library) {
     const q = qualityLabelShort(
       item.library_format || '',
-      item.library_min_bitrate || 0,
+      item.library_avg_bitrate || 0,
     );
     const suffix = q && q !== '?' ? ` · ${q}` : '';
     // Rank colour overrides the default blue when the backend supplied

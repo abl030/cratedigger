@@ -26,9 +26,12 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             "bad-quality": 12,
         }
         mock_beets.check_mbids_detail.return_value = {
-            "held": {"beets_format": "FLAC", "beets_bitrate": 1100},
-            "both": {"beets_format": "MP3", "beets_bitrate": 320},
-            "bad-quality": {"beets_format": None, "beets_bitrate": None},
+            "held": {"beets_format": "FLAC", "beets_bitrate": 900,
+                     "beets_avg_bitrate": 1100},
+            "both": {"beets_format": "MP3", "beets_bitrate": 194,
+                     "beets_avg_bitrate": 288},
+            "bad-quality": {"beets_format": None, "beets_bitrate": None,
+                            "beets_avg_bitrate": None},
         }
 
         with patch("web.server.check_beets_library",
@@ -46,7 +49,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertTrue(by_id["held"]["in_library"])
         self.assertEqual(by_id["held"]["beets_album_id"], 10)
         self.assertEqual(by_id["held"]["library_format"], "FLAC")
-        self.assertEqual(by_id["held"]["library_min_bitrate"], 1100)
+        self.assertEqual(by_id["held"]["library_min_bitrate"], 900)
+        self.assertEqual(by_id["held"]["library_avg_bitrate"], 1100)
         # Real compute_library_rank — 1100kbps FLAC is lossless.
         self.assertEqual(by_id["held"]["library_rank"], "lossless")
         self.assertIsNone(by_id["held"]["pipeline_status"])
@@ -58,6 +62,9 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
 
         self.assertTrue(by_id["both"]["in_library"])
         self.assertEqual(by_id["both"]["beets_album_id"], 11)
+        self.assertEqual(by_id["both"]["library_min_bitrate"], 194)
+        self.assertEqual(by_id["both"]["library_avg_bitrate"], 288)
+        self.assertEqual(by_id["both"]["library_rank"], "transparent")
         self.assertEqual(by_id["both"]["pipeline_status"], "queued")
         self.assertEqual(by_id["both"]["pipeline_id"], 22)
 
@@ -104,7 +111,8 @@ class TestBandReleaseIds(unittest.TestCase):
         contract test)."""
         mock_beets = MagicMock()
         mock_beets.check_mbids_detail.return_value = {
-            "on-disk": {"beets_format": "FLAC", "beets_bitrate": 1100},
+            "on-disk": {"beets_format": "FLAC", "beets_bitrate": 900,
+                        "beets_avg_bitrate": 1100},
             "no-detail": {},
         }
         with patch("web.server.check_beets_library",

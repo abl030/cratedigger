@@ -22,6 +22,7 @@ from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
 # (web.routes.browse.discogs_api) and `mb_api` (web.server.mb_api) don't
 # replace the constants with auto-generated Mock attributes.
 from lib.artist_compare import annotate_in_library, merge_discographies
+from lib.banding import current_library_bitrate
 from web.library_artist_service import list_library_artist_rows
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import RouteRegistration, pattern_route, route
@@ -269,14 +270,16 @@ def _overlay_disambiguate(skeleton: dict) -> dict:
             if pq:
                 p["library_format"] = pq.get("beets_format") or ""
                 p["library_min_bitrate"] = pq.get("beets_bitrate") or 0
+                p["library_avg_bitrate"] = current_library_bitrate(pq)
                 p["library_rank"] = srv.compute_library_rank(
-                    p["library_format"], p["library_min_bitrate"])
+                    p["library_format"], p["library_avg_bitrate"])
 
         if rg_quality:
             rg["library_format"] = rg_quality.get("beets_format") or ""
             rg["library_min_bitrate"] = rg_quality.get("beets_bitrate") or 0
+            rg["library_avg_bitrate"] = current_library_bitrate(rg_quality)
             rg["library_rank"] = srv.compute_library_rank(
-                rg["library_format"], rg["library_min_bitrate"])
+                rg["library_format"], rg["library_avg_bitrate"])
 
     return response
 
@@ -337,9 +340,11 @@ def get_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]], release
         fmt = fmt_raw if isinstance(fmt_raw, str) else ""
         br_raw = quality.get("beets_bitrate")
         br = br_raw if isinstance(br_raw, int) else 0
+        avg_br = current_library_bitrate(quality)
         data["library_format"] = fmt
         data["library_min_bitrate"] = br
-        data["library_rank"] = srv.compute_library_rank(fmt, br)
+        data["library_avg_bitrate"] = avg_br
+        data["library_rank"] = srv.compute_library_rank(fmt, avg_br)
         tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
@@ -410,9 +415,11 @@ def get_discogs_release(h: BaseHTTPRequestHandler, params: dict[str, list[str]],
         fmt = fmt_raw if isinstance(fmt_raw, str) else ""
         br_raw = quality.get("beets_bitrate")
         br = br_raw if isinstance(br_raw, int) else 0
+        avg_br = current_library_bitrate(quality)
         data["library_format"] = fmt
         data["library_min_bitrate"] = br
-        data["library_rank"] = srv.compute_library_rank(fmt, br)
+        data["library_avg_bitrate"] = avg_br
+        data["library_rank"] = srv.compute_library_rank(fmt, avg_br)
         tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
             data["beets_tracks"] = tracks

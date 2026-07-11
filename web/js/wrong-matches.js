@@ -464,7 +464,7 @@ function convergeRequestBody(requestId, thresholdMilli) {
  * Format the per-candidate stored evidence cells for a wrong-match
  * entry. Pure — input is the entry payload, output is a `{format,
  * spectral, v0}` triple of short display strings. The format cell
- * reads the canonical evidence row (storage_format + min_bitrate kbps)
+ * reads the canonical evidence row (storage_format + explicit min/avg kbps)
  * surfaced by /api/wrong-matches via album_quality_evidence; the
  * candidate row never starts a preview job from the UI (R3) and never
  * exposes a preview button.
@@ -476,10 +476,18 @@ function formatEntryEvidence(entry) {
     ? entry.format : null;
   const minBr = entry && Number.isFinite(entry.min_bitrate)
     ? entry.min_bitrate : null;
+  const avgBr = entry && Number.isFinite(entry.avg_bitrate)
+    ? entry.avg_bitrate : null;
   let format = '—';
-  if (fmt && minBr != null && minBr > 0) format = `${fmt} ${minBr}k`;
+  if (fmt && avgBr != null && avgBr > 0 && minBr != null && minBr > 0) {
+    format = `${fmt} avg ${avgBr}k · min ${minBr}k`;
+  } else if (fmt && avgBr != null && avgBr > 0) format = `${fmt} avg ${avgBr}k`;
+  else if (fmt && minBr != null && minBr > 0) format = `${fmt} min ${minBr}k`;
   else if (fmt) format = fmt;
-  else if (minBr != null && minBr > 0) format = `${minBr}k`;
+  else if (avgBr != null && avgBr > 0 && minBr != null && minBr > 0) {
+    format = `avg ${avgBr}k · min ${minBr}k`;
+  } else if (avgBr != null && avgBr > 0) format = `avg ${avgBr}k`;
+  else if (minBr != null && minBr > 0) format = `min ${minBr}k`;
 
   const grade = entry && typeof entry.spectral_grade === 'string'
     ? entry.spectral_grade : null;
@@ -803,13 +811,17 @@ function renderQualityBadges(g) {
   // and leave the badge strip empty.
   //
   // Issues #121 / #123: the backend gates `in_library` and the
-  // quality fields (`quality_label`, `min_bitrate`,
+  // quality fields (`quality_label`, `avg_bitrate`, `min_bitrate`,
   // `current_spectral_grade`, `format`) on exact-ID match — no
   // fuzzy fallback. When `in_library=true` the quality fields will
   // be populated; when false they'll be null. `format` stays in the
   // guard because it's the fallback badge text when bitrate is null
   // (e.g. FLAC with no bitrate metadata).
-  const hasOnDiskQuality = g.quality_label || g.min_bitrate
+  const avgBr = Number.isFinite(g.avg_bitrate) && g.avg_bitrate > 0
+    ? g.avg_bitrate : null;
+  const minBr = Number.isFinite(g.min_bitrate) && g.min_bitrate > 0
+    ? g.min_bitrate : null;
+  const hasOnDiskQuality = g.quality_label || avgBr || minBr
     || g.current_spectral_grade || g.format;
   if (!hasOnDiskQuality && !g.in_library) {
     return '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>';
@@ -827,8 +839,11 @@ function renderQualityBadges(g) {
   if (label) {
     const color = rankColor(g.quality_rank || '');
     parts.push(`<span class="badge" style="background:#222;color:${color};border:1px solid ${color};">${esc(label)}</span>`);
-  } else if (g.min_bitrate) {
-    parts.push(`<span class="badge" style="background:#222;color:#aaa;">${g.min_bitrate}k</span>`);
+  } else if (avgBr !== null || minBr !== null) {
+    const fallback = [];
+    if (avgBr !== null) fallback.push(`avg ${avgBr}k`);
+    if (minBr !== null) fallback.push(`min ${minBr}k`);
+    parts.push(`<span class="badge" style="background:#222;color:#aaa;">${fallback.join(' · ')}</span>`);
   }
   if (g.verified_lossless) {
     parts.push('<span class="badge" style="background:#1a3a4a;color:#7cf;">verified lossless</span>');
@@ -1303,6 +1318,7 @@ export const __test__ = {
   removeWrongMatchEntry,
   removeWrongMatchGroup,
   renderLatestImport,
+  renderQualityBadges,
   renderWrongMatchExplorer,
   renderWrongMatches,
   setWrongMatchConvergeThreshold,

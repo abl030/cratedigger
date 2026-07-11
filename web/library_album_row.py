@@ -31,9 +31,9 @@ def _timestamp(value: object | None) -> float:
     )
 
 
-def _bitrate_kbps(min_bitrate_bps: object | None) -> int:
-    if isinstance(min_bitrate_bps, int):
-        return min_bitrate_bps // 1000
+def _bitrate_kbps(bitrate_bps: object | None) -> int:
+    if isinstance(bitrate_bps, int):
+        return bitrate_bps // 1000
     return 0
 
 
@@ -49,6 +49,8 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
       stays stable.
     - ``library_rank`` is only meaningful for beets-backed rows. Pipeline-only
       rows carry ``None`` to keep the schema uniform.
+    - ``min_bitrate`` remains the bps floor. ``avg_bitrate`` is the positive-
+      track mean used for current-state badges and ``library_rank``.
     - ``source`` keeps the historical row-provenance semantics: beets-backed
       rows expose release origin (``musicbrainz`` / ``discogs`` / ``unknown``),
       while pipeline-only rows mirror the pipeline request source
@@ -67,6 +69,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     added: float
     formats: str
     min_bitrate: int | None
+    avg_bitrate: int | None
     type: str
     label: str
     country: str | None
@@ -100,6 +103,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         )
         formats = str(album.get("formats") or "")
         min_bitrate = album.get("min_bitrate")
+        avg_bitrate = album.get("avg_bitrate")
         return msgspec.convert(
             {
                 "id": album["id"],
@@ -113,6 +117,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "added": _timestamp(album.get("added")),
                 "formats": formats,
                 "min_bitrate": min_bitrate,
+                "avg_bitrate": avg_bitrate,
                 "type": str(album.get("type") or ""),
                 "label": str(album.get("label") or ""),
                 "country": album.get("country"),
@@ -122,7 +127,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "pipeline_status": None,
                 "pipeline_id": None,
                 "upgrade_queued": False,
-                "library_rank": rank_fn(formats, _bitrate_kbps(min_bitrate)),
+                "library_rank": rank_fn(formats, _bitrate_kbps(avg_bitrate)),
             },
             type=cls,
         )
@@ -164,6 +169,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "added": _timestamp(row.get("created_at")),
                 "formats": str(row.get("format") or ""),
                 "min_bitrate": min_bitrate * 1000 if isinstance(min_bitrate, int) else None,
+                "avg_bitrate": None,
                 "type": "album",
                 "label": "",
                 "country": row.get("country"),

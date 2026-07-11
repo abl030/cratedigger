@@ -169,6 +169,7 @@ export function synthesizeMasterlessRow(data) {
     pipeline_id: data.pipeline_id ?? null,
     library_format: data.library_format,
     library_min_bitrate: data.library_min_bitrate,
+    library_avg_bitrate: data.library_avg_bitrate,
     library_rank: data.library_rank,
   };
 }

@@ -3946,6 +3946,10 @@ class FakePipelineDB:
                     ev_measurement.min_bitrate_kbps
                     if ev_measurement is not None else None
                 ),
+                "evidence_avg_bitrate": (
+                    ev_measurement.avg_bitrate_kbps
+                    if ev_measurement is not None else None
+                ),
                 "evidence_verified_lossless": (
                     bool(ev_measurement.verified_lossless)
                     if ev_measurement is not None else False

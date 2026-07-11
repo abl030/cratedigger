@@ -523,6 +523,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 COALESCE(e.v0_avg_bitrate_kbps, dl.v0_probe_avg_bitrate) AS v0_probe_avg_bitrate,
                 e.storage_format AS evidence_storage_format,
                 e.min_bitrate_kbps AS evidence_min_bitrate,
+                e.avg_bitrate_kbps AS evidence_avg_bitrate,
                 e.verified_lossless AS evidence_verified_lossless,
                 ar.status AS request_status,
                 ar.min_bitrate AS request_min_bitrate,

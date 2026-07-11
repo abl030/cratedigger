@@ -158,6 +158,15 @@ middle value, or the mean of the two middle values for even track counts.
 Both are computed in Python in `BeetsDB.get_album_info()` because the
 beets library is SQLite (no native percentile aggregator).
 
+Current web-library labels and ranks use the positive-track average as well.
+The bounded `check_mbids_detail()` projection exposes the existing minimum as
+`beets_bitrate` and the mean as `beets_avg_bitrate`; artist rows expose the
+same values in bps as `min_bitrate` and `avg_bitrate`. Frontend overlays keep
+the explicit `library_min_bitrate` floor for display/controls and use
+`library_avg_bitrate` for the label and rank. This current-state rule is
+separate from persisted decision history: rows without `comparison_basis`
+retain their legacy min-derived wording byte for byte.
+
 ## Default band values
 
 All numbers live in `lib.quality.QualityRankConfig` defaults and in the
@@ -419,4 +428,3 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `gate_min_rank`, `bitrate_metric`, and thresholds the simulator is using. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
 
 3. **Simulate against the live config** -- `ssh doc2 'pipeline-cli import-preview --values --values-json '"'"'{"is_flac": false, "min_bitrate": 200, "is_cbr": false}'"'"''`. The preview path loads the same runtime rank config the importer uses, so the verdict reflects your tuning (the web Decisions tab that used to render these values was removed in #575).
-

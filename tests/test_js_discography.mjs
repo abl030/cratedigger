@@ -87,12 +87,14 @@ console.log('synthesizeMasterlessRow() — in-library payload keeps quality fiel
     pipeline_id: 7,
     library_format: 'FLAC',
     library_min_bitrate: 900,
+    library_avg_bitrate: 1100,
     library_rank: 'lossless',
   });
   assertEqual(row.in_library, true, 'in_library true forwarded');
   assertEqual(row.beets_album_id, 42, 'beets_album_id forwarded');
   assertEqual(row.library_format, 'FLAC', 'library_format forwarded');
   assertEqual(row.library_min_bitrate, 900, 'library_min_bitrate forwarded');
+  assertEqual(row.library_avg_bitrate, 1100, 'library_avg_bitrate forwarded');
   assertEqual(row.library_rank, 'lossless', 'library_rank forwarded');
   assertEqual(row.format, '?', 'empty formats fall back to ?');
 }

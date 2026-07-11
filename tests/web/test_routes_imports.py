@@ -112,7 +112,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         "mb_release_group_id",
         "in_library", "pending_count", "entries",
         # Quality summary for the collapsed card (issue: "show quality on disk").
-        "status", "min_bitrate", "format", "verified_lossless",
+        "status", "min_bitrate", "avg_bitrate", "format", "verified_lossless",
         "current_spectral_grade", "current_spectral_bitrate",
         "quality_label", "quality_rank",
         # Summary of the last successful import for the request — tells the
@@ -128,11 +128,11 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # values are None when the underlying row lacks evidence.
         "spectral_grade", "spectral_bitrate",
         "v0_probe_kind", "v0_probe_avg_bitrate",
-        # Storage format + min bitrate + computed quality rank — read
+        # Storage format + explicit min/avg bitrates + computed quality rank — read
         # from album_quality_evidence via download_log.candidate_evidence_id
         # so wrong-match rows show their actual codec/rank instead of
         # dashes from the legacy denorm columns. Drives entry sort order.
-        "format", "min_bitrate", "verified_lossless", "quality_rank",
+        "format", "min_bitrate", "avg_bitrate", "verified_lossless", "quality_rank",
     }
     DELETE_RESULT_REQUIRED_FIELDS = {
         "status", "download_log_id", "outcome", "success", "request_id",
@@ -216,6 +216,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self, log_id: int, *,
         storage_format: str | None = None,
         min_bitrate: int | None = None,
+        avg_bitrate: int | None = None,
         verified_lossless: bool = False,
         spectral_grade: str | None = None,
         spectral_bitrate: int | None = None,
@@ -235,6 +236,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             storage_format=storage_format,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=(
+                    avg_bitrate if avg_bitrate is not None else min_bitrate
+                ),
                 format=storage_format,
                 verified_lossless=verified_lossless,
                 spectral_grade=spectral_grade,
@@ -667,9 +671,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
         get_wrong_matches() LEFT JOINs the evidence row addressed by
         download_log.candidate_evidence_id; the route layer surfaces
-        storage_format → entry.format, min_bitrate_kbps → entry.min_bitrate,
+        storage_format → entry.format, min/avg bitrate → entry.min/avg_bitrate,
         verified_lossless → entry.verified_lossless, and computes
-        quality_rank from format + bitrate via compute_library_rank.
+        quality_rank from format + average via compute_library_rank.
         """
         self._seed_entry_evidence(
             self.default_log_id,
@@ -680,6 +684,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         entry = data["groups"][0]["entries"][0]
         self.assertEqual(entry["format"], "FLAC")
         self.assertEqual(entry["min_bitrate"], 0)
+        self.assertEqual(entry["avg_bitrate"], 0)
         self.assertTrue(entry["verified_lossless"])
         self.assertEqual(entry["quality_rank"], "lossless")
 
@@ -770,7 +775,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     @patch("web.server.check_beets_library_detail",
            return_value={"abc-123": {"beets_format": "MP3",
-                                     "beets_bitrate": 207,
+                                     "beets_bitrate": 194,
+                                     "beets_avg_bitrate": 288,
                                      "beets_tracks": 12}})
     def test_group_shows_current_quality_when_imported(self, _mock_beets):
         """Imported album: quality_label, quality_rank, verified_lossless reflect on-disk state."""
@@ -781,16 +787,13 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "imported")
-        self.assertEqual(group["min_bitrate"], 207)
+        self.assertEqual(group["min_bitrate"], 194)
+        self.assertEqual(group["avg_bitrate"], 288)
         self.assertTrue(group["verified_lossless"])
         self.assertEqual(group["current_spectral_grade"], "genuine")
         self.assertEqual(group["format"], "MP3")
-        # `quality_label` is bitrate-only: 207 kbps lands in the V2 band on
-        # the label function (V0 starts at ≥220). The rank is independent —
-        # it applies `compute_library_rank` which uses the codec-aware tiers.
-        self.assertIsInstance(group["quality_label"], str)
-        self.assertTrue(group["quality_label"].startswith("MP3"))
-        self.assertIsInstance(group["quality_rank"], str)
+        self.assertEqual(group["quality_label"], "MP3 V0")
+        self.assertEqual(group["quality_rank"], "transparent")
 
     def test_group_shows_nothing_on_disk_when_wanted(self):
         """Wanted album: no files in library yet — fields are null, label signals 'not on disk'."""

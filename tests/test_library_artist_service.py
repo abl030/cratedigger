@@ -37,6 +37,7 @@ def _beets_album(**overrides: object) -> dict[str, object]:
         "added": 1773651901.0,
         "formats": "MP3",
         "min_bitrate": 320000,
+        "avg_bitrate": 320000,
         "type": "album",
         "label": "Test Label",
         "country": "US",

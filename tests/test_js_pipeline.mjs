@@ -97,5 +97,25 @@ console.log('clearPipelineSearch() makes filters and search mutually exclusive')
   assertExcludes(html, 'No matches', 'list body is back in filter mode after clear');
 }
 
+console.log('request 6039 current Quality uses average positive track bitrate');
+{
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: null,
+      last_download_spectral_bitrate: null,
+      current_spectral_grade: null,
+      last_download_spectral_grade: null,
+      verified_lossless: false,
+    },
+    [
+      ...Array.from({ length: 6 }, () => ({ format: 'MP3', bitrate: 320000 })),
+      { format: 'MP3', bitrate: 196000 },
+      { format: 'MP3', bitrate: 194000 },
+    ],
+  );
+  assertContains(html, 'MP3 V0', 'avg 288 renders the current V0 label');
+  assertExcludes(html, 'MP3 V2', 'min 194 never paints current quality');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

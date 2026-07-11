@@ -8,7 +8,7 @@
 /**
  * Format bitrate into a quality label like "MP3 V0" or "FLAC".
  * @param {string|null|undefined} formats - Comma-separated format string (e.g. "MP3" or "MP3,FLAC")
- * @param {number|null|undefined} kbps - Bitrate in kilobits per second
+ * @param {number|null|undefined} kbps - Current positive-track average in kbps
  * @returns {string}
  */
 export function qualityLabel(formats, kbps) {
@@ -35,7 +35,7 @@ export function qualityLabel(formats, kbps) {
  * the bitrate suffix.
  *
  * @param {string|null|undefined} formats
- * @param {number|null|undefined} kbps
+ * @param {number|null|undefined} kbps - Current positive-track average in kbps
  * @returns {string}
  */
 export function qualityLabelShort(formats, kbps) {

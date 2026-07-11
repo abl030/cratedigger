@@ -119,6 +119,9 @@ def compute_library_rank(format_str: str | None, bitrate_kbps: int | None) -> st
     produces VBR-V0 MP3, and for the bitrate buckets the badge cares
     about the VBR-vs-CBR distinction barely matters at the display level.
 
+    Current-state callers supply the positive-track average. The explicit
+    minimum remains floor data and must not enter this rank path.
+
     Thin wrapper supplying the web process's cached rank cfg; the pure
     decision lives in ``lib.banding`` so the CLI bands without importing web.
     """

@@ -511,7 +511,11 @@ class BeetsDB:
         ]
 
     def check_mbids_detail(self, mbids: list[str]) -> dict[str, dict[str, object]]:
-        """Batch lookup: release ID → {beets_tracks, beets_format, beets_bitrate, beets_samplerate, beets_bitdepth}.
+        """Batch lookup of release IDs and current beets audio aggregates.
+
+        ``beets_bitrate`` remains the minimum-track floor in kbps.
+        ``beets_avg_bitrate`` is the average across positive track bitrates
+        and is the current-state label/rank signal.
 
         Accepts both MusicBrainz UUIDs (matched against ``albums.mb_albumid``)
         and Discogs numeric IDs (matched against ``albums.discogs_albumid``,
@@ -558,18 +562,27 @@ class BeetsDB:
                     continue
                 bitrate = r[3]
                 kbps = int(bitrate / 1000) if isinstance(bitrate, (int, float)) else None
+                avg_bitrate = r[4]
+                avg_kbps = (
+                    int(avg_bitrate / 1000)
+                    if isinstance(avg_bitrate, (int, float))
+                    else None
+                )
                 result[str(r[0])] = {
                     "beets_tracks": r[1],
                     "beets_format": r[2],
                     "beets_bitrate": kbps,
-                    "beets_samplerate": r[4],
-                    "beets_bitdepth": r[5],
+                    "beets_avg_bitrate": avg_kbps,
+                    "beets_samplerate": r[5],
+                    "beets_bitdepth": r[6],
                 }
 
         detail_cols = (
             "  (SELECT COUNT(*) FROM items WHERE album_id = a.id) AS track_count, "
             "  (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) AS formats, "
-            "  (SELECT MIN(i.bitrate) FROM items i WHERE i.album_id = a.id) AS min_bitrate, "
+            "  (SELECT MIN(i.bitrate) FROM items i "
+            "   WHERE i.album_id = a.id AND i.bitrate > 0) AS min_bitrate, "
+            "  (SELECT AVG(i.bitrate) FROM items i WHERE i.album_id = a.id AND i.bitrate > 0) AS avg_bitrate, "
             "  (SELECT MIN(i.samplerate) FROM items i WHERE i.album_id = a.id) AS samplerate, "
             "  (SELECT MAX(i.bitdepth) FROM items i WHERE i.album_id = a.id) AS bitdepth "
         )
@@ -631,7 +644,10 @@ class BeetsDB:
         "       (SELECT COUNT(*) FROM items WHERE items.album_id = a.id) as track_count, "
         "       (SELECT GROUP_CONCAT(DISTINCT i.format) FROM items i WHERE i.album_id = a.id) as formats, "
         "       a.added, a.mb_releasegroupid, a.release_group_title, "
-        "       (SELECT MIN(i.bitrate) FROM items i WHERE i.album_id = a.id) as min_bitrate, "
+        "       (SELECT MIN(i.bitrate) FROM items i "
+        "        WHERE i.album_id = a.id AND i.bitrate > 0) as min_bitrate, "
+        "       (SELECT CAST(AVG(i.bitrate) AS INTEGER) FROM items i "
+        "        WHERE i.album_id = a.id AND i.bitrate > 0) as avg_bitrate, "
         "       a.discogs_albumid "
         "FROM albums a "
     )
@@ -746,18 +762,19 @@ class BeetsDB:
     def _album_row_to_dict(r: tuple[object, ...]) -> dict[str, object]:
         """Convert a standard album query row to dict.
 
-        Column order must match _ALBUM_SELECT (indices 0-14).
+        Column order must match _ALBUM_SELECT (indices 0-15).
         Field names here are the API contract — the frontend depends on them.
         """
-        frontend_id = frontend_release_id(r[4], r[14])
+        frontend_id = frontend_release_id(r[4], r[15])
         source = detect_release_source(frontend_id)
-        discogs_identity = ReleaseIdentity.from_id(r[14])
+        discogs_identity = ReleaseIdentity.from_id(r[15])
         return {
             "id": r[0], "album": r[1], "artist": r[2], "year": r[3],
             "mb_albumid": frontend_id, "type": r[5], "label": r[6],
             "country": r[7], "track_count": r[8], "formats": r[9],
             "added": r[10], "mb_releasegroupid": r[11],
             "release_group_title": r[12], "min_bitrate": r[13],
+            "avg_bitrate": r[14],
             "source": source,
             "discogs_albumid": (
                 discogs_identity.release_id

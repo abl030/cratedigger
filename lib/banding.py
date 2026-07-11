@@ -36,8 +36,9 @@ def compute_library_rank(
 ) -> str:
     """Codec-aware quality-rank label for a beets album, given the rank cfg.
 
-    Pure (moved from ``web/server.py``, which keeps a 2-arg wrapper supplying
-    the cached cfg). Returns the lowercase rank name (``lossless`` /
+    Current-state callers pass the positive-track average, never the minimum
+    floor. Pure (moved from ``web/server.py``, which keeps a 2-arg wrapper
+    supplying the cached cfg). Returns the lowercase rank name (``lossless`` /
     ``transparent`` / ``excellent`` / ``good`` / ``acceptable`` / ``poor`` /
     ``unknown``). Treats MP3 as VBR — cratedigger only produces VBR-V0 MP3, and
     the badge buckets barely care about the VBR/CBR distinction.
@@ -49,6 +50,18 @@ def compute_library_rank(
         return BAND_UNKNOWN
     from lib.quality import quality_rank
     return quality_rank(fmt, bitrate_kbps, is_cbr=False, cfg=cfg).name.lower()
+
+
+def current_library_bitrate(detail: dict[str, object]) -> int:
+    """Return the positive-track average bitrate for current-state ranking.
+
+    ``beets_bitrate`` is deliberately not a fallback: that field is the
+    minimum-track floor retained for display and operator controls. A missing
+    average contributes no bitrate evidence, rather than reviving the
+    min-derived VBR label bug. Codec-only rules may still determine a rank.
+    """
+    raw = detail.get("beets_avg_bitrate")
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
 
 
 def band_from_detail(
@@ -76,6 +89,5 @@ def band_from_detail(
         return BAND_UNKNOWN
     fmt_raw = q.get("beets_format")
     fmt = fmt_raw if isinstance(fmt_raw, str) else ""
-    br_raw = q.get("beets_bitrate")
-    br = br_raw if isinstance(br_raw, int) else 0
+    br = current_library_bitrate(q)
     return compute_library_rank(fmt, br, cfg)
