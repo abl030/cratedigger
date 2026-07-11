@@ -524,6 +524,35 @@ force-mode rejects are deleted and cleared; would-import, uncertain, missing
 evidence, stale evidence, active-job, and missing-path rows stay actionable for
 manual review or converge.
 
+The quarantine lifecycle view surfaces folders that are protected from the
+disk reaper but no longer visible in Wrong Matches:
+
+```bash
+pipeline-cli triage quarantine --json
+curl https://music.ablz.au/api/triage/quarantine
+```
+
+Both read-only adapters wrap the same service. It scans only immediate real
+directories under the configured `<slskd_download_dir>/failed_imports/`; it
+does not recurse, follow symlinks, delete, or infer ownership. The code-owned
+`bad_files/` and `untracked_audio/` category roots are excluded rather than
+misreported as album folders or recursively expanded. A visible Wrong Matches
+row protects its immediate album root whether its persisted `failed_path` is a
+legacy relative path (`failed_imports/Artist - Album`), an absolute path, or a
+descendant of that album root. References outside the configured quarantine
+do not claim local folders. A `status='replaced'` parent is frozen audit
+history and is excluded by the shared default Wrong Matches visibility rule,
+so its reference does not hide a quarantine folder. The explicit
+`/api/wrong-matches?include_replaced=true` history view still surfaces those
+rows without changing lifecycle triage.
+
+Results are sorted by folder name and carry `name`, absolute `path`, and
+`mtime_ns`. A genuinely absent `failed_imports/` root is a valid empty state.
+Configuration, DB, validation-envelope, directory-read, and mid-scan race
+errors fail the whole view as CLI exit `5` / HTTP `503`; partial state is never
+presented as an empty or trustworthy orphan list. Deletion remains an explicit
+operator decision through the existing Wrong Matches delete surfaces.
+
 Historical rows may still contain
 `download_log.validation_result.wrong_match_triage` from the retired preview
 triage path. Recents History renders those old blobs as display-only audit

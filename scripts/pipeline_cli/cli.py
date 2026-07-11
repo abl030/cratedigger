@@ -42,7 +42,12 @@ from scripts.pipeline_cli.search_plan import (
     cmd_search_plan_show,
 )
 from scripts.pipeline_cli.show import cmd_show
-from scripts.pipeline_cli.triage import cmd_triage_list, cmd_triage_show
+from scripts.pipeline_cli.triage import (
+    _quarantine_scan_unavailable,
+    cmd_triage_list,
+    cmd_triage_quarantine,
+    cmd_triage_show,
+)
 from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
     cmd_wrong_match_delete_group,
@@ -52,13 +57,6 @@ from scripts.pipeline_cli.youtube import cmd_youtube_album, cmd_youtube_rescue
 
 
 def main():
-    # Mirror origins for every web.mb / web.discogs consumer in this
-    # process (add --discogs, youtube-album, distance, Replace, field
-    # resolution). Without this, the CLI silently runs against public MB
-    # and an unset Discogs base (tier-2 U6 wiring).
-    from web.api_bases import configure_api_bases_from_runtime_config
-    configure_api_bases_from_runtime_config()
-
     parser, p_sp, p_triage_op = _build_parser()
     args = parser.parse_args()
     if not args.command:
@@ -73,6 +71,11 @@ def main():
         p_triage_op.print_help()
         sys.exit(1)
 
+    is_quarantine = (
+        args.command == "triage"
+        and getattr(args, "triage_command", None) == "quarantine"
+    )
+
     # ``routes`` is the only subcommand that doesn't require a DB
     # connection — short-circuit before constructing PipelineDB so the
     # command works without a reachable database.
@@ -82,7 +85,25 @@ def main():
             sys.exit(rc)
         return
 
-    db = PipelineDB(args.dsn)
+    # Mirror origins for every web.mb / web.discogs consumer in this
+    # process (add --discogs, youtube-album, distance, Replace, field
+    # resolution). Quarantine is filesystem/DB-only and must not fail on
+    # unrelated mirror configuration before its own unavailable mapping can
+    # run. ``routes`` already returned above for the same zero-init reason.
+    if not is_quarantine:
+        from web.api_bases import configure_api_bases_from_runtime_config
+        configure_api_bases_from_runtime_config()
+
+    try:
+        db = PipelineDB(args.dsn)
+    except Exception:
+        if is_quarantine:
+            rc = _quarantine_scan_unavailable(
+                args,
+                "Could not open pipeline database for quarantine scan",
+            )
+            sys.exit(rc)
+        raise
 
     commands = {
         "list": cmd_list,
@@ -121,6 +142,7 @@ def main():
     triage_commands = {
         "show": cmd_triage_show,
         "list": cmd_triage_list,
+        "quarantine": cmd_triage_quarantine,
     }
     try:
         if args.command == "search-plan":

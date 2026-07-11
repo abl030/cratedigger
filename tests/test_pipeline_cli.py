@@ -983,6 +983,120 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
 
 
 class TestMainExitCodes(unittest.TestCase):
+    def test_non_quarantine_main_still_configures_mirror_api_bases(self):
+        import web.mb
+
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "status",
+        ]
+        db = FakePipelineDB()
+        old_mb_base = web.mb.MB_API_BASE
+        self.addCleanup(setattr, web.mb, "MB_API_BASE", old_mb_base)
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[MusicBrainz]\n"
+                    "api_base = http://main-entrypoint-mirror.test:5200\n"
+                )
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB",
+                return_value=db,
+            ), redirect_stdout(io.StringIO()):
+                pipeline_cli.main()
+
+        self.assertEqual(
+            web.mb.MB_API_BASE,
+            "http://main-entrypoint-mirror.test:5200/ws/2",
+        )
+        self.assertEqual(db.close_calls, 1)
+
+    def test_quarantine_main_maps_runtime_config_failure_and_closes_db(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "quarantine",
+            "--json",
+        ]
+        db = FakePipelineDB()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "lib.config.read_runtime_config",
+            side_effect=PermissionError("runtime config unreadable"),
+        ), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            return_value=db,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertIn("error", payload)
+        self.assertIn("runtime configuration", payload["error"])
+        self.assertEqual(db.close_calls, 1)
+
+    def test_quarantine_main_maps_db_construction_failure_to_json_exit_5(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "quarantine",
+            "--json",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            side_effect=RuntimeError("database unavailable"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {"error": "Could not open pipeline database for quarantine scan"},
+        )
+
+    def test_quarantine_main_maps_db_construction_failure_to_human_exit_5(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "quarantine",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            side_effect=RuntimeError("database unavailable"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Quarantine scan unavailable", stderr.getvalue())
+        self.assertIn(
+            "Could not open pipeline database for quarantine scan",
+            stderr.getvalue(),
+        )
+
     def test_main_propagates_command_return_code(self):
         argv = [
             "pipeline_cli.py",
@@ -3297,6 +3411,69 @@ class TestPipelineCliTriage(unittest.TestCase):
             rc = pipeline_cli.cmd_triage_show(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
+    def _run_quarantine(self, db, root, *, json_out=False):
+        config_path = os.path.join(root, "config.ini")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(f"[Slskd]\ndownload_dir = {root}\n")
+        args = SimpleNamespace(json=json_out)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            clear=False,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_quarantine(db, args)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_quarantine_json_matches_typed_service_shape(self):
+        from lib.quarantine_triage_service import QuarantineTriageResult
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as root:
+            quarantine = os.path.join(root, "failed_imports")
+            referenced = os.path.join(quarantine, "Referenced")
+            orphan = os.path.join(quarantine, "Orphan")
+            os.makedirs(referenced)
+            os.makedirs(orphan)
+            _seed_id = db.add_request("Artist", "Album", "request")
+            db.log_download(
+                _seed_id,
+                outcome="rejected",
+                validation_result={
+                    "failed_path": "failed_imports/Referenced",
+                    "scenario": "high_distance",
+                },
+            )
+
+            rc, out, err = self._run_quarantine(db, root, json_out=True)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        result = msgspec.convert(json.loads(out), type=QuarantineTriageResult)
+        self.assertEqual([folder.name for folder in result.folders], ["Orphan"])
+
+    def test_quarantine_human_output_names_folder(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "failed_imports", "Visible Orphan"))
+            rc, out, err = self._run_quarantine(
+                FakePipelineDB(), root,
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Visible Orphan", out)
+
+    def test_quarantine_scan_error_returns_5_with_json_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
+                f.write("not a directory")
+            rc, out, err = self._run_quarantine(
+                FakePipelineDB(), root, json_out=True,
+            )
+        self.assertEqual(rc, 5)
+        self.assertEqual(err, "")
+        self.assertIn("error", json.loads(out))
+
     def test_show_human_renders_request_meta_and_search_log(self):
         from lib.triage_service import TriageResult  # noqa: F401
         db = FakePipelineDB()
@@ -3681,6 +3858,7 @@ class TestPipelineCliRoutes(unittest.TestCase):
         # Nested commands are emitted as space-separated leaves.
         self.assertIn("search-plan show", output)
         self.assertIn("triage list", output)
+        self.assertIn("triage quarantine", output)
         # The ``routes`` command must self-describe.
         self.assertIn("routes", output)
 
@@ -3698,7 +3876,10 @@ class TestPipelineCliRoutes(unittest.TestCase):
             self.assertIsInstance(entry["description"], str)
         names_list = [entry["subcommand"] for entry in data]
         names_set = set(names_list)
-        for expected in ("list", "search-plan show", "triage list", "routes"):
+        for expected in (
+            "list", "search-plan show", "triage list",
+            "triage quarantine", "routes",
+        ):
             self.assertIn(expected, names_set)
 
         # Sort invariant — operators consume this as a stable index.

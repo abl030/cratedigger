@@ -56,7 +56,7 @@ def _build_parser() -> tuple[
     # search-plan (+ nested show/regenerate/advance/dry-run/saturation/history)
     p_sp = add_search_plan_subparser(sub)
 
-    # triage (+ nested show/list)
+    # triage (+ nested show/list/quarantine)
     p_triage_op = add_triage_subparser(sub)
 
     # long-tail

@@ -5,6 +5,7 @@ pipeline-cli show <request_id>               # quality columns + download histor
 pipeline-cli quality <request_id>            # simulate gate for genuine FLAC / V0 / CBR 320 / suspect FLAC
 pipeline-cli debug-download <download_log_id>  # raw JSONB audit for one attempt
 pipeline-cli search-plan show <request_id>   # active plan + cursor + per-slot usefulness stats (--json for machine output)
+pipeline-cli triage quarantine --json       # unreferenced immediate failed_imports album folders (read-only)
 pipeline-cli search-plan regenerate <request_id>  # operator repair path; resets cursor on success, preserves old plan on failure
 pipeline-cli query "SELECT ..."              # ad-hoc read-only SQL (add --json for machine output)
 pipeline-cli query - <<'SQL'                 # multi-line SQL without shell quoting
@@ -62,7 +63,7 @@ Every top-level `pipeline-cli` subcommand, one line each. Run `pipeline-cli rout
 | `set-intent` | Toggle lossless-on-disk for a request |
 | `show` | Show full details of a request |
 | `status` | Show counts by status |
-| `triage` | Operator triage (U16) — compose unfindable + field-quality + search-forensics for one request, or list a cohort by filter |
+| `triage` | Read-only operator triage — request/search forensics, cohort listing, and `triage quarantine` for unreferenced immediate `failed_imports/` album folders |
 | `wrong-match-delete` | Delete one visible Wrong Matches source folder |
 | `wrong-match-delete-group` | Delete visible Wrong Matches source folders for one request |
 | `wrong-match-triage` | Clean the full Wrong Matches queue using existing evidence |

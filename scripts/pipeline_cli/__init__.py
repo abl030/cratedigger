@@ -20,7 +20,7 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     replace.py           replace
     beets_distance.py    beets-distance
     youtube.py           youtube-album / youtube-rescue
-    triage.py             triage show / list
+    triage.py             triage show / list / quarantine
     long_tail.py          long-tail
     routes_meta.py       argparse tree construction (``_build_parser``)
                        + ``routes`` self-documentation
@@ -147,6 +147,7 @@ from scripts.pipeline_cli.triage import (
     _TRIAGE_VALID_FILTER_FORMS,
     _TRIAGE_VALID_FILTER_FORMS_BASE,
     cmd_triage_list,
+    cmd_triage_quarantine,
     cmd_triage_show,
 )
 from scripts.pipeline_cli.long_tail import _cli_band_fn, cmd_long_tail
@@ -191,6 +192,7 @@ __all__ = [
     "cmd_show",
     "cmd_status",
     "cmd_triage_list",
+    "cmd_triage_quarantine",
     "cmd_triage_show",
     "cmd_wrong_match_delete",
     "cmd_wrong_match_delete_group",
