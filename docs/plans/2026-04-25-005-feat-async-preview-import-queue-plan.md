@@ -415,7 +415,7 @@ mapping and terminal status transitions before wiring the loop.
 - `scripts/importer.py` for DB setup, loop shape, worker id, and `--once`.
 - `lib.import_preview.preview_import_from_path` and
   `preview_import_from_download_log` for no-mutation preview behavior.
-- `lib.download.reconstruct_grab_list_entry` and `ActiveDownloadState` parsing
+- `lib.download_reconstruction.reconstruct_grab_list_entry` and `ActiveDownloadState` parsing
   patterns for automation job state.
 
 **Test scenarios:**

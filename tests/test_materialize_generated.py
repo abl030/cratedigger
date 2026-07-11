@@ -59,12 +59,12 @@ from hypothesis import strategies as st
 
 from lib.download_processing import (
     Materialized,
-    _canonical_import_folder_path,
     _materialize_processing_dir,
 )
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
     attempt_fingerprint,
+    canonical_folder_for_row,
     canonical_processing_path,
     sanitize_processing_folder_name,
 )
@@ -213,7 +213,7 @@ class TestCanonicalPathProperties(unittest.TestCase):
 # ============================================================================
 #
 # _materialize_processing_dir's canonical folder is keyed by
-# attempt_fingerprint(files) (see _canonical_import_folder_path). Two
+# attempt_fingerprint(files) (via canonical_folder_for_row). Two
 # different download attempts for the SAME artist/title/year must
 # materialize into DIFFERENT folders whenever their (username, filename)
 # manifests differ, and into the SAME folder when the manifests are
@@ -324,7 +324,7 @@ class TestMaterializeAttemptIsolation(unittest.TestCase):
         expected_basenames = frozenset(staged_filename(f) for f in album.files)
         staged = StagedAlbum.from_entry(
             album,
-            default_path=_canonical_import_folder_path(album, download_root))
+            default_path=canonical_folder_for_row(album, download_root))
         result = _materialize_processing_dir(album, staged, ctx)
         self.assertIsInstance(result, Materialized)
         return staged, expected_basenames

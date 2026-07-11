@@ -9,9 +9,9 @@ the write-ahead transfer ledger, migration 045) because a
 completed-but-unconsumed download's slskd-side handle is unreliable —
 the end-of-cycle ``purge_completed_transfers`` removes stamped-owned
 completed records, and unstamped/foreign ones persist indefinitely. Eight invariants, each shipped as a deterministic pin
-(``TestDiskReaperDeterministicPins`` / ``TestCanonicalDerivationParity``)
+(``TestDiskReaperDeterministicPins`` / ``TestSharedCanonicalDerivation``)
 AND a generated property (``TestGeneratedDiskReaperInvariants`` /
-``TestGeneratedCanonicalDerivationParity``):
+``TestGeneratedSharedCanonicalDerivation``):
 
 1. **Within-root** — the reaper never removes anything outside
    ``slskd_download_dir``, and never removes the root itself.
@@ -30,12 +30,10 @@ AND a generated property (``TestGeneratedDiskReaperInvariants`` /
    ``active_download_state`` is missing or undecodable, the sweep
    aborts with ZERO deletions for the cycle: partial ownership
    knowledge must never make an unparseable row's files reap-eligible.
-7. **Derivation parity** — the canonical folder the reaper protects is
-   byte-identical to the folder materialize computes for the same row
-   (real ``reconstruct_grab_list_entry`` +
-   ``_canonical_import_folder_path`` on one side, the reaper's
-   ``_protected_paths_for_downloading`` on the other), guarding the
-   #546 projection-drift class.
+7. **Single-source derivation** — materialize and the reaper both consume
+   ``canonical_folder_for_row``; the reaper protects that shared leaf's
+   result for the same persisted row, making the #546 projection-drift
+   class inexpressible.
 8. **Good-citizen positive ownership (#571)** — R1: a file with NO
    positive ownership signal (no ledgered event-stamped ``local_path``,
    no ledgered ``attempt_fingerprint``-derived canonical folder) is
@@ -80,11 +78,12 @@ import msgspec
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from lib.download import build_active_download_state, reconstruct_grab_list_entry
-from lib.download_processing import _canonical_import_folder_path
+from lib.download import build_active_download_state
+from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import (
     attempt_fingerprint,
+    canonical_folder_for_row,
     canonical_processing_path,
     normalize_processing_path,
     sanitize_processing_folder_name,
@@ -142,8 +141,8 @@ def _downloading_row_and_canonical(
     """Build a ``downloading`` row + its canonical folder path the SAME
     way materialize computes it, for seeding into ``FakePipelineDB``.
 
-    Uses the real ``build_active_download_state`` / ``attempt_fingerprint``
-    / ``canonical_processing_path`` — never a reimplementation of the
+    Uses the real ``build_active_download_state`` /
+    ``canonical_folder_for_row`` leaf — never a reimplementation of the
     folder-name derivation.
     """
     local_paths = local_paths or {}
@@ -169,10 +168,7 @@ def _downloading_row_and_canonical(
         year=int(year),
         active_download_state=raw_state,
     )
-    fingerprint = attempt_fingerprint(file_pairs)
-    canonical = canonical_processing_path(
-        artist=artist, title=title, year=year,
-        slskd_download_dir=root, attempt_fingerprint=fingerprint)
+    canonical = canonical_folder_for_row(entry, root)
     return row, canonical
 
 
@@ -1153,35 +1149,28 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
 
 
 # ============================================================================
-# Derivation parity: reaper protection == materialize's canonical folder
+# Shared derivation wiring: reaper protects the canonical folder for the row
 # ============================================================================
 #
-# The reaper computes its protected canonical folder from the leaf
-# functions (attempt_fingerprint + canonical_processing_path); materialize
-# computes the SAME folder through its wrappers
-# (reconstruct_grab_list_entry -> _canonical_import_folder_path). If those
-# wrappers ever drift (a different fingerprint input set, a different
-# artist/title/year projection), the reaper would silently stop protecting
-# the folder materialize actually writes into — the #546 projection-drift
-# class. This parity test drives BOTH real production derivations from the
-# same row and demands byte-equality. Unaffected by the #571 ownership
-# flip — this is purely about the ACTIVE-protection derivation.
+# Materialize and the reaper now consume ``canonical_folder_for_row`` rather
+# than maintaining equivalent derivations. These tests pin the shared leaf
+# over deterministic and generated rows, then prove the reaper wires that
+# result into its protected set. The checker remains known-bad-qualified.
 
-def assert_canonical_derivation_parity(
-    materialize_path: str,
+def assert_shared_canonical_protected(
+    canonical_path: str,
     protected_dirs: set[str],
     root: str,
 ) -> None:
-    """Module-level checker: the reaper's protected set contains exactly
-    the quarantine dir plus the (normalized) folder materialize derives."""
-    norm_expected = normalize_processing_path(materialize_path)
+    """The reaper protects exactly the shared leaf's canonical directory."""
+    norm_expected = normalize_processing_path(canonical_path)
     quarantine = normalize_processing_path(
         os.path.join(root, "failed_imports"))
     canonical_entries = protected_dirs - {quarantine}
     if canonical_entries != {norm_expected}:
         raise AssertionError(
-            "reaper protection diverged from materialize's canonical "
-            f"derivation: materialize={norm_expected!r} "
+            "reaper protection omitted or altered the shared canonical "
+            f"folder: canonical={norm_expected!r} "
             f"reaper={sorted(canonical_entries)!r}")
 
 
@@ -1206,20 +1195,17 @@ def _parity_row(
         year=year, active_download_state=msgspec.to_builtins(state))
 
 
-def _run_parity(row: dict[str, Any], root: str) -> None:
-    # Materialize's derivation: the REAL wrappers production uses when
-    # placing completed files.
+def _run_shared_derivation(row: dict[str, Any], root: str) -> None:
     state = ActiveDownloadState.from_raw(row["active_download_state"])
     entry = reconstruct_grab_list_entry(row, state)
-    materialize_path = _canonical_import_folder_path(entry, root)
-    # The reaper's derivation.
+    canonical_path = canonical_folder_for_row(entry, root)
     protected_dirs, _protected_files = _protected_paths_for_downloading(
         root, [row])
-    assert_canonical_derivation_parity(materialize_path, protected_dirs, root)
+    assert_shared_canonical_protected(canonical_path, protected_dirs, root)
 
 
-class TestCanonicalDerivationParity(unittest.TestCase):
-    """Invariant 7 pins: both real derivations agree byte-for-byte."""
+class TestSharedCanonicalDerivation(unittest.TestCase):
+    """Invariant 7 pins: the reaper protects the shared leaf's result."""
 
     CASES: list[tuple[str, str, str, int | None, list[tuple[str, str]]]] = [
         ("ascii", "Test Artist", "Test Album", 2020,
@@ -1234,11 +1220,22 @@ class TestCanonicalDerivationParity(unittest.TestCase):
         ("empty fileset", "Test Artist", "Test Album", 2020, []),
     ]
 
-    def test_reaper_protects_exactly_what_materialize_derives(self):
+    def test_reaper_protects_exactly_what_shared_leaf_derives(self):
         for desc, artist, title, year, pairs in self.CASES:
             with self.subTest(desc=desc):
-                _run_parity(_parity_row(artist, title, year, pairs),
-                            "/downloads")
+                _run_shared_derivation(
+                    _parity_row(artist, title, year, pairs), "/downloads")
+
+    def test_reaper_calls_the_shared_persisted_row_projection(self):
+        source = inspect.getsource(_protected_paths_for_downloading)
+        tree = ast.parse(source)
+        calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("reconstruct_grab_list_entry", calls)
+        self.assertNotIn("_ActiveCanonicalFolderRow", source)
 
 
 @st.composite
@@ -1253,33 +1250,33 @@ def _parity_inputs(draw) -> tuple[str, str, int | None, list[tuple[str, str]]]:
     return artist, title, year, pairs
 
 
-class TestGeneratedCanonicalDerivationParity(unittest.TestCase):
-    """Invariant 7 property: parity holds across the input space (pure
-    path computation — no filesystem)."""
+class TestGeneratedSharedCanonicalDerivation(unittest.TestCase):
+    """Invariant 7 property: shared derivation wiring holds over generated rows."""
 
     @given(inputs=_parity_inputs())
     @example(inputs=("Sigur Rós", "Ágætis byrjun", 1999,
                      [("péer", "péer\\Tónlist\\01 svefn-g-englar.flac")]))
     @example(inputs=("The Artist", "T" * 300, 2001,
                      [("user1", "user1\\Music\\01.flac")]))
-    def test_derivations_agree_over_generated_inputs(self, inputs):
+    def test_reaper_protects_shared_derivation_over_generated_inputs(self, inputs):
         artist, title, year, pairs = inputs
-        _run_parity(_parity_row(artist, title, year, pairs), "/downloads")
+        _run_shared_derivation(
+            _parity_row(artist, title, year, pairs), "/downloads")
 
 
-class TestParityCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests for assert_canonical_derivation_parity."""
+class TestSharedCanonicalCheckerTripsOnViolations(unittest.TestCase):
+    """Known-bad self-tests for assert_shared_canonical_protected."""
 
     def test_trips_when_canonical_folder_not_protected(self):
         with self.assertRaises(AssertionError):
-            assert_canonical_derivation_parity(
+            assert_shared_canonical_protected(
                 "/downloads/Artist - Album (2020) [deadbeef]",
                 {normalize_processing_path("/downloads/failed_imports")},
                 "/downloads")
 
     def test_trips_when_protected_folder_differs_by_one_byte(self):
         with self.assertRaises(AssertionError):
-            assert_canonical_derivation_parity(
+            assert_shared_canonical_protected(
                 "/downloads/Artist - Album (2020) [deadbeef]",
                 {normalize_processing_path("/downloads/failed_imports"),
                  normalize_processing_path(

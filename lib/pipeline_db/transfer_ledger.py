@@ -269,9 +269,10 @@ class _TransferLedgerMixin(_PipelineDBBase):
         The caller re-derives each folder with
         ``lib.processing_paths.canonical_processing_path`` from the
         returned ``artist_name``/``album_title``/``year``/
-        ``attempt_fingerprint`` -- the SAME leaf function
-        ``_protected_paths_for_downloading`` uses for a currently
-        ``downloading`` row, so a past attempt (imported, replaced, or
+        ``attempt_fingerprint``. Current downloading rows instead flow
+        through ``canonical_folder_for_row``, which delegates to that same
+        formatter after deriving the fingerprint from persisted files. Thus
+        a past attempt (imported, replaced, or
         reset-to-wanted-and-retried) whose row has since left
         ``downloading`` is STILL recognised as owned here, unlike the
         active-protection set which only tracks the row's CURRENT state.

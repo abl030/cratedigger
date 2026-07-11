@@ -67,6 +67,14 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
                           pipeline_db_source=pipeline_db_source)
 
 
+class TestDownloadModuleBoundary(unittest.TestCase):
+    """Moved reconstruction must not remain importable from its old module."""
+
+    def test_reconstruct_grab_list_entry_is_not_reexported(self):
+        with self.assertRaises(ImportError):
+            exec("from lib.download import reconstruct_grab_list_entry", {})
+
+
 class TestBuildDownloadInfo(unittest.TestCase):
 
     def test_basic(self):
@@ -2307,9 +2315,9 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
     def test_materialize_never_blends_files_from_a_different_attempt(self):
         from lib.download_processing import (
             Materialized,
-            _canonical_import_folder_path,
             _materialize_processing_dir,
         )
+        from lib.processing_paths import canonical_folder_for_row
         from lib.staged_album import StagedAlbum
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2355,7 +2363,7 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
 
             staged_album = StagedAlbum.from_entry(
                 album,
-                default_path=_canonical_import_folder_path(
+                default_path=canonical_folder_for_row(
                     album, ctx.cfg.slskd_download_dir),
             )
             result = _materialize_processing_dir(album, staged_album, ctx)
@@ -2390,9 +2398,9 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
     def test_untracked_audio_reject_persists_null_distance_not_fabricated_zero(self):
         from lib.download_processing import (
             CompletionDispatched,
-            _canonical_import_folder_path,
             process_completed_album,
         )
+        from lib.processing_paths import canonical_folder_for_row
         from lib.quality import ValidationResult
         import msgspec
         import tempfile
@@ -2450,7 +2458,7 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
             # The manifest guard fires BEFORE beets_validate ever runs, so
             # no beets distance has been — or ever will be — measured for
             # this reject.
-            canonical_path = _canonical_import_folder_path(album, download_root)
+            canonical_path = canonical_folder_for_row(album, download_root)
             os.makedirs(canonical_path, exist_ok=True)
             with open(os.path.join(canonical_path, "leftover.mp3"), "wb") as fp:
                 fp.write(b"stale leftover audio from a different attempt")
@@ -4601,8 +4609,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         """
         from lib.download import (
             _processing_path_ready_for_importer,
-            reconstruct_grab_list_entry,
         )
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.download_processing import (
             MaterializeFailed,
             _materialize_processing_dir,
@@ -5353,7 +5361,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
     """Test reconstruct_grab_list_entry() — rebuild GrabListEntry from DB row + state."""
 
     def test_reconstruct_basic(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="flac",
@@ -5389,8 +5397,50 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         self.assertEqual(entry.files[0].id, "")  # Must be re-derived
         self.assertEqual(entry.files[0].retry, 0)
 
+    def test_reconstruct_applies_live_transfer_ids_by_attempt_identity(self):
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
+
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-04-03T12:00:00+00:00",
+            files=[
+                ActiveDownloadFileState(
+                    username="user1",
+                    filename="user1\\Music\\01.flac",
+                    file_dir="user1\\Music",
+                    size=30000000,
+                ),
+                ActiveDownloadFileState(
+                    username="user2",
+                    filename="user2\\Music\\02.flac",
+                    file_dir="user2\\Music",
+                    size=25000000,
+                ),
+            ],
+        )
+        request = {
+            "id": 42,
+            "album_title": "Test Album",
+            "artist_name": "Test Artist",
+            "year": 2020,
+            "mb_release_id": "test-mbid",
+            "source": "request",
+            "search_filetype_override": None,
+            "target_format": None,
+        }
+
+        entry = reconstruct_grab_list_entry(
+            request,
+            state,
+            transfer_ids={("user1", "user1\\Music\\01.flac"): "transfer-42"},
+        )
+
+        self.assertEqual(entry.files[0].id, "transfer-42")
+        self.assertEqual(entry.files[1].id, "")
+
     def test_reconstruct_multi_disc(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="flac",
@@ -5417,7 +5467,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         self.assertEqual(entry.files[1].disk_no, 2)
 
     def test_reconstruct_search_filetype_override(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState
         state = ActiveDownloadState(filetype="flac", enqueued_at="now", files=[])
         request = {"id": 10, "album_title": "B", "artist_name": "A",
@@ -5427,7 +5477,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         self.assertEqual(entry.db_search_filetype_override, "flac")
 
     def test_reconstruct_retry_count(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="flac",
@@ -5446,7 +5496,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         self.assertEqual(entry.files[0].retry, 5)
 
     def test_reconstruct_progress_fields(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="flac",
@@ -5474,7 +5524,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
     def test_reconstruct_restores_terminal_status_from_persisted_state(self):
         """Once slskd reports a terminal state, later snapshot gaps must not
         erase that evidence."""
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="m4a",
@@ -5505,7 +5555,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
     def test_reconstruct_restores_exception_onto_terminal_status(self):
         """Issue #564: a persisted exception rehydrates onto the
         synthetic TransferSnapshot AND the DownloadFile field directly."""
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="m4a",
@@ -5541,7 +5591,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         """A non-terminal state carries no synthetic status, but the
         persisted exception field itself must still survive the round
         trip — evidence the pre-purge harvest (issue #564 C3) relies on."""
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState, ActiveDownloadFileState
         state = ActiveDownloadState(
             filetype="flac",
@@ -5567,7 +5617,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
             "Read error: Connection reset by peer")
 
     def test_reconstruct_missing_year(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState
         state = ActiveDownloadState(filetype="flac", enqueued_at="now", files=[])
         request = {"id": 10, "album_title": "B", "artist_name": "A",
@@ -5577,7 +5627,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         self.assertEqual(entry.year, "")
 
     def test_reconstruct_current_path_to_import_folder(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState
         state = ActiveDownloadState(
             filetype="flac",
@@ -5592,7 +5642,7 @@ class TestReconstructGrabListEntry(unittest.TestCase):
         self.assertEqual(entry.import_folder, "/tmp/staged/A/B")
 
     def test_reconstruct_fallback_current_path(self):
-        from lib.download import reconstruct_grab_list_entry
+        from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.quality import ActiveDownloadState
         state = ActiveDownloadState(
             filetype="flac",

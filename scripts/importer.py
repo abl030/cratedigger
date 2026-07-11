@@ -289,7 +289,8 @@ def execute_automation_import_job(
     ctx: Any = None,
 ) -> DispatchOutcome:
     """Run completed-download processing from an automation queue job."""
-    from lib.download import _run_completed_processing, reconstruct_grab_list_entry
+    from lib.download import _run_completed_processing
+    from lib.download_reconstruction import reconstruct_grab_list_entry
 
     request_id = job.request_id
     if request_id is None:
@@ -363,7 +364,7 @@ def execute_youtube_import_job(
     the staged audio manifest, so the rejection paths inside
     ``_handle_rejected_result`` find no peers to denylist.
     """
-    from lib.download import reconstruct_grab_list_entry
+    from lib.download_reconstruction import reconstruct_grab_list_entry
     from lib.download_processing import process_completed_album
 
     request_id = job.request_id

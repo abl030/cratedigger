@@ -6,11 +6,37 @@ import hashlib
 import json
 import os
 import re
-from typing import Sequence
+from typing import Protocol, Sequence
 
 AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
 POST_VALIDATION_STAGING_SUBDIR = "post-validation"
 DUPLICATE_REMOVE_GUARD_SUBDIR = "duplicate-remove-guard"
+
+
+class CanonicalFolderFile(Protocol):
+    """File identity fields used to scope a canonical processing folder."""
+
+    @property
+    def username(self) -> str: ...
+
+    @property
+    def filename(self) -> str: ...
+
+
+class CanonicalFolderRow(Protocol):
+    """Album fields that uniquely derive an attempt's processing folder."""
+
+    @property
+    def artist(self) -> str: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def year(self) -> str: ...
+
+    @property
+    def files(self) -> Sequence[CanonicalFolderFile]: ...
 
 
 def sanitize_processing_folder_name(folder_name: str) -> str:
@@ -113,6 +139,25 @@ def canonical_processing_path(
                 "utf-8", errors="ignore").rstrip()
         import_folder_name = f"{import_folder_name}{suffix}"
     return os.path.join(slskd_download_dir, import_folder_name)
+
+
+def canonical_folder_for_row(row: CanonicalFolderRow, root: str) -> str:
+    """Derive one attempt-scoped canonical folder from an album row.
+
+    Materialization and active-download reaper protection both call this
+    function so their artist/title/year and exact file-identity projection
+    cannot drift independently (issue #573 W1).
+    """
+    fingerprint = attempt_fingerprint([
+        (file.username, file.filename) for file in row.files
+    ])
+    return canonical_processing_path(
+        artist=row.artist,
+        title=row.title,
+        year=row.year,
+        slskd_download_dir=root,
+        attempt_fingerprint=fingerprint,
+    )
 
 
 def stage_to_ai_root(

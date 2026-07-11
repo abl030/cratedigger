@@ -15,9 +15,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TYPE_CHECKING
 
+from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
     attempt_fingerprint,
+    canonical_folder_for_row,
     canonical_processing_path,
     normalize_processing_path,
     path_is_within_root,
@@ -781,13 +783,10 @@ def _protected_paths_for_downloading(
 
     ``protected_dirs`` always includes the ``failed_imports/`` quarantine
     subtree (Wrong Match cards reference these paths) plus, for every
-    ``downloading`` row, its canonical processing folder derived the SAME
-    way materialize does — ``canonical_processing_path`` keyed by the
-    attempt fingerprint of the row's persisted (username, filename) set
-    (mirrors ``lib/download_processing.py``'s ``_canonical_import_folder_path``
-    / ``_attempt_fingerprint_for`` without importing that module, which
-    would create an import cycle: ``lib.download`` imports
-    ``lib.slskd_transfers`` at module scope). ``protected_files`` adds each
+    ``downloading`` row, its canonical processing folder from the SAME
+    ``canonical_folder_for_row`` leaf materialize calls. The row's persisted
+    ``(username, filename)`` set scopes the attempt.
+    ``protected_files`` adds each
     row's stamped ``local_path`` entries directly, as a second, independent
     guard beyond the directory-level protection.
 
@@ -821,15 +820,8 @@ def _protected_paths_for_downloading(
             if f.local_path:
                 protected_files.add(normalize_processing_path(f.local_path))
 
-        fingerprint = attempt_fingerprint(
-            [(f.username, f.filename) for f in state.files])
-        canonical = canonical_processing_path(
-            artist=row.get("artist_name") or "",
-            title=row.get("album_title") or "",
-            year=str(row.get("year") or ""),
-            slskd_download_dir=root,
-            attempt_fingerprint=fingerprint,
-        )
+        entry = reconstruct_grab_list_entry(row, state)
+        canonical = canonical_folder_for_row(entry, root)
         protected_dirs.add(normalize_processing_path(canonical))
 
     return protected_dirs, protected_files
@@ -856,9 +848,9 @@ def _owned_paths_from_ledger(
     independent of any folder derivation. ``owned_dirs`` is the
     canonical processing folder for every distinct ledgered
     ``(request_id, attempt_fingerprint)`` pair
-    (``get_owned_attempt_folders``), derived with the SAME
-    ``canonical_processing_path`` leaf function
-    ``_protected_paths_for_downloading`` uses.
+    (``get_owned_attempt_folders``), derived with the underlying
+    ``canonical_processing_path`` formatter also used by the active path's
+    ``canonical_folder_for_row`` leaf.
 
     A request hard-deleted out from under a ledger row (no FK,
     migration 045) makes that row's FOLDER undiscoverable here (the

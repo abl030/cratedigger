@@ -38,7 +38,7 @@ from lib.import_manifest import (
 )
 from lib.processing_paths import (
     attempt_fingerprint,
-    canonical_processing_path,
+    canonical_folder_for_row,
     normalize_processing_path,
     normalize_source_dirs,
     path_is_within_root,
@@ -259,19 +259,6 @@ def _attempt_fingerprint_for(files: list[DownloadFile]) -> str:
     folder as ``external`` and strands it (issue #550 phase 2).
     """
     return attempt_fingerprint([(f.username, f.filename) for f in files])
-
-
-def _canonical_import_folder_path(
-    album_data: GrabListEntry,
-    slskd_download_dir: str,
-) -> str:
-    return canonical_processing_path(
-        artist=album_data.artist,
-        title=album_data.title,
-        year=album_data.year,
-        slskd_download_dir=slskd_download_dir,
-        attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
-    )
 
 
 def _source_dirs_for_album(album_data: GrabListEntry) -> list[str]:
@@ -716,7 +703,7 @@ def _materialize_processing_dir(
     persist_current_path: bool = True,
 ) -> MaterializeResult:
     """Ensure ``staged_album.current_path`` holds the album's local files."""
-    canonical_path = _canonical_import_folder_path(
+    canonical_path = canonical_folder_for_row(
         album_data, ctx.cfg.slskd_download_dir)
     logger.info(
         "MANIFEST-TRACE materialize request=%s %s canonical_exists=%s "
@@ -910,7 +897,7 @@ def process_completed_album(
     """
     staged_album = StagedAlbum.from_entry(
         album_data,
-        default_path=_canonical_import_folder_path(
+        default_path=canonical_folder_for_row(
             album_data, ctx.cfg.slskd_download_dir),
     )
     materialized = _materialize_processing_dir(album_data, staged_album, ctx)

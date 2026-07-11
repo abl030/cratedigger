@@ -216,7 +216,7 @@ class ActiveDownloadState:
 
 ### Commit 3: GrabListEntry reconstruction from DB + ActiveDownloadState
 
-**Files**: `lib/download.py`
+**Files**: `lib/download_reconstruction.py`
 
 **Tests first** (RED): `tests/test_download.py`
 - `test_reconstruct_grab_list_entry_basic`: album_requests row + ActiveDownloadState → correct GrabListEntry
@@ -226,7 +226,7 @@ class ActiveDownloadState:
 
 **Implementation** (GREEN):
 
-Add to `lib/download.py`:
+Add to `lib/download_reconstruction.py`:
 
 ```python
 from lib.quality import ActiveDownloadState, ActiveDownloadFileState

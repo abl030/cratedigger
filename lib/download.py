@@ -29,7 +29,6 @@ from lib.download_processing import (
     MaterializeFailed,
     MaterializeGuarded,
     MaterializeResult,
-    _canonical_import_folder_path,
     _evaluate_staged_path_readiness,
     _materialize_processing_dir,
 )
@@ -37,8 +36,15 @@ from lib.download_recovery import (
     classify_processing_path,
     reconcile_processing_current_path,
 )
+from lib.download_reconstruction import (
+    reconstruct_grab_list_entry as _reconstruct_grab_list_entry,
+)
 from lib.grab_list import GrabListEntry, DownloadFile
-from lib.processing_paths import attempt_fingerprint, directory_has_entries
+from lib.processing_paths import (
+    attempt_fingerprint,
+    canonical_folder_for_row,
+    directory_has_entries,
+)
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
                          FileFailureDetail,
@@ -56,7 +62,7 @@ from lib.import_queue import (
     automation_import_dedupe_key,
     automation_import_payload,
 )
-from lib.slskd_client import DownloadUser, TransferSnapshot
+from lib.slskd_client import DownloadUser
 from lib.slskd_transfers import (
     _get_all_downloads_snapshot,
     cancel_and_delete,
@@ -215,86 +221,6 @@ def build_active_download_state(
             else entry.import_folder
         ),
     )
-
-
-
-# === GrabListEntry reconstruction from DB ===
-
-def reconstruct_grab_list_entry(
-    request: dict[str, Any],
-    state: ActiveDownloadState,
-    *,
-    transfer_ids: dict[tuple[str, str], str] | None = None,
-) -> GrabListEntry:
-    """Rebuild GrabListEntry from a DB row + persisted download state.
-
-    Does NOT set slskd transfer IDs — those are ephemeral and must be
-    re-derived from the live slskd API by the caller.
-    """
-    files = []
-    for f in state.files:
-        restored_status = _restored_terminal_status(
-            f.last_state,
-            f.bytes_transferred,
-            f.last_exception,
-        )
-        files.append(DownloadFile(
-            filename=f.filename,
-            id=(transfer_ids or {}).get((f.username, f.filename), ""),
-            file_dir=f.file_dir,
-            username=f.username,
-            size=f.size,
-            disk_no=f.disk_no,
-            disk_count=f.disk_count,
-            retry=f.retry_count,
-            bytes_transferred=f.bytes_transferred,
-            last_state=f.last_state,
-            last_exception=f.last_exception,
-            status=restored_status,
-            local_path=f.local_path,
-        ))
-    year = request.get("year")
-    from lib.import_manifest import manifest_trace_summary
-    logger.info(
-        "MANIFEST-TRACE reconstruct request=%s %s current_path=%s",
-        request["id"],
-        manifest_trace_summary(files),
-        state.current_path,
-    )
-    return GrabListEntry(
-        album_id=request["id"],
-        files=files,
-        filetype=state.filetype,
-        title=request["album_title"],
-        artist=request["artist_name"],
-        year=str(year) if year else "",
-        mb_release_id=request.get("mb_release_id") or "",
-        db_request_id=request["id"],
-        db_source=request.get("source"),
-        db_search_filetype_override=request.get("search_filetype_override"),
-        db_target_format=request.get("target_format"),
-        import_folder=state.current_path,
-    )
-
-
-def _restored_terminal_status(
-    last_state: str | None,
-    bytes_transferred: int,
-    exception: str | None = None,
-) -> TransferSnapshot | None:
-    """Rehydrate terminal slskd observations persisted in JSONB state.
-
-    slskd's ``includeRemoved`` snapshot can stop exposing terminal transfer
-    rows between poll cycles. Once we have seen a terminal state, keep that
-    evidence actionable instead of downgrading it to an invisible transfer.
-    ``exception`` (issue #564) restores the real failure reason onto the
-    synthetic snapshot so downstream message composition still has it.
-    """
-    if not last_state or not last_state.startswith("Completed,"):
-        return None
-    return TransferSnapshot(
-        state=last_state, bytes_transferred=bytes_transferred,
-        exception=exception)
 
 
 
@@ -565,7 +491,7 @@ def _run_completed_processing(
 
     if state.processing_started_at is None:
         if entry.import_folder is None:
-            entry.import_folder = _canonical_import_folder_path(
+            entry.import_folder = canonical_folder_for_row(
                 entry,
                 ctx.cfg.slskd_download_dir,
             )
@@ -687,11 +613,11 @@ def _enqueue_completed_processing(
     if entry.import_folder is None:
         entry.import_folder = (
             state.current_path
-            or _canonical_import_folder_path(entry, ctx.cfg.slskd_download_dir)
+            or canonical_folder_for_row(entry, ctx.cfg.slskd_download_dir)
         )
     staged_album = StagedAlbum.from_entry(
         entry,
-        default_path=_canonical_import_folder_path(
+        default_path=canonical_folder_for_row(
             entry,
             ctx.cfg.slskd_download_dir,
         ),
@@ -954,8 +880,8 @@ def _poll_one_active_download(
         and state.processing_started_at is None
         and active_import_job is None
     ):
-        initial_entry = reconstruct_grab_list_entry(row, state)
-        completion_current_path = _canonical_import_folder_path(
+        initial_entry = _reconstruct_grab_list_entry(row, state)
+        completion_current_path = canonical_folder_for_row(
             initial_entry,
             ctx.cfg.slskd_download_dir,
         )
@@ -1084,7 +1010,7 @@ def _poll_one_active_download(
         for file, observation in zip(state.files, snapshot.files)
         if observation.transfer_id is not None
     }
-    entry = reconstruct_grab_list_entry(
+    entry = _reconstruct_grab_list_entry(
         row,
         state,
         transfer_ids=transfer_ids,

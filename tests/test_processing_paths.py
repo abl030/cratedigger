@@ -2,7 +2,24 @@
 
 import unittest
 
-from lib.processing_paths import attempt_fingerprint, canonical_processing_path
+from lib.grab_list import DownloadFile, GrabListEntry
+from lib.processing_paths import (
+    attempt_fingerprint,
+    canonical_folder_for_row,
+    canonical_processing_path,
+)
+
+
+def _row(*, files: list[DownloadFile]) -> GrabListEntry:
+    return GrabListEntry(
+        album_id=1,
+        files=files,
+        filetype="flac",
+        title="Test Album",
+        artist="Test Artist",
+        year="2020",
+        mb_release_id="release-id",
+    )
 
 
 class TestAttemptFingerprint(unittest.TestCase):
@@ -102,6 +119,37 @@ class TestCanonicalProcessingPathFingerprint(unittest.TestCase):
         path_b = canonical_processing_path(attempt_fingerprint="bbbbbbbb", **base_kwargs)
 
         self.assertNotEqual(path_a, path_b)
+
+
+class TestCanonicalFolderForRow(unittest.TestCase):
+    """The row-to-folder projection has one leaf implementation (#573 W1)."""
+
+    def test_derives_folder_from_row_fields_and_exact_file_identity_set(self):
+        files = [
+            DownloadFile(
+                filename="peer\\Album\\01.flac",
+                id="transfer-1",
+                file_dir="peer\\Album",
+                username="peer",
+                size=123,
+            ),
+            DownloadFile(
+                filename="peer\\Album\\02.flac",
+                id="transfer-2",
+                file_dir="peer\\Album",
+                username="peer",
+                size=456,
+            ),
+        ]
+        fingerprint = attempt_fingerprint([
+            (file.username, file.filename) for file in files
+        ])
+
+        self.assertEqual(
+            canonical_folder_for_row(_row(files=files), "/tmp/downloads"),
+            "/tmp/downloads/Test Artist - Test Album (2020) "
+            f"[{fingerprint}]",
+        )
 
 
 if __name__ == "__main__":

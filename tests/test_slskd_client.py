@@ -683,9 +683,9 @@ class TestTransferSnapshot(unittest.TestCase):
         self.assertIsNone(snap)
 
     def test_construction_with_only_state_for_synthetic_statuses(self):
-        # Mirrors _restored_terminal_status / the vanished-transfer
-        # fallback in lib/download.py — both build a TransferSnapshot
-        # directly (not via decode) with only state (+ bytes_transferred).
+        # Mirrors _restored_terminal_status in lib/download_reconstruction.py
+        # and the vanished-transfer fallback in lib/download.py — both build
+        # a TransferSnapshot directly with only state (+ bytes_transferred).
         snap = TransferSnapshot(state="Completed, Errored")
 
         self.assertEqual(snap.state, "Completed, Errored")
