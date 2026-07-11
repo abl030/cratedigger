@@ -2,8 +2,8 @@
 
 This is the sole owner of turning event-stamped slskd file locations into a
 request-scoped processing directory, deciding whether an already-staged path
-is safe to resume, and quarantining an interrupted auto-import. Validation and
-validation lives in :mod:`lib.download_validation`, completion orchestration
+is safe to resume, and quarantining an interrupted auto-import. Validation
+lives in :mod:`lib.download_validation`, completion orchestration
 in :mod:`lib.download_processing`, and poll state in :mod:`lib.download`.
 """
 
