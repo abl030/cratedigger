@@ -22,3 +22,5 @@ tests/fixtures/pipeline_db_snapshot_*.sql
 
 # Build / tooling output (e.g. scripts/find_dead_code.sh).
 /build/
+# Screenshot-loop output belongs outside the repository root.
+/*.png
