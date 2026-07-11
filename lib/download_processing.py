@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Protocol, TYPE_CHECKING
 
 from lib import download_materialization
 from lib import download_validation
@@ -52,6 +52,21 @@ class CompletionDeferred:
 
 CompletionResult = Completed | CompletionFailed | CompletionDispatched | CompletionDeferred
 """Return type of ``process_completed_album`` / ``_run_completed_processing``."""
+
+
+class ProcessAlbumFn(Protocol):
+    """Exact injectable shape of :func:`process_completed_album`."""
+
+    def __call__(
+        self,
+        album_data: GrabListEntry,
+        ctx: CratediggerContext,
+        *,
+        import_job_id: int,
+        validate_fn: download_validation.ValidateFn | None = None,
+        handle_valid_fn: download_validation.HandleValidFn | None = None,
+        dispatch_fn: DispatchCoreFn | None = None,
+    ) -> CompletionResult: ...
 
 
 def process_completed_album(
@@ -106,3 +121,6 @@ def process_completed_album(
                 return CompletionDeferred(detail=outcome.message)
             return CompletionDispatched(outcome=outcome)
     return Completed()
+
+
+_process_completed_album_conformance: ProcessAlbumFn = process_completed_album

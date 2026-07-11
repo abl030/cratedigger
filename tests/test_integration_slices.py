@@ -33,7 +33,12 @@ from lib.quality import (
     ValidationResult,
 )
 from lib.staged_album import StagedAlbum
-from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.fakes import (
+    FakePipelineDB,
+    FakePipelineDBSource,
+    FakeSlskdAPI,
+    RecordingProcessAlbum,
+)
 from tests.helpers import (
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -2677,11 +2682,17 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             id=42, status="downloading",
             current_spectral_grade="genuine",
             current_spectral_bitrate=245))
+        process_album = RecordingProcessAlbum(outcome=CompletionDeferred(
+            detail="release_lock_contention",
+        ))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: CompletionDeferred(
-                detail="release_lock_contention"),
+            process_album_fn=process_album,
+        )
+        self.assertEqual(
+            [call.import_job_id for call in process_album.calls],
+            [1],
         )
         self.assertEqual(db.request(42)["status"], "downloading")
         # Spectral untouched.
@@ -2698,10 +2709,15 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         from lib.download_processing import Completed
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
+        process_album = RecordingProcessAlbum(outcome=Completed())
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: Completed(),
+            process_album_fn=process_album,
+        )
+        self.assertEqual(
+            [call.import_job_id for call in process_album.calls],
+            [1],
         )
         self.assertEqual(db.request(42)["status"], "imported")
 
@@ -2713,11 +2729,17 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         from lib.download_processing import CompletionFailed
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
+        process_album = RecordingProcessAlbum(outcome=CompletionFailed(
+            reason="staged_path_missing",
+        ))
         dl_mod._run_completed_processing(
             self._entry(), 42, self._state(), db, self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: CompletionFailed(
-                reason="staged_path_missing"),
+            process_album_fn=process_album,
+        )
+        self.assertEqual(
+            [call.import_job_id for call in process_album.calls],
+            [1],
         )
         self.assertEqual(db.request(42)["status"], "wanted")
 
@@ -2728,12 +2750,25 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         """
         from lib import download as dl_mod
         from lib import transitions
-        from lib.download_processing import CompletionFailed
+        from lib import download_validation
+        from lib.context import CratediggerContext
+        from lib.dispatch import DispatchCoreFn
+        from lib.download_processing import CompletionFailed, CompletionResult
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
 
-        def reject_inside_process(*_args, **_kwargs):
+        def reject_inside_process(
+            album_data: GrabListEntry,
+            ctx: CratediggerContext,
+            *,
+            import_job_id: int,
+            validate_fn: download_validation.ValidateFn | None = None,
+            handle_valid_fn: download_validation.HandleValidFn | None = None,
+            dispatch_fn: DispatchCoreFn | None = None,
+        ) -> CompletionResult:
+            del album_data, ctx, import_job_id
+            del validate_fn, handle_valid_fn, dispatch_fn
             transitions.finalize_request(
                 cast(Any, db),
                 42,
@@ -2771,6 +2806,9 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             message="Pre-import gate rejected",
         )
 
+        process_album = RecordingProcessAlbum(outcome=CompletionDispatched(
+            outcome=dispatch_outcome,
+        ))
         result = dl_mod._run_completed_processing(
             self._entry(),
             42,
@@ -2778,11 +2816,14 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
             db,
             self._ctx(db),
             import_job_id=1,
-            process_album_fn=lambda *_a, **_kw: CompletionDispatched(
-                outcome=dispatch_outcome),
+            process_album_fn=process_album,
         )
 
         assert isinstance(result, CompletionDispatched)
+        self.assertEqual(
+            [call.import_job_id for call in process_album.calls],
+            [1],
+        )
         self.assertIs(result.outcome, dispatch_outcome)
         self.assertEqual(db.request(42)["status"], "downloading")
         self.assertEqual(db.status_history, [])
