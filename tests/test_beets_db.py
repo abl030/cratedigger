@@ -930,6 +930,46 @@ class TestGetItemPaths(unittest.TestCase):
         self.assertEqual(len(paths), 2)
         self.assertEqual(paths[0][1], "/m/a/01.mp3")
 
+    def test_relative_paths_and_album_dir_resolve_against_library_root(
+        self,
+    ) -> None:
+        """Bad-rip hashing must never receive cwd-relative Beets paths."""
+        _insert_album(self.db_path, 1, "rolling-stones-release", [
+            (
+                128000,
+                "The Rolling Stones/1964 - England's Newest Hit Makers/"
+                "01 Not Fade Away.opus",
+            ),
+        ])
+        library_root = "/mnt/virtio/Music/Beets"
+        with BeetsDB(self.db_path, library_root=library_root) as db:
+            paths = db.get_item_paths("rolling-stones-release")
+            album_path = db.get_album_path_by_id(1)
+
+        expected_album = os.path.join(
+            library_root,
+            "The Rolling Stones/1964 - England's Newest Hit Makers",
+        )
+        self.assertEqual(
+            paths,
+            [(1, os.path.join(expected_album, "01 Not Fade Away.opus"))],
+        )
+        self.assertEqual(album_path, expected_album)
+
+    def test_absolute_item_paths_pass_through_with_library_root(self) -> None:
+        _insert_album(self.db_path, 1, "absolute-release", [
+            (320000, "/other/library/Artist/Album/01.flac"),
+        ])
+        with BeetsDB(
+            self.db_path,
+            library_root="/mnt/virtio/Music/Beets",
+        ) as db:
+            paths = db.get_item_paths("absolute-release")
+            album_path = db.get_album_path_by_id(1)
+
+        self.assertEqual(paths, [(1, "/other/library/Artist/Album/01.flac")])
+        self.assertEqual(album_path, "/other/library/Artist/Album")
+
     def test_not_found(self) -> None:
         with BeetsDB(self.db_path) as db:
             paths = db.get_item_paths("nonexistent")

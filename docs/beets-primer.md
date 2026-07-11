@@ -431,6 +431,14 @@ printf 'a\n' | beet import ...  # Blindly accepts ANY match without inspection.
                                 # Use the harness instead — it lets you verify MBID and distance.
 ```
 
+Cratedigger's explicit Bad rip and Replace actions are the narrow exceptions:
+they route destructive removal through `lib/release_cleanup.py`, which invokes
+the pinned Beets with the exact release selector. The rendered Beets `clutter`
+list includes the exact derived filename `cratedigger.json`, allowing Beets to
+prune a directory whose managed audio and sidecar are all gone. Any file that
+does not match the configured clutter patterns prevents pruning and remains
+untouched.
+
 ## The Beets SQLite Database
 
 Located at `/mnt/virtio/Music/beets-library.db`. Two main tables:

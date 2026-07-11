@@ -113,6 +113,7 @@ _db_dsn = None
 # shared handle and the caller owns its thread-safety.
 db: PipelineDB | None = None
 beets_db_path: str | None = None
+beets_library_root: str = ""
 _beets: BeetsDB | None = None
 
 # Per-thread DB handles. Threads are mostly long-lived: the Handler
@@ -183,9 +184,20 @@ def _beets_db() -> BeetsDB | None:
         return None
     handle = getattr(_thread_state, "beets", None)
     if handle is None:
-        handle = BeetsDB(beets_db_path)
+        handle = BeetsDB(
+            beets_db_path,
+            library_root=beets_library_root,
+        )
         _thread_state.beets = handle
     return handle
+
+
+def _configure_beets_library_root_from_runtime_config() -> None:
+    """Load the canonical Beets directory for per-thread path resolution."""
+    from lib.config import read_runtime_config
+
+    global beets_library_root
+    beets_library_root = read_runtime_config().beets_directory
 
 
 def _close_thread_handles() -> None:
@@ -504,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global beets_db_path
+    global beets_db_path, beets_library_root
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument("--port", type=int, default=8085)
@@ -545,6 +557,11 @@ def main():
     # then serves a clear 503 mirror-required (R13).
     from web.api_bases import configure_api_bases_from_runtime_config
     configure_api_bases_from_runtime_config()
+    # The same module-rendered [Beets] directory value that drives the
+    # importer must anchor paths read from the relative-path Beets DB. Without
+    # it, filesystem consumers such as bad-rip hashing resolve paths from the
+    # web service's cwd and silently miss every imported track.
+    _configure_beets_library_root_from_runtime_config()
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api
     if args.discogs_api:

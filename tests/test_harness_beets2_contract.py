@@ -128,6 +128,48 @@ assert did_neutralize_mb is False, did_neutralize_mb
 assert mb_item_data.get("mb_albumid") == "11111111-2222-3333-4444-555555555555", \
     mb_item_data.get("mb_albumid")
 print("DISCOGS_NEUTRALIZE_OK")
+
+# --- Bad-rip derived-sidecar cleanup contract. ``beet remove -d`` delegates
+# to Album.remove(delete=True), which prunes a directory only when every
+# remaining file matches the exact clutter list. Our sidecar is derived state;
+# an unknown sentinel must still block pruning.
+from beets import config
+
+def cleanup_world(*, foreign_file):
+    with tempfile.TemporaryDirectory() as d:
+        album_dir = os.path.join(d, "The Rolling Stones", "1964 - Album")
+        os.makedirs(album_dir)
+        audio_path = os.path.join(album_dir, "01.flac")
+        with open(audio_path, "wb") as f:
+            f.write(b"audio")
+        sidecar_path = os.path.join(album_dir, "cratedigger.json")
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            f.write("{}")
+        sentinel_path = os.path.join(album_dir, "operator.keep")
+        if foreign_file:
+            with open(sentinel_path, "w", encoding="utf-8") as f:
+                f.write("keep")
+
+        lib = library.Library(os.path.join(d, "lib.db"), d)
+        item = library.Item(
+            title="Track", artist="Artist", album="Album",
+            albumartist="Artist", path=audio_path,
+        )
+        album = lib.add_album([item])
+        config["clutter"].set(["cratedigger.json"])
+        album.remove(delete=True)
+
+        assert not os.path.exists(audio_path), audio_path
+        if foreign_file:
+            assert os.path.isdir(album_dir), album_dir
+            assert os.path.isfile(sidecar_path), sidecar_path
+            assert os.path.isfile(sentinel_path), sentinel_path
+        else:
+            assert not os.path.exists(album_dir), album_dir
+
+cleanup_world(foreign_file=False)
+cleanup_world(foreign_file=True)
+print("BAD_RIP_CLEANUP_OK")
 '''
 
 
@@ -149,6 +191,7 @@ class TestHarnessBeets2Contract(unittest.TestCase):
         self.assertIn("LIBRARY_OK", proc.stdout)
         self.assertIn("CONTRACT_OK", proc.stdout)
         self.assertIn("DISCOGS_NEUTRALIZE_OK", proc.stdout)
+        self.assertIn("BAD_RIP_CLEANUP_OK", proc.stdout)
 
 
 if __name__ == "__main__":

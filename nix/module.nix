@@ -60,13 +60,20 @@
   #   - paths / asciify_paths — path-affecting keys; drift here plus the
   #     importer's post-import `beet move` reproduces the 2026-05-18
   #     asciify mass-split (1,178 albums).
+  #   - clutter includes the exact derived sidecar name `cratedigger.json` so
+  #     the canonical `beet remove -d` bad-rip/Replace cleanup can prune a
+  #     sidecar-only album directory. Files outside the configured clutter
+  #     patterns still block Beets pruning.
   beetsSettings = let
     bc = cfg.beets.config;
   in {
     directory = bc.directory;
     library = bc.library;
     asciify_paths = true;
-    clutter = ["Thumbs.DB" "Thumbs.db" ".DS_Store" "*.jpg" "*.png" "AlbumArt*" "Folder.*" "desktop.ini"];
+    clutter = [
+      "Thumbs.DB" "Thumbs.db" ".DS_Store" "*.jpg" "*.png" "AlbumArt*"
+      "Folder.*" "desktop.ini" "cratedigger.json"
+    ];
     import = {
       copy = false;
       write = true;
