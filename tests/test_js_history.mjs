@@ -628,5 +628,116 @@ console.log('renderDownloadHistoryItem() omits the Compared row without a basis'
   assertExcludes(html, 'Compared', 'no Compared row on legacy rows');
 }
 
+console.log('renderDownloadHistoryItem() leads with the verdict, red on rejections');
+{
+  // Request 8781 / download_log 36660: a Rejected row whose quality
+  // evidence all read positive (transparent vs transparent, verified
+  // lossless bypass) buried the actual rejection reason (mbid_missing)
+  // as a dim line BELOW the grid — the detail view told a quality story
+  // for a match failure. The verdict now renders directly under the
+  // header, before the evidence grid, in the reject colour.
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    badge: 'Rejected',
+    badge_class: 'badge-rejected',
+    soulseek_username: 'tunnik',
+    created_at: '2026-07-10T23:19:10+00:00',
+    downloaded_label: 'WAV (converted to OPUS V2)',
+    spectral_grade: 'genuine',
+    verdict: 'mbid_missing',
+    comparison_basis: {
+      verdict: 'equivalent', branch: 'cross_family_same_rank',
+      new_rank: 'transparent', existing_rank: 'transparent',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 216, existing_value_kbps: 256,
+      new_format: 'opus 128', existing_format: 'aac',
+      spectral_clamped: false, tolerance_kbps: null,
+      verified_lossless_bypass: true,
+    },
+  });
+
+  assertContains(html, 'p-hist-verdict-reject', 'rejected verdict gets the reject class');
+  const verdictPos = html.indexOf('mbid_missing');
+  const gridPos = html.indexOf('p-hist-grid');
+  if (verdictPos !== -1 && gridPos !== -1 && verdictPos < gridPos) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: rejection verdict should render before the evidence grid');
+  }
+}
+
+console.log('renderDownloadHistoryItem() colors the verdict red across the failure family');
+{
+  for (const outcome of ['rejected', 'failed', 'timeout', 'user_offline', 'curator_ban']) {
+    const html = renderDownloadHistoryItem({
+      outcome,
+      soulseek_username: 'testuser',
+      created_at: '2026-07-10T23:19:10+00:00',
+      verdict: 'some failure story',
+    });
+    assertContains(html, 'p-hist-verdict-reject', `${outcome} verdict gets the reject class`);
+  }
+}
+
+console.log('renderDownloadHistoryItem() keeps success verdicts unstyled and above the grid');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'success',
+    soulseek_username: 'dbqs',
+    created_at: '2026-07-10T14:46:05+00:00',
+    actual_min_bitrate: 194,
+    verdict: 'Upgrade: MP3 V2 to MP3 320',
+  });
+  assertContains(html, 'p-hist-verdict', 'verdict line present on success rows');
+  assertExcludes(html, 'p-hist-verdict-reject', 'success verdict keeps the default colour');
+  const verdictPos = html.indexOf('Upgrade: MP3 V2 to MP3 320');
+  const gridPos = html.indexOf('p-hist-grid');
+  if (verdictPos !== -1 && gridPos !== -1 && verdictPos < gridPos) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: success verdict should also render before the grid');
+  }
+}
+
+console.log('renderDownloadHistoryItem() surfaces beets_detail behind the forensics toggle');
+{
+  // mbid_not_found rows carry the explanation ("Target MBID X not in
+  // candidates") in beets_detail — previously dropped on the floor.
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'tunnik',
+    created_at: '2026-07-10T22:28:12+00:00',
+    verdict: 'mbid_not_found',
+    beets_detail: 'Target MBID 3de1b986-1b7d-4769-ba9a-5d2b398d0331 not in candidates',
+  });
+  assertContains(html, '<details class="p-hist-forensics">',
+    'forensics toggle present when beets_detail exists');
+  assertContains(html, 'Target MBID 3de1b986-1b7d-4769-ba9a-5d2b398d0331 not in candidates',
+    'beets_detail reachable in forensics');
+  const detailsStart = html.indexOf('<details');
+  const detailPos = html.indexOf('Target MBID');
+  if (detailsStart !== -1 && detailPos > detailsStart) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: beets_detail should live inside the forensics toggle');
+  }
+}
+
+console.log('renderDownloadHistoryItem() omits the forensics Detail row when beets_detail repeats the verdict');
+{
+  const html = renderDownloadHistoryItem({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-10T22:28:12+00:00',
+    verdict: 'audio_corrupt',
+    beets_detail: 'audio_corrupt',
+  });
+  assertExcludes(html, '<details class="p-hist-forensics">',
+    'no forensics toggle for a redundant beets_detail');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
