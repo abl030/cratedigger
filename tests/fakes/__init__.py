@@ -10,6 +10,7 @@ from tests.fakes._shared import _EPOCH, _PERTH_TZ, _as_datetime, _utcnow
 from tests.fakes.beets import FakeBeetsDB
 from tests.fakes.cursors import FakeCursor
 from tests.fakes.dispatch import DispatchCoreCall, RecordingDispatchCore
+from tests.fakes.download import ProcessAlbumCall, RecordingProcessAlbum
 from tests.fakes.lookups import FakeDiscogsLookup, FakeMBLookup, http_error
 from tests.fakes.pipeline_db import (
     FakePipelineDB,
@@ -56,6 +57,8 @@ __all__ = [
     "SearchLogRow",
     "SearchTextCall",
     "RecordingDispatchCore",
+    "ProcessAlbumCall",
+    "RecordingProcessAlbum",
     "UserCooldownRow",
     "http_error",
 ]

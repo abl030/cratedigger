@@ -49,6 +49,7 @@ def assert_completion_orchestrator_responsibilities(source: str) -> None:
         "CompletionFailed",
         "CompletionDispatched",
         "CompletionDeferred",
+        "ProcessAlbumFn",
     }
     assert functions == {"process_completed_album"}
 
