@@ -13,12 +13,12 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal, Sequence, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
+from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
     attempt_fingerprint,
-    CanonicalFolderFile,
     canonical_folder_for_row,
     canonical_processing_path,
     normalize_processing_path,
@@ -810,16 +810,6 @@ class DiskReapOwnershipError(Exception):
     """
 
 
-@dataclass(frozen=True)
-class _ActiveCanonicalFolderRow:
-    """Typed projection of an active DB row for the shared path leaf."""
-
-    artist: str
-    title: str
-    year: str
-    files: Sequence[CanonicalFolderFile]
-
-
 def _protected_paths_for_downloading(
     root: str,
     downloading_rows: list[dict[str, Any]],
@@ -869,15 +859,8 @@ def _protected_paths_for_downloading(
             if f.local_path:
                 protected_files.add(normalize_processing_path(f.local_path))
 
-        canonical = canonical_folder_for_row(
-            _ActiveCanonicalFolderRow(
-                artist=row.get("artist_name") or "",
-                title=row.get("album_title") or "",
-                year=str(row.get("year") or ""),
-                files=state.files,
-            ),
-            root,
-        )
+        entry = reconstruct_grab_list_entry(row, state)
+        canonical = canonical_folder_for_row(entry, root)
         protected_dirs.add(normalize_processing_path(canonical))
 
     return protected_dirs, protected_files

@@ -50,7 +50,8 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from lib.download import build_active_download_state, reconstruct_grab_list_entry
+from lib.download import build_active_download_state
+from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile
 from lib.import_manifest import (
     ManifestCheck,

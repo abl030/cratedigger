@@ -78,7 +78,8 @@ import msgspec
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from lib.download import build_active_download_state, reconstruct_grab_list_entry
+from lib.download import build_active_download_state
+from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import (
     attempt_fingerprint,
@@ -1224,6 +1225,17 @@ class TestSharedCanonicalDerivation(unittest.TestCase):
             with self.subTest(desc=desc):
                 _run_shared_derivation(
                     _parity_row(artist, title, year, pairs), "/downloads")
+
+    def test_reaper_calls_the_shared_persisted_row_projection(self):
+        source = inspect.getsource(_protected_paths_for_downloading)
+        tree = ast.parse(source)
+        calls = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("reconstruct_grab_list_entry", calls)
+        self.assertNotIn("_ActiveCanonicalFolderRow", source)
 
 
 @st.composite
