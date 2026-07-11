@@ -5,7 +5,7 @@ from __future__ import annotations
 import keyword
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/push/fuzz tiers
 from tests.test_unused_import_audit import (
@@ -14,11 +14,19 @@ from tests.test_unused_import_audit import (
 )
 
 
+_SCAFFOLDING_NAMES = frozenset({
+    "__debug__",
+    "candidates",
+    "dependency",
+    "inspect",
+    "object",
+})
+
 _IDENTIFIERS = st.from_regex(
     r"[A-Za-z_][A-Za-z0-9_]{0,15}",
     fullmatch=True,
 ).filter(
-    lambda value: not keyword.iskeyword(value) and value != "__debug__"
+    lambda value: not keyword.iskeyword(value) and value not in _SCAFFOLDING_NAMES
 )
 
 
@@ -46,6 +54,24 @@ class TestGeneratedUnusedImportAudit(unittest.TestCase):
             "comprehension_shadow",
             "nested_global_use",
         )),
+    )
+    @example(imported_name="unused_pin", import_style="from", local_shape="unused")
+    @example(imported_name="direct_pin", import_style="alias", local_shape="direct_use")
+    @example(
+        imported_name="parameter_pin",
+        import_style="from",
+        local_shape="parameter_shadow",
+    )
+    @example(imported_name="rebound_pin", import_style="alias", local_shape="rebound_use")
+    @example(
+        imported_name="comprehension_pin",
+        import_style="from",
+        local_shape="comprehension_shadow",
+    )
+    @example(
+        imported_name="nested_pin",
+        import_style="alias",
+        local_shape="nested_global_use",
     )
     def test_only_a_same_binding_reference_keeps_an_import_live(
         self,

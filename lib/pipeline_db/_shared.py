@@ -11,66 +11,21 @@ Usage:
 """
 
 import hashlib
-# Explicit redundant aliases are the exact baseline for the pre-split flat
-# PipelineDB namespace. New unused imports remain F401 failures.
-import json as json
 import logging
 import os
 import zlib
-from contextlib import contextmanager as contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta as timedelta, timezone
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Iterable as Iterable,
-    Iterator as Iterator,
-    Optional,
-)
-
-if TYPE_CHECKING:
-    from lib.quality import CandidateScore as CandidateScore
-    from lib.triage_service import ParsedTriageFilter as ParsedTriageFilter
-    from lib.unfindable_detection_service import (
-        UnfindableSearchLogSignal as UnfindableSearchLogSignal,
-    )
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 import psycopg2
 import psycopg2.extras
 import msgspec
 
-from lib.import_queue import (
-    IMPORT_JOB_YOUTUBE as IMPORT_JOB_YOUTUBE,
-    ImportJob as ImportJob,
-    IMPORT_JOB_PREVIEW_WAITING as IMPORT_JOB_PREVIEW_WAITING,
-    validate_preview_failure_status as validate_preview_failure_status,
-    validate_job_type as validate_job_type,
-    validate_payload as validate_payload,
-    validate_status as validate_status,
-)
 from lib.quality import (
-    AlbumQualityEvidence as AlbumQualityEvidence,
-    AlbumQualityEvidenceFile as AlbumQualityEvidenceFile,
-    AlbumQualityV0Metric as AlbumQualityV0Metric,
-    AudioQualityMeasurement as AudioQualityMeasurement,
-    CooldownConfig as CooldownConfig,
     SpectralMeasurement,
     V0ProbeEvidence,
-    VerifiedLosslessProof as VerifiedLosslessProof,
-    should_cooldown as should_cooldown,
 )
-from lib.release_identity import (
-    ReleaseIdentity as ReleaseIdentity,
-    normalize_release_id as normalize_release_id,
-)
-from lib.search_classification import (
-    SearchSummary as _ImportedSearchSummary,
-    classify_failure_class as _imported_classify_failure_class,
-)
-
-_SearchSummary = _ImportedSearchSummary
-_classify_failure_class = _imported_classify_failure_class
-del _ImportedSearchSummary, _imported_classify_failure_class
 
 logger = logging.getLogger(__name__)
 

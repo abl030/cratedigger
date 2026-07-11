@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
 
-RUFF_RULES = "F401,F811"
 EXPECTED_PRODUCTION_ROOTS = (
     "lib",
     "web",
@@ -20,32 +20,34 @@ EXPECTED_PRODUCTION_ROOTS = (
 )
 LEGACY_EXPORT_SURFACES = (
     "cratedigger.py",
-    "lib/pipeline_db/_shared.py",
     "scripts/pipeline_cli/__init__.py",
 )
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _write_source_world(root: Path, sources: dict[str, str]) -> Path:
+    paths: list[str] = []
+    for relative_path, source in sources.items():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        paths.append(path.as_posix())
+    source_list = root / "production-sources.txt"
+    source_list.write_text("\n".join(paths) + "\n", encoding="utf-8")
+    return source_list
 
 
 def ruff_findings(sources: dict[str, str]) -> tuple[dict[str, object], ...]:
-    """Run the real pinned Ruff over a synthetic source world."""
+    """Run the production source-local command over a synthetic world."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        paths: list[str] = []
-        for relative_path, source in sources.items():
-            path = root / relative_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(source, encoding="utf-8")
-            paths.append(relative_path)
+        source_list = _write_source_world(root, sources)
+        env = dict(os.environ)
+        env["CRATEDIGGER_RUFF_OUTPUT_FORMAT"] = "json"
         result = subprocess.run(
-            [
-                "ruff",
-                "check",
-                "--select",
-                RUFF_RULES,
-                "--output-format",
-                "json",
-                *paths,
-            ],
-            cwd=root,
+            ["bash", "scripts/find_unused_imports.sh", str(source_list)],
+            cwd=REPO_ROOT,
+            env=env,
             text=True,
             capture_output=True,
             check=False,
@@ -53,6 +55,32 @@ def ruff_findings(sources: dict[str, str]) -> tuple[dict[str, object], ...]:
     if result.returncode not in {0, 1}:
         raise AssertionError(result.stderr or result.stdout)
     return tuple(json.loads(result.stdout))
+
+
+def run_full_dead_code_gate(
+    sources: dict[str, str],
+    *,
+    runner_source: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the actual production wrapper, optionally with a planted mutant."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source_list = _write_source_world(root, sources)
+        runner = REPO_ROOT / "scripts/find_dead_code.sh"
+        if runner_source is not None:
+            runner = root / "find_dead_code.sh"
+            runner.write_text(runner_source, encoding="utf-8")
+        env = dict(os.environ)
+        env["CRATEDIGGER_REPO_ROOT"] = str(REPO_ROOT)
+        env["CRATEDIGGER_PRODUCTION_PYTHON_SOURCES_FILE"] = str(source_list)
+        return subprocess.run(
+            ["bash", str(runner)],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 def assert_import_liveness(
@@ -70,6 +98,11 @@ def assert_import_liveness(
     assert bool(matching) is not import_is_live
 
 
+def assert_dead_code_gate_rejects(result: subprocess.CompletedProcess[str]) -> None:
+    """Assert the production wrapper enforces a source-local failure."""
+    assert result.returncode != 0, result.stdout + result.stderr
+
+
 class TestUnusedImportAudit(unittest.TestCase):
     def test_peer_name_use_does_not_keep_an_import_live(self) -> None:
         findings = ruff_findings({
@@ -82,6 +115,36 @@ class TestUnusedImportAudit(unittest.TestCase):
             relative_path="lib/importing.py",
             import_is_live=False,
         )
+
+    def test_actual_production_wrapper_rejects_cross_module_name_masking(self) -> None:
+        sources = {
+            "lib/importing.py": "from dependency import shared_name\n",
+            "lib/peer.py": "shared_name = object()\nprint(shared_name)\n",
+        }
+
+        result = run_full_dead_code_gate(sources)
+
+        assert_dead_code_gate_rejects(result)
+
+    def test_checker_kills_a_non_enforcing_production_wrapper_mutant(self) -> None:
+        sources = {
+            "lib/importing.py": "from dependency import shared_name\n",
+            "lib/peer.py": "shared_name = object()\nprint(shared_name)\n",
+        }
+        runner_source = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
+        enforcing_call = 'bash scripts/find_unused_imports.sh "$SOURCE_LIST"'
+        self.assertIn(enforcing_call, runner_source)
+        mutant = runner_source.replace(
+            enforcing_call,
+            enforcing_call + " || true",
+            1,
+        )
+
+        result = run_full_dead_code_gate(sources, runner_source=mutant)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with self.assertRaises(AssertionError):
+            assert_dead_code_gate_rejects(result)
 
     def test_scope_control_flow_annotations_and_exports_use_real_ruff(self) -> None:
         cases = {
@@ -153,10 +216,9 @@ class TestUnusedImportAudit(unittest.TestCase):
                 )
 
     def test_each_legacy_surface_still_rejects_a_new_unused_import(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
         for relative_path in LEGACY_EXPORT_SURFACES:
             with self.subTest(relative_path=relative_path):
-                source = (repo_root / relative_path).read_text(encoding="utf-8")
+                source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
                 findings = ruff_findings({
                     relative_path: source + "\nimport planted_unused_dependency\n",
                 })
@@ -179,7 +241,7 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertEqual(roots, EXPECTED_PRODUCTION_ROOTS)
         self.assertNotIn("tests", roots)
         self.assertIn("tools/production_python_sources.txt", script)
-        self.assertIn("ruff check --select F401,F811", script)
+        self.assertIn('bash scripts/find_unused_imports.sh "$SOURCE_LIST"', script)
         self.assertIn('vulture "${VULTURE_ARGS[@]}" "${SOURCES[@]}"', script)
 
 

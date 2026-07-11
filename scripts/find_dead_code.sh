@@ -15,7 +15,8 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+REPO_ROOT=${CRATEDIGGER_REPO_ROOT:-"$(cd "$(dirname "$0")/.." && pwd)"}
+cd "$REPO_ROOT"
 
 USE_WHITELIST=1
 CONFIDENCE=60
@@ -35,8 +36,11 @@ done
 
 # One authored production-root list feeds both local F401 and aggregate vulture.
 # Tests stay excluded: a test reference must not keep production code live.
-mapfile -t SOURCES < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
-  tools/production_python_sources.txt)
+SOURCE_LIST=${CRATEDIGGER_PRODUCTION_PYTHON_SOURCES_FILE:-tools/production_python_sources.txt}
+if [[ "$SOURCE_LIST" != /* ]]; then
+  SOURCE_LIST="$REPO_ROOT/$SOURCE_LIST"
+fi
+mapfile -t SOURCES < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SOURCE_LIST")
 
 VULTURE_ARGS=(--min-confidence "$CONFIDENCE")
 if [[ "$USE_WHITELIST" == 1 ]]; then
@@ -45,7 +49,7 @@ fi
 
 echo "=== ruff source-local unused imports: ${SOURCES[*]} ==="
 echo
-ruff check --select F401,F811 "${SOURCES[@]}"
+bash scripts/find_unused_imports.sh "$SOURCE_LIST"
 
 echo
 echo "=== vulture ${VULTURE_ARGS[*]} ${SOURCES[*]} ==="

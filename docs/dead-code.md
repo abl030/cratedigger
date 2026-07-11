@@ -4,8 +4,8 @@ Two complementary static checks protect production liveness:
 
 - Ruff `F401`/`F811` runs source-locally, so a name used in another module
   cannot hide an unused import. Explicit redundant aliases mark the exact
-  pre-existing legacy export baseline in `cratedigger.py`,
-  `lib/pipeline_db/_shared.py`, and `scripts/pipeline_cli/__init__.py`.
+  55-binding pre-existing legacy export baseline in `cratedigger.py` and
+  `scripts/pipeline_cli/__init__.py`.
 - Vulture keeps the aggregate repository view for dead functions, classes,
   attributes, and cross-module APIs.
 
