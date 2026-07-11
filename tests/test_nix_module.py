@@ -263,6 +263,16 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn(f'plugins = "{self.PRODUCTION_PLUGINS}";', text)
 
+    def test_cratedigger_sidecar_is_exact_beets_clutter(self) -> None:
+        """Beet remove may prune our sidecar, never arbitrary leftovers."""
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        match = re.search(r"clutter = \[(.*?)\];", text, re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        clutter = match.group(1)
+        self.assertIn('"cratedigger.json"', clutter)
+        self.assertNotIn('"cratedigger.*"', clutter)
+
     def test_permissions_plugin_configured_with_media_server_friendly_modes(
         self,
     ) -> None:

@@ -12,11 +12,13 @@ the three load-bearing properties:
    configured, while the injected-handle path (this very harness)
    keeps returning the shared object.
 """
+import configparser
 import http.client
 import os
 import sys
 import threading
 import time
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -236,6 +238,84 @@ class TestPerThreadDbHandles(unittest.TestCase):
         t.start(); t.join(timeout=10)
         self.assertEqual(seen, [sentinel])
         self.assertIs(srv._db(), sentinel)
+
+
+class TestPerThreadBeetsHandles(unittest.TestCase):
+    """Production Beets handles carry the configured library root."""
+
+    def setUp(self):
+        from web import server as srv
+        self._srv = srv
+        self._saved_path = srv.beets_db_path
+        self._saved_root = srv.beets_library_root
+        self._saved_injected = srv._beets
+        self._saved_dsn = srv._db_dsn
+        self._saved_mb_api_base = srv.mb_api.MB_API_BASE
+        self._saved_discogs_api_base = srv._discogs.DISCOGS_API_BASE
+
+    def tearDown(self):
+        self._srv._close_thread_handles()
+        self._srv.beets_db_path = self._saved_path
+        self._srv.beets_library_root = self._saved_root
+        self._srv._beets = self._saved_injected
+        self._srv._db_dsn = self._saved_dsn
+        self._srv.mb_api.MB_API_BASE = self._saved_mb_api_base
+        self._srv._discogs.DISCOGS_API_BASE = self._saved_discogs_api_base
+
+    def test_constructor_receives_library_root(self):
+        from lib.config import CratediggerConfig
+
+        srv = self._srv
+        ini = configparser.ConfigParser()
+        ini["Beets"] = {"directory": "/mnt/virtio/Music/Beets"}
+        cfg = CratediggerConfig.from_ini(ini)
+        with tempfile.NamedTemporaryFile() as db_file:
+            srv.beets_db_path = db_file.name
+            srv._beets = None
+
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                srv._configure_beets_library_root_from_runtime_config()
+                handle = srv._beets_db()
+
+            self.assertIsNotNone(handle)
+            assert handle is not None
+            self.assertEqual(
+                handle._library_root,  # noqa: SLF001 - constructor seam
+                "/mnt/virtio/Music/Beets",
+            )
+
+    def test_main_executes_runtime_root_wiring(self):
+        """Production boot must load the root before opening the server."""
+        from lib.config import CratediggerConfig
+
+        class BootStop(Exception):
+            pass
+
+        srv = self._srv
+        ini = configparser.ConfigParser()
+        ini["Beets"] = {"directory": "/boot-config/Music/Beets"}
+        cfg = CratediggerConfig.from_ini(ini)
+        with tempfile.NamedTemporaryFile() as db_file, patch.object(
+            sys,
+            "argv",
+            [
+                "server.py",
+                "--dsn",
+                str(TEST_DSN),
+                "--beets-db",
+                db_file.name,
+            ],
+        ), patch(
+            "lib.config.read_runtime_config",
+            return_value=cfg,
+        ), patch(
+            "web.server.ThreadingHTTPServer",
+            side_effect=BootStop,
+        ):
+            with self.assertRaises(BootStop):
+                srv.main()
+
+        self.assertEqual(srv.beets_library_root, "/boot-config/Music/Beets")
 
 
 if __name__ == "__main__":
