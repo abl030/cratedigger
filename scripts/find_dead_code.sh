@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Static dead-code finder. Wraps vulture with sensible defaults for this repo.
+# Static liveness gates: source-local Ruff imports plus aggregate vulture.
 #
-# Default: reads tools/vulture/whitelist.py and only reports *new* findings
-#          introduced since the baseline. Use this in CI / pre-commit to
-#          catch drift.
+# Default: Ruff rejects source-local F401/F811 findings, then vulture reads
+#          tools/vulture/whitelist.py and reports only aggregate findings
+#          introduced since that baseline.
 #
-# --baseline: ignore the whitelist and report every candidate. Use this when
-#             actively hunting dead code for deletion — many findings will be
-#             real, some are framework dispatch the whitelist already covers.
+# --baseline: ignore only vulture's whitelist and report every aggregate
+#             candidate. Ruff remains an exact zero-new-debt gate.
 #
 # Usage:
 #   nix-shell --run "bash scripts/find_dead_code.sh"             # diff vs whitelist
@@ -34,23 +33,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-SOURCES=(
-  # Deliberately production-only: a test call must not keep a dead production
-  # API alive. Test-only wire/framework fields require explicit whitelist
-  # entries with a rationale instead (docs/dead-code.md).
-  lib
-  web
-  harness
-  scripts
-  cratedigger.py
-  album_source.py
-)
+# One authored production-root list feeds both local F401 and aggregate vulture.
+# Tests stay excluded: a test reference must not keep production code live.
+mapfile -t SOURCES < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
+  tools/production_python_sources.txt)
 
 VULTURE_ARGS=(--min-confidence "$CONFIDENCE")
 if [[ "$USE_WHITELIST" == 1 ]]; then
   VULTURE_ARGS+=(tools/vulture/whitelist.py)
 fi
 
+echo "=== ruff source-local unused imports: ${SOURCES[*]} ==="
+echo
+ruff check --select F401,F811 "${SOURCES[@]}"
+
+echo
 echo "=== vulture ${VULTURE_ARGS[*]} ${SOURCES[*]} ==="
 echo
 

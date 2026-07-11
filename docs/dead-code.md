@@ -1,6 +1,16 @@
 # Finding dead code
 
-Static analysis via vulture — reach for it when the test suite starts feeling like a tax on code nobody runs in production.
+Two complementary static checks protect production liveness:
+
+- Ruff `F401`/`F811` runs source-locally, so a name used in another module
+  cannot hide an unused import. Explicit redundant aliases mark the exact
+  pre-existing legacy export baseline in `cratedigger.py`,
+  `lib/pipeline_db/_shared.py`, and `scripts/pipeline_cli/__init__.py`.
+- Vulture keeps the aggregate repository view for dead functions, classes,
+  attributes, and cross-module APIs.
+
+Both consume `tools/production_python_sources.txt`; tests are deliberately
+absent from that one authored root list.
 
 **Static (fast, noisy):** vulture flags unreferenced functions / classes / variables.
 
@@ -9,20 +19,25 @@ nix-shell --run "bash scripts/find_dead_code.sh"             # diff vs whitelist
 nix-shell --run "bash scripts/find_dead_code.sh --baseline"  # all candidates (initial hunt)
 ```
 
-The whitelist at `tools/vulture/whitelist.py` masks the known false positives on main (msgspec Struct fields, beets ImportSession overrides, route handler dispatch, SQL DictRow attribute access). After deleting genuinely-dead code, regenerate the baseline:
+The whitelist at `tools/vulture/whitelist.py` masks the known aggregate
+false positives on main (msgspec Struct fields, beets ImportSession overrides,
+route handler dispatch, SQL DictRow attribute access). After deleting
+genuinely-dead code, regenerate the aggregate baseline:
 
 ```bash
-nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py > tools/vulture/whitelist.py"
+nix-shell --run 'mapfile -t sources < <(sed "/^[[:space:]]*#/d; /^[[:space:]]*$/d" tools/production_python_sources.txt); vulture --make-whitelist "${sources[@]}" > tools/vulture/whitelist.py'
 ```
 
-The scan is intentionally **production-only**. Tests are evidence that a
+Both scans are intentionally **production-only**. Tests are evidence that a
 surface behaves as expected, not evidence that production still calls it; if
 tests were included, a test-only reference could silently preserve a dead API
 forever. A production field consumed only through serialization, framework
 reflection, or an external client therefore needs a narrow entry in
-`tools/vulture/whitelist.py` with its reason on the same line. The suite pins
-this boundary in `tests/test_issue_573_boundaries.py`; do not add `tests/` to
-the scanner's source roots.
+`tools/vulture/whitelist.py` with its reason on the same line. Intentional
+unused imports use an explicit redundant alias at that import, never a
+whole-file ignore; this keeps every module ratcheted against new F401 debt.
+The suite pins this boundary in `tests/test_issue_573_boundaries.py` and
+`tests/test_unused_import_audit.py`; do not add `tests/` to the source roots.
 
 **Why no runtime coverage?** We tried it (issue #352): production-instrumented coverage.py on the long-running services, diffed against test coverage to surface "tested but never run in prod." It was removed 2026-07-01. It never produced an actionable signal — collection silently broke three times on Nix store-path renames, and once fixed the diff was dominated by noise it can't see past: `pipeline-cli` / the beets-interpreter harness / the deploy-time migrator aren't instrumented at all (so they always look dead), and a branch not hit in a bounded window is a "rare operator path" (Replace, YouTube-rescue, ban-source), not dead. For a single-operator system the CPU overhead bought nothing that vulture plus judgement didn't already give. Don't re-add it without a fundamentally different design.
 
@@ -41,7 +56,9 @@ The mechanic is simple but easy to miss: vulture's whitelist contains an entry p
 
 **Workflow per deletion PR:**
 1. Make the deletion + delete the tests that exercised it.
-2. Regenerate the whitelist: `nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py" 2>/dev/null > tools/vulture/whitelist.py` (then prepend the 22-line header back from the previous version).
+2. Regenerate the whitelist with the roots from
+   `tools/production_python_sources.txt` (the command above), then prepend the
+   header from the previous version.
 3. Diff the whitelist (`git diff tools/vulture/whitelist.py`). New entries are cascading orphans you exposed.
 4. For each new entry, decide:
    - **Fold into this PR** if the orphan is small, contained, and the test cleanup is bounded (~50 LOC). Best when the orphan is structurally tied to the deletion (`strip_short_tokens` was the canonical example — its body matched what only the deleted callers needed).

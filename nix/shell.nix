@@ -28,6 +28,7 @@ let
   #
   # Dev-only additions:
   #   - vulture: static dead-code finder (scripts/find_dead_code.sh)
+  #   - ruff: source-local unused-import gate (same script)
   #   - hypothesis: property-based generated tests (docs/generated-testing.md)
   #   - coverage: branch-coverage steering for the fuzz tier (same doc)
   testPythonEnv = pkgs.python3.withPackages (ps:
@@ -38,6 +39,7 @@ in
 pkgs.mkShell {
   packages = [
     pkgs.postgresql          # initdb, pg_ctl for ephemeral test DB
+    pkgs.ruff                # per-module F401 liveness (aggregate vulture masks it)
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
     pkgs.ffmpeg              # ffprobe for bitrate measurement in quality tests

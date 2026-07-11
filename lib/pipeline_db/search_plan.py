@@ -3,7 +3,6 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 import psycopg2
 import psycopg2.extras
-import msgspec
 
 
 if TYPE_CHECKING:

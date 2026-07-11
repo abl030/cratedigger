@@ -23,7 +23,7 @@ from lib.dispatch.types import QualityGateState
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
-    from lib.quality import AudioQualityMeasurement, QualityRankConfig
+    from lib.quality import QualityRankConfig
 
 logger = logging.getLogger("cratedigger")
 
