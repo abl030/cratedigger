@@ -399,6 +399,24 @@ class FakePipelineDB:
                 p["reconciled_at"] = reconciled_at
                 return
 
+    def prune_terminal_plex_added_at_pins(
+        self,
+        *,
+        older_than: datetime,
+    ) -> int:
+        terminal = {"done", "skipped"}
+        survivors = [
+            p for p in self.plex_added_at_pins
+            if not (
+                p["status"] in terminal
+                and p["reconciled_at"] is not None
+                and _as_datetime(p["reconciled_at"]) < older_than
+            )
+        ]
+        removed = len(self.plex_added_at_pins) - len(survivors)
+        self.plex_added_at_pins[:] = survivors
+        return removed
+
     # --- Migration 046: Jellyfin DateCreated pin store ---
 
     def add_jellyfin_date_created_pin(
@@ -451,6 +469,24 @@ class FakePipelineDB:
                 p["status"] = status
                 p["reconciled_at"] = reconciled_at
                 return
+
+    def prune_terminal_jellyfin_date_created_pins(
+        self,
+        *,
+        older_than: datetime,
+    ) -> int:
+        terminal = {"done", "skipped", "expired"}
+        survivors = [
+            p for p in self.jellyfin_date_created_pins
+            if not (
+                p["status"] in terminal
+                and p["reconciled_at"] is not None
+                and _as_datetime(p["reconciled_at"]) < older_than
+            )
+        ]
+        removed = len(self.jellyfin_date_created_pins) - len(survivors)
+        self.jellyfin_date_created_pins[:] = survivors
+        return removed
 
     def queue_execute_results(self, *results: Any) -> None:
         """Register a deterministic cursor sequence for ``_execute`` calls.

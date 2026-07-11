@@ -343,6 +343,19 @@ class TestRenderedBeetsConfigContract(unittest.TestCase):
         self.assertIn("ratelimit", text)
 
 
+class TestJellyfinNotifierConfigContract(unittest.TestCase):
+    def test_library_id_is_nullable_and_only_rendered_when_configured(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        jellyfin_options = text[text.index("jellyfin = {"):]
+        self.assertIn("libraryId = mkOption {", jellyfin_options)
+        self.assertIn("type = types.nullOr types.nonEmptyStr;", jellyfin_options)
+        self.assertIn("default = null;", jellyfin_options)
+        self.assertIn(
+            '${optionalString (cfg.notifiers.jellyfin.libraryId != null) "library_id = ${cfg.notifiers.jellyfin.libraryId}"}',
+            text,
+        )
+
+
 class TestCreateLocallyContract(unittest.TestCase):
     """pipelineDb.createLocally (tier-2 plan U7, R10/KTD5): local postgres
     with peer auth by construction — role + database named after cfg.user,

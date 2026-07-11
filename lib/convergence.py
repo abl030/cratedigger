@@ -81,6 +81,8 @@ _SEARCH_LEDGER_FAILURE = (
     "SEARCH-LEDGER: sweep failed; continuing with the cycle.")
 _TRANSFER_LEDGER_FAILURE = (
     "TRANSFER-LEDGER: prune failed; continuing with the cycle.")
+_PIN_RETENTION_FAILURE = (
+    "PIN-RETENTION: prune failed; continuing with the cycle.")
 _HARVEST_FAILURE = (
     "HARVEST: pre-purge evidence harvest failed; continuing with the cycle.")
 _COMPLETED_PURGE_FAILURE = (
@@ -96,6 +98,7 @@ CONVERGENCE_STEPS: Mapping[ConvergenceGroup, tuple[ConvergenceStep, ...]] = (
             _lazy_step("lib.slskd_transfers", "reap_disk_orphans", _DISK_REAP_FAILURE),
             _lazy_step("lib.slskd_searches", "converge_slskd_searches", _SEARCH_LEDGER_FAILURE),
             _lazy_step("lib.slskd_transfer_ledger", "prune_transfer_ledger_cycle", _TRANSFER_LEDGER_FAILURE),
+            _lazy_step("lib.pin_retention", "prune_terminal_pin_rows_cycle", _PIN_RETENTION_FAILURE),
         ),
         ConvergenceGroup.END_OF_CYCLE: (
             _lazy_step("lib.download", "harvest_terminal_transfer_evidence", _HARVEST_FAILURE),
