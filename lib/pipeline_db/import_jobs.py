@@ -561,12 +561,11 @@ class _ImportJobsMixin(_PipelineDBBase):
     def get_active_import_job_for_request(
         self,
         request_id: int,
-    ) -> dict[str, Any] | None:
+    ) -> ImportJob | None:
         """Return the most recent queued/running import job for this request.
 
         Used by the ban-source route's importer-race check (E1.3 in the
-        plan). Returns the raw row dict (not an `ImportJob`) because the
-        caller only inspects `status` for the 409 decision.
+        plan). All callers consume the queue's concrete ``ImportJob`` shape.
         """
         cur = self._execute("""
             SELECT *
@@ -577,4 +576,4 @@ class _ImportJobsMixin(_PipelineDBBase):
             LIMIT 1
         """, (request_id,))
         row = cur.fetchone()
-        return dict(row) if row else None
+        return ImportJob.from_row(dict(row)) if row else None

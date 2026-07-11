@@ -26,9 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import cratedigger
 from lib import enqueue as enqueue_module
 from lib.grab_list import DownloadFile
-from lib.slskd_client import TransferSnapshot
-from lib.slskd_transfers import (cancel_and_delete, slskd_download_status,
-                          slskd_do_enqueue, downloads_all_done)
+from lib.slskd_transfers import cancel_and_delete, slskd_do_enqueue
 from lib.dispatch import _build_download_info
 from lib.context import CratediggerContext
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
@@ -125,11 +123,6 @@ DIRECTORY_FILE_MP3 = {
     "bitDepth": 16,
     "isVariableBitRate": True,
 }
-
-DOWNLOAD_STATUS_DONE = TransferSnapshot(state="Completed, Succeeded")
-DOWNLOAD_STATUS_QUEUED = TransferSnapshot(state="Queued, Remotely")
-DOWNLOAD_STATUS_FAILED = TransferSnapshot(state="Completed, Errored")
-
 
 def make_search_result(username, files, upload_speed=1048576):
     """Build a search result dict as slskd returns it."""
@@ -492,77 +485,6 @@ class TestSlskdDoEnqueue(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertIsInstance(result[0], DownloadFile)
         self.assertIsInstance(result[1], DownloadFile)
-
-
-class TestDownloadStatusFlow(unittest.TestCase):
-    """Verify download status polling works with DownloadFile instances."""
-
-    def test_status_set_on_download_file(self):
-        """slskd_download_status sets .status on DownloadFile instances
-        from the bulk snapshot (the only production path — #508)."""
-        slskd = FakeSlskdAPI()
-        slskd.add_transfer(
-            username="user",
-            directory="dir",
-            filename="track.flac",
-            id="xfer-1",
-            state="Completed, Succeeded",
-        )
-        f = make_download_file(
-            filename="track.flac",
-            id="xfer-1",
-            file_dir="dir",
-            username="user",
-            size=100,
-        )
-        snapshot = slskd.transfers.get_all_downloads()
-
-        ok = slskd_download_status([f], snapshot=snapshot)
-
-        self.assertTrue(ok)
-        self.assertIsNotNone(f.status)
-        assert f.status is not None
-        self.assertEqual(f.status.state, "Completed, Succeeded")
-
-    def test_downloads_all_done(self):
-        """downloads_all_done reads .status on DownloadFile instances."""
-        f1 = make_download_file(filename="a.flac", id="1", file_dir="d",
-                                username="u", size=1)
-        f2 = make_download_file(filename="b.flac", id="2", file_dir="d",
-                                username="u", size=1)
-        f1.status = DOWNLOAD_STATUS_DONE
-        f2.status = DOWNLOAD_STATUS_DONE
-
-        done, problems, queued = downloads_all_done([f1, f2])
-
-        self.assertTrue(done)
-        self.assertIsNone(problems)
-        self.assertEqual(queued, 0)
-
-    def test_downloads_partial_queued(self):
-        f1 = make_download_file(filename="a.flac", id="1", file_dir="d",
-                                username="u", size=1)
-        f2 = make_download_file(filename="b.flac", id="2", file_dir="d",
-                                username="u", size=1)
-        f1.status = DOWNLOAD_STATUS_DONE
-        f2.status = DOWNLOAD_STATUS_QUEUED
-
-        done, problems, queued = downloads_all_done([f1, f2])
-
-        self.assertFalse(done)
-        self.assertEqual(queued, 1)
-
-    def test_downloads_with_errors(self):
-        f1 = make_download_file(filename="a.flac", id="1", file_dir="d",
-                                username="u", size=1)
-        f1.status = DOWNLOAD_STATUS_FAILED
-
-        done, problems, queued = downloads_all_done([f1])
-
-        self.assertFalse(done)
-        self.assertIsNotNone(problems)
-        assert problems is not None
-        self.assertEqual(len(problems), 1)
 
 
 class TestBuildDownloadInfo(unittest.TestCase):

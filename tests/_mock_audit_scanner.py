@@ -144,14 +144,6 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.enqueue\.slskd_do_enqueue$"),
     re.compile(r"^lib\.enqueue\.slskd_enqueue_with_outcome$"),
     re.compile(r"^lib\.(download|enqueue)\.cancel_and_delete$"),
-    # slskd_download_status matches downloads locally against a pre-fetched
-    # poll-cycle snapshot (no client call since #508 removed the per-file
-    # API fallback). It's patched only as an assert-not-called sentinel in
-    # the restored-terminal-status poll tests, guarding that a persisted
-    # completion short-circuits before any status re-poll — so mocking it is
-    # a control-flow probe, not a stand-in for our own decision logic.
-    re.compile(r"^lib\.download\.slskd_download_status$"),
-
     # Beets harness subprocess wrapper. ``beets_validate`` invokes
     # ``run_beets_harness.sh`` and parses JSON — equivalent to mocking
     # a subprocess seam.

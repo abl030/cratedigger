@@ -8,13 +8,13 @@ Three invariants, each shipped as a deterministic pin (already living in
 
 I1. **No terminal observation is ever lost.** Any file whose transfer
     slskd reports in a terminal state (``"Completed, *"``) during a poll
-    (``lib.download._capture_download_progress``) OR during the
+    (``lib.quality.reduce_poll_cycle``) OR during the
     pre-purge harvest (``lib.download.harvest_terminal_transfer_evidence``)
     must have that state AND its exception persisted by the end of the
     cycle. Two sub-properties share this shape:
-      - I1a — the poll-cycle capture/persistence-gate split (root cause
-        #2: a transition INTO a terminal error state that wasn't
-        "forward progress" was silently dropped).
+      - I1a — the complete poll-cycle state result (root cause #2: a
+        transition INTO a terminal error state that wasn't "forward
+        progress" was silently dropped).
       - I1b — the pre-purge harvest (root cause #3: transfers that
         complete/error within the same cycle they were enqueued, before
         any poll observes them, had their evidence destroyed by
@@ -38,6 +38,7 @@ tests/_hypothesis_profiles.py and docs/generated-testing.md.
 import os
 import sys
 import unittest
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,15 +51,21 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 from lib.download import (
-    _capture_download_progress,
     _enrich_timeout_reason,
     _vanished_timeout_reason,
     harvest_terminal_transfer_evidence,
     summarize_file_failures,
 )
 from lib.enqueue import _stamp_enqueue_failure_reason
-from lib.quality import ActiveDownloadFileState, ActiveDownloadState
-from lib.slskd_client import TransferSnapshot
+from lib.quality import (
+    ActiveDownloadFileState,
+    ActiveDownloadState,
+    PollCycleConfig,
+    PollCycleDecision,
+    PollCycleSnapshot,
+    PollFileSnapshot,
+    reduce_poll_cycle,
+)
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import make_ctx_with_fake_db, make_download_file, make_request_row
 
@@ -81,7 +88,7 @@ _EXCEPTIONS = (
 
 
 # ============================================================================
-# I1a -- _capture_download_progress never loses a terminal observation
+# I1a -- reduce_poll_cycle never loses a terminal observation
 # ============================================================================
 
 def assert_capture_progress_preserves_terminal_observation(
@@ -95,11 +102,15 @@ def assert_capture_progress_preserves_terminal_observation(
     snap_bytes: int,
     after_last_state: str | None,
     after_last_exception: str | None,
-    state_dirty: bool,
+    after_bytes: int,
 ) -> None:
     """Module-level checker (known-bad self-tests below)."""
     if not has_snapshot:
-        if after_last_state != prev_state or after_last_exception != prev_exception:
+        if (
+            after_last_state != prev_state
+            or after_last_exception != prev_exception
+            or after_bytes != prev_bytes
+        ):
             raise AssertionError(
                 "no snapshot observed this cycle, but the file's "
                 "persisted evidence was mutated anyway")
@@ -115,16 +126,10 @@ def assert_capture_progress_preserves_terminal_observation(
         raise AssertionError(
             f"terminal exception observation lost: expected="
             f"{expected_exception!r} after={after_last_exception!r}")
-    already_persisted = (
-        prev_state == snap_state
-        and prev_exception == expected_exception
-        and prev_bytes == snap_bytes
-    )
-    if not already_persisted and not state_dirty:
+    if after_bytes != snap_bytes:
         raise AssertionError(
-            "terminal observation newly arrived this cycle but was not "
-            "marked state_dirty -- it would never reach persistence "
-            "(issue #564 root cause #2)")
+            f"terminal byte observation lost: expected={snap_bytes} "
+            f"after={after_bytes}")
 
 
 @st.composite
@@ -141,20 +146,43 @@ def _capture_progress_worlds(draw: Any) -> dict:
 
 
 def _run_capture_progress(world: dict) -> dict:
-    f = make_download_file(
-        last_state=world["prev_state"], last_exception=world["prev_exception"],
-        bytes_transferred=world["prev_bytes"])
-    if world["has_snapshot"]:
-        f.status = TransferSnapshot(
-            state=world["snap_state"], bytes_transferred=world["snap_bytes"],
-            exception=world["snap_exception"])
+    f = ActiveDownloadFileState(
+        username="user",
+        filename="Album\\01.flac",
+        file_dir="Album",
+        size=1,
+        last_state=world["prev_state"],
+        last_exception=world["prev_exception"],
+        bytes_transferred=world["prev_bytes"],
+    )
     state = ActiveDownloadState(
-        filetype="flac", enqueued_at="2026-01-01T00:00:00+00:00", files=[])
+        filetype="flac",
+        enqueued_at="2026-01-01T00:00:00+00:00",
+        files=[f],
+    )
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    _progress_made, state_dirty = _capture_download_progress([f], state, now)
+    snapshot = PollFileSnapshot(
+        transfer_id="tx-1" if world["has_snapshot"] else None,
+        state=world["snap_state"] if world["has_snapshot"] else None,
+        bytes_transferred=(world["snap_bytes"] if world["has_snapshot"] else 0),
+        exception=(world["snap_exception"] if world["has_snapshot"] else None),
+    )
+    result = reduce_poll_cycle(
+        state,
+        PollCycleSnapshot(files=[snapshot], completion_current_path="/canonical"),
+        now,
+        PollCycleConfig(
+            remote_queue_timeout=10_000,
+            stalled_timeout=10_000,
+            max_file_retries=5,
+        ),
+    )
+    assert result.state is not None
+    after = result.state.files[0]
     return dict(
-        after_last_state=f.last_state, after_last_exception=f.last_exception,
-        state_dirty=state_dirty,
+        after_last_state=after.last_state,
+        after_last_exception=after.last_exception,
+        after_bytes=after.bytes_transferred,
     )
 
 
@@ -178,7 +206,7 @@ class TestCaptureProgressCheckerTripsOnViolations(unittest.TestCase):
             snap_exception="Transfer rejected: Banned", snap_bytes=0,
             after_last_state="Completed, Rejected",
             after_last_exception="Transfer rejected: Banned",
-            state_dirty=True,
+            after_bytes=0,
         )
         defaults.update(overrides)
         return defaults
@@ -193,15 +221,194 @@ class TestCaptureProgressCheckerTripsOnViolations(unittest.TestCase):
             assert_capture_progress_preserves_terminal_observation(
                 **self._base(after_last_exception=None))
 
-    def test_trips_when_new_terminal_observation_not_marked_dirty(self):
+    def test_trips_when_terminal_bytes_are_dropped(self):
         with self.assertRaises(AssertionError):
             assert_capture_progress_preserves_terminal_observation(
-                **self._base(state_dirty=False))
+                **self._base(snap_bytes=10, after_bytes=0))
 
     def test_trips_when_no_snapshot_but_file_mutated(self):
         with self.assertRaises(AssertionError):
             assert_capture_progress_preserves_terminal_observation(**self._base(
                 has_snapshot=False, after_last_state="Completed, Rejected"))
+
+
+# ============================================================================
+# Pure reducer inputs are never mutated across any poll phase
+# ============================================================================
+
+def assert_reducer_inputs_unchanged(
+    *,
+    state_before: object,
+    state_after: object,
+    snapshot_before: object,
+    snapshot_after: object,
+) -> None:
+    """The reducer may construct outputs but must never mutate its inputs."""
+    if state_after != state_before:
+        raise AssertionError("reduce_poll_cycle mutated persisted_state")
+    if snapshot_after != snapshot_before:
+        raise AssertionError("reduce_poll_cycle mutated snapshot")
+
+
+def _state_shape(state: ActiveDownloadState) -> object:
+    return msgspec.to_builtins(state)
+
+
+def _snapshot_shape(snapshot: PollCycleSnapshot) -> object:
+    return asdict(snapshot)
+
+
+_REDUCER_PHASES = (
+    "import_gate",
+    "processing_recovery",
+    "processing_blocked",
+    "fresh_vanished",
+    "old_vanished",
+    "progress",
+    "retry",
+    "completion",
+)
+
+
+@st.composite
+def _reducer_purity_worlds(draw: Any) -> dict[str, Any]:
+    return {
+        "phase": draw(st.sampled_from(_REDUCER_PHASES)),
+        "prev_bytes": draw(st.integers(min_value=0, max_value=1_000_000)),
+        "retry_count": draw(st.integers(min_value=0, max_value=4)),
+        "exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+    }
+
+
+def _run_reducer_purity(world: dict[str, Any]) -> None:
+    now = datetime(2026, 1, 1, 0, 10, tzinfo=timezone.utc)
+    file = ActiveDownloadFileState(
+        username="user",
+        filename="Album\\01.flac",
+        file_dir="Album",
+        size=1_000_000,
+        retry_count=world["retry_count"],
+        bytes_transferred=world["prev_bytes"],
+        last_exception=world["exception"],
+    )
+    state = ActiveDownloadState(
+        filetype="flac",
+        enqueued_at="2026-01-01T00:00:00+00:00",
+        last_progress_at="2026-01-01T00:09:30+00:00",
+        files=[file],
+    )
+    phase = world["phase"]
+    expected = PollCycleDecision.in_progress
+    snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
+        transfer_id="tx-1",
+        state="InProgress",
+        bytes_transferred=world["prev_bytes"] + 1,
+    )])
+
+    if phase == "import_gate":
+        snapshot = PollCycleSnapshot(
+            active_import_job_id=17,
+            active_import_job_status="running",
+            processing_blocked_reason="multiple_populated_paths",
+        )
+        expected = PollCycleDecision.wait_import_job
+    elif phase == "processing_recovery":
+        state.processing_started_at = "2026-01-01T00:09:00+00:00"
+        state.current_path = "/old"
+        snapshot = PollCycleSnapshot(processing_current_path="/recovered")
+        expected = PollCycleDecision.processing
+    elif phase == "processing_blocked":
+        state.processing_started_at = "2026-01-01T00:09:00+00:00"
+        state.current_path = "/old"
+        snapshot = PollCycleSnapshot(
+            processing_blocked_reason="legacy_shared_only",
+        )
+        expected = PollCycleDecision.wait_processing_recovery
+    elif phase == "fresh_vanished":
+        state.enqueued_at = "2026-01-01T00:09:30+00:00"
+        snapshot = PollCycleSnapshot(files=[PollFileSnapshot()])
+        expected = PollCycleDecision.wait_fresh_vanished
+    elif phase == "old_vanished":
+        snapshot = PollCycleSnapshot(files=[PollFileSnapshot()])
+        expected = PollCycleDecision.timeout_vanished
+    elif phase == "retry":
+        state.files.append(ActiveDownloadFileState(
+            username="user",
+            filename="Album\\02.flac",
+            file_dir="Album",
+            size=1_000_000,
+            last_state="InProgress",
+        ))
+        snapshot = PollCycleSnapshot(files=[
+            PollFileSnapshot(
+                transfer_id="tx-1",
+                state="Completed, Rejected",
+                bytes_transferred=world["prev_bytes"],
+                exception=world["exception"],
+            ),
+            PollFileSnapshot(
+                transfer_id="tx-2",
+                state="InProgress",
+                bytes_transferred=1,
+            ),
+        ])
+        expected = PollCycleDecision.retry_files
+    elif phase == "completion":
+        snapshot = PollCycleSnapshot(
+            files=[PollFileSnapshot(
+                transfer_id="tx-1",
+                state="Completed, Succeeded",
+                bytes_transferred=1_000_000,
+            )],
+            completion_current_path="/canonical",
+        )
+        expected = PollCycleDecision.complete
+
+    state_before = _state_shape(state)
+    snapshot_before = _snapshot_shape(snapshot)
+    result = reduce_poll_cycle(
+        state,
+        snapshot,
+        now,
+        PollCycleConfig(
+            remote_queue_timeout=10_000,
+            stalled_timeout=10_000,
+            max_file_retries=5,
+        ),
+    )
+    assert result.verdict.decision == expected
+    assert_reducer_inputs_unchanged(
+        state_before=state_before,
+        state_after=_state_shape(state),
+        snapshot_before=snapshot_before,
+        snapshot_after=_snapshot_shape(snapshot),
+    )
+
+
+class TestGeneratedReducerInputsArePure(unittest.TestCase):
+    @given(world=_reducer_purity_worlds())
+    def test_reduce_poll_cycle_never_mutates_inputs(self, world):
+        _run_reducer_purity(world)
+
+
+class TestReducerInputPurityCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_state_is_mutated(self):
+        with self.assertRaises(AssertionError):
+            assert_reducer_inputs_unchanged(
+                state_before={"files": [{"retry_count": 0}]},
+                state_after={"files": [{"retry_count": 1}]},
+                snapshot_before={"files": []},
+                snapshot_after={"files": []},
+            )
+
+    def test_trips_when_snapshot_is_mutated(self):
+        with self.assertRaises(AssertionError):
+            assert_reducer_inputs_unchanged(
+                state_before={"files": []},
+                state_after={"files": []},
+                snapshot_before={"files": [{"state": "InProgress"}]},
+                snapshot_after={"files": [{"state": "Completed, Errored"}]},
+            )
 
 
 # ============================================================================

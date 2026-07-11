@@ -1695,7 +1695,7 @@ class FakePipelineDB:
     def get_active_import_job_for_request(
         self,
         request_id: int,
-    ) -> dict[str, Any] | None:
+    ) -> ImportJob | None:
         """Most recent queued/running import job for this request, or None."""
         rows = [
             row for row in self._import_jobs
@@ -1705,7 +1705,7 @@ class FakePipelineDB:
         if not rows:
             return None
         rows.sort(key=lambda row: row["id"], reverse=True)
-        return copy.deepcopy(rows[0])
+        return ImportJob.from_row(copy.deepcopy(rows[0]))
 
     def check_and_apply_cooldown(self, username: str,
                                   config: Any = None) -> bool:  # noqa: ARG002
@@ -5289,4 +5289,3 @@ class FakePipelineDBSource:
 
     def close(self) -> None:
         self.close_calls += 1
-

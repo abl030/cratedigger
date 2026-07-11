@@ -712,6 +712,8 @@ def _materialize_processing_dir(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
+    *,
+    persist_current_path: bool = True,
 ) -> MaterializeResult:
     """Ensure ``staged_album.current_path`` holds the album's local files."""
     canonical_path = _canonical_import_folder_path(
@@ -852,7 +854,8 @@ def _materialize_processing_dir(
             logger.warning(f"Skipping removal of {rm_dir} because it's not empty.")
 
     album_data.import_folder = staged_album.current_path
-    staged_album.persist_current_path(db)
+    if persist_current_path:
+        staged_album.persist_current_path(db)
     return Materialized()
 
 

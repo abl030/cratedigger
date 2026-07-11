@@ -141,27 +141,6 @@ def _delete_completed_payloads(
             pass  # Non-empty (shared with another album) or already gone.
 
 
-def slskd_download_status(downloads: list[DownloadFile], *,
-                          snapshot: list[DownloadUser]) -> bool:
-    """Get status of each download file by matching locally against the
-    pre-fetched bulk poll-cycle snapshot (issue #508: every caller already
-    has one — there is no per-file API fallback)."""
-    ok = True
-    for file in downloads:
-        try:
-            transfer = match_transfer(snapshot, file.filename, username=file.username)
-            if transfer is not None:
-                file.status = transfer
-            else:
-                file.status = None
-                ok = False
-        except Exception:
-            logger.exception(f"Error getting download status of {file.filename}")
-            file.status = None
-            ok = False
-    return ok
-
-
 def _is_user_offline_http_error(exc: BaseException) -> bool:
     """slskd surfaces a peer-offline rejection as an HTTPError whose
     response body contains 'appears to be offline' (verified against
@@ -407,46 +386,6 @@ def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
     return outcome.downloads
 
 
-def downloads_all_done(
-    downloads: list[DownloadFile],
-) -> tuple[bool, list[DownloadFile] | None, int]:
-    """Check status of all files. Returns (all_done, error_list_or_none, remote_queue_count)."""
-    all_done = True
-    error_list: list[DownloadFile] = []
-    remote_queue = 0
-    for file in downloads:
-        if file.status is not None:
-            state = file.status.state
-            if state != "Completed, Succeeded":
-                all_done = False
-            if state in (
-                "Completed, Cancelled",
-                "Completed, TimedOut",
-                "Completed, Errored",
-                "Completed, Rejected",
-                "Completed, Aborted",
-            ):
-                error_list.append(file)
-            if state == "Queued, Remotely":
-                remote_queue += 1
-    return all_done, error_list if error_list else None, remote_queue
-
-
-def _all_files_remotely_queued(
-    downloads: list[DownloadFile], remote_queue_count: int,
-) -> bool:
-    """Return True when every tracked file is still queued on the remote peer.
-
-    This is intentionally separate from stalled transfer detection: a file that has
-    never started uploading should be governed by the remote queue timeout, not the
-    no-progress timeout used for active transfers.
-    """
-    return bool(downloads) and remote_queue_count == len(downloads)
-
-
-
-
-
 # === Transfer ID re-derivation ===
 
 def match_transfer_id(
@@ -541,6 +480,28 @@ def match_transfer(
     if not candidates:
         return None
     return max(candidates, key=_transfer_priority)
+
+
+def match_transfer_for_attempt(
+    downloads: DownloadUser | list[DownloadUser],
+    target_filename: str,
+    *,
+    username: str,
+    not_before: str | None,
+) -> TransferSnapshot | None:
+    """Match one transfer without binding a new attempt to stale history."""
+
+    transfer = match_transfer(
+        downloads,
+        target_filename,
+        username=username,
+    )
+    if transfer is not None and _is_terminal_transfer_before(
+        transfer,
+        not_before,
+    ):
+        return None
+    return transfer
 
 
 def _get_all_downloads_snapshot(
@@ -654,12 +615,12 @@ def rederive_transfer_ids(
         return False
 
     for f in entry.files:
-        transfer = match_transfer(downloads, f.filename, username=f.username)
-        if transfer is not None and _is_terminal_transfer_before(
-            transfer,
-            not_before,
-        ):
-            transfer = None
+        transfer = match_transfer_for_attempt(
+            downloads,
+            f.filename,
+            username=f.username,
+            not_before=not_before,
+        )
         if transfer is not None:
             f.id = transfer.id
             if transfer.state.startswith("Completed,"):
