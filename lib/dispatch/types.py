@@ -8,11 +8,16 @@ package. No behaviour; these types are defined above every use site.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Protocol, Sequence, TYPE_CHECKING
+
+from lib.wrong_match_policy import PREIMPORT_FACT_REJECTION_SCENARIOS
 
 if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
+    from lib.import_evidence import CandidateEvidenceActionResult
+    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import (AlbumQualityEvidence, AudioQualityMeasurement,
-                             ImportResult)
+                             DownloadInfo, ImportResult)
 
 
 # U2: when the importer claim arrives without valid candidate evidence
@@ -69,6 +74,43 @@ class DispatchOutcome:
     code: str | None = None
 
 
+class DispatchCoreFn(Protocol):
+    """Exact callable contract for the test-injected core dispatch seam.
+
+    Production calls ``dispatch_import_core`` directly. This protocol keeps
+    the explicit test seam honest without allowing a ``dict[str, Any]`` splat
+    to erase argument checking at the shared boundary.
+    """
+
+    def __call__(
+        self,
+        *,
+        path: str,
+        mb_release_id: str,
+        request_id: int,
+        label: str,
+        force: bool = False,
+        override_min_bitrate: int | None = None,
+        target_format: str | None = None,
+        verified_lossless_target: str = "",
+        beets_harness_path: str,
+        db: "PipelineDB",
+        dl_info: "DownloadInfo",
+        distance: float | None = None,
+        scenario: str = "auto_import",
+        files: Sequence[object] | None = None,
+        cfg: "CratediggerConfig | None" = None,
+        outcome_label: "DownloadLogOutcome" = "success",
+        requeue_on_failure: bool = True,
+        cooled_down_users: set[str] | None = None,
+        source_dirs: list[str] | None = None,
+        candidate_import_job_id: int | None = None,
+        candidate_download_log_id: int | None = None,
+        prevalidated_candidate_result: "CandidateEvidenceActionResult | None" = None,
+        quality_gate_fn: "QualityGateFn" = ...,
+    ) -> DispatchOutcome: ...
+
+
 @dataclass(frozen=True)
 class ImportOneRun:
     """Result of one import_one.py subprocess protocol invocation."""
@@ -110,13 +152,7 @@ class EvidenceImportGate:
 # caller's ``requeue_on_failure`` flag — the candidate failed *upstream* of
 # any beets mutation, so the parent request must always self-heal back to
 # ``wanted`` even when the operator chose force/manual import.
-_PREIMPORT_FACT_REJECT_DECISIONS: frozenset[str] = frozenset({
-    "audio_corrupt",
-    "bad_audio_hash",
-    "nested_layout",
-    "empty_fileset",
-    "mixed_source",
-})
+_PREIMPORT_FACT_REJECT_DECISIONS = PREIMPORT_FACT_REJECTION_SCENARIOS
 
 
 

@@ -19,17 +19,12 @@ from lib.processing_paths import source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
+from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
 
 logger = logging.getLogger("cratedigger")
-
-
-AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
-    "audio_corrupt",
-    "spectral_reject",
-})
 
 
 def _run_post_rejection_wrong_match_cleanup(
@@ -42,7 +37,7 @@ def _run_post_rejection_wrong_match_cleanup(
     """Evaluate newly-created Wrong Matches rows through importer cleanup."""
     if not isinstance(download_log_id, int) or isinstance(download_log_id, bool):
         return None
-    if scenario in AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS:
+    if not rejection_scenario_is_wrong_match_candidate(scenario):
         return None
     if ctx.pipeline_db_source is None:
         return None

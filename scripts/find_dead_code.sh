@@ -35,6 +35,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 SOURCES=(
+  # Deliberately production-only: a test call must not keep a dead production
+  # API alive. Test-only wire/framework fields require explicit whitelist
+  # entries with a rationale instead (docs/dead-code.md).
   lib
   web
   harness

@@ -9,6 +9,7 @@ that lived in the old single-file tests/fakes.py.
 from tests.fakes._shared import _EPOCH, _PERTH_TZ, _as_datetime, _utcnow
 from tests.fakes.beets import FakeBeetsDB
 from tests.fakes.cursors import FakeCursor
+from tests.fakes.dispatch import DispatchCoreCall, RecordingDispatchCore
 from tests.fakes.lookups import FakeDiscogsLookup, FakeMBLookup, http_error
 from tests.fakes.pipeline_db import (
     FakePipelineDB,
@@ -38,6 +39,7 @@ __all__ = [
     "CancelDownloadCall",
     "DenylistEntry",
     "DownloadLogRow",
+    "DispatchCoreCall",
     "EnqueueCall",
     "FakeBeetsDB",
     "FakeCursor",
@@ -53,6 +55,7 @@ __all__ = [
     "FieldResolutionRow",
     "SearchLogRow",
     "SearchTextCall",
+    "RecordingDispatchCore",
     "UserCooldownRow",
     "http_error",
 ]

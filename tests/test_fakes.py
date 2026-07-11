@@ -3467,6 +3467,25 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             for r in rows])
         self.assertEqual(paths, ["/p1", "/p2"])
 
+    def test_get_wrong_matches_excludes_every_non_match_rejection_scenario(self):
+        from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, artist_name="A", album_title="B"))
+        db.log_download(1, outcome="rejected", validation_result={
+            "failed_path": "/keep", "scenario": "high_distance"})
+        for index, scenario in enumerate(
+            sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS)
+        ):
+            db.log_download(1, outcome="rejected", validation_result={
+                "failed_path": f"/drop-{index}", "scenario": scenario})
+
+        rows = db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        validation_result = rows[0]["validation_result"]
+        assert isinstance(validation_result, dict)
+        self.assertEqual(validation_result["failed_path"], "/keep")
+
     def test_clear_wrong_match_path_strips_key(self):
         db = FakePipelineDB()
         db.log_download(1, outcome="rejected",

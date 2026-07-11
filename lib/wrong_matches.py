@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
+from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
 
 def wrong_match_row_is_visible(
@@ -22,7 +23,10 @@ def wrong_match_row_is_visible(
     Matches. Explicit history views can opt back in; every default consumer
     shares this predicate so card visibility and lifecycle references agree.
     """
-    return include_replaced or row.get("request_status") != "replaced"
+    if not include_replaced and row.get("request_status") == "replaced":
+        return False
+    scenario = decode_validation_envelope(row.get("validation_result")).scenario
+    return rejection_scenario_is_wrong_match_candidate(scenario)
 
 
 @runtime_checkable

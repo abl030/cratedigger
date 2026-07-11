@@ -2363,7 +2363,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
         # The staged move and dispatch MUST NOT run on contention.
         import_folder_fullpath = "/tmp/test-import-folder"
-        dispatch_calls: list[dict] = []
+        from tests.fakes import RecordingDispatchCore
+        dispatch = RecordingDispatchCore()
         with patch.object(dp_mod.StagedAlbum, "move_to") as mock_move:
             outcome = dp_mod._handle_valid_result(
                 entry,
@@ -2373,7 +2374,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                     request_id=42,
                 ),
                 ctx,
-                dispatch_fn=lambda **kw: dispatch_calls.append(kw) or None,
+                dispatch_fn=dispatch,
             )
 
         assert outcome is not None
@@ -2383,7 +2384,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         # import_folder_fullpath where process_completed_album's
         # resume guard can pick them up next cycle.
         mock_move.assert_not_called()
-        self.assertEqual(dispatch_calls, [])
+        self.assertEqual(dispatch.calls, [])
 
     def test_redownload_path_does_not_take_release_lock(self):
         """Redownload path (source != 'request') must NOT take the
@@ -2433,10 +2434,10 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
     def test_auto_path_persists_current_path_after_staging(self):
         from lib import download_processing as dp_mod
-        from lib.dispatch import DispatchOutcome
         from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
                                      release_id_to_lock_key)
         from lib.quality import ValidationResult
+        from tests.fakes import RecordingDispatchCore
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -2515,11 +2516,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 self.assertTrue(move_saw_release_lock)
                 return original_move_to(album, dest, db)
 
+            dispatch = RecordingDispatchCore()
             with patch.object(
-                dp_mod,
-                "dispatch_import_core",
-                return_value=DispatchOutcome(success=True, message="ok"),
-            ) as mock_dispatch, patch.object(
                 db,
                 "advisory_lock",
                 side_effect=tracking_advisory_lock,
@@ -2534,6 +2532,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                     bv_result,
                     staged_album,
                     ctx,
+                    dispatch_fn=dispatch,
                 )
 
             assert outcome is not None
@@ -2552,8 +2551,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 db.request(42)["active_download_state"]["current_path"],
                 staged_path,
             )
-            mock_dispatch.assert_called_once()
-            self.assertEqual(mock_dispatch.call_args.kwargs["path"], staged_path)
+            self.assertEqual(len(dispatch.calls), 1)
+            self.assertEqual(dispatch.calls[0].path, staged_path)
 
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""

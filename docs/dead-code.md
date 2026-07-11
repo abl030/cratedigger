@@ -15,6 +15,15 @@ The whitelist at `tools/vulture/whitelist.py` masks the known false positives on
 nix-shell --run "vulture --make-whitelist lib/ web/ harness/ scripts/ cratedigger.py album_source.py > tools/vulture/whitelist.py"
 ```
 
+The scan is intentionally **production-only**. Tests are evidence that a
+surface behaves as expected, not evidence that production still calls it; if
+tests were included, a test-only reference could silently preserve a dead API
+forever. A production field consumed only through serialization, framework
+reflection, or an external client therefore needs a narrow entry in
+`tools/vulture/whitelist.py` with its reason on the same line. The suite pins
+this boundary in `tests/test_issue_573_boundaries.py`; do not add `tests/` to
+the scanner's source roots.
+
 **Why no runtime coverage?** We tried it (issue #352): production-instrumented coverage.py on the long-running services, diffed against test coverage to surface "tested but never run in prod." It was removed 2026-07-01. It never produced an actionable signal — collection silently broke three times on Nix store-path renames, and once fixed the diff was dominated by noise it can't see past: `pipeline-cli` / the beets-interpreter harness / the deploy-time migrator aren't instrumented at all (so they always look dead), and a branch not hit in a bounded window is a "rare operator path" (Replace, YouTube-rescue, ban-source), not dead. For a single-operator system the CPU overhead bought nothing that vulture plus judgement didn't already give. Don't re-add it without a fundamentally different design.
 
 ## Cascading orphans — regen the whitelist after every deletion

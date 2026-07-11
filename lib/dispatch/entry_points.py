@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from lib.processing_paths import normalize_source_dirs
 from lib.import_evidence import ensure_candidate_evidence_for_action
@@ -20,6 +20,7 @@ from lib.dispatch.manifest_guard import _guard_force_manual_audio_manifest
 from lib.dispatch.evidence_gate import (_download_info_from_candidate_evidence,
                                         _requeue_import_job_to_preview)
 from lib.dispatch.core import dispatch_import_core
+from lib.dispatch.quality_gate import _check_quality_gate_core
 
 if TYPE_CHECKING:
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
@@ -202,7 +203,10 @@ def _dispatch_import_from_db_locked(
         candidate_result.evidence,
         username=source_username,
     )
-    core_kwargs: dict[str, Any] = dict(
+    resolved_quality_gate_fn = (
+        quality_gate_fn if quality_gate_fn is not None else _check_quality_gate_core
+    )
+    return dispatch_import_core(
         path=failed_path,
         mb_release_id=mbid,
         request_id=request_id,
@@ -226,7 +230,5 @@ def _dispatch_import_from_db_locked(
         candidate_import_job_id=import_job_id,
         candidate_download_log_id=download_log_id,
         prevalidated_candidate_result=candidate_result,
+        quality_gate_fn=resolved_quality_gate_fn,
     )
-    if quality_gate_fn is not None:
-        core_kwargs["quality_gate_fn"] = quality_gate_fn
-    return dispatch_import_core(**core_kwargs)
