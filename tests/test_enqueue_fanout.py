@@ -23,7 +23,7 @@ import configparser
 import json
 import unittest
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, Sequence, cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import TrackRecord
@@ -555,6 +555,45 @@ class TestEnqueueFailureTracking(unittest.TestCase):
 
 
 class TestDownloadOwnershipPreclaim(unittest.TestCase):
+    @staticmethod
+    def _two_disc_release_and_tracks() -> tuple[MagicMock, list[TrackRecord]]:
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = cast(
+            "list[TrackRecord]",
+            [
+                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
+                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
+            ],
+        )
+        return release, tracks
+
+    @staticmethod
+    def _match_two_discs(
+        tracks: Sequence[TrackRecord],
+        _allowed_filetype: str,
+        file_dirs: list[str],
+        username: str,
+        _ctx: CratediggerContext,
+    ) -> MatchResult:
+        disc_no = tracks[0]["mediumNumber"]
+        expected_user = "u00" if disc_no == 1 else "u01"
+        if username != expected_user:
+            return _nomatch()
+        file_dir = file_dirs[0]
+        return MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{
+                    "filename": f"d{disc_no}.flac",
+                    "size": 111 * disc_no,
+                }],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
     def test_filtered_empty_match_does_not_claim_or_enqueue(self):
         cfg = replace(_make_cfg(browse_top_k=20), download_filtering=True)
         db = FakePipelineDB()
@@ -1258,6 +1297,93 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
 
         self.assertTrue(attempt.matched)
         self.assertEqual(db.status_history, [(1, "downloading")])
+
+    def test_multi_disc_first_ambiguous_outcome_stamps_all_planned_files(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        results = _make_results(["u00", "u01"])
+        release, tracks = self._two_disc_release_and_tracks()
+        reason = "first disc enqueue response was uncertain"
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(
+                     status="unknown",
+                     reason=reason,
+                 ),
+             ):
+            attempt = try_multi_enqueue(
+                release,
+                tracks,
+                results,
+                "flac",
+                ctx,
+                match_fn=self._match_two_discs,
+            )
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        state_raw = db.request(1)["active_download_state"]
+        state = json.loads(state_raw) if isinstance(state_raw, str) else state_raw
+        self.assertEqual(len(state["files"]), 2)
+        self.assertEqual(
+            [file["last_exception"] for file in state["files"]],
+            [f"enqueue failed: {reason}"] * 2,
+        )
+
+    def test_multi_disc_later_ambiguous_outcome_keeps_accepted_transfer(self):
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        results = _make_results(["u00", "u01"])
+        release, tracks = self._two_disc_release_and_tracks()
+        reason = "second disc enqueue response was uncertain"
+        enqueue_calls = 0
+
+        def fake_enqueue(*, username, files, file_dir, ctx, **_ledger_kwargs):
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 2:
+                return SlskdEnqueueOutcome(status="unknown", reason=reason)
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id="transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 side_effect=fake_enqueue,
+             ):
+            attempt = try_multi_enqueue(
+                release,
+                tracks,
+                results,
+                "flac",
+                ctx,
+                match_fn=self._match_two_discs,
+            )
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(db.request(1)["status"], "downloading")
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        state_raw = db.request(1)["active_download_state"]
+        state = json.loads(state_raw) if isinstance(state_raw, str) else state_raw
+        self.assertEqual(len(state["files"]), 2)
+        self.assertEqual(
+            [file["last_exception"] for file in state["files"]],
+            [f"enqueue failed: {reason}"] * 2,
+        )
 
     def test_multi_disc_partial_failure_resets_after_verified_cancel(self):
         cfg = _make_cfg(browse_top_k=20)
