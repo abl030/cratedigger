@@ -67,6 +67,19 @@ The Plex read/edit client lives in `lib/util.py` (`plex_find_album_by_path`,
 `plex_set_added_at`) with verify-then-unverified SSL fallback. Both are
 best-effort; failures never block an import or the cycle.
 
+The Plex and Jellyfin orchestration modules deliberately remain separate.
+Their shared capture/reconcile outline is smaller than their backend
+contracts: epoch integer versus ISO string, Plex field lock versus Jellyfin
+landed detector/TTL, and one album write versus album plus Audio children. A
+strategy-driven shared core would move those differences rather than simplify
+them. A third media backend must first be compared with both lifecycles;
+extract only when a common engine materially reduces behavior, otherwise keep
+a backend-owned module.
+
+Terminal pin rows (`done` and `skipped`) are convergence bookkeeping, not
+audit history. Phase 0 prunes them after 90 days using a strict age boundary;
+`pending` rows survive regardless of age.
+
 ### How paths get to Plex
 
 Beets stores file paths as **relative** to its `directory:` root, so

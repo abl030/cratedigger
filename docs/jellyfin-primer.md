@@ -29,6 +29,8 @@ Scan notifier: `lib/util.py::trigger_jellyfin_scan(cfg)` — called from
 `action.trigger_notifiers = True`. Sends `POST /Library/Refresh` (or
 `POST /Items/<library_id>/Refresh` when `library_id` is configured) with the
 `X-Emby-Token` header. Best-effort — failures don't block the import.
+The targeted form refreshes only the configured music library; leaving the ID
+unset deliberately retains the full-library fallback.
 
 ### "Recently Added" pin on upgrades (migration 046, issue #574)
 
@@ -64,16 +66,29 @@ lock:
 1. **No lock exists.** Jellyfin has no `DateCreated.locked`. But it also only
    stamps `DateCreated` at item *creation* — an existing item's date survives
    every subsequent scan — so a one-time write-back sticks.
-2. **The rescan window is unbounded.** Our trigger is a full-library refresh
-   (minutes+), and inotify on the fuse mount may never fire, leaving the
+2. **The rescan window is unbounded.** The refresh request is asynchronous
+   even when `library_id` targets only music (and remains a full-library
+   refresh when unset); inotify on the fuse mount may never fire, leaving the
    nightly scheduled scan (~24h) as the backstop. Closing a pin before the
    rescan re-stamped the items would write to the doomed OLD items and leave
-   nothing to fix the new ones — so the reconciler waits for observable
-   drift instead of trusting a clock.
+   nothing to fix the new ones — so the reconciler waits for observable drift
+   instead of trusting a clock.
 3. **A pin that never lands is benign.** Ids unchanged means Jellyfin kept
    the items (e.g. a same-filename upgrade), and it never re-stamps kept
    items — the album never surfaced in Recently Added. The TTL just closes
    the row (`expired`).
+
+The Plex and Jellyfin orchestration modules deliberately remain separate.
+Their shared outline is smaller than their backend contracts: epoch integer
+versus ISO string, Plex field lock versus Jellyfin landed detector/TTL, and one
+album write versus album plus Audio children. A strategy-driven shared core
+would move those differences rather than simplify them. A third media backend
+must first be compared with both lifecycles; extract only when a common engine
+materially reduces behavior, otherwise keep a backend-owned module.
+
+Terminal pin rows (`done`, `skipped`, and Jellyfin's `expired`) are convergence
+bookkeeping, not audit history. Phase 0 prunes them after 90 days using a strict
+age boundary; `pending` rows survive regardless of age.
 
 ### Editing items: the full-dto rule
 
@@ -92,6 +107,7 @@ the POST returns 204.
 [Jellyfin]
 url = https://jelly.ablz.au
 token_file = /run/cratedigger-secrets/JELLYFIN_TOKEN
+library_id = <music-library-item-id>
 path_map = /mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets
 ```
 
@@ -99,8 +115,10 @@ path_map = /mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets
 (absolutize relative `imported_path`, then prefix-swap — see
 `docs/plex-primer.md` § "How paths get to Plex"). Without it the pin can't
 locate albums (find returns nothing, captures report `disabled`/`no_album`);
-the plain scan notifier works without it. Via the Nix module:
-`services.cratedigger.notifiers.jellyfin.pathMap`.
+the plain scan notifier works without it. `library_id` is independent: set it
+to target the music library's `/Items/{id}/Refresh`, or omit it for
+`/Library/Refresh`. Via the Nix module these are
+`services.cratedigger.notifiers.jellyfin.libraryId` and `.pathMap`.
 
 ## API Access
 

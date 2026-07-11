@@ -118,6 +118,10 @@ pkgs.testers.nixosTest {
       # never invokes yt-dlp (empty queue), so this is exercised only at
       # the wrapper-render seam: we assert the flag lands in the ExecStart.
       youtubeIngest.sourceAddress = "10.0.2.15";
+      # Exercise the configured branch of Jellyfin's targeted refresh option.
+      # The Python config/notifier tests separately pin the null -> full-library
+      # fallback.
+      notifiers.jellyfin.libraryId = "music-library-item-id";
       timer.enable = false;
       healthCheck.enable = false;
     };
@@ -172,6 +176,7 @@ pkgs.testers.nixosTest {
     machine.succeed("grep -q '\\[Peer Cache\\]' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q 'redis_host = 127.0.0.1' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -q 'ttl_seconds = 604800' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^library_id = music-library-item-id$' /var/lib/cratedigger/config.ini")
     machine.succeed("${pkgs.redis}/bin/redis-cli -p 6379 CONFIG GET maxmemory-policy | grep -q allkeys-lru")
     machine.succeed("systemctl show -p After cratedigger.service | grep -q redis-cratedigger.service")
     machine.succeed("systemctl show -p Wants cratedigger.service | grep -q redis-cratedigger.service")

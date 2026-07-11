@@ -69,6 +69,7 @@ class TestConvergenceRegistryPins(unittest.TestCase):
                 "reap_disk_orphans",
                 "converge_slskd_searches",
                 "prune_transfer_ledger_cycle",
+                "prune_terminal_pin_rows_cycle",
             ),
         )
 
