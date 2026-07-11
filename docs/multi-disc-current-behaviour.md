@@ -43,10 +43,10 @@ not a multi-disc bug.
 Multi-disc requests preserve disc structure in three layers:
 
 * **`album_tracks` schema** (`migrations/001_initial.sql`, columns
-  populated by `PipelineDB.set_tracks` at `lib/pipeline_db.py:2912-2925`).
+  populated by `PipelineDB.set_tracks` in `lib/pipeline_db/misc.py`).
   The column is `disc_number INTEGER` and `set_tracks` reads
   `t.get("disc_number", 1)` per track. `get_tracks` returns rows
-  `ORDER BY disc_number, track_number` (`pipeline_db.py:2927-2934`), so
+  `ORDER BY disc_number, track_number` in that module, so
   iteration order is pressing order.
 * **`AlbumRecord.from_db_row`** (`album_source.py:69-149`) groups the
   fetched track rows into `discs: dict[int, list[track]]` keyed by
@@ -66,7 +66,7 @@ across 6 discs), Bruce Springsteen *Born to Run 30th Anniversary*
 (40 tracks across 4 discs), Eluvium *Life Through Bombardment Vol. 1*
 (47 tracks across 14 discs).
 
-`release_snapshot.py::_tracks_titles_and_artists` (lines 116-161) sorts
+`lib/release_snapshot.py::_tracks_titles_and_artists` sorts
 by `(disc_number, track_number)` before extracting titles. The output
 is a **flat** `tuple[str, ...]` — the generator never sees disc
 boundaries. This is fine because the generator's per-track slots use
@@ -314,8 +314,8 @@ contemplate this fallback ("If any of these fail, U10's body slips to
 a follow-up plan; the test scaffold lands in PR2 anyway as RED
 placeholders"). Concretely for PR2:
 
-* Add a single RED integration slice in
-  `tests/test_integration_slices.py::TestMultiDiscSiblingDiscoverySlice`
+* Add a single RED integration slice named
+  `TestMultiDiscSiblingDiscoverySlice` in `tests/test_integration_slices.py`
   that seeds `FakeSlskdAPI` with the case-1 Aerial pattern (search
   response returns only `Aerial\CD 1\` files; peer also has
   `Aerial\CD 2\` on disk but slskd didn't return it; under
@@ -329,8 +329,8 @@ placeholders"). Concretely for PR2:
 The follow-up plan can then either:
 
 1. **Browse-side sibling discovery** — `lib/browse.py` adds a
-   `discover_siblings(username, matched_dir, expected_disc_count)`
-   helper that uses `slskd.users.directory` against the parent and
+   `discover_siblings(username, matched_dir, expected_disc_count)` helper
+   that uses `slskd.users.directory` against the parent and
    filters children by the disc regex. `try_multi_enqueue` invokes
    it once per cycle per request when partial-match is detected.
 2. **Per-disc query emission** — generator emits a
@@ -358,7 +358,7 @@ clean but more disruptive. The follow-up plan owns that call.
 * `album_source.py` lines 23-149, 206-228 — `MediaRecord`,
   `AlbumRecord.from_db_row`, `DatabaseSource.get_tracks`.
 * `lib/staged_album.py` lines 29-34 — `staged_filename` disk prefix.
-* `lib/pipeline_db.py` lines 2912-2934 — `set_tracks`, `get_tracks`.
+* `lib/pipeline_db/misc.py` — `set_tracks`, `get_tracks`.
 * `tests/test_enqueue_fanout.py` line 1499 —
   `test_multi_disc_per_disc_uses_warm_cache_across_discs` (existing
   multi-disc fixture pattern).

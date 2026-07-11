@@ -371,7 +371,7 @@ Top 20 peer scores per search, sorted by `(matched_tracks DESC, avg_ratio DESC)`
  "missing_titles": ["..."], "file_count": 26}
 ```
 
-Empty array `[]` for `no_results` / `no_match` outcomes; `NULL` for `error`, `timeout`, `exhausted`, `empty_query`. Decoded at exactly one site per consumer (`web/routes/pipeline.py:get_pipeline_detail` and `scripts/pipeline_cli.py:cmd_show`) via `msgspec.convert(blob, type=list[CandidateScore])`.
+Empty array `[]` for `no_results` / `no_match` outcomes; `NULL` for `error`, `timeout`, `exhausted`, `empty_query`. Decoded at exactly one site per consumer (`web/routes/pipeline.py::get_pipeline_detail` and `scripts/pipeline_cli/show.py::cmd_show`) via `msgspec.convert(blob, type=list[CandidateScore])`.
 
 ### `final_state`
 
@@ -415,7 +415,7 @@ R-id it satisfies.
 
 Seven nullable scalars that let triage SQL skip JSONB introspection
 into `candidates`. Populated at log-write time by
-`lib/pipeline_db.py::log_search` via the matcher
+`lib/pipeline_db/search_plan.py::log_search` via the matcher
 (`lib/matching.py::check_for_match`) and search-executor layer.
 Historical rows pre-deploy carry `NULL` in all seven; new rows
 post-PR3 populate every applicable column.

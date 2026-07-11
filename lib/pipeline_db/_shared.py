@@ -162,7 +162,7 @@ ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST = 0x59544942
 def release_id_to_lock_key(mb_release_id: str) -> int:
     """Map an ``mb_release_id`` string to a stable int32 advisory-lock key.
 
-    PostgreSQL's two-arg ``pg_advisory_lock(int4, int4)`` takes signed
+    PostgreSQL's two-arg ``pg_try_advisory_lock`` function takes signed
     int32 keys. ``mb_release_id`` is a str — either a MusicBrainz UUID
     (36 chars) or a Discogs numeric release id. ``zlib.crc32`` is
     stable across processes (Python's builtin ``hash`` is salted per
@@ -1130,5 +1130,4 @@ class TransferIdOwnership:
     """
     stamped: set[str]
     unstamped: set[str]
-
 

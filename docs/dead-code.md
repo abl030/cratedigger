@@ -24,7 +24,9 @@ Deleting a vulture-flagged helper frequently exposes a **deeper orphan** that wa
 - **PR #358** — deleting `finalize_request_if_plan_current` orphaned `PipelineDB.is_request_plan_current` (its only reader)
 - **PR #360** — deleting `move_album` orphaned `BeetsOpResult.new_path` (only set by `move_album`)
 - **PR #363 → #364** — deleting `_select_variant_for_album` (in #356) exposed `build_query` and `select_variant`; deleting those exposed `strip_short_tokens`
-- **PR #355** — deleting all three public exports of `lib/import_service.py` left `_apply_request_spectral_fields` as a cascading orphan that justified deleting the whole module
+- **PR #355** — deleting all three public exports of the former import-service
+  module left `_apply_request_spectral_fields` as a cascading orphan that
+  justified deleting the whole module
 
 The mechanic is simple but easy to miss: vulture's whitelist contains an entry per known orphan, keyed by name. When a helper goes away, its callees lose their last reference but aren't in the whitelist yet (they were "used" before). The next `vulture --make-whitelist` run will surface them, and `bash scripts/find_dead_code.sh` will go red until you either delete them or accept them as new whitelist entries.
 

@@ -187,7 +187,7 @@ The harness (`harness/beets_harness.py`) is a custom `ImportSession` subclass th
 
 ### Why the Harness Exists
 
-`beet import` is designed for interactive terminal use — it prints colored text, waits for keyboard input, and has no machine-readable output. The harness subclasses `ImportSession` and overrides `choose_match()`, `choose_item()`, `resolve_duplicate()`, and `should_resume()` to communicate via newline-delimited JSON instead.
+`beet import` is designed for interactive terminal use — it prints colored text, waits for keyboard input, and has no machine-readable output. The harness subclasses `ImportSession` and overrides `choose_match()`, `choose_item()`, `get_duplicate_action()`, and `should_resume()` to communicate via newline-delimited JSON instead.
 
 ### Running the Harness
 
@@ -554,7 +554,8 @@ A full library health check found:
 
 ### Validation Script
 
-`scripts/audio_health_check.py` in the tagging-workspace repo:
+`tagging-workspace/scripts/audio_health_check.py` in the separate
+tagging-workspace repo:
 ```bash
 python3 scripts/audio_health_check.py --ext mp3 --workers 8  # Full MP3 decode, 8 parallel
 python3 scripts/audio_health_check.py --ext flac              # FLAC integrity check

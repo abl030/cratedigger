@@ -45,7 +45,7 @@ The plan file is the living record. If the implementation diverges, the plan mus
 
 ### Commit 1: Schema migration — add `downloading` status and `active_download_state` JSONB
 
-**Files**: `lib/pipeline_db.py`
+**Files**: `lib/pipeline_db/`
 
 **Tests first** (RED): `tests/test_pipeline_db.py`
 - `test_downloading_status_allowed`: insert row, update to `downloading`, verify roundtrip
@@ -55,7 +55,7 @@ The plan file is the living record. If the implementation diverges, the plan mus
 
 **Implementation** (GREEN):
 
-`lib/pipeline_db.py` changes:
+`lib/pipeline_db/` changes:
 
 1. **Migrate status CHECK constraint** in `init_schema()` — add idempotent DDL:
    ```python
@@ -130,7 +130,7 @@ The plan file is the living record. If the implementation diverges, the plan mus
 
 ### Commit 2: ActiveDownloadState dataclass with JSON round-trip
 
-**Files**: `lib/quality.py` (where all typed dataclasses live)
+**Files**: `lib/quality/` (where the typed quality structures now live)
 
 **Tests first** (RED): `tests/test_import_result.py` (where dataclass serialization tests live)
 - `test_active_download_state_to_json`: serialize, verify JSON structure
@@ -141,7 +141,7 @@ The plan file is the living record. If the implementation diverges, the plan mus
 
 **Implementation** (GREEN):
 
-Add to `lib/quality.py`:
+Add to the `lib/quality/` package:
 
 ```python
 @dataclass
@@ -208,7 +208,8 @@ class ActiveDownloadState:
         return ActiveDownloadState.from_dict(json.loads(s))
 ```
 
-**Note**: `json` import already exists in `lib/quality.py` (used by `ImportResult.to_json()`).
+**Note**: the quality package owns the JSON round trip used by
+`ImportResult.to_json()`.
 
 **Convention**: Follow the existing `from_dict`/`from_json` pattern used by `ImportResult`, `ValidationResult`, etc. `from_dict` is the primary constructor (works directly with Python dicts, which is what psycopg2 returns for JSONB columns). `from_json` is a thin wrapper: `from_dict(json.loads(s))`.
 
@@ -644,7 +645,7 @@ if refreshed and refreshed["status"] == "downloading":
 
 ### Commit 6b: Defense-in-depth — clear `active_download_state` in existing DB methods
 
-**Files**: `lib/pipeline_db.py`
+**Files**: `lib/pipeline_db/`
 
 **Why**: `reset_to_wanted()` and `update_status()` are called from many places (quality gate,
 mark_done, reject_and_requeue, dispatch_import_core). If any of these runs on an album that still has
@@ -875,12 +876,12 @@ from lib.download import (cancel_and_delete as _cancel_and_delete_impl,
 - `web/routes/pipeline.py` ~line 293: validates allowed statuses for `post_pipeline_update` — do NOT add `downloading` here (users shouldn't manually set this status)
 - `web/routes/pipeline.py` ~line 395: validates allowed statuses for quality endpoint — add `"downloading"` if quality info should be viewable for in-progress downloads
 
-**pipeline-cli** (`scripts/pipeline_cli.py`):
+**pipeline-cli** (`scripts/pipeline_cli/`):
 - ~line 150: `for status in ["wanted", "imported", "manual"]` — add `"downloading"` to status count display
 - ~line 174: `VALID_STATUSES = ["wanted", "imported", "manual"]` — do NOT add `downloading` here (users shouldn't `pipeline-cli set <id> downloading`)
 - `pipeline-cli show`: display `active_download_state` when present (enqueued_at, file count, filetype)
 
-**Tests first** (RED): `tests/test_web_server.py`, `tests/test_pipeline_cli.py`
+**Tests first** (RED): `tests/web/`, `tests/test_pipeline_cli.py`
 - `test_status_counts_includes_downloading`: verify `/api/pipeline/status` returns downloading count
 - `test_pipeline_all_includes_downloading`: verify `get_pipeline_all` returns downloading albums
 - `test_pipeline_cli_status_shows_downloading`: verify `pipeline-cli status` shows downloading count

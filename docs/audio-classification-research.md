@@ -30,7 +30,6 @@ The current detector lives primarily in:
 - `lib/spectral_check.py`
 - `lib/quality/`
 - `lib/download.py`
-- `scripts/spectral_corpus.py`
 
 ### Track-level method
 
@@ -164,8 +163,8 @@ The original corpus script was a consistency check, not a truth test.
 
 ## The Evaluation Harness
 
-To move beyond a pure same-model rescan, `scripts/spectral_corpus.py` was
-extended into a proper evaluation harness.
+To move beyond a pure same-model rescan, the now-retired spectral corpus
+runner was extended into a proper evaluation harness.
 
 The harness now does three kinds of work:
 
@@ -190,7 +189,7 @@ The harness also exports raw evidence:
 - cliff vs. HF-only suspect counts
 - nominal bitrate stats from the files on disk
 
-Helper tests live in `tests/test_spectral_corpus.py`.
+The runner's likewise-retired helper tests pinned its evidence shape.
 
 ## Synthetic Ground-Truth Findings
 
@@ -443,7 +442,7 @@ The best candidate for this is `vamp-lossy-encoding-detector`.
 
 If the integration friction is acceptable, it should be used as:
 
-- an offline comparison backend in `scripts/spectral_corpus.py`
+- an offline comparison backend in the retired spectral corpus runner
 - then an optional shadow backend in the live pipeline
 
 ### 3. Adopt profile-aware logic internally
@@ -503,7 +502,7 @@ The second is not.
 ### High priority
 
 - add a shadow backend for `vamp-lossy-encoding-detector`
-- extend `scripts/spectral_corpus.py` to compare Cratedigger vs. external detectors
+- extend the retired spectral corpus runner to compare Cratedigger vs. external detectors
 - record disagreement sets in machine-readable output
 - keep building a labeled edge corpus from:
   - failed imports
@@ -567,6 +566,5 @@ Relevant local files:
 - `lib/spectral_check.py`
 - `lib/quality/`
 - `lib/download.py`
-- `scripts/spectral_corpus.py`
-- `tests/test_spectral_corpus.py`
+- the retired spectral corpus runner and its helper tests
 - `docs/quality-verification.md`
