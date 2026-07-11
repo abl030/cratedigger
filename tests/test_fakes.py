@@ -3862,8 +3862,8 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         job = self._enqueue(db, request_id=42, dedupe_key="manual:42")
         result = db.get_active_import_job_for_request(42)
         assert result is not None
-        self.assertEqual(result["id"], job.id)
-        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result.id, job.id)
+        self.assertEqual(result.status, "queued")
 
     def test_returns_running_job_for_request(self):
         db = FakePipelineDB()
@@ -3878,8 +3878,8 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         assert claimed is not None
         result = db.get_active_import_job_for_request(42)
         assert result is not None
-        self.assertEqual(result["status"], "running")
-        self.assertEqual(result["id"], claimed.id)
+        self.assertEqual(result.status, "running")
+        self.assertEqual(result.id, claimed.id)
 
     def test_returns_none_for_completed_job(self):
         db = FakePipelineDB()
@@ -3914,8 +3914,8 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         r42 = db.get_active_import_job_for_request(42)
         r99 = db.get_active_import_job_for_request(99)
         assert r42 is not None and r99 is not None
-        self.assertEqual(r42["request_id"], 42)
-        self.assertEqual(r99["request_id"], 99)
+        self.assertEqual(r42.request_id, 42)
+        self.assertEqual(r99.request_id, 99)
 
     def test_returns_most_recent_job_when_multiple_active(self):
         db = FakePipelineDB()
@@ -3925,7 +3925,7 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
         result = db.get_active_import_job_for_request(42)
         assert result is not None
         # Most recent by id
-        self.assertEqual(result["id"], max(first.id, second.id))
+        self.assertEqual(result.id, max(first.id, second.id))
 
 
 class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):

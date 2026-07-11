@@ -334,7 +334,8 @@ def _seed_get_active_import_job_for_request(db: Any) -> "list[dict[str, Any]]":
         dedupe_key=f"manual:{rid}",
         payload=manual_import_payload(failed_path="/tmp/parity"),
     )
-    return _one(db.get_active_import_job_for_request(rid))
+    job = db.get_active_import_job_for_request(rid)
+    return _one(job.to_dict() if job is not None else None)
 
 
 # --- youtube_album_mappings projection ------------------------------------

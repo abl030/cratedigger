@@ -1,7 +1,7 @@
 """Tests for lib/download.py — download processing functions.
 
-Tests _build_download_info, cancel_and_delete, slskd_download_status,
-downloads_all_done, poll_active_downloads, grab_most_wanted.
+Tests _build_download_info, cancel_and_delete, poll_active_downloads,
+and grab_most_wanted.
 
 Pre-import measurement behavior (audio integrity + spectral analysis) is
 shared with the force/manual import paths and tested directly against
@@ -324,68 +324,6 @@ class TestResolveRequestRejectionId(unittest.TestCase):
 
 # === NEW tests for functions moving to lib/download.py ===
 
-class TestDownloadsAllDone(unittest.TestCase):
-    """downloads_all_done is pure logic — test all branches."""
-
-    def test_all_succeeded(self):
-        from lib.slskd_transfers import downloads_all_done
-        files = [make_download_file(), make_download_file()]
-        files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
-        files[1].status = make_transfer_snapshot(state="Completed, Succeeded")
-        done, problems, queued = downloads_all_done(files)
-        self.assertTrue(done)
-        self.assertIsNone(problems)
-        self.assertEqual(queued, 0)
-
-    def test_one_errored(self):
-        from lib.slskd_transfers import downloads_all_done
-        files = [make_download_file(), make_download_file()]
-        files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
-        files[1].status = make_transfer_snapshot(state="Completed, Errored")
-        done, problems, queued = downloads_all_done(files)
-        self.assertFalse(done)
-        self.assertIsNotNone(problems)
-        assert problems is not None
-        self.assertEqual(len(problems), 1)
-        self.assertEqual(queued, 0)
-
-    def test_queued_remotely(self):
-        from lib.slskd_transfers import downloads_all_done
-        files = [make_download_file(), make_download_file()]
-        files[0].status = make_transfer_snapshot(state="Completed, Succeeded")
-        files[1].status = make_transfer_snapshot(state="Queued, Remotely")
-        done, problems, queued = downloads_all_done(files)
-        self.assertFalse(done)
-        self.assertIsNone(problems)
-        self.assertEqual(queued, 1)
-
-    def test_all_error_states(self):
-        """Every error state should appear in problems list."""
-        from lib.slskd_transfers import downloads_all_done
-        error_states = [
-            "Completed, Cancelled",
-            "Completed, TimedOut",
-            "Completed, Errored",
-            "Completed, Rejected",
-            "Completed, Aborted",
-        ]
-        for state in error_states:
-            files = [make_download_file()]
-            files[0].status = make_transfer_snapshot(state=state)
-            done, problems, _ = downloads_all_done(files)
-            self.assertFalse(done, f"state={state} should not be done")
-            self.assertIsNotNone(problems, f"state={state} should be a problem")
-
-    def test_none_status_skipped(self):
-        from lib.slskd_transfers import downloads_all_done
-        files = [make_download_file()]
-        files[0].status = None
-        done, problems, queued = downloads_all_done(files)
-        # None status means we can't confirm done
-        self.assertTrue(done)  # loop body skips None
-        self.assertIsNone(problems)
-
-
 class TestCancelAndDelete(unittest.TestCase):
     """cancel_and_delete deletes completed payloads at their authoritative
     (event-derived) local paths — never at inferred folder locations
@@ -550,43 +488,6 @@ class TestCancelAndDelete(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(len(slskd.transfers.cancel_download_calls), 1)
-
-
-class TestSlskdDownloadStatus(unittest.TestCase):
-    """slskd_download_status matches locally against a pre-fetched bulk
-    snapshot — issue #508 removed the per-file network fallback (dead:
-    every live caller already passes ``snapshot=cycle_snapshot``)."""
-
-    def test_bulk_snapshot_populates_status(self):
-        """When snapshot is provided, use match_transfer instead of per-file API."""
-        from lib.slskd_transfers import slskd_download_status
-        f = make_download_file(filename="Music\\01 - Track.mp3", username="user1")
-        snapshot = [make_download_user(username="user1", directories=[
-            make_download_directory(directory="", files=[
-                make_transfer_snapshot(
-                    filename="Music\\01 - Track.mp3",
-                    id="file-id-1",
-                    state="Completed, Succeeded",
-                    size=5000000,
-                ),
-            ]),
-        ])]
-        ok = slskd_download_status([f], snapshot=snapshot)
-        self.assertTrue(ok)
-        self.assertIsNotNone(f.status)
-        assert f.status is not None
-        self.assertEqual(f.status.state, "Completed, Succeeded")
-
-    def test_bulk_snapshot_file_not_found(self):
-        """When snapshot doesn't contain the file, status is None, returns False."""
-        from lib.slskd_transfers import slskd_download_status
-        f = make_download_file(filename="Music\\missing.mp3", username="user1")
-        snapshot = [make_download_user(username="user1", directories=[
-            make_download_directory(directory="", files=[]),
-        ])]
-        ok = slskd_download_status([f], snapshot=snapshot)
-        self.assertFalse(ok)
-        self.assertIsNone(f.status)
 
 
 class TestSlskdDoEnqueue(unittest.TestCase):
@@ -2781,120 +2682,6 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
             self.assertEqual(db.request(1)["status"], "wanted")
 
 
-class TestCaptureDownloadProgress(unittest.TestCase):
-    """Test _capture_download_progress() — the persistence-gate split
-    (issue #564 C2 / root cause #2): progress_made drives stall-detection
-    timing; state_dirty must independently gate persistence so a
-    terminal-error observation is never silently dropped just because it
-    isn't "forward progress".
-    """
-
-    def _file(self, **overrides: Any) -> Any:
-        from tests.helpers import make_download_file
-        f = make_download_file()
-        for key, value in overrides.items():
-            setattr(f, key, value)
-        return f
-
-    def _state(self) -> Any:
-        from lib.quality import ActiveDownloadState
-        return ActiveDownloadState(
-            filetype="flac", enqueued_at="2026-01-01T00:00:00+00:00",
-            files=[])
-
-    CASES = [
-        (
-            "bytes increase is progress and dirty",
-            dict(bytes_transferred=0, last_state="InProgress",
-                 last_exception=None),
-            TransferSnapshot(state="InProgress", bytes_transferred=100),
-            True, True,
-        ),
-        (
-            "no status observed leaves file untouched",
-            dict(bytes_transferred=0, last_state=None, last_exception=None),
-            None,
-            False, False,
-        ),
-        (
-            "transition into non-progress state without exception is "
-            "still dirty (not progress)",
-            dict(bytes_transferred=0, last_state=None, last_exception=None),
-            TransferSnapshot(state="Queued, Remotely", bytes_transferred=0),
-            False, True,
-        ),
-        (
-            "terminal error with no byte progress is dirty but not "
-            "progress -- issue #564 root cause #2's exact shape",
-            dict(bytes_transferred=0, last_state="InProgress",
-                 last_exception=None),
-            TransferSnapshot(state="Completed, Rejected", bytes_transferred=0,
-                              exception="Transfer rejected: Banned"),
-            False, True,
-        ),
-        (
-            "identical repeat observation is neither progress nor dirty",
-            dict(bytes_transferred=0, last_state="Completed, Errored",
-                 last_exception="Read error: Connection reset by peer"),
-            TransferSnapshot(state="Completed, Errored", bytes_transferred=0,
-                              exception="Read error: Connection reset by peer"),
-            False, False,
-        ),
-        (
-            "a blank re-observation preserves the prior exception",
-            dict(bytes_transferred=0, last_state="Completed, Errored",
-                 last_exception="Read error: Connection reset by peer"),
-            TransferSnapshot(state="Completed, Errored", bytes_transferred=0),
-            False, False,
-        ),
-    ]
-
-    def test_progress_and_dirty_split(self):
-        for desc, file_kwargs, status, expect_progress, expect_dirty in self.CASES:
-            with self.subTest(desc=desc):
-                from lib.download import _capture_download_progress
-                f = self._file(**file_kwargs)
-                f.status = status
-                state = self._state()
-                progress_made, state_dirty = _capture_download_progress(
-                    [f], state, datetime(2026, 1, 1, tzinfo=timezone.utc))
-                self.assertEqual(progress_made, expect_progress, desc)
-                self.assertEqual(state_dirty, expect_dirty, desc)
-
-    def test_terminal_error_records_exception_even_without_progress(self):
-        """Regression pin for root cause #2: the exception must be
-        recorded on the file even though this is NOT forward progress."""
-        from lib.download import _capture_download_progress
-        f = self._file(bytes_transferred=0, last_state="InProgress",
-                       last_exception=None)
-        f.status = TransferSnapshot(
-            state="Completed, Rejected", bytes_transferred=0,
-            exception="Transfer rejected: Banned")
-        state = self._state()
-
-        progress_made, state_dirty = _capture_download_progress(
-            [f], state, datetime(2026, 1, 1, tzinfo=timezone.utc))
-
-        self.assertFalse(progress_made)
-        self.assertTrue(state_dirty)
-        self.assertEqual(f.last_state, "Completed, Rejected")
-        self.assertEqual(f.last_exception, "Transfer rejected: Banned")
-
-    def test_progress_made_advances_last_progress_at_only(self):
-        """state.last_progress_at moves on progress_made, exactly as
-        before issue #564 -- the split does not change stall timing."""
-        from lib.download import _capture_download_progress
-        f = self._file(bytes_transferred=0, last_state="InProgress",
-                       last_exception=None)
-        f.status = TransferSnapshot(state="InProgress", bytes_transferred=50)
-        state = self._state()
-        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-        _capture_download_progress([f], state, now)
-
-        self.assertEqual(state.last_progress_at, now.isoformat())
-
-
 def _fail_file(*, last_state=None, last_exception=None):
     from tests.helpers import make_download_file
     return make_download_file(last_state=last_state, last_exception=last_exception)
@@ -3391,7 +3178,12 @@ class TestPollActiveDownloads(unittest.TestCase):
             "active_download_state": state_dict,
         }
 
-    def _make_poll_ctx(self, downloading_rows=None, slskd_downloads=None):
+    def _make_poll_ctx(
+        self,
+        downloading_rows=None,
+        slskd_downloads=None,
+        fake_db: FakePipelineDB | None = None,
+    ):
         """Build context with fake DB + fake slskd for polling."""
         if slskd_downloads is None:
             # Default: return transfers that match the files
@@ -3437,7 +3229,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 # behaviour opt out with an explicit "local_path": None.
                 if "local_path" not in file_state:
                     file_state["local_path"] = local_path
-        fake_db = FakePipelineDB()
+        fake_db = fake_db or FakePipelineDB()
         for row in downloading_rows or []:
             fake_db.seed_request(row)
         ctx = make_ctx_with_fake_db(
@@ -3446,6 +3238,61 @@ class TestPollActiveDownloads(unittest.TestCase):
             slskd=FakeSlskdAPI(downloads=slskd_downloads),
         )
         return ctx, fake_db
+
+    def test_poll_lost_ownership_stops_before_every_verdict_effect(self):
+        """A concurrent transition wins before stale state or effects land."""
+        from lib.download import poll_active_downloads
+        from lib.quality import ActiveDownloadState
+
+        class LoseOwnershipOnPersistDB(FakePipelineDB):
+            def update_download_state_if_downloading(
+                self,
+                request_id: int,
+                state_json: str,
+            ) -> bool:
+                self._requests[request_id]["status"] = "replaced"
+                return super().update_download_state_if_downloading(
+                    request_id,
+                    state_json,
+                )
+
+        row = self._make_downloading_row()
+        losing_db = LoseOwnershipOnPersistDB()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=[{
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Succeeded",
+                    "bytesTransferred": 30000000,
+                }]}],
+            }],
+            fake_db=losing_db,
+        )
+        original_state = fake_db.request(1)["active_download_state"]
+        assert isinstance(original_state, dict)
+        original_state_json = ActiveDownloadState.from_dict(
+            original_state,
+        ).to_json()
+        local_path = original_state["files"][0]["local_path"]
+
+        poll_active_downloads(ctx)
+
+        current = fake_db.request(1)
+        self.assertEqual(current["status"], "replaced")
+        self.assertEqual(
+            ActiveDownloadState.from_dict(current["active_download_state"]).to_json(),
+            original_state_json,
+        )
+        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(fake_db.list_import_jobs(request_id=1), [])
+        self.assertEqual(fake_db.download_logs, [])
+        slskd = cast(FakeSlskdAPI, ctx.slskd)
+        self.assertEqual(slskd.transfers.enqueue_calls, [])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertTrue(os.path.isfile(local_path))
 
     def _download_state(self, fake_db: FakePipelineDB, request_id: int = 1):
         state = fake_db.request(request_id)["active_download_state"]
@@ -3902,10 +3749,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        with patch("lib.download.slskd_download_status") as mock_status:
-            poll_active_downloads(ctx)
+        poll_active_downloads(ctx)
 
-        mock_status.assert_not_called()
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(len(fake_db.list_import_jobs()), 1)
@@ -3942,10 +3787,8 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
-        with patch("lib.download.slskd_download_status") as mock_status:
-            poll_active_downloads(ctx)
+        poll_active_downloads(ctx)
 
-        mock_status.assert_not_called()
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.status_history, [])
         self.assertEqual(fake_db.cooldowns_applied, [])
@@ -4055,12 +3898,12 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        # Album 1 persists processing/materialization, album 2 persists progress.
-        self.assertEqual(len(fake_db.update_download_state_calls), 3)
+        # Each album persists exactly one complete reduced state.
+        self.assertEqual(len(fake_db.update_download_state_calls), 2)
         update_request_ids = [
             request_id for request_id, _ in fake_db.update_download_state_calls
         ]
-        self.assertEqual(update_request_ids, [1, 1, 2])
+        self.assertEqual(update_request_ids, [1, 2])
         self.assertIsNotNone(fake_db.request(1)["active_download_state"])
         self.assertIsNotNone(self._download_state(fake_db, 2)["last_progress_at"])
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
@@ -4180,8 +4023,8 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         self.assertEqual(fake_db.download_logs, [])
         # First observation of "Queued, Remotely" is new evidence (issue
-        # #564 state_dirty split) even though it isn't forward progress —
-        # persisted once, but stalled_timeout still doesn't fire.
+        # #564 evidence rule) even though it isn't forward progress — the
+        # complete reduced state persists, but stalled_timeout still doesn't fire.
         self.assertEqual(len(fake_db.update_download_state_calls), 1)
         self.assertIn(
             "Queued, Remotely",
@@ -4352,7 +4195,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         self.assertEqual(fake_db.download_logs, [])
         self.assertEqual(fake_db.status_history, [])
-        self.assertEqual(len(fake_db.update_download_state_calls), 2)
+        self.assertEqual(len(fake_db.update_download_state_calls), 1)
         persisted = self._download_state(fake_db)
         self.assertIsNotNone(persisted["processing_started_at"])
         self.assertIsNotNone(persisted["current_path"])
@@ -4440,13 +4283,10 @@ class TestPollActiveDownloads(unittest.TestCase):
                 _fake_db.request(1)["active_download_state"]["current_path"],
                 canonical_path,
             )
-            self.assertGreaterEqual(
-                len(_fake_db.update_download_state_current_path_calls),
-                1,
-            )
+            self.assertEqual(len(_fake_db.update_download_state_calls), 1)
             self.assertEqual(
-                _fake_db.update_download_state_current_path_calls[-1],
-                (1, canonical_path),
+                _fake_db.update_download_state_current_path_calls,
+                [],
             )
             self.assertEqual(len(_fake_db.list_import_jobs(request_id=1)), 1)
 
@@ -4579,7 +4419,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
             self.assertEqual(fake_db.request(1)["status"], "downloading")
             self.assertIsNone(fake_db.request(1)["active_download_state"].get("current_path"))
-            self.assertEqual(fake_db.update_download_state_calls, [])
+            self.assertEqual(len(fake_db.update_download_state_calls), 1)
             self.assertIn(
                 "LEGACY STAGED RESUME BLOCKED",
                 "\n".join(logs.output),
@@ -4624,7 +4464,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
             self.assertEqual(fake_db.request(1)["status"], "downloading")
             self.assertIsNone(fake_db.request(1)["active_download_state"].get("current_path"))
-            self.assertEqual(fake_db.update_download_state_calls, [])
+            self.assertEqual(len(fake_db.update_download_state_calls), 1)
             self.assertIn("MID-PROCESS RESUME BLOCKED", "\n".join(logs.output))
 
     def test_poll_missing_persisted_current_path_resets_to_wanted(self):
