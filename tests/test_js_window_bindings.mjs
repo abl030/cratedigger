@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import {
   assertWindowBindings,
   auditWindowBindings,
+  emittedOnclickBodies,
   emittedOnclickHandlers,
   exposedWindowBindings,
 } from './helpers/js_window_bindings_audit.mjs';
@@ -43,6 +44,87 @@ const releaseActionHandlers = emittedOnclickHandlers({
 assert(releaseActionHandlers.has('openReplacePicker'));
 assert(exposedWindowBindings(mainSource).has('openReplacePicker'));
 assert(!exposedWindowBindings(mainSource).has('openReplacePickerAndHandle'));
+
+// Independent adversarial matrix. These fixtures are intentionally not
+// derived from the production scanner's output, so they constrain what an
+// onclick surface IS rather than merely mutating whatever the scanner found.
+const adversarialSource = `
+  const help = 'To debug, call window.unrelatedHelpExample() in the console';
+  const direct = '<button onclick="window.windowHandler()">window</button>';
+  const bare = '<button onclick="bareHandler()">bare</button>';
+  const prefixed = '<button onclick="event.stopPropagation(); window.prefixedHandler()">prefixed</button>';
+  const concatenated = '<button onclick="event.preventDefault(); '
+    + 'window.concatenatedHandler()">concatenated</button>';
+  const templated = \`<button onclick="window.templateArgumentHandler(\${row.id})">templated</button>\`;
+  const resolvedBody = 'event.stopPropagation(); window.resolvedBodyHandler()';
+  const resolved = \`<button onclick="\${resolvedBody}">resolved</button>\`;
+`;
+const adversarialMain = `Object.assign(window, {
+  windowHandler,
+  bareHandler,
+  prefixedHandler,
+  concatenatedHandler,
+  templateArgumentHandler,
+  publicAlias: localImplementation,
+  resolvedBodyHandler,
+});`;
+const adversarialBodies = emittedOnclickBodies({
+  jsSources: { 'adversarial.js': adversarialSource },
+  indexHtml: '<button onclick="publicAlias()">alias</button>',
+});
+assert(adversarialBodies.some((body) => body.includes('window.windowHandler()')));
+assert(adversarialBodies.some((body) => body.includes('bareHandler()')));
+assert(adversarialBodies.some((body) => body.includes('window.concatenatedHandler()')));
+const adversarialAudit = assertWindowBindings({
+  jsSources: { 'adversarial.js': adversarialSource },
+  indexHtml: '<button onclick="publicAlias()">alias</button>',
+  mainSource: adversarialMain,
+});
+assert.deepEqual([...adversarialAudit.required].sort(), [
+  'bareHandler',
+  'concatenatedHandler',
+  'prefixedHandler',
+  'publicAlias',
+  'resolvedBodyHandler',
+  'templateArgumentHandler',
+  'windowHandler',
+]);
+assert(!adversarialAudit.required.has('unrelatedHelpExample'));
+
+// Missing bare handlers and dynamic callee names must both fail. A dynamic
+// argument is safe because it cannot alter which public function is called.
+const missingBare = auditWindowBindings({
+  jsSources: { 'fixture.js': `const html = '<button onclick="bareMissing()">x</button>';` },
+  indexHtml: '',
+  mainSource: 'Object.assign(window, {});',
+});
+assert.deepEqual([...missingBare.missing], ['bareMissing']);
+
+for (const dynamicSource of [
+  'const html = `<button onclick="window.${handlerName}()">x</button>`;',
+  'const html = `<button onclick="${handlerBody}">x</button>`;',
+  `// const handlerBody = 'window.commentDecoyHandler()';
+   const html = \`<button onclick="\${handlerBody}">x</button>\`;`,
+  `const html = '<button onclick="window.' + handlerName + '()">x</button>';`,
+  `const html = '<button onclick="window[handlerName]()">x</button>';`,
+  `const handlerBody = enabled ? 'window.onlyStaticBranch()' : dynamicBody;
+   const html = \`<button onclick="\${handlerBody}">x</button>\`;`,
+]) {
+  const dynamicAudit = auditWindowBindings({
+    jsSources: { 'dynamic.js': dynamicSource },
+    indexHtml: '',
+    mainSource: 'Object.assign(window, {});',
+  });
+  assert(dynamicAudit.unresolved.length > 0, `dynamic handler must be unresolved: ${dynamicSource}`);
+  assert.throws(
+    () => assertWindowBindings({
+      jsSources: { 'dynamic.js': dynamicSource },
+      indexHtml: '',
+      mainSource: 'Object.assign(window, {});',
+    }),
+    /unresolved inline onclick/,
+  );
+}
 
 // Generated/property sweep: the real repository is complete, then removing
 // each required public property in turn must make precisely that property
