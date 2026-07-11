@@ -47,9 +47,12 @@ from lib.processing_paths import (
 )
 from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
                          CooldownConfig,
-                         DownloadDecision,
                          FileFailureDetail,
-                         decide_download_action,
+                         PollCycleConfig,
+                         PollCycleDecision,
+                         PollCycleSnapshot,
+                         PollFileSnapshot,
+                         reduce_poll_cycle,
                          extract_usernames)
 from lib import transitions
 from lib.dispatch import _build_download_info
@@ -59,16 +62,13 @@ from lib.import_queue import (
     automation_import_dedupe_key,
     automation_import_payload,
 )
-from lib.slskd_client import DownloadUser, TransferSnapshot
+from lib.slskd_client import DownloadUser
 from lib.slskd_transfers import (
-    _all_files_remotely_queued,
     _get_all_downloads_snapshot,
     cancel_and_delete,
-    downloads_all_done,
     match_transfer,
-    rederive_transfer_ids,
+    match_transfer_for_attempt,
     slskd_do_enqueue,
-    slskd_download_status,
 )
 from lib.staged_album import StagedAlbum
 
@@ -135,7 +135,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
 
     def get_active_import_job_for_request(
         self, request_id: int,
-    ) -> dict[str, Any] | None: ...
+    ) -> ImportJob | None: ...
 
     def get_import_job_candidate_evidence_id(
         self, import_job_id: int,
@@ -391,7 +391,7 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     This takes one final bulk snapshot and, for every ``downloading`` row
     that hasn't reached local processing yet, stamps any file whose
     matched transfer is now terminal into ``active_download_state`` —
-    the SAME persisted fields ``_capture_download_progress`` writes
+    the SAME persisted fields ``reduce_poll_cycle`` returns
     (``last_state``, ``last_exception``, ``bytes_transferred``) via the
     real ``ActiveDownloadState`` round trip (decode -> mutate -> encode),
     never a hand-rolled JSON dict. Rows already past
@@ -460,76 +460,6 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
         logger.info(
             "HARVEST: captured pre-purge terminal transfer evidence for "
             "%d downloading row(s)", harvested)
-
-
-_NON_PROGRESS_STATES = {
-    "",
-    "Queued, Remotely",
-    "Completed, Cancelled",
-    "Completed, TimedOut",
-    "Completed, Errored",
-    "Completed, Rejected",
-    "Completed, Aborted",
-}
-
-
-def _capture_download_progress(
-    downloads: list[DownloadFile],
-    state: ActiveDownloadState,
-    now: datetime,
-) -> tuple[bool, bool]:
-    """Record byte/state/exception evidence from fresh slskd status snapshots.
-
-    Returns ``(progress_made, state_dirty)``:
-
-    - ``progress_made`` — observable forward progress this cycle (bytes
-      increased, or the state changed to something outside
-      ``_NON_PROGRESS_STATES``). Drives ``state.last_progress_at`` —
-      stall-detection semantics are UNCHANGED from before issue #564.
-    - ``state_dirty`` — ANY change to a file's ``last_state``,
-      ``last_exception``, or ``bytes_transferred`` this cycle, including
-      a transition INTO a terminal error state (which is deliberately
-      NOT "progress"). Callers must persist on ``state_dirty``, not
-      ``progress_made`` — gating persistence on progress alone silently
-      dropped every terminal-error observation that arrived without
-      forward progress (issue #564 root cause #2), so the poller's next
-      cycle found the row's evidence gone.
-    """
-    progress_made = False
-    state_dirty = False
-    for file in downloads:
-        if not file.status:
-            continue
-
-        current_state = file.status.state
-        current_bytes = file.status.bytes_transferred
-        current_exception = file.status.exception
-        previous_bytes = file.bytes_transferred or 0
-        previous_state = file.last_state
-        previous_exception = file.last_exception
-
-        if current_bytes > previous_bytes:
-            progress_made = True
-        elif (current_state != (previous_state or "")
-              and current_state not in _NON_PROGRESS_STATES):
-            progress_made = True
-
-        new_state = current_state or previous_state
-        new_exception = current_exception or previous_exception
-        if (current_bytes != previous_bytes
-                or new_state != previous_state
-                or new_exception != previous_exception):
-            state_dirty = True
-
-        file.bytes_transferred = current_bytes
-        file.last_state = new_state
-        file.last_exception = new_exception
-
-    if progress_made:
-        state.last_progress_at = now.isoformat()
-
-    return progress_made, state_dirty
-
 
 def _run_completed_processing(
     entry: GrabListEntry,
@@ -632,7 +562,7 @@ def _run_completed_processing(
 
 def _active_import_job_for_request(
     db: DownloadDB, request_id: int,
-) -> dict[str, Any] | None:
+) -> ImportJob | None:
     return db.get_active_import_job_for_request(request_id)
 
 
@@ -676,16 +606,10 @@ def _enqueue_completed_processing(
     state: ActiveDownloadState,
     db: DownloadDB,
     ctx: CratediggerContext,
-) -> Any:
+) -> ImportJob | None:
     """Submit completed-download processing to the shared import queue."""
     if state.processing_started_at is None:
-        if entry.import_folder is None:
-            entry.import_folder = canonical_folder_for_row(
-                entry,
-                ctx.cfg.slskd_download_dir,
-            )
-        state.processing_started_at = datetime.now(timezone.utc).isoformat()
-        _persist_updated_download_state(db, request_id, entry, state)
+        raise ValueError("processing must be marked before importer enqueue")
     if entry.import_folder is None:
         entry.import_folder = (
             state.current_path
@@ -698,7 +622,12 @@ def _enqueue_completed_processing(
             ctx.cfg.slskd_download_dir,
         ),
     )
-    materialized = _materialize_processing_dir(entry, staged_album, ctx)
+    materialized = _materialize_processing_dir(
+        entry,
+        staged_album,
+        ctx,
+        persist_current_path=False,
+    )
     if not isinstance(materialized, Materialized):
         action = materialize_failure_action(
             materialized,
@@ -742,8 +671,6 @@ def _enqueue_completed_processing(
         )
         return None
     entry.import_folder = staged_album.current_path
-    state.current_path = staged_album.current_path
-    _persist_updated_download_state(db, request_id, entry, state)
     job = db.enqueue_import_job(
         IMPORT_JOB_AUTOMATION,
         request_id=request_id,
@@ -751,18 +678,18 @@ def _enqueue_completed_processing(
         payload=automation_import_payload(),
         message=f"Automation import queued for {entry.artist} - {entry.title}",
     )
-    if getattr(job, "deduped", False):
+    if job.deduped:
         logger.info(
             "Automation import already queued/running for request %s "
             "(job %s)",
             request_id,
-            getattr(job, "id", "?"),
+            job.id,
         )
     else:
         logger.info(
             "Queued automation import for request %s as job %s",
             request_id,
-            getattr(job, "id", "?"),
+            job.id,
         )
     return job
 
@@ -916,50 +843,22 @@ def _poll_one_active_download(
     ctx: CratediggerContext,
     cycle_snapshot: list[DownloadUser],
 ) -> None:
-    """Process one ``downloading`` row.
-
-    Extracted from ``poll_active_downloads`` so the per-row try/except
-    guard at the call site is the single seam where unhandled
-    exceptions get contained. Inside, ``return`` has the same semantics
-    as the original ``continue`` had inline.
-    """
+    """Build poll facts, persist one reduced state, then dispatch one effect."""
     request_id = row["id"]
     raw_state = row.get("active_download_state")
-    if not raw_state:
-        # Crash recovery: downloading with no state means process_completed_album
-        # crashed on a previous run. Reset to wanted so it gets re-searched.
-        logger.error(f"Downloading album {request_id} has no active_download_state — "
-                     f"resetting to wanted")
-        transitions.finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted(
-                from_status="downloading",
-            ),
-        )
-        return
+    state = ActiveDownloadState.from_raw(raw_state) if raw_state else None
+    active_import_job = (
+        _active_import_job_for_request(db, request_id)
+        if state is not None
+        else None
+    )
 
-    state = ActiveDownloadState.from_raw(raw_state)
-    active_import_job = _active_import_job_for_request(db, request_id)
-    if active_import_job is not None:
-        job_id = (
-            active_import_job.get("id")
-            if isinstance(active_import_job, dict)
-            else getattr(active_import_job, "id", "?")
-        )
-        job_status = (
-            active_import_job.get("status")
-            if isinstance(active_import_job, dict)
-            else getattr(active_import_job, "status", "?")
-        )
-        logger.info(
-            "Request %s is waiting on importer job %s (%s)",
-            request_id,
-            job_id,
-            job_status,
-        )
-        return
-    if state.processing_started_at is not None:
+    recovery_decision = None
+    if (
+        state is not None
+        and state.processing_started_at is not None
+        and active_import_job is None
+    ):
         recovery_decision = reconcile_processing_current_path(
             current_path=state.current_path,
             artist=row["artist_name"],
@@ -973,7 +872,106 @@ def _poll_one_active_download(
                 [(f.username, f.filename) for f in state.files],
             ),
         )
-        if recovery_decision.blocked_reason == "multiple_populated_paths":
+
+    file_snapshots: list[PollFileSnapshot] = []
+    completion_current_path = None
+    if (
+        state is not None
+        and state.processing_started_at is None
+        and active_import_job is None
+    ):
+        initial_entry = _reconstruct_grab_list_entry(row, state)
+        completion_current_path = canonical_folder_for_row(
+            initial_entry,
+            ctx.cfg.slskd_download_dir,
+        )
+        for file in state.files:
+            transfer = match_transfer_for_attempt(
+                cycle_snapshot,
+                file.filename,
+                username=file.username,
+                not_before=state.enqueued_at,
+            )
+            file_snapshots.append(PollFileSnapshot(
+                transfer_id=transfer.id if transfer is not None else None,
+                state=transfer.state if transfer is not None else None,
+                bytes_transferred=(
+                    transfer.bytes_transferred if transfer is not None else 0
+                ),
+                exception=transfer.exception if transfer is not None else None,
+            ))
+
+    snapshot = PollCycleSnapshot(
+        files=file_snapshots,
+        active_import_job_id=(
+            active_import_job.id if active_import_job is not None else None
+        ),
+        active_import_job_status=(
+            active_import_job.status if active_import_job is not None else None
+        ),
+        processing_current_path=(
+            recovery_decision.selected_location.path
+            if recovery_decision is not None
+            and recovery_decision.selected_location is not None
+            else None
+        ),
+        processing_blocked_reason=(
+            recovery_decision.blocked_reason
+            if recovery_decision is not None
+            else None
+        ),
+        completion_current_path=completion_current_path,
+    )
+    now = datetime.now(timezone.utc)
+    result = reduce_poll_cycle(
+        state,
+        snapshot,
+        now,
+        PollCycleConfig(
+            remote_queue_timeout=ctx.cfg.remote_queue_timeout,
+            stalled_timeout=ctx.cfg.stalled_timeout,
+            max_file_retries=MAX_FILE_RETRIES,
+        ),
+    )
+
+    # The reducer returns the whole observation state, so every valid row
+    # persists unconditionally here while this worker still owns a
+    # downloading row. Losing that guard means a concurrent transition won;
+    # its state and every downstream side effect take precedence.
+    if (
+        result.state is not None
+        and not db.update_download_state_if_downloading(
+            request_id,
+            result.state.to_json(),
+        )
+    ):
+        return
+
+    verdict = result.verdict
+    if verdict.decision == PollCycleDecision.reset_missing_state:
+        logger.error(f"Downloading album {request_id} has no active_download_state — "
+                     f"resetting to wanted")
+        transitions.finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+            ),
+        )
+        return
+
+    if verdict.decision == PollCycleDecision.wait_import_job:
+        logger.info(
+            "Request %s is waiting on importer job %s (%s)",
+            request_id,
+            verdict.import_job_id,
+            verdict.import_job_status,
+        )
+        return
+
+    if verdict.decision == PollCycleDecision.wait_processing_recovery:
+        assert recovery_decision is not None
+        if verdict.reason == "multiple_populated_paths":
             rendered_candidates = ", ".join(
                 f"{location.short_label}={location.path}"
                 for location in recovery_decision.populated_locations
@@ -988,7 +986,7 @@ def _poll_one_active_download(
                 rendered_candidates,
             )
             return
-        if recovery_decision.blocked_reason == "legacy_shared_only":
+        if verdict.reason == "legacy_shared_only":
             logger.error(
                 "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
                 "persisted current_path=%s could not be resumed, "
@@ -998,22 +996,27 @@ def _poll_one_active_download(
                 request_id,
                 row["artist_name"],
                 row["album_title"],
-                state.current_path,
+                result.state.current_path if result.state is not None else None,
                 recovery_decision.canonical_path,
                 recovery_decision.legacy_shared_path,
             )
             return
-        assert recovery_decision.selected_location is not None
-        selected_path = recovery_decision.selected_location.path
-        if selected_path != state.current_path:
-            state.current_path = selected_path
-            db.update_download_state_current_path(
-                request_id,
-                state.current_path,
-            )
-    entry = _reconstruct_grab_list_entry(row, state)
+        raise AssertionError(f"unknown processing recovery block: {verdict.reason}")
 
-    if state.processing_started_at is not None:
+    state = result.state
+    assert state is not None
+    transfer_ids = {
+        (file.username, file.filename): observation.transfer_id
+        for file, observation in zip(state.files, snapshot.files)
+        if observation.transfer_id is not None
+    }
+    entry = _reconstruct_grab_list_entry(
+        row,
+        state,
+        transfer_ids=transfer_ids,
+    )
+
+    if verdict.decision == PollCycleDecision.processing:
         if not _processing_path_ready_for_importer(
             entry,
             request_id,
@@ -1025,152 +1028,76 @@ def _poll_one_active_download(
         _enqueue_completed_processing(entry, request_id, state, db, ctx)
         return
 
-    # Re-derive transfer IDs from pre-fetched snapshot
-    if not rederive_transfer_ids(
-        entry,
-        ctx.slskd,
-        snapshot=cycle_snapshot,
-        not_before=state.enqueued_at,
-    ):
-        logger.warning(f"API error re-deriving transfers for {entry.artist} - {entry.title} "
-                       f"— will retry next cycle")
+    if verdict.decision == PollCycleDecision.wait_fresh_vanished:
+        logger.info(
+            "Request %s has fresh planned ownership but no visible "
+            "slskd transfers yet; deferring vanished-transfer reset",
+            request_id,
+        )
         return
 
-    enqueued_at = datetime.fromisoformat(state.enqueued_at)
-    if enqueued_at.tzinfo is None:
-        enqueued_at = enqueued_at.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    elapsed_seconds = (now - enqueued_at).total_seconds()
-
-    # Check if all transfers have vanished (slskd restart, user offline).
-    # A restored terminal status from a previous poll is still visible
-    # evidence; do not erase it just because slskd no longer lists the
-    # removed transfer row.
-    all_vanished = all(f.id == "" and f.status is None for f in entry.files)
-    if all_vanished:
-        if elapsed_seconds < 60:
-            logger.info(
-                "Request %s has fresh planned ownership but no visible "
-                "slskd transfers yet; deferring vanished-transfer reset",
-                request_id,
-            )
-            return
+    if verdict.decision == PollCycleDecision.timeout_vanished:
         _timeout_album(
-            entry, request_id, _vanished_timeout_reason(entry.files), ctx)
+            entry,
+            request_id,
+            _vanished_timeout_reason(entry.files),
+            ctx,
+        )
         return
 
-    # Mark files with vanished transfers as errored. Preserve restored
-    # terminal statuses (Completed, Rejected/Errored/etc.) from previous
-    # poll cycles so the reducer can report the real terminal failure.
-    for f in entry.files:
-        if f.id == "" and f.status is None:
-            f.status = TransferSnapshot(state="Completed, Errored")
-
-    # Track total album age separately from stall/progress timing.
-    # Poll live status only for transfers that are still active in slskd.
-    files_requiring_status = [
-        f for f in entry.files
-        if f.id and not (f.status and f.status.state.startswith("Completed,"))
-    ]
-    if files_requiring_status and not slskd_download_status(
-            files_requiring_status, snapshot=cycle_snapshot):
-        logger.warning(f"API error polling {entry.artist} - {entry.title} — "
-                      f"will retry next cycle")
-        return
-
-    album_done, problems, queued = downloads_all_done(entry.files)
-    statusful_files = [f for f in entry.files if f.status is not None]
-    _progress_made, state_dirty = _capture_download_progress(
-        statusful_files, state, now)
-
-    all_remote_queued = _all_files_remotely_queued(entry.files, queued)
-    error_filenames = [f.filename for f in problems] if problems is not None else None
-    file_retries = {f.filename: (f.retry or 0) for f in entry.files}
-
-    progress_at = state.last_progress_at or state.enqueued_at
-    idle_seconds = (now - datetime.fromisoformat(progress_at)).total_seconds()
-
-    verdict = decide_download_action(
-        album_done=album_done,
-        error_filenames=error_filenames,
-        total_files=len(entry.files),
-        all_remote_queued=all_remote_queued,
-        elapsed_seconds=elapsed_seconds,
-        idle_seconds=idle_seconds,
-        remote_queue_timeout=ctx.cfg.remote_queue_timeout,
-        stalled_timeout=ctx.cfg.stalled_timeout,
-        file_retries=file_retries,
-        max_file_retries=MAX_FILE_RETRIES,
-        processing_started=False,
-    )
-
-    if verdict.decision == DownloadDecision.timeout_remote_queue:
+    if verdict.decision == PollCycleDecision.timeout_remote_queue:
         _timeout_album(entry, request_id, verdict.reason, ctx)
         return
 
-    if verdict.decision == DownloadDecision.complete:
+    if verdict.decision == PollCycleDecision.complete:
         logger.info(f"Download complete: {entry.artist} - {entry.title}")
         _enqueue_completed_processing(entry, request_id, state, db, ctx)
         return
 
-    if verdict.decision == DownloadDecision.timeout_all_errored:
+    if verdict.decision == PollCycleDecision.timeout_all_errored:
         _timeout_album(entry, request_id, verdict.reason, ctx)
         return
 
-    if verdict.decision == DownloadDecision.timeout_stalled:
+    if verdict.decision == PollCycleDecision.timeout_stalled:
         _timeout_album(entry, request_id, verdict.reason, ctx)
         return
 
-    if verdict.decision == DownloadDecision.retry_files:
+    if verdict.decision == PollCycleDecision.retry_files:
         for retry_filename in verdict.files_to_retry:
-            for df in entry.files:
-                if df.filename == retry_filename:
-                    retries_used = (df.retry or 0) + 1
-                    df.retry = retries_used
+            for file in entry.files:
+                if file.filename == retry_filename:
+                    retries_used = file.retry or 0
                     logger.info(f"Re-enqueue failed file "
                                 f"({retries_used}/{MAX_FILE_RETRIES} retries): "
                                 f"{retry_filename}")
-                    # Find the problem file for username/size/dir
-                    file = next((f for f in entry.files if f.filename == retry_filename), None)
-                    if file:
-                        # T1 (issue #571): the retry is still within THIS
-                        # attempt (not a new one), so the fingerprint is
-                        # computed from the whole entry, matching what
-                        # canonical_folder_for_row derives from the same
-                        # manifest elsewhere (issue #550 phase 2).
-                        requeue = slskd_do_enqueue(
-                            file.username,
-                            [{"filename": file.filename, "size": file.size}],
-                            file.file_dir, ctx,
-                            request_id=request_id,
-                            attempt_fp=attempt_fingerprint(
-                                [(f.username, f.filename) for f in entry.files]),
-                        )
-                        state_dirty = True
-                        if requeue:
-                            df.id = requeue[0].id
-                            df.bytes_transferred = 0
-                            df.last_state = None
-                            df.last_exception = None
-                            state.last_progress_at = now.isoformat()
-                        else:
-                            logger.warning(f"Failed to re-enqueue file: {retry_filename}")
+                    requeue = slskd_do_enqueue(
+                        file.username,
+                        [{"filename": file.filename, "size": file.size}],
+                        file.file_dir, ctx,
+                        request_id=request_id,
+                        attempt_fp=attempt_fingerprint(
+                            [(f.username, f.filename) for f in entry.files]),
+                    )
+                    if not requeue:
+                        logger.warning(f"Failed to re-enqueue file: {retry_filename}")
                     break
 
         refreshed = db.get_request(request_id)
         if refreshed and refreshed["status"] != "downloading":
             return
 
-    # In progress — persist state and log
-    refreshed = db.get_request(request_id)
-    if refreshed and refreshed["status"] != "downloading":
-        return
-    if state_dirty:
-        _persist_updated_download_state(db, request_id, entry, state)
+    elif verdict.decision != PollCycleDecision.in_progress:
+        assert_never(verdict.decision)
 
     # Still in progress — log and continue to next album
-    files_done = sum(1 for f in entry.files
-                    if f.status and f.status.state == "Completed, Succeeded")
+    enqueued_at = datetime.fromisoformat(state.enqueued_at)
+    if enqueued_at.tzinfo is None:
+        enqueued_at = enqueued_at.replace(tzinfo=timezone.utc)
+    elapsed_seconds = (now - enqueued_at).total_seconds()
+    files_done = sum(
+        1 for file in state.files
+        if file.last_state == "Completed, Succeeded"
+    )
     logger.info(f"In progress: {entry.artist} - {entry.title} "
                 f"({files_done}/{len(entry.files)} files, "
                 f"{elapsed_seconds/60:.1f}min elapsed)")

@@ -63,6 +63,13 @@ class ReleaseLocation:
 DEFAULT_BEETS_DB = os.environ.get("BEETS_DB", "/mnt/virtio/Music/beets-library.db")
 
 
+def _resolve_library_path(path: str, library_root: str) -> str:
+    """Anchor a Beets-relative path to its configured library root."""
+    if library_root and not os.path.isabs(path):
+        return os.path.join(library_root, path)
+    return path
+
+
 def _reduce_album_format(
     formats_on_disk: set[str],
     cfg: "QualityRankConfig",
@@ -159,6 +166,13 @@ class BeetsDB:
         if isinstance(raw, bytes):
             return raw.decode("utf-8", errors="replace")
         return str(raw)
+
+    def _resolve_path(self, raw: object) -> str:
+        """Decode a stored path and apply the one library-root policy."""
+        return _resolve_library_path(
+            self._decode_path(raw),
+            self._library_root,
+        )
 
     def locate(self, release_id: str) -> ReleaseLocation:
         """Resolve a pipeline ``mb_release_id`` to a ``ReleaseLocation``.
@@ -395,9 +409,7 @@ class BeetsDB:
         # relative to the library root in production; absolutize so
         # downstream FS consumers (snapshot_audio_files, spectral_analyze,
         # os.path.isdir checks) work regardless of cwd.
-        first_path = self._decode_path(rows[0][1])
-        if self._library_root and not os.path.isabs(first_path):
-            first_path = os.path.join(self._library_root, first_path)
+        first_path = self._resolve_path(rows[0][1])
         album_path = os.path.dirname(first_path)
 
         # Reduce multi-format albums via cfg.mixed_format_precedence.
@@ -436,7 +448,7 @@ class BeetsDB:
         rows = self._conn.execute(
             "SELECT id, path FROM items WHERE album_id = ?", (album_id,)
         ).fetchall()
-        return [(r[0], self._decode_path(r[1])) for r in rows]
+        return [(r[0], self._resolve_path(r[1])) for r in rows]
 
     def get_album_path(self, mb_release_id: str) -> Optional[str]:
         """Get the directory path for an album's tracks. Returns None if not found."""
@@ -460,7 +472,7 @@ class BeetsDB:
         ).fetchone()
         if not row or not row[0]:
             return None
-        return os.path.dirname(self._decode_path(row[0]))
+        return os.path.dirname(self._resolve_path(row[0]))
 
     # ── Web UI query methods ────────────────────────────────────────
 
@@ -598,7 +610,7 @@ class BeetsDB:
             "id": i[0], "title": i[1], "artist": i[2], "track": i[3],
             "disc": i[4], "length": i[5], "format": i[6],
             "bitrate": i[7], "samplerate": i[8], "bitdepth": i[9],
-            "path": self._decode_path(i[10]) if i[10] else None,
+            "path": self._resolve_path(i[10]) if i[10] else None,
         } for i in items]
         album_path = os.path.dirname(tracks[0]["path"]) if tracks and tracks[0]["path"] else None
         identity = ReleaseIdentity.from_fields(album[4], album[10])
@@ -608,7 +620,7 @@ class BeetsDB:
             "mb_albumid": identity.release_id if identity else None,
             "type": album[5],
             "label": album[6], "country": album[7],
-            "artpath": self._decode_path(album[8]) if album[8] else None,
+            "artpath": self._resolve_path(album[8]) if album[8] else None,
             "added": album[9], "tracks": tracks, "path": album_path,
             "source": identity.source if identity else "unknown",
         }

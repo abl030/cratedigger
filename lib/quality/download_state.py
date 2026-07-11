@@ -1,15 +1,19 @@
-"""Download poll-state types + the cooldown/download-action reducers.
+"""Pure download-state types and reducers.
 
-Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477),
-refreshed onto main to carry ``ActiveDownloadFileState`` /
-``ActiveDownloadState`` as ``msgspec.Struct`` (issue #467) instead of the
-hand-rolled ``@dataclass`` with ``to_dict``/``from_dict``/``to_json``/
-``from_json`` the original split carved. Pure move: every definition is
-AST-identical to the current monolith.
+``reduce_poll_cycle`` owns the complete asynchronous poll transition from
+persisted state plus caller-supplied observations to a new whole state and one
+typed verdict. This module performs no DB, slskd, filesystem, clock, logging,
+or callback work; ``lib.download`` builds snapshots, persists the returned
+state under its ownership guard, and dispatches verdict side effects.
+
+The same module also owns the narrower historical download-action and uploader
+cooldown decisions, along with the JSONB wire types used to persist active
+download evidence.
 """
 
 import enum
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 import msgspec
@@ -36,6 +40,74 @@ class DownloadVerdict:
     decision: DownloadDecision
     files_to_retry: list[str] = field(default_factory=list)
     reason: str = ""
+
+
+class PollCycleDecision(enum.Enum):
+    """One side effect (or deliberate wait) selected for a poll cycle."""
+
+    reset_missing_state = "reset_missing_state"
+    wait_import_job = "wait_import_job"
+    wait_processing_recovery = "wait_processing_recovery"
+    wait_fresh_vanished = "wait_fresh_vanished"
+    timeout_vanished = "timeout_vanished"
+    in_progress = "in_progress"
+    complete = "complete"
+    retry_files = "retry_files"
+    timeout_remote_queue = "timeout_remote_queue"
+    timeout_stalled = "timeout_stalled"
+    timeout_all_errored = "timeout_all_errored"
+    processing = "processing"
+
+
+@dataclass(frozen=True)
+class PollCycleVerdict:
+    """Side-effect instruction returned by :func:`reduce_poll_cycle`."""
+
+    decision: PollCycleDecision
+    files_to_retry: list[str] = field(default_factory=list)
+    reason: str = ""
+    import_job_id: int | None = None
+    import_job_status: str | None = None
+
+
+@dataclass(frozen=True)
+class PollFileSnapshot:
+    """Current-cycle slskd facts for one persisted file, in file order."""
+
+    transfer_id: str | None = None
+    state: str | None = None
+    bytes_transferred: int = 0
+    exception: str | None = None
+
+
+@dataclass(frozen=True)
+class PollCycleSnapshot:
+    """All impure observations supplied to the pure poll-cycle reducer."""
+
+    files: list[PollFileSnapshot] = field(default_factory=list)
+    active_import_job_id: int | None = None
+    active_import_job_status: str | None = None
+    processing_current_path: str | None = None
+    processing_blocked_reason: str | None = None
+    completion_current_path: str | None = None
+
+
+@dataclass(frozen=True)
+class PollCycleConfig:
+    """Scalar policy facts needed by the poll-cycle reducer."""
+
+    remote_queue_timeout: int
+    stalled_timeout: int
+    max_file_retries: int
+    vanished_grace_seconds: int = 60
+
+
+@dataclass(frozen=True)
+class PollCycleResult:
+    """The complete state to persist and the one effect to dispatch."""
+
+    state: "ActiveDownloadState | None"
+    verdict: PollCycleVerdict
 
 
 # --- User cooldown system (issue #39) ---
@@ -269,6 +341,268 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
             "active_download_state must be a dict or JSON string, "
             f"got {type(raw).__name__}"
         )
+
+
+_TERMINAL_ERROR_STATES = frozenset({
+    "Completed, Cancelled",
+    "Completed, TimedOut",
+    "Completed, Errored",
+    "Completed, Rejected",
+    "Completed, Aborted",
+})
+
+_NON_PROGRESS_STATES = frozenset({
+    "",
+    "Queued, Remotely",
+    *_TERMINAL_ERROR_STATES,
+})
+
+
+def _copy_download_file_state(
+    file: ActiveDownloadFileState,
+    *,
+    retry_count: int | None = None,
+    bytes_transferred: int | None = None,
+    last_state: str | None = None,
+    last_exception: str | None = None,
+) -> ActiveDownloadFileState:
+    return ActiveDownloadFileState(
+        username=file.username,
+        filename=file.filename,
+        file_dir=file.file_dir,
+        size=file.size,
+        disk_no=file.disk_no,
+        disk_count=file.disk_count,
+        retry_count=(file.retry_count if retry_count is None else retry_count),
+        bytes_transferred=(
+            file.bytes_transferred
+            if bytes_transferred is None
+            else bytes_transferred
+        ),
+        last_state=file.last_state if last_state is None else last_state,
+        last_exception=(
+            file.last_exception
+            if last_exception is None
+            else last_exception
+        ),
+        local_path=file.local_path,
+    )
+
+
+def _copy_download_state(
+    state: ActiveDownloadState,
+    *,
+    files: list[ActiveDownloadFileState] | None = None,
+    last_progress_at: str | None = None,
+    processing_started_at: str | None = None,
+    current_path: str | None = None,
+) -> ActiveDownloadState:
+    return ActiveDownloadState(
+        filetype=state.filetype,
+        enqueued_at=state.enqueued_at,
+        files=state.files if files is None else files,
+        last_progress_at=(
+            state.last_progress_at
+            if last_progress_at is None
+            else last_progress_at
+        ),
+        processing_started_at=(
+            state.processing_started_at
+            if processing_started_at is None
+            else processing_started_at
+        ),
+        import_subprocess_started_at=state.import_subprocess_started_at,
+        current_path=state.current_path if current_path is None else current_path,
+    )
+
+
+def _datetime_from_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def reduce_poll_cycle(
+    persisted_state: ActiveDownloadState | None,
+    snapshot: PollCycleSnapshot,
+    now: datetime,
+    cfg: PollCycleConfig,
+) -> PollCycleResult:
+    """Reduce one poll cycle without I/O, mutation, clocks, or callbacks."""
+
+    if persisted_state is None:
+        return PollCycleResult(
+            state=None,
+            verdict=PollCycleVerdict(PollCycleDecision.reset_missing_state),
+        )
+
+    if snapshot.active_import_job_id is not None:
+        return PollCycleResult(
+            state=persisted_state,
+            verdict=PollCycleVerdict(
+                PollCycleDecision.wait_import_job,
+                import_job_id=snapshot.active_import_job_id,
+                import_job_status=snapshot.active_import_job_status,
+            ),
+        )
+
+    if persisted_state.processing_started_at is not None:
+        if snapshot.processing_blocked_reason is not None:
+            return PollCycleResult(
+                state=persisted_state,
+                verdict=PollCycleVerdict(
+                    PollCycleDecision.wait_processing_recovery,
+                    reason=snapshot.processing_blocked_reason,
+                ),
+            )
+        recovered_state = _copy_download_state(
+            persisted_state,
+            current_path=(
+                snapshot.processing_current_path
+                if snapshot.processing_current_path is not None
+                else persisted_state.current_path
+            ),
+        )
+        return PollCycleResult(
+            state=recovered_state,
+            verdict=PollCycleVerdict(PollCycleDecision.processing),
+        )
+
+    if len(snapshot.files) != len(persisted_state.files):
+        raise ValueError(
+            "poll snapshot file count must match persisted state: "
+            f"{len(snapshot.files)} != {len(persisted_state.files)}"
+        )
+
+    missing = [
+        observation.transfer_id is None
+        and not (
+            file.last_state is not None
+            and file.last_state.startswith("Completed,")
+        )
+        for file, observation in zip(persisted_state.files, snapshot.files)
+    ]
+    elapsed_seconds = (
+        now - _datetime_from_iso(persisted_state.enqueued_at)
+    ).total_seconds()
+    if all(missing):
+        decision = (
+            PollCycleDecision.wait_fresh_vanished
+            if elapsed_seconds < cfg.vanished_grace_seconds
+            else PollCycleDecision.timeout_vanished
+        )
+        return PollCycleResult(
+            state=persisted_state,
+            verdict=PollCycleVerdict(decision),
+        )
+
+    observed_progress = False
+    new_files: list[ActiveDownloadFileState] = []
+    for file, observation, vanished in zip(
+        persisted_state.files,
+        snapshot.files,
+        missing,
+    ):
+        if vanished:
+            current_state = "Completed, Errored"
+            current_bytes = file.bytes_transferred
+            current_exception = file.last_exception
+        elif observation.transfer_id is None:
+            current_state = file.last_state
+            current_bytes = file.bytes_transferred
+            current_exception = file.last_exception
+        else:
+            current_state = observation.state or file.last_state
+            current_bytes = observation.bytes_transferred
+            current_exception = observation.exception or file.last_exception
+
+        if current_bytes > file.bytes_transferred:
+            observed_progress = True
+        elif (
+            current_state != (file.last_state or "")
+            and (current_state or "") not in _NON_PROGRESS_STATES
+        ):
+            observed_progress = True
+
+        new_files.append(_copy_download_file_state(
+            file,
+            bytes_transferred=current_bytes,
+            last_state=current_state,
+            last_exception=current_exception,
+        ))
+
+    new_state = _copy_download_state(
+        persisted_state,
+        files=new_files,
+        last_progress_at=(
+            now.isoformat()
+            if observed_progress
+            else persisted_state.last_progress_at
+        ),
+    )
+    states = [file.last_state for file in new_files]
+    album_done = bool(new_files) and all(
+        state == "Completed, Succeeded" for state in states
+    )
+    error_filenames = [
+        file.filename
+        for file in new_files
+        if file.last_state in _TERMINAL_ERROR_STATES
+    ]
+    all_remote_queued = bool(new_files) and all(
+        state == "Queued, Remotely" for state in states
+    )
+    progress_at = new_state.last_progress_at or new_state.enqueued_at
+    idle_seconds = (now - _datetime_from_iso(progress_at)).total_seconds()
+    action = decide_download_action(
+        album_done=album_done,
+        error_filenames=error_filenames or None,
+        total_files=len(new_files),
+        all_remote_queued=all_remote_queued,
+        elapsed_seconds=elapsed_seconds,
+        idle_seconds=idle_seconds,
+        remote_queue_timeout=cfg.remote_queue_timeout,
+        stalled_timeout=cfg.stalled_timeout,
+        file_retries={file.filename: file.retry_count for file in new_files},
+        max_file_retries=cfg.max_file_retries,
+        processing_started=False,
+    )
+    decision = PollCycleDecision(action.decision.value)
+
+    if decision == PollCycleDecision.retry_files:
+        retry_names = set(action.files_to_retry)
+        new_state = _copy_download_state(
+            new_state,
+            files=[
+                _copy_download_file_state(
+                    file,
+                    retry_count=file.retry_count + 1,
+                )
+                if file.filename in retry_names
+                else file
+                for file in new_state.files
+            ],
+        )
+    elif decision == PollCycleDecision.complete:
+        new_state = _copy_download_state(
+            new_state,
+            processing_started_at=now.isoformat(),
+            current_path=(
+                snapshot.completion_current_path
+                if snapshot.completion_current_path is not None
+                else new_state.current_path
+            ),
+        )
+
+    return PollCycleResult(
+        state=new_state,
+        verdict=PollCycleVerdict(
+            decision,
+            files_to_retry=action.files_to_retry,
+            reason=action.reason,
+        ),
+    )
 
 
 @dataclass

@@ -5123,8 +5123,8 @@ class TestActiveImportJobForRequest(unittest.TestCase):
             request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
         result = self.db.get_active_import_job_for_request(self.req_id)
         assert result is not None
-        self.assertEqual(result["id"], job.id)
-        self.assertEqual(result["status"], "queued")
+        self.assertEqual(result.id, job.id)
+        self.assertEqual(result.status, "queued")
 
     def test_returns_running_job(self):
         self._enqueue(
@@ -5140,8 +5140,8 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         assert claimed is not None
         result = self.db.get_active_import_job_for_request(self.req_id)
         assert result is not None
-        self.assertEqual(result["status"], "running")
-        self.assertEqual(result["id"], claimed.id)
+        self.assertEqual(result.status, "running")
+        self.assertEqual(result.id, claimed.id)
 
     def test_returns_none_for_completed_job(self):
         job = self._enqueue(
@@ -5185,15 +5185,15 @@ class TestActiveImportJobForRequest(unittest.TestCase):
         r1 = self.db.get_active_import_job_for_request(self.req_id)
         r2 = self.db.get_active_import_job_for_request(other)
         assert r1 is not None and r2 is not None
-        self.assertEqual(r1["request_id"], self.req_id)
-        self.assertEqual(r2["request_id"], other)
+        self.assertEqual(r1.request_id, self.req_id)
+        self.assertEqual(r2.request_id, other)
 
     def test_returns_most_recent_when_multiple_active(self):
         first = self._enqueue(request_id=self.req_id, dedupe_key="manual:a")
         second = self._enqueue(request_id=self.req_id, dedupe_key="manual:b")
         result = self.db.get_active_import_job_for_request(self.req_id)
         assert result is not None
-        self.assertEqual(result["id"], max(first.id, second.id))
+        self.assertEqual(result.id, max(first.id, second.id))
 
 
 @requires_postgres

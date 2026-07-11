@@ -31,12 +31,15 @@ def _restored_terminal_status(
 def reconstruct_grab_list_entry(
     request: dict[str, Any],
     state: ActiveDownloadState,
+    *,
+    transfer_ids: dict[tuple[str, str], str] | None = None,
 ) -> GrabListEntry:
     """Rebuild a GrabListEntry from one DB row and its persisted state.
 
     This is the single projection used by poll/materialize workers and the
-    disk reaper. Transfer IDs remain empty because callers must re-derive
-    those ephemeral identifiers from slskd's live API.
+    disk reaper. Callers with a live slskd snapshot may supply ephemeral
+    transfer IDs keyed by ``(username, filename)``; persisted-only callers
+    leave them empty.
     """
     files = []
     for file_state in state.files:
@@ -47,7 +50,10 @@ def reconstruct_grab_list_entry(
         )
         files.append(DownloadFile(
             filename=file_state.filename,
-            id="",
+            id=(transfer_ids or {}).get(
+                (file_state.username, file_state.filename),
+                "",
+            ),
             file_dir=file_state.file_dir,
             username=file_state.username,
             size=file_state.size,
