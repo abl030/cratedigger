@@ -319,6 +319,24 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertIn("groups", data,
                       "Response must expose a `groups` array keyed by release.")
 
+    def test_default_wrong_matches_excludes_replaced_audit_rows(self):
+        self._seed_wrong_match(request_id=101, mb_release_id="abc-101")
+        self.db.update_request_fields(101, status="replaced")
+
+        status, data = self._get("/api/wrong-matches")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn(101, [group["request_id"] for group in data["groups"]])
+
+    def test_include_replaced_true_preserves_explicit_history_view(self):
+        self._seed_wrong_match(request_id=101, mb_release_id="abc-101")
+        self.db.update_request_fields(101, status="replaced")
+
+        status, data = self._get("/api/wrong-matches?include_replaced=true")
+
+        self.assertEqual(status, 200)
+        self.assertIn(101, [group["request_id"] for group in data["groups"]])
+
     def test_group_has_required_fields_and_types(self):
         status, data = self._get("/api/wrong-matches")
         self.assertGreater(len(data["groups"]), 0)

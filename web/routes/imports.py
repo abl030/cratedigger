@@ -21,6 +21,7 @@ from lib.util import resolve_failed_path
 from lib.wrong_match_cleanup_service import (
     cleanup_all_wrong_matches,
 )
+from lib.wrong_matches import wrong_match_row_is_visible
 from lib.wrong_match_delete_service import (
     OUTCOME_DELETE_FAILED as DELETE_OUTCOME_FAILED,
     OUTCOME_SKIPPED_ACTIVE_JOB as DELETE_OUTCOME_ACTIVE_JOB,
@@ -319,7 +320,10 @@ def _build_wrong_match_groups(
     order: list[int] = []
 
     for row in rows:
-        if not include_replaced and row.get("request_status") == "replaced":
+        if not wrong_match_row_is_visible(
+            row,
+            include_replaced=include_replaced,
+        ):
             continue
         vr = decode_validation_envelope(row.get("validation_result"))
         failed_path = vr.failed_path or ""

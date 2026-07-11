@@ -25,6 +25,13 @@ REFERENCE_KINDS = (
     "absolute_descendant",
     "outside",
 )
+REQUEST_STATUSES = (
+    "wanted",
+    "downloading",
+    "manual",
+    "imported",
+    "replaced",
+)
 
 
 def assert_quarantine_listing_invariant(
@@ -42,11 +49,18 @@ def assert_quarantine_listing_invariant(
         assert folder.name not in result.special_buckets
 
 
-def _seed_reference(db: FakePipelineDB, failed_path: str, index: int) -> None:
+def _seed_reference(
+    db: FakePipelineDB,
+    failed_path: str,
+    index: int,
+    *,
+    request_status: str,
+) -> None:
     request_id = db.add_request(
         artist_name=f"Artist {index}",
         album_title=f"Album {index}",
         source="request",
+        status=request_status,
     )
     db.log_download(
         request_id,
@@ -74,10 +88,17 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
 
 class TestGeneratedQuarantineLifecycle(unittest.TestCase):
-    @given(st.lists(st.sampled_from(REFERENCE_KINDS), min_size=0, max_size=12))
+    @given(st.lists(
+        st.tuples(
+            st.sampled_from(REFERENCE_KINDS),
+            st.sampled_from(REQUEST_STATUSES),
+        ),
+        min_size=0,
+        max_size=12,
+    ))
     def test_only_unreferenced_immediate_album_roots_surface(
         self,
-        reference_kinds: list[str],
+        row_states: list[tuple[str, str]],
     ) -> None:
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
             quarantine = os.path.join(root, "failed_imports")
@@ -87,7 +108,7 @@ class TestGeneratedQuarantineLifecycle(unittest.TestCase):
             db = FakePipelineDB()
             expected: set[str] = set()
 
-            for index, reference_kind in enumerate(reference_kinds):
+            for index, (reference_kind, request_status) in enumerate(row_states):
                 name = f"Album {index:02d}"
                 path = os.path.join(quarantine, name)
                 descendant = os.path.join(path, "Disc 1")
@@ -109,7 +130,14 @@ class TestGeneratedQuarantineLifecycle(unittest.TestCase):
                         other, "failed_imports", name,
                     )
                     expected.add(path)
-                _seed_reference(db, failed_path, index)
+                if request_status == "replaced":
+                    expected.add(path)
+                _seed_reference(
+                    db,
+                    failed_path,
+                    index,
+                    request_status=request_status,
+                )
 
             result = list_unreferenced_quarantine_folders(db, root)
 

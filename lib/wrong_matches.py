@@ -11,6 +11,20 @@ from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
 
 
+def wrong_match_row_is_visible(
+    row: dict[str, object],
+    *,
+    include_replaced: bool = False,
+) -> bool:
+    """Return whether a projected row belongs in the operator worklist.
+
+    Replaced requests are frozen audit history, not live/actionable Wrong
+    Matches. Explicit history views can opt back in; every default consumer
+    shares this predicate so card visibility and lifecycle references agree.
+    """
+    return include_replaced or row.get("request_status") != "replaced"
+
+
 @runtime_checkable
 class WrongMatchSourceDB(Protocol):
     """The PipelineDB surface the wrong-match source helpers use (#409).

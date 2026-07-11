@@ -14,11 +14,17 @@ from lib.quarantine_triage_service import (
 from tests.fakes import FakePipelineDB
 
 
-def _seed_wrong_match(db: FakePipelineDB, failed_path: str) -> None:
+def _seed_wrong_match(
+    db: FakePipelineDB,
+    failed_path: str,
+    *,
+    request_status: str = "wanted",
+) -> None:
     request_id = db.add_request(
         artist_name="Referenced",
         album_title=failed_path,
         source="request",
+        status=request_status,
     )
     db.log_download(
         request_id,
@@ -95,6 +101,26 @@ class TestQuarantineTriageService(unittest.TestCase):
             result = list_unreferenced_quarantine_folders(db, root)
 
             self.assertEqual([folder.path for folder in result.folders], [album])
+
+    def test_replaced_audit_reference_does_not_claim_live_folder(self) -> None:
+        """Default Wrong Matches hides replaced rows, so triage must too."""
+        with tempfile.TemporaryDirectory() as root:
+            quarantine = os.path.join(root, "failed_imports")
+            album = os.path.join(quarantine, "Frozen Audit Album")
+            os.makedirs(album)
+            db = FakePipelineDB()
+            _seed_wrong_match(
+                db,
+                "failed_imports/Frozen Audit Album",
+                request_status="replaced",
+            )
+
+            result = list_unreferenced_quarantine_folders(db, root)
+
+            self.assertEqual(
+                [folder.path for folder in result.folders],
+                [album],
+            )
 
     def test_missing_failed_imports_root_is_valid_empty_state(self) -> None:
         with tempfile.TemporaryDirectory() as root:

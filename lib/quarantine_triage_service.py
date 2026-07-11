@@ -14,6 +14,7 @@ from typing import Protocol
 import msgspec
 
 from lib.validation_envelope import decode_validation_envelope
+from lib.wrong_matches import wrong_match_row_is_visible
 
 
 FAILED_IMPORTS_DIRECTORY = "failed_imports"
@@ -112,6 +113,8 @@ def _visible_wrong_match_roots(
     referenced: set[str] = set()
     try:
         for row in rows:
+            if not wrong_match_row_is_visible(row):
+                continue
             failed_path = decode_validation_envelope(
                 row.get("validation_result")
             ).failed_path

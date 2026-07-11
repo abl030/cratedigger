@@ -540,7 +540,11 @@ misreported as album folders or recursively expanded. A visible Wrong Matches
 row protects its immediate album root whether its persisted `failed_path` is a
 legacy relative path (`failed_imports/Artist - Album`), an absolute path, or a
 descendant of that album root. References outside the configured quarantine
-do not claim local folders.
+do not claim local folders. A `status='replaced'` parent is frozen audit
+history and is excluded by the shared default Wrong Matches visibility rule,
+so its reference does not hide a quarantine folder. The explicit
+`/api/wrong-matches?include_replaced=true` history view still surfaces those
+rows without changing lifecycle triage.
 
 Results are sorted by folder name and carry `name`, absolute `path`, and
 `mtime_ns`. A genuinely absent `failed_imports/` root is a valid empty state.
