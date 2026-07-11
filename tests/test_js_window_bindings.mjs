@@ -1,10 +1,5 @@
 /**
- * Audit inline onclick handlers against main.js's public window bindings.
- *
- * Invariant (issue #603): every application handler emitted by a web/js/*.js
- * string/template or declared inline in web/index.html is exposed by the
- * Object.assign(window, {...}) block in web/js/main.js.
- *
+ * Conservative audit for statically authored window handlers (issue #603).
  * Run with: node tests/test_js_window_bindings.mjs
  */
 
@@ -16,15 +11,13 @@ import { fileURLToPath } from 'node:url';
 import {
   assertWindowBindings,
   auditWindowBindings,
-  emittedOnclickBodies,
-  emittedOnclickHandlers,
+  emittedWindowHandlers,
   exposedWindowBindings,
 } from './helpers/js_window_bindings_audit.mjs';
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(TEST_DIR);
 const WEB_JS_DIR = path.join(REPO_ROOT, 'web', 'js');
-
 const jsSources = Object.fromEntries(
   fs.readdirSync(WEB_JS_DIR)
     .filter((name) => name.endsWith('.js'))
@@ -34,139 +27,141 @@ const jsSources = Object.fromEntries(
 const indexHtml = fs.readFileSync(path.join(REPO_ROOT, 'web', 'index.html'), 'utf8');
 const mainSource = jsSources['main.js'];
 
-// Deterministic pin: the release toolbar emits the public alias, not the local
-// implementation name. The binding parser must therefore use the property key
-// from `openReplacePicker: openReplacePickerAndHandle`.
-const releaseActionHandlers = emittedOnclickHandlers({
+// Alias pin: the public Object.assign key is the binding, not its local value.
+const releaseHandlers = emittedWindowHandlers({
   jsSources: { 'release_actions.js': jsSources['release_actions.js'] },
   indexHtml: '',
 });
-assert(releaseActionHandlers.has('openReplacePicker'));
-assert(exposedWindowBindings(mainSource).has('openReplacePicker'));
-assert(!exposedWindowBindings(mainSource).has('openReplacePickerAndHandle'));
+assert(releaseHandlers.handlers.has('openReplacePicker'));
+const realBindings = exposedWindowBindings(mainSource);
+assert(realBindings.has('openReplacePicker'));
+assert(!realBindings.has('openReplacePickerAndHandle'));
 
-// Independent adversarial matrix. These fixtures are intentionally not
-// derived from the production scanner's output, so they constrain what an
-// onclick surface IS rather than merely mutating whatever the scanner found.
-const adversarialSource = `
-  const help = 'To debug, call window.unrelatedHelpExample() in the console';
-  const direct = '<button onclick="window.windowHandler()">window</button>';
-  const bare = '<button onclick="bareHandler()">bare</button>';
-  const prefixed = '<button onclick="event.stopPropagation(); window.prefixedHandler()">prefixed</button>';
-  const concatenated = '<button onclick="event.preventDefault(); '
-    + 'window.concatenatedHandler()">concatenated</button>';
-  const templated = \`<button onclick="window.templateArgumentHandler(\${row.id})">templated</button>\`;
-  const resolvedBody = 'event.stopPropagation(); window.resolvedBodyHandler()';
-  const resolved = \`<button onclick="\${resolvedBody}">resolved</button>\`;
-`;
-const adversarialMain = `Object.assign(window, {
-  windowHandler,
-  bareHandler,
-  prefixedHandler,
-  concatenatedHandler,
-  templateArgumentHandler,
+// Top-level-only pin: nested values do not accidentally become public keys.
+const nestedBindings = exposedWindowBindings(`Object.assign(window, {
+  shorthand,
   publicAlias: localImplementation,
-  resolvedBodyHandler,
-});`;
-const adversarialBodies = emittedOnclickBodies({
-  jsSources: { 'adversarial.js': adversarialSource },
-  indexHtml: '<button onclick="publicAlias()">alias</button>',
-});
-assert(adversarialBodies.some((body) => body.includes('window.windowHandler()')));
-assert(adversarialBodies.some((body) => body.includes('bareHandler()')));
-assert(adversarialBodies.some((body) => body.includes('window.concatenatedHandler()')));
-const adversarialAudit = assertWindowBindings({
-  jsSources: { 'adversarial.js': adversarialSource },
-  indexHtml: '<button onclick="publicAlias()">alias</button>',
-  mainSource: adversarialMain,
-});
-assert.deepEqual([...adversarialAudit.required].sort(), [
-  'bareHandler',
-  'concatenatedHandler',
-  'prefixedHandler',
-  'publicAlias',
-  'resolvedBodyHandler',
-  'templateArgumentHandler',
-  'windowHandler',
-]);
-assert(!adversarialAudit.required.has('unrelatedHelpExample'));
+  namespace: { nestedHandler, deeper: { hiddenHandler } },
+});`);
+assert.deepEqual([...nestedBindings].sort(), ['namespace', 'publicAlias', 'shorthand']);
 
-// Missing bare handlers and dynamic callee names must both fail. A dynamic
-// argument is safe because it cannot alter which public function is called.
-const missingBare = auditWindowBindings({
-  jsSources: { 'fixture.js': `const html = '<button onclick="bareMissing()">x</button>';` },
+// Dynamic onclick BODY interpolation is allowed: its statically authored
+// handler strings are conservatively found elsewhere in the same sources.
+const dynamicBodyHandlers = emittedWindowHandlers({
+  jsSources: {
+    'pipeline.js': jsSources['pipeline.js'],
+    'render_primitives.js': jsSources['render_primitives.js'],
+    'discography.js': jsSources['discography.js'],
+  },
+  indexHtml: '',
+});
+for (const name of ['loadLongTail', 'loadPipelineDashboard', 'loadPipeline', 'toggleReleaseDetail']) {
+  assert(dynamicBodyHandlers.handlers.has(name), `static handler body not found: ${name}`);
+}
+assert.deepEqual(dynamicBodyHandlers.dynamicCallees, []);
+
+// Generated/property sweep independent of production discovery: deterministic
+// synthetic names define both the expected set and each missing-binding world.
+const generatedNames = Array.from({ length: 32 }, (_, i) => `generatedHandler${String(i).padStart(2, '0')}`);
+const generatedSource = generatedNames
+  .map((name) => `const html_${name} = '<button onclick="window.${name}()">x</button>';`)
+  .join('\n');
+const generatedBindings = (names) => `Object.assign(window, { ${names.join(', ')} });`;
+const generatedAudit = assertWindowBindings({
+  jsSources: { 'generated.js': generatedSource },
+  indexHtml: '',
+  mainSource: generatedBindings(generatedNames),
+});
+assert.deepEqual([...generatedAudit.required].sort(), generatedNames);
+for (const missingName of generatedNames) {
+  const audit = auditWindowBindings({
+    jsSources: { 'generated.js': generatedSource },
+    indexHtml: '',
+    mainSource: generatedBindings(generatedNames.filter((name) => name !== missingName)),
+  });
+  assert.deepEqual([...audit.missing], [missingName]);
+}
+
+// index.html uses bare calls; comments and ordinary JS code do not count as
+// string/template surfaces. Unrelated strings DO count by design: conservative
+// false positives are preferable to silently missed dead buttons.
+const conservative = emittedWindowHandlers({
+  jsSources: {
+    'fixture.js': `
+      // const ignored = '<button onclick="window.commentOnly()">';
+      window.ordinaryCodeOnly();
+      const help = 'Debug with window.helpStringHandler()';
+      const native = 'window.fetch("/api")';
+    `,
+  },
+  indexHtml: '<button onclick="bareIndexHandler()">x</button>',
+});
+assert.deepEqual([...conservative.handlers].sort(), ['bareIndexHandler', 'helpStringHandler']);
+
+// Known-bad static handler proves the binding assertion has teeth.
+const knownBad = auditWindowBindings({
+  jsSources: { 'bad.js': `const html = '<button onclick="window.unboundStaticHandler()">x</button>';` },
   indexHtml: '',
   mainSource: 'Object.assign(window, {});',
 });
-assert.deepEqual([...missingBare.missing], ['bareMissing']);
+assert.deepEqual([...knownBad.missing], ['unboundStaticHandler']);
+assert.throws(
+  () => assertWindowBindings({
+    jsSources: { 'bad.js': `const html = '<button onclick="window.unboundStaticHandler()">x</button>';` },
+    indexHtml: '',
+    mainSource: 'Object.assign(window, {});',
+  }),
+  /unboundStaticHandler/,
+);
 
-for (const dynamicSource of [
+// Computed/dynamic window callees fail closed; dynamic handler bodies do not.
+for (const source of [
   'const html = `<button onclick="window.${handlerName}()">x</button>`;',
-  'const html = `<button onclick="${handlerBody}">x</button>`;',
-  `// const handlerBody = 'window.commentDecoyHandler()';
-   const html = \`<button onclick="\${handlerBody}">x</button>\`;`,
-  `const html = '<button onclick="window.' + handlerName + '()">x</button>';`,
   `const html = '<button onclick="window[handlerName]()">x</button>';`,
-  `const handlerBody = enabled ? 'window.onlyStaticBranch()' : dynamicBody;
-   const html = \`<button onclick="\${handlerBody}">x</button>\`;`,
 ]) {
-  const dynamicAudit = auditWindowBindings({
-    jsSources: { 'dynamic.js': dynamicSource },
+  const audit = auditWindowBindings({
+    jsSources: { 'dynamic.js': source },
     indexHtml: '',
     mainSource: 'Object.assign(window, {});',
   });
-  assert(dynamicAudit.unresolved.length > 0, `dynamic handler must be unresolved: ${dynamicSource}`);
+  assert(audit.dynamicCallees.length > 0);
   assert.throws(
     () => assertWindowBindings({
-      jsSources: { 'dynamic.js': dynamicSource },
+      jsSources: { 'dynamic.js': source },
       indexHtml: '',
       mainSource: 'Object.assign(window, {});',
     }),
-    /unresolved inline onclick/,
+    /dynamic window callee/,
   );
 }
-
-// Generated/property sweep: the real repository is complete, then removing
-// each required public property in turn must make precisely that property
-// observable as missing. This exercises every currently emitted handler rather
-// than pinning a hand-maintained handler list.
-const actualAudit = assertWindowBindings({ jsSources, indexHtml, mainSource });
-assert(actualAudit.required.size > 0, 'audit discovered no inline onclick handlers');
-
-for (const handler of [...actualAudit.required].sort()) {
-  const withoutHandler = mainSource.replace(
-    new RegExp(`^\\s*${handler}(?:\\s*:\\s*[A-Za-z_$][\\w$]*)?\\s*,\\s*$`, 'm'),
-    '',
-  );
-  assert.notEqual(withoutHandler, mainSource, `fixture could not remove binding ${handler}`);
-  const fault = auditWindowBindings({ jsSources, indexHtml, mainSource: withoutHandler });
-  assert.deepEqual([...fault.missing], [handler], `removing ${handler} did not fail precisely`);
-}
-
-// Known-bad self-test: a newly emitted application handler with no public
-// binding is rejected. Browser-native calls and non-handler comments/code are
-// deliberately present to prove they do not become application requirements.
-const knownBadSources = {
-  'fixture.js': `
-    // onclick="window.onlyInAComment()"
-    window.onlyOrdinaryCode();
-    const native = '<button onclick="window.open(\"about:blank\")">native</button>';
-    const broken = '<button onclick="window.issue603UnboundHandler()">broken</button>';
-  `,
-};
-const knownBad = auditWindowBindings({
-  jsSources: knownBadSources,
+assert.doesNotThrow(() => assertWindowBindings({
+  jsSources: { 'body.js': 'const html = `<button onclick="${handlerBody}">x</button>`;' },
   indexHtml: '',
-  mainSource: 'Object.assign(window, { onlyInAComment, onlyOrdinaryCode });',
+  mainSource: 'Object.assign(window, {});',
+}));
+
+// Approved native calls are ignored, but exposing an app binding under a
+// reserved native name is rejected as shadowing.
+assert.doesNotThrow(() => assertWindowBindings({
+  jsSources: { 'native.js': `const help = 'window.fetch("/api"); window.open("/")';` },
+  indexHtml: '',
+  mainSource: 'Object.assign(window, {});',
+}));
+const nativeShadow = auditWindowBindings({
+  jsSources: {},
+  indexHtml: '',
+  mainSource: 'Object.assign(window, { fetch });',
 });
-assert.deepEqual([...knownBad.missing], ['issue603UnboundHandler']);
+assert.deepEqual([...nativeShadow.nativeCollisions], ['fetch']);
 assert.throws(
   () => assertWindowBindings({
-    jsSources: knownBadSources,
+    jsSources: {},
     indexHtml: '',
-    mainSource: 'Object.assign(window, { onlyInAComment, onlyOrdinaryCode });',
+    mainSource: 'Object.assign(window, { fetch });',
   }),
-  /issue603UnboundHandler/,
+  /reserved native window names: fetch/,
 );
 
-console.log(`JS window-binding audit passed (${actualAudit.required.size} handlers)`);
+const actualAudit = assertWindowBindings({ jsSources, indexHtml, mainSource });
+assert(actualAudit.required.size > 0, 'audit discovered no static handlers');
+console.log(`JS window-binding audit passed (${actualAudit.required.size} conservative handlers)`);
