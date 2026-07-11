@@ -67,6 +67,14 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
                           pipeline_db_source=pipeline_db_source)
 
 
+class TestDownloadModuleBoundary(unittest.TestCase):
+    """Moved reconstruction must not remain importable from its old module."""
+
+    def test_reconstruct_grab_list_entry_is_not_reexported(self):
+        with self.assertRaises(ImportError):
+            exec("from lib.download import reconstruct_grab_list_entry", {})
+
+
 class TestBuildDownloadInfo(unittest.TestCase):
 
     def test_basic(self):

@@ -103,8 +103,9 @@ class TransferSnapshot(msgspec.Struct, rename="camel", frozen=True):
     Every field defaults: a queued transfer has no ``bytesTransferred``
     or lifecycle timestamps yet, a bare match-lookup entry may carry only
     ``filename``/``id``, and the two synthetic constructions
-    (``_restored_terminal_status``, the vanished-transfer fallback in
-    ``lib/download.py``) build a ``TransferSnapshot`` directly with only
+    (``_restored_terminal_status`` in ``lib/download_reconstruction.py``,
+    and the vanished-transfer fallback in ``lib/download.py``) build a
+    ``TransferSnapshot`` directly with only
     ``state`` (+ optionally ``bytes_transferred``/``exception``) set.
     """
 

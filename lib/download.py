@@ -36,7 +36,9 @@ from lib.download_recovery import (
     classify_processing_path,
     reconcile_processing_current_path,
 )
-from lib.download_reconstruction import reconstruct_grab_list_entry
+from lib.download_reconstruction import (
+    reconstruct_grab_list_entry as _reconstruct_grab_list_entry,
+)
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.processing_paths import (
     attempt_fingerprint,
@@ -1009,7 +1011,7 @@ def _poll_one_active_download(
                 request_id,
                 state.current_path,
             )
-    entry = reconstruct_grab_list_entry(row, state)
+    entry = _reconstruct_grab_list_entry(row, state)
 
     if state.processing_started_at is not None:
         if not _processing_path_ready_for_importer(

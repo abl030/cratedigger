@@ -4,7 +4,8 @@
 Property-based tests over the download-manifest seams touched by #550:
 the ``ActiveDownloadState`` persist/reconstruct round trip
 (``lib/download.py::build_active_download_state`` /
-``reconstruct_grab_list_entry``) and the on-disk manifest guard
+``lib/download_reconstruction.py::reconstruct_grab_list_entry``) and the
+on-disk manifest guard
 (``lib/import_manifest.py::check_audio_manifest`` /
 ``tracked_audio_paths_for_downloads`` / ``audio_relative_paths``) used by
 ``_check_staged_audio_manifest`` at validation.
