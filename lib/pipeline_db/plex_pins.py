@@ -10,6 +10,10 @@ from datetime import datetime
 from typing import Any
 
 from lib.pipeline_db._core import _PipelineDBBase
+from lib.pipeline_db.pin_status import (
+    PLEX_TERMINAL_PIN_STATUSES,
+    PlexTerminalPinStatus,
+)
 
 
 class _PlexPinsMixin(_PipelineDBBase):
@@ -69,7 +73,7 @@ class _PlexPinsMixin(_PipelineDBBase):
         self,
         pin_id: int,
         *,
-        status: str,
+        status: PlexTerminalPinStatus,
         reconciled_at: datetime,
     ) -> None:
         """Mark a pin terminal: ``status`` is 'done' (pinned/already-correct)
@@ -100,6 +104,6 @@ class _PlexPinsMixin(_PipelineDBBase):
             WHERE status = ANY(%s)
               AND reconciled_at < %s
             """,
-            (["done", "skipped"], older_than),
+            (list(PLEX_TERMINAL_PIN_STATUSES), older_than),
         )
         return cur.rowcount

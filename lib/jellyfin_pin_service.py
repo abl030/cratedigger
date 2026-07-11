@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from lib.pipeline_db.pin_status import JellyfinTerminalPinStatus
 from lib.util import (
     JellyfinAlbumRef,
     JellyfinItemRef,
@@ -80,7 +81,7 @@ class _PinDBProto(Protocol):
         limit: int = 100) -> list[dict[str, Any]]: ...
 
     def mark_jellyfin_date_created_pin(
-        self, pin_id: int, *, status: str,
+        self, pin_id: int, *, status: JellyfinTerminalPinStatus,
         reconciled_at: datetime) -> None: ...
 
 

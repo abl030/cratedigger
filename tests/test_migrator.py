@@ -6,6 +6,7 @@ the ephemeral PostgreSQL fixture from ``conftest.py``.
 
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -3190,6 +3191,137 @@ class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
         assert latest_values is not None, (
             "no migration defines download_log_outcome_check")
         self.assertEqual(DOWNLOAD_LOG_OUTCOMES, latest_values)
+
+
+class TestPinStatusTaxonomySync(unittest.TestCase):
+    """Pin the two Python status taxonomies to their latest CHECK migration."""
+
+    def test_literals_match_latest_named_migration_checks(self):
+        import re
+        from lib.pipeline_db import JELLYFIN_PIN_STATUSES, PLEX_PIN_STATUSES
+
+        expected = {
+            "plex_added_at_pins_status_check": PLEX_PIN_STATUSES,
+            "jellyfin_date_created_pins_status_check": JELLYFIN_PIN_STATUSES,
+        }
+        latest: dict[str, frozenset[str]] = {}
+        pattern = re.compile(
+            r"ADD CONSTRAINT ([a-z_]+_status_check)\s*"
+            r"CHECK \(status IN \(([^;]+)\)\)",
+            re.DOTALL,
+        )
+        for path in sorted(pathlib.Path(DEFAULT_MIGRATIONS_DIR).glob("*.sql")):
+            for name, values in pattern.findall(path.read_text()):
+                if name in expected:
+                    latest[name] = frozenset(
+                        re.findall(r"'([a-z_]+)'", values))
+        self.assertEqual(latest, expected)
+
+
+@requires_postgres
+class TestPinStatusDomainMigration(unittest.TestCase):
+    """Migration 047 closes both pin domains without rewriting bad data."""
+
+    def _copy_migrations_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def _exec(self, dsn: str, sql: str, params: tuple = ()) -> None:
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _query(self, dsn: str, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def test_write_blocking_locks_precede_both_preflights(self):
+        path = pathlib.Path(DEFAULT_MIGRATIONS_DIR) / (
+            "047_media_server_pin_status_domains.sql")
+        sql = path.read_text()
+        plex_lock = sql.index(
+            "LOCK TABLE plex_added_at_pins IN SHARE MODE;")
+        jellyfin_lock = sql.index(
+            "LOCK TABLE jellyfin_date_created_pins IN SHARE MODE;")
+        first_preflight = sql.index("DO $$")
+        self.assertLess(plex_lock, jellyfin_lock)
+        self.assertLess(jellyfin_lock, first_preflight)
+
+    def test_fresh_database_applies_and_records_047(self):
+        name = "cratedigger_test_pin_status_047_fresh"
+        dsn = _create_fresh_database(name)
+        try:
+            applied = apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
+            self.assertEqual(applied[-1].version, 47)
+            self.assertEqual(
+                self._query(
+                    dsn,
+                    "SELECT version, name FROM schema_migrations "
+                    "WHERE version = 47",
+                ),
+                [(47, "media_server_pin_status_domains")],
+            )
+        finally:
+            _drop_database(name)
+
+    def test_bad_existing_rows_fail_preflight_with_actionable_message(self):
+        cases = (
+            ("plex", "plex_added_at_pins", "stranded-plex"),
+            ("jellyfin", "jellyfin_date_created_pins", "stranded-jellyfin"),
+        )
+        for backend, table, bad_status in cases:
+            with self.subTest(backend=backend):
+                name = f"cratedigger_test_pin_status_047_bad_{backend}"
+                dsn = _create_fresh_database(name)
+                try:
+                    with tempfile.TemporaryDirectory() as migrations_dir:
+                        self._copy_migrations_through(migrations_dir, 46)
+                        apply_migrations(dsn, migrations_dir)
+                        if backend == "plex":
+                            self._exec(dsn, """
+                                INSERT INTO plex_added_at_pins
+                                    (imported_path, original_added_at, status)
+                                VALUES ('A/B', 1, %s)
+                            """, (bad_status,))
+                        else:
+                            self._exec(dsn, """
+                                INSERT INTO jellyfin_date_created_pins
+                                    (imported_path, original_date_created,
+                                     album_item_id, status)
+                                VALUES ('A/B', '2000-01-01T00:00:00Z',
+                                        'album', %s)
+                            """, (bad_status,))
+                        self._copy_migrations_through(migrations_dir, 47)
+                        with self.assertRaises(
+                            psycopg2.errors.CheckViolation,
+                        ) as ctx:
+                            apply_migrations(dsn, migrations_dir)
+                        message = str(ctx.exception)
+                        self.assertIn(table, message)
+                        self.assertIn("status domain", message)
+                        self.assertIn(bad_status, message)
+                        self.assertIn("1 invalid row", message)
+                        self.assertEqual(
+                            self._query(
+                                dsn,
+                                "SELECT version FROM schema_migrations "
+                                "WHERE version = 47",
+                            ),
+                            [],
+                        )
+                finally:
+                    _drop_database(name)
 
 
 # ---------------------------------------------------------------------------

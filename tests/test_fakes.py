@@ -1,9 +1,10 @@
 """Tests for lightweight fakes and shared builders."""
 
+import copy
 import inspect
 import unittest
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -564,6 +565,20 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.plex_added_at_pins[0]["status"], "done")
         self.assertEqual(db.plex_added_at_pins[0]["reconciled_at"], now)
 
+    def test_plex_pin_rejects_invalid_status_without_mutating_row(self):
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="A/B", original_added_at=1,
+            rating_key=None, request_id=None)
+        before = copy.deepcopy(db.plex_added_at_pins[0])
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.mark_plex_added_at_pin(
+                pin_id, status=cast(Any, "stranded"),
+                reconciled_at=datetime.now(timezone.utc))
+        self.assertEqual(db.plex_added_at_pins[0], before)
+
     def test_plex_pin_prune_matches_strict_terminal_age_contract(self):
         db = FakePipelineDB()
         cutoff = datetime(2026, 7, 11, tzinfo=timezone.utc)
@@ -622,6 +637,21 @@ class TestFakePipelineDB(unittest.TestCase):
             [])
         self.assertEqual(db.jellyfin_date_created_pins[0]["status"], "expired")
         self.assertEqual(db.jellyfin_date_created_pins[0]["reconciled_at"], now)
+
+    def test_jellyfin_pin_rejects_invalid_status_without_mutating_row(self):
+        import psycopg2.errors
+
+        db = FakePipelineDB()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="A/B",
+            original_date_created="2000-01-01T00:00:00Z",
+            album_item_id="album", children_item_ids=[], request_id=None)
+        before = copy.deepcopy(db.jellyfin_date_created_pins[0])
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.mark_jellyfin_date_created_pin(
+                pin_id, status=cast(Any, "stranded"),
+                reconciled_at=datetime.now(timezone.utc))
+        self.assertEqual(db.jellyfin_date_created_pins[0], before)
 
     def test_jellyfin_pin_prune_matches_strict_terminal_age_contract(self):
         db = FakePipelineDB()

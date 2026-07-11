@@ -21,8 +21,11 @@ import psycopg2
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
+from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence
 from lib.pipeline_db import (  # noqa: E402
+    JELLYFIN_PIN_STATUSES,
+    PLEX_PIN_STATUSES,
     DownloadLogOutcome,
     PersistedDistance,
     PersistedTrack,
@@ -278,6 +281,48 @@ class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
         self.assertEqual([r for r in rows if r["id"] == pin_id], [],
                          "done pin must not appear in pending")
 
+    def test_status_check_accepts_domain_and_rejects_unknown_value(self):
+        db = make_db()
+        pin_id = db.add_plex_added_at_pin(
+            imported_path="A/B", original_added_at=100,
+            rating_key=None, request_id=None)
+        for status in PLEX_PIN_STATUSES:
+            with self.subTest(status=status):
+                db._execute(
+                    "UPDATE plex_added_at_pins SET status = %s WHERE id = %s",
+                    (status, pin_id),
+                )
+        db._execute(
+            "UPDATE plex_added_at_pins SET status = 'pending' WHERE id = %s",
+            (pin_id,),
+        )
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.mark_plex_added_at_pin(
+                pin_id,
+                status=cast(Any, "stranded"),
+                reconciled_at=datetime.now(timezone.utc),
+            )
+        cur = db._execute(
+            "SELECT status, reconciled_at FROM plex_added_at_pins WHERE id = %s",
+            (pin_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual((row["status"], row["reconciled_at"]), ("pending", None))
+
+    def test_status_check_constraint_is_named(self):
+        db = make_db()
+        cur = db._execute("""
+            SELECT conname
+            FROM pg_constraint
+            WHERE conrelid = 'plex_added_at_pins'::regclass
+              AND contype = 'c'
+        """)
+        self.assertIn(
+            "plex_added_at_pins_status_check",
+            {row["conname"] for row in cur.fetchall()},
+        )
+
     def test_pending_getter_respects_captured_before_cutoff(self):
         from datetime import datetime, timedelta, timezone
         db = make_db()
@@ -392,6 +437,51 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
         self.assertEqual([r for r in rows if r["id"] == pin_id], [],
                          "terminal pin must not appear in pending")
 
+    def test_status_check_accepts_domain_and_rejects_unknown_value(self):
+        db = make_db()
+        pin_id = db.add_jellyfin_date_created_pin(
+            imported_path="A/B", original_date_created="2026-01-01T00:00:00Z",
+            album_item_id="alb", children_item_ids=[], request_id=None)
+        for status in JELLYFIN_PIN_STATUSES:
+            with self.subTest(status=status):
+                db._execute(
+                    "UPDATE jellyfin_date_created_pins SET status = %s "
+                    "WHERE id = %s",
+                    (status, pin_id),
+                )
+        db._execute(
+            "UPDATE jellyfin_date_created_pins SET status = 'pending' "
+            "WHERE id = %s",
+            (pin_id,),
+        )
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.mark_jellyfin_date_created_pin(
+                pin_id,
+                status=cast(Any, "stranded"),
+                reconciled_at=datetime.now(timezone.utc),
+            )
+        cur = db._execute(
+            "SELECT status, reconciled_at FROM jellyfin_date_created_pins "
+            "WHERE id = %s",
+            (pin_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        self.assertEqual((row["status"], row["reconciled_at"]), ("pending", None))
+
+    def test_status_check_constraint_is_named(self):
+        db = make_db()
+        cur = db._execute("""
+            SELECT conname
+            FROM pg_constraint
+            WHERE conrelid = 'jellyfin_date_created_pins'::regclass
+              AND contype = 'c'
+        """)
+        self.assertIn(
+            "jellyfin_date_created_pins_status_check",
+            {row["conname"] for row in cur.fetchall()},
+        )
+
     def test_pending_getter_respects_captured_before_cutoff(self):
         db = make_db()
         pin_id = db.add_jellyfin_date_created_pin(
@@ -439,6 +529,109 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
             surviving_ids,
             {ids[label] for label, _status, _at, survives in cases if survives},
         )
+
+
+@requires_postgres
+class TestPinStatusProductionFakeParity(unittest.TestCase):
+    """Existing/missing id by valid/invalid status parity for both stores."""
+
+    CASES = (
+        ("existing valid", True, False),
+        ("existing invalid", True, True),
+        ("missing valid", False, False),
+        ("missing invalid", False, True),
+    )
+
+    def test_plex_mark_matrix(self):
+        now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        for scenario, exists, invalid in self.CASES:
+            for adapter in ("production", "fake"):
+                with self.subTest(scenario=scenario, adapter=adapter):
+                    db: Any = (
+                        make_db() if adapter == "production"
+                        else FakePipelineDB()
+                    )
+                    pin_id = db.add_plex_added_at_pin(
+                        imported_path="A/B", original_added_at=1,
+                        rating_key=None, request_id=None)
+                    target_id = pin_id if exists else pin_id + 1000
+                    status = cast(Any, "stranded" if invalid else "done")
+                    error: Exception | None = None
+                    try:
+                        db.mark_plex_added_at_pin(
+                            target_id, status=status, reconciled_at=now)
+                    except Exception as exc:
+                        error = exc
+
+                    if adapter == "production":
+                        cur = db._execute(
+                            "SELECT status, reconciled_at "
+                            "FROM plex_added_at_pins WHERE id = %s",
+                            (pin_id,),
+                        )
+                        row = cur.fetchone()
+                        assert row is not None
+                    else:
+                        row = db.plex_added_at_pins[0]
+
+                    should_reject = exists and invalid
+                    if should_reject:
+                        self.assertIsInstance(
+                            error, psycopg2.errors.CheckViolation)
+                    else:
+                        self.assertIsNone(error)
+                    self.assertEqual(
+                        (row["status"], row["reconciled_at"]),
+                        ("done", now) if exists and not invalid
+                        else ("pending", None),
+                    )
+
+    def test_jellyfin_mark_matrix(self):
+        now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        for scenario, exists, invalid in self.CASES:
+            for adapter in ("production", "fake"):
+                with self.subTest(scenario=scenario, adapter=adapter):
+                    db: Any = (
+                        make_db() if adapter == "production"
+                        else FakePipelineDB()
+                    )
+                    pin_id = db.add_jellyfin_date_created_pin(
+                        imported_path="A/B",
+                        original_date_created="2000-01-01T00:00:00Z",
+                        album_item_id="album", children_item_ids=[],
+                        request_id=None)
+                    target_id = pin_id if exists else pin_id + 1000
+                    status = cast(
+                        Any, "stranded" if invalid else "expired")
+                    error: Exception | None = None
+                    try:
+                        db.mark_jellyfin_date_created_pin(
+                            target_id, status=status, reconciled_at=now)
+                    except Exception as exc:
+                        error = exc
+
+                    if adapter == "production":
+                        cur = db._execute(
+                            "SELECT status, reconciled_at "
+                            "FROM jellyfin_date_created_pins WHERE id = %s",
+                            (pin_id,),
+                        )
+                        row = cur.fetchone()
+                        assert row is not None
+                    else:
+                        row = db.jellyfin_date_created_pins[0]
+
+                    should_reject = exists and invalid
+                    if should_reject:
+                        self.assertIsInstance(
+                            error, psycopg2.errors.CheckViolation)
+                    else:
+                        self.assertIsNone(error)
+                    self.assertEqual(
+                        (row["status"], row["reconciled_at"]),
+                        ("expired", now) if exists and not invalid
+                        else ("pending", None),
+                    )
 
 
 @requires_postgres
