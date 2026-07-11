@@ -20,7 +20,7 @@ from lib import transitions
 # ``lib.dispatch.outcome_actions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import (DownloadInfo, dispatch_action, extract_usernames,
+from lib.quality import (DownloadInfo, ValidationResult, dispatch_action, extract_usernames,
                          is_comparable_lossless_source_probe)
 
 from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
@@ -87,17 +87,20 @@ def _reject_import_from_evidence_decision(
     # U11: force requeue on folder/audio-integrity rejects (formerly the
     # invariant enforced by the deleted ``_route_preimport_decision_reject``).
     effective_requeue = requeue_on_failure or decision in _PREIMPORT_FACT_REJECT_DECISIONS
+    rejection_validation = validation_result or ValidationResult(
+        distance=distance,
+        scenario=decision or scenario,
+        detail=detail,
+    ).to_json()
     _record_rejection_and_maybe_requeue(
         db,
         request_id,
         dl_info,
-        distance=distance,
-        scenario=decision or scenario,
         detail=detail,
         error=None,
         requeue=effective_requeue,
         outcome_label="rejected",
-        validation_result=validation_result,
+        validation_result=rejection_validation,
         staged_path=staged_path,
     )
     if action.denylist:
@@ -216,12 +219,16 @@ def _do_mark_done(
         transitions.RequestTransition.to_imported_fields(fields=update_fields),
     )
 
+    validation_result = dl_info.validation_result or ValidationResult(
+        valid=True,
+        distance=distance,
+        scenario=scenario,
+        detail=detail,
+    ).to_json()
     return db.log_download(
         request_id=request_id,
         soulseek_username=dl_info.username,
         filetype=dl_info.filetype,
-        beets_distance=distance,
-        beets_scenario=scenario,
         beets_detail=detail,
         outcome=outcome_label,
         staged_path=dest_path,
@@ -244,7 +251,7 @@ def _do_mark_done(
             dl_info.current_spectral.bitrate_kbps if dl_info.current_spectral else None
         ),
         import_result=dl_info.import_result,
-        validation_result=dl_info.validation_result,
+        validation_result=validation_result,
         final_format=dl_info.final_format,
         **_v0_probe_log_fields(dl_info),
     )
@@ -348,15 +355,13 @@ def _record_rejection_and_maybe_requeue(
     db: "PipelineDB",
     request_id: int,
     dl_info: DownloadInfo,
-    distance: float | None,
-    scenario: str,
     detail: str | None,
     error: str | None,
     *,
+    validation_result: str,
     requeue: bool = True,
     outcome_label: DownloadLogOutcome = "rejected",
     search_filetype_override: str | None = None,
-    validation_result: str | None = None,
     staged_path: str | None = None,
 ) -> int:
     """Importer-side rejection entry point.
@@ -375,12 +380,14 @@ def _record_rejection_and_maybe_requeue(
 
     Returns the new ``download_log`` row id — captured by the
     auto-import path for downstream Wrong Matches triage.
+
+    ``validation_result`` is required and is the sole distance/scenario
+    input for the audit row. ``PipelineDB.log_download`` derives its
+    denormalized query columns from that envelope.
     """
     log_download_kwargs: dict[str, Any] = {
         "soulseek_username": dl_info.username,
         "filetype": dl_info.filetype,
-        "beets_distance": distance,
-        "beets_scenario": scenario,
         "beets_detail": detail,
         "outcome": outcome_label,
         "staged_path": staged_path,
@@ -403,9 +410,7 @@ def _record_rejection_and_maybe_requeue(
         "existing_spectral_bitrate": (dl_info.current_spectral.bitrate_kbps
                                       if dl_info.current_spectral else None),
         "import_result": dl_info.import_result,
-        "validation_result": (validation_result
-                              if validation_result is not None
-                              else dl_info.validation_result),
+        "validation_result": validation_result,
     }
     log_download_kwargs.update(_v0_probe_log_fields(dl_info))
     return _finalize_request_and_log_rejection(

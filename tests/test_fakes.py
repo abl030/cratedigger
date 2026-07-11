@@ -2879,7 +2879,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             current_path="/tmp/staged",
             soulseek_username="alice",
             filetype="flac",
-            beets_scenario="abandoned_auto_import",
             beets_detail="abandoned",
             outcome="failed",
             staged_path="/tmp/staged",
@@ -2901,7 +2900,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             current_path="/tmp/staged",
             soulseek_username="alice",
             filetype="flac",
-            beets_scenario="abandoned_auto_import",
             beets_detail="abandoned",
             outcome="failed",
             staged_path="/tmp/staged",
@@ -2910,6 +2908,111 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         )
         self.assertIsNone(second)
         self.assertEqual(len(db.download_logs), 1)
+
+    def test_log_download_derives_validation_projection_like_postgres(self):
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        validation_result = ValidationResult(
+            distance=0.0,
+            scenario="untracked_audio",
+        ).to_json()
+        db.log_download(
+            42,
+            outcome="rejected",
+            validation_result=validation_result,
+        )
+
+        log = db.download_logs[0]
+        self.assertEqual(log.beets_distance, 0.0)
+        self.assertEqual(log.beets_scenario, "untracked_audio")
+        self.assertEqual(log.validation_result, validation_result)
+
+    def test_abandon_auto_import_derives_validation_projection_like_postgres(self):
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "current_path": "/tmp/staged",
+                "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
+            },
+        ))
+        validation_result = ValidationResult(
+            distance=0.12,
+            scenario="abandoned_auto_import",
+        ).to_json()
+        db.abandon_auto_import_request(
+            request_id=42,
+            current_path="/tmp/staged",
+            soulseek_username="alice",
+            filetype="flac",
+            beets_detail="abandoned",
+            outcome="failed",
+            staged_path="/tmp/staged",
+            error_message="abandoned",
+            validation_result=validation_result,
+        )
+
+        log = db.download_logs[0]
+        self.assertEqual(log.beets_distance, 0.12)
+        self.assertEqual(log.beets_scenario, "abandoned_auto_import")
+
+    def test_log_download_derives_custom_envelope_scenario_like_postgres(self):
+        db = FakePipelineDB()
+        validation_result = {
+            "scenario": "curator_ban",
+            "hashes_recorded": 2,
+        }
+        db.log_download(
+            42,
+            outcome="curator_ban",
+            validation_result=validation_result,
+        )
+
+        log = db.download_logs[0]
+        self.assertEqual(log.beets_scenario, "curator_ban")
+        self.assertIsNone(log.beets_distance)
+        self.assertIs(log.validation_result, validation_result)
+
+    def test_log_download_explicit_metadata_requires_missing_envelope_key(self):
+        from lib.quality import MeasurementFailure, ValidationResult
+        import msgspec
+
+        db = FakePipelineDB()
+        payload = MeasurementFailure(
+            reason="measurement_crashed",
+            detail="ffmpeg failed",
+        )
+        db.log_download(
+            42,
+            outcome="measurement_failed",
+            beets_scenario="measurement_failed",
+            validation_result=msgspec.json.encode(payload).decode(),
+        )
+        self.assertEqual(db.download_logs[-1].beets_scenario,
+                         "measurement_failed")
+
+        validation_result = ValidationResult(
+            distance=0.1,
+            scenario="high_distance",
+        ).to_json()
+        with self.assertRaisesRegex(ValueError, "beets_distance"):
+            db.log_download(
+                42,
+                outcome="rejected",
+                beets_distance=0.2,
+                validation_result=validation_result,
+            )
+        with self.assertRaisesRegex(ValueError, "beets_scenario"):
+            db.log_download(
+                42,
+                outcome="rejected",
+                beets_scenario="wrong_value",
+                validation_result=validation_result,
+            )
 
     def test_dashboard_metric_stubs_return_core_shapes(self):
         db = FakePipelineDB()

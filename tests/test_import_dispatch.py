@@ -19,7 +19,8 @@ from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
                          AudioQualityMeasurement, PostflightInfo,
                          QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
-                         V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence)
+                         V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence,
+                         ValidationResult)
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
@@ -282,10 +283,13 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
             db,  # type: ignore[arg-type]
             42,
             DownloadInfo(username="user1"),
-            distance=0.5,
-            scenario="quality_downgrade",
             detail="too low",
             error=None,
+            validation_result=ValidationResult(
+                distance=0.5,
+                scenario="quality_downgrade",
+                detail="too low",
+            ).to_json(),
             requeue=True,
         )
 
@@ -306,10 +310,13 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
             db,  # type: ignore[arg-type]
             42,
             DownloadInfo(username="user1"),
-            distance=0.5,
-            scenario="quality_downgrade",
             detail="too low",
             error=None,
+            validation_result=ValidationResult(
+                distance=0.5,
+                scenario="quality_downgrade",
+                detail="too low",
+            ).to_json(),
             requeue=True,
             search_filetype_override="flac,mp3 v0",
         )

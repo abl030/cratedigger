@@ -29,6 +29,7 @@ from lib.quality import (
     DownloadInfo,
     ImportResult,
     PostflightInfo,
+    ValidationResult,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
@@ -5715,10 +5716,13 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             cast(Any, db),
             99,
             DownloadInfo(username="alice", filetype="mp3", bitrate=192_000),
-            distance=0.5,
-            scenario="quality_downgrade",
             detail="bitrate too low",
             error=None,
+            validation_result=ValidationResult(
+                distance=0.5,
+                scenario="quality_downgrade",
+                detail="bitrate too low",
+            ).to_json(),
             requeue=True,
         )
 
@@ -7401,7 +7405,6 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         db.log_download(
             request_id,
             outcome="rejected",
-            beets_scenario="high_distance",
             soulseek_username="testuser",
             validation_result={
                 "scenario": "wrong_match",

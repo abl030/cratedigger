@@ -4,7 +4,8 @@ Split out of lib/download.py (issue #146 phase 3). Owns everything
 between "the album finished downloading" and "the importer queue takes
 over": materializing files from their event-stamped local paths,
 beets validation, staging moves, auto-import dispatch, rejection
-handling, and the abandoned-auto-import recovery machinery. The poll
+handoff, and the abandoned-auto-import recovery machinery. Focused reject
+writers and Wrong Matches convergence live in ``lib.download_rejection``. The poll
 state machine lives in lib/download.py; slskd transfer helpers in
 lib/slskd_transfers.py.
 """
@@ -22,9 +23,13 @@ from lib.download_recovery import ProcessingPathLocation, classify_processing_pa
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.dispatch import (DispatchOutcome, QualityGateFn,
                           _build_download_info,
-                          _record_rejection_and_maybe_requeue,
                           _requeue_import_job_to_preview,
                           dispatch_import_core)
+from lib.download_rejection import (
+    _handle_rejected_result,
+    _reject_request_auto_import,
+    _source_dirs_for_album,
+)
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
@@ -33,21 +38,18 @@ from lib.import_manifest import (
     audio_relative_paths,
     check_audio_manifest,
     manifest_trace_summary,
-    move_failed_import_curated,
     tracked_audio_paths_for_downloads,
 )
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
     normalize_processing_path,
-    normalize_source_dirs,
     path_is_within_root,
     stage_to_ai_path,
     stage_to_ai_root,
 )
 from lib.quality import (ActiveDownloadState, ValidationResult,
-                         compute_effective_override_bitrate,
-                         rejection_backfill_override)
+                         compute_effective_override_bitrate)
 from lib.staged_album import StagedAlbum
 from lib.util import (
     move_abandoned_auto_import,
@@ -61,10 +63,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
-    "audio_corrupt",
-    "spectral_reject",
-})
 ABANDONED_AUTO_IMPORT_SCENARIO = "abandoned_auto_import"
 _ABANDON_PATH_PRESENT = "present"
 _ABANDON_PATH_ABSENT = "absent"
@@ -171,58 +169,6 @@ CompletionResult = Completed | CompletionFailed | CompletionDispatched | Complet
 """Return type of ``process_completed_album`` / ``_run_completed_processing``."""
 
 
-def _run_post_rejection_wrong_match_cleanup(
-    ctx: "CratediggerContext",
-    download_log_id: object,
-    *,
-    scenario: str | None,
-    import_job_id: int | None = None,
-) -> Any:
-    """Evaluate newly-created Wrong Matches rows through importer cleanup.
-
-    This runs after the rejected download_log row exists and only for the
-    review-queue scenarios that Wrong Matches exposes. Bad-file scenarios have
-    their own buckets and should not be deleted through wrong-match policy.
-    """
-    if not isinstance(download_log_id, int) or isinstance(download_log_id, bool):
-        return None
-    if scenario in AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS:
-        return None
-    if ctx.pipeline_db_source is None:
-        return None
-    get_db = getattr(ctx.pipeline_db_source, "_get_db", None)
-    if get_db is None:
-        return None
-    try:
-        from lib.wrong_match_cleanup_service import cleanup_wrong_match
-
-        db = get_db()
-        if import_job_id is not None:
-            evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
-            if evidence_id is not None:
-                db.set_download_log_candidate_evidence(download_log_id, evidence_id)
-        result = cleanup_wrong_match(
-            db,
-            download_log_id,
-            ignore_import_job_id=import_job_id,
-        )
-        logger.info(
-            "WRONG-MATCH CLEANUP: download_log_id=%s outcome=%s verdict=%s reason=%s",
-            download_log_id,
-            getattr(result, "outcome", None),
-            getattr(result, "verdict", None),
-            getattr(result, "reason", None),
-        )
-        return result
-    except Exception:
-        logger.exception(
-            "WRONG-MATCH CLEANUP FAILED: download_log_id=%s",
-            download_log_id,
-        )
-        return None
-
-
-
 # === slskd file locations ===
 #
 # The authoritative local path of every completed download comes from
@@ -259,13 +205,6 @@ def _attempt_fingerprint_for(files: list[DownloadFile]) -> str:
     folder as ``external`` and strands it (issue #550 phase 2).
     """
     return attempt_fingerprint([(f.username, f.filename) for f in files])
-
-
-def _source_dirs_for_album(album_data: GrabListEntry) -> list[str]:
-    return normalize_source_dirs(
-        [file.file_dir for file in album_data.files if file.file_dir],
-    )
-
 
 
 # === Download completion processing ===
@@ -393,7 +332,6 @@ def _commit_abandoned_auto_import(
         current_path=current_path,
         soulseek_username=dl_info.username,
         filetype=dl_info.filetype,
-        beets_scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
         beets_detail=detail,
         outcome="failed",
         staged_path=current_path,
@@ -1035,130 +973,6 @@ def _process_beets_validation(
     )
 
 
-def _resolved_request_rejection_id(
-    album_data: GrabListEntry,
-    ctx: CratediggerContext,
-) -> tuple[Any | None, int | None]:
-    """Resolve the backing request row for defensive auto-import rejects."""
-    if ctx.pipeline_db_source is None:
-        return None, None
-    db = ctx.pipeline_db_source._get_db()
-    if album_data.db_request_id is not None:
-        return db, album_data.db_request_id
-
-    candidate_request_id = album_data.album_id
-    if not isinstance(candidate_request_id, int) or isinstance(candidate_request_id, bool):
-        return db, None
-    # ``AlbumRecord.id`` is negative on the search path, so only positive
-    # ids can safely be treated as ``album_requests.id`` candidates here.
-    if candidate_request_id <= 0:
-        return db, None
-
-    request_row = db.get_request(candidate_request_id)
-    if not isinstance(request_row, dict):
-        return db, None
-    if str(request_row.get("artist_name") or "") != album_data.artist:
-        return db, None
-    if str(request_row.get("album_title") or "") != album_data.title:
-        return db, None
-    request_year = request_row.get("year")
-    if (
-        album_data.year
-        and request_year not in (None, "")
-        and str(request_year) != album_data.year
-    ):
-        return db, None
-    album_release_id = str(album_data.mb_release_id or "")
-    request_release_id = str(request_row.get("mb_release_id") or "")
-    if bool(album_release_id) != bool(request_release_id):
-        return db, None
-    if album_release_id and request_release_id != album_release_id:
-        return db, None
-    return db, candidate_request_id
-
-
-def _reject_request_auto_import(
-    album_data: GrabListEntry,
-    bv_result: ValidationResult,
-    staged_album: StagedAlbum,
-    ctx: CratediggerContext,
-    *,
-    detail: str,
-    scenario: str,
-    error: str,
-) -> DispatchOutcome:
-    """Reject a request auto-import when ownership can be proven safely."""
-    db, request_id = _resolved_request_rejection_id(album_data, ctx)
-    if db is None or request_id is None:
-        logger.error(
-            "AUTO-IMPORT REJECT BLOCKED WITHOUT REQUEST AUDIT: album_id=%s %s - %s "
-            "(scenario=%s) could not resolve a safe pipeline request row; "
-            "files remain at %s and automatic retry/import is disabled until "
-            "manual recovery.",
-            album_data.album_id,
-            album_data.artist,
-            album_data.title,
-            scenario,
-            staged_album.current_path,
-        )
-        return DispatchOutcome(
-            success=False,
-            message=detail,
-            deferred=True,
-        )
-
-    # No unmeasured distance is ever recorded as a number (#550 defect #4).
-    # ``bv_result.distance`` is only non-None when beets actually compared
-    # a candidate; a pre-match reject (e.g. the manifest guard, which fires
-    # before ``beets_validate`` ever runs) has no measurement to report, so
-    # this stays ``None`` rather than fabricating a 0.0 "perfect match".
-    failed_result = ValidationResult(
-        distance=bv_result.distance,
-        scenario=scenario,
-        detail=detail,
-        error=error,
-    )
-    failed_result.source_dirs = _source_dirs_for_album(album_data)
-    failed_result.failed_path = move_failed_import_curated(
-        staged_album.current_path,
-        allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
-        scenario=failed_result.scenario,
-    )
-    logger.error(
-        "AUTO-IMPORT REJECTED: %s - %s — %s",
-        album_data.artist,
-        album_data.title,
-        detail,
-    )
-    log_validation_result(album_data, failed_result, ctx.cfg)
-
-    dl_info = _build_download_info(album_data)
-    if album_data.download_spectral is not None:
-        dl_info.download_spectral = album_data.download_spectral
-        dl_info.current_spectral = album_data.current_spectral
-        dl_info.existing_min_bitrate = album_data.current_min_bitrate
-        dl_info.slskd_filetype = dl_info.filetype
-        dl_info.actual_filetype = dl_info.filetype
-    download_log_id = _record_rejection_and_maybe_requeue(
-        db,
-        request_id,
-        dl_info,
-        distance=failed_result.distance,
-        scenario=failed_result.scenario or scenario,
-        detail=detail,
-        error=failed_result.error,
-        requeue=True,
-        validation_result=failed_result.to_json(),
-    )
-    _run_post_rejection_wrong_match_cleanup(
-        ctx,
-        download_log_id,
-        scenario=failed_result.scenario,
-    )
-
-    return DispatchOutcome(success=False, message=detail)
-
-
 def _handle_valid_result(
     album_data: GrabListEntry,
     bv_result: ValidationResult,
@@ -1363,101 +1177,4 @@ def _handle_valid_result(
             return _dispatch(**core_kwargs)
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
-        return None
-
-
-def _handle_rejected_result(album_data: GrabListEntry, bv_result: ValidationResult,
-                            staged_album: StagedAlbum,
-                            ctx: CratediggerContext,
-                            *,
-                            import_job_id: int | None = None) -> DispatchOutcome:
-    """Handle a rejected beets validation result."""
-    bv_result.source_dirs = _source_dirs_for_album(album_data)
-    failed_dest = move_failed_import_curated(
-        staged_album.current_path,
-        allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
-        scenario=bv_result.scenario,
-    )
-    bv_result.failed_path = failed_dest
-    log_validation_result(album_data, bv_result, ctx.cfg)
-    usernames = set(f.username for f in album_data.files)
-    bv_result.denylisted_users = sorted(usernames)
-    dl_info = _build_download_info(album_data)
-    dl_info.validation_result = bv_result.to_json()
-    if album_data.download_spectral is not None:
-        dl_info.download_spectral = album_data.download_spectral
-        dl_info.current_spectral = album_data.current_spectral
-        dl_info.existing_min_bitrate = album_data.current_min_bitrate
-        dl_info.slskd_filetype = dl_info.filetype
-        dl_info.actual_filetype = dl_info.filetype
-
-    # Backfill search_filetype_override for pre-quality-gate albums stuck in loops
-    backfill_override = _compute_rejection_backfill(album_data, ctx)
-
-    download_log_id = ctx.pipeline_db_source.reject_and_requeue(
-        album_data,
-        bv_result,
-        usernames=usernames,
-        download_info=dl_info,
-        search_filetype_override=backfill_override,
-        cooled_down_users=ctx.cooled_down_users,
-    )
-    _run_post_rejection_wrong_match_cleanup(
-        ctx,
-        download_log_id,
-        scenario=bv_result.scenario,
-        import_job_id=import_job_id,
-    )
-    logger.warning(f"REJECTED: {album_data.artist} - {album_data.title} "
-                   f"(scenario={bv_result.scenario}, "
-                   f"distance={bv_result.distance}, "
-                   f"detail={bv_result.detail}) "
-                   f"| denylisted users: {', '.join(usernames)}")
-    scenario = bv_result.scenario or "validation_rejected"
-    detail = bv_result.detail or bv_result.error
-    message = f"Rejected: {scenario}"
-    if detail:
-        message = f"{message} - {detail}"
-    return DispatchOutcome(success=False, message=message)
-
-
-def _compute_rejection_backfill(album_data: GrabListEntry,
-                                ctx: CratediggerContext) -> str | None:
-    """Check if search_filetype_override should be backfilled on rejection.
-
-    Only fires when search_filetype_override is currently NULL and the on-disk state
-    is genuine + decent quality + not verified lossless.
-    """
-    request_id = album_data.db_request_id
-    if not request_id or not ctx.pipeline_db_source:
-        return None
-    if album_data.db_search_filetype_override:
-        return None
-    try:
-        db = ctx.pipeline_db_source._get_db()
-        req = db.get_request(request_id)
-        if not req or req.get("search_filetype_override"):
-            return None
-        from lib.beets_db import BeetsDB
-        with BeetsDB() as beets:
-            info = beets.get_album_info(
-                album_data.mb_release_id, ctx.cfg.quality_ranks)
-        if not info:
-            return None
-        override = rejection_backfill_override(
-            is_cbr=info.is_cbr,
-            min_bitrate_kbps=info.min_bitrate_kbps,
-            spectral_grade=req.get("current_spectral_grade"),
-            verified_lossless=bool(req.get("verified_lossless")),
-            cfg=ctx.cfg.quality_ranks,
-        )
-        if override:
-            logger.info(
-                f"BACKFILL: {album_data.artist} - {album_data.title} "
-                f"search_filetype_override=NULL → '{override}' "
-                f"(on-disk: {info.min_bitrate_kbps}kbps, cbr={info.is_cbr}, "
-                f"spectral={req.get('current_spectral_grade')})")
-        return override
-    except Exception:
-        logger.debug("BACKFILL: failed to check on-disk state", exc_info=True)
         return None

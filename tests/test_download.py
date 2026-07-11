@@ -105,7 +105,7 @@ class TestBuildDownloadInfo(unittest.TestCase):
 
 class TestPostRejectionWrongMatchTriage(unittest.TestCase):
     def test_runs_cleanup_for_new_wrong_match_log_row(self):
-        from lib.download_processing import _run_post_rejection_wrong_match_cleanup
+        from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
 
         db = FakePipelineDB()
         ctx = make_ctx_with_fake_db(db)
@@ -125,7 +125,7 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         self.assertIs(result, cleanup.return_value)
 
     def test_copies_import_job_candidate_evidence_before_cleanup(self):
-        from lib.download_processing import _run_post_rejection_wrong_match_cleanup
+        from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
@@ -159,7 +159,7 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         self.assertIs(result, cleanup.return_value)
 
     def test_skips_bad_file_rejections(self):
-        from lib.download_processing import _run_post_rejection_wrong_match_cleanup
+        from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
 
         db = FakePipelineDB()
         ctx = make_ctx_with_fake_db(db)
@@ -175,7 +175,7 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_rejected_download_handler_triggers_triage_after_logging(self):
-        from lib.download_processing import _handle_rejected_result
+        from lib.download_rejection import _handle_rejected_result
         from lib.quality import ValidationResult
         from lib.staged_album import StagedAlbum
         import tempfile
@@ -287,7 +287,7 @@ class TestRequestScopedAutoImportPath(unittest.TestCase):
 class TestResolveRequestRejectionId(unittest.TestCase):
 
     def test_refuses_release_id_presence_mismatch(self):
-        from lib.download_processing import _resolved_request_rejection_id
+        from lib.download_rejection import _resolved_request_rejection_id
 
         for desc, row_mbid, album_mbid in [
             ("row missing mbid", "", "test-mbid"),
@@ -319,6 +319,37 @@ class TestResolveRequestRejectionId(unittest.TestCase):
 
                 self.assertIs(resolved_db, db)
                 self.assertIsNone(request_id)
+
+
+class TestDownloadRejectionExtraction(unittest.TestCase):
+    """The completed-download module no longer owns reject writers."""
+
+    def test_reject_writer_functions_live_only_in_focused_module(self):
+        import ast
+        from pathlib import Path
+
+        rejection_names = {
+            "_run_post_rejection_wrong_match_cleanup",
+            "_resolved_request_rejection_id",
+            "_reject_request_auto_import",
+            "_handle_rejected_result",
+        }
+        processing_tree = ast.parse(
+            Path("lib/download_processing.py").read_text(encoding="utf-8")
+        )
+        rejection_tree = ast.parse(
+            Path("lib/download_rejection.py").read_text(encoding="utf-8")
+        )
+        processing_defs = {
+            node.name for node in ast.walk(processing_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        rejection_defs = {
+            node.name for node in ast.walk(rejection_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.assertTrue(rejection_names.isdisjoint(processing_defs))
+        self.assertTrue(rejection_names.issubset(rejection_defs))
 
 
 ## TestGatherSpectralContext and TestCheckQualityGateDecision removed:
@@ -2014,7 +2045,7 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
         ctx.cfg.beets_distance_threshold = 0.15
 
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch("lib.download_processing.log_validation_result"):
+             patch("lib.download_rejection.log_validation_result"):
             import_dir = os.path.join(tmpdir, "Test Artist - Test Album")
             os.makedirs(import_dir)
             with open(os.path.join(import_dir, "01 - Track.mp3"), "w",
@@ -2070,7 +2101,7 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
         ctx.cfg.beets_distance_threshold = 0.15
 
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch("lib.download_processing.log_validation_result"):
+             patch("lib.download_rejection.log_validation_result"):
             import_dir = os.path.join(tmpdir, "Test Artist - Test Album")
             os.makedirs(import_dir)
             with open(os.path.join(import_dir, "01 - Track.mp3"), "w",
@@ -5645,7 +5676,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
         return album_data, ctx, beets_info
 
     def _run(self, album_data, ctx, beets_info):
-        from lib.download_processing import _compute_rejection_backfill
+        from lib.download_rejection import _compute_rejection_backfill
         with patch("lib.beets_db.BeetsDB") as mock_beets_cls:
             mock_beets = MagicMock()
             mock_beets.__enter__ = MagicMock(return_value=mock_beets)

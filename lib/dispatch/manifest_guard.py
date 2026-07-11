@@ -17,6 +17,7 @@ from lib.import_manifest import (
     tracked_audio_paths_from_validation_items,
 )
 from lib.validation_envelope import decode_validation_envelope
+from lib.quality import ValidationResult
 
 from lib.dispatch.types import (DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
                                 DispatchOutcome)
@@ -100,10 +101,14 @@ def _guard_reject(
         db,
         request_id,
         DownloadInfo(username=source_username),
-        distance=None,
-        scenario=scenario,
         detail=detail,
         error=None,
+        validation_result=ValidationResult(
+            distance=None,
+            scenario=scenario,
+            detail=detail,
+            failed_path=failed_path,
+        ).to_json(),
         requeue=True,
         outcome_label="rejected",
         staged_path=failed_path,

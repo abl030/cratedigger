@@ -31,8 +31,11 @@ from lib.pipeline_db._core import _PipelineDBBase
 from lib.validation_envelope import (
     FAILED_PATH_KEY,
     SCENARIO_KEY,
+    VALIDATION_PROJECTION_UNSET,
+    ValidationProjectionUnset,
     WRONG_MATCH_TRIAGE_KEY,
     WrongMatchTriageAudit,
+    derive_validation_log_columns,
 )
 
 
@@ -128,8 +131,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                      soulseek_username: str | None = None,
                      filetype: str | None = None,
                      download_path: str | None = None,
-                     beets_distance: float | None = None,
-                     beets_scenario: str | None = None,
+                     beets_distance: float | None | ValidationProjectionUnset = (
+                         VALIDATION_PROJECTION_UNSET),
+                     beets_scenario: str | None | ValidationProjectionUnset = (
+                         VALIDATION_PROJECTION_UNSET),
                      beets_detail: str | None = None,
                      valid: bool | None = None,
                      outcome: DownloadLogOutcome | None = None,
@@ -169,6 +174,11 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # dicts (via msgspec.to_builtins), or None.
                      transfer_detail: Any = None,
                      ) -> int:
+        beets_distance_value, beets_scenario_value = derive_validation_log_columns(
+            validation_result,
+            beets_distance=beets_distance,
+            beets_scenario=beets_scenario,
+        )
         cur = self._execute("""
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
@@ -192,7 +202,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             RETURNING id
         """, (
             request_id, soulseek_username, filetype, download_path,
-            beets_distance, beets_scenario, beets_detail, valid,
+            beets_distance_value, beets_scenario_value, beets_detail, valid,
             outcome, staged_path, error_message,
             bitrate, sample_rate, bit_depth, is_vbr,
             was_converted, original_filetype,
@@ -221,7 +231,6 @@ class _DownloadLogMixin(_PipelineDBBase):
         current_path: str,
         soulseek_username: str | None,
         filetype: str | None,
-        beets_scenario: str,
         beets_detail: str,
         outcome: str,
         staged_path: str,
@@ -229,6 +238,15 @@ class _DownloadLogMixin(_PipelineDBBase):
         validation_result: str | None,
     ) -> int | None:
         """Atomically audit and reset an owned interrupted auto-import row."""
+        if validation_result is None:
+            beets_distance, beets_scenario = derive_validation_log_columns(
+                validation_result,
+                beets_scenario="abandoned_auto_import",
+            )
+        else:
+            beets_distance, beets_scenario = derive_validation_log_columns(
+                validation_result,
+            )
         with self._atomic():
             now = datetime.now(timezone.utc)
             with self.conn.cursor(
@@ -286,15 +304,16 @@ class _DownloadLogMixin(_PipelineDBBase):
                     """
                     INSERT INTO download_log (
                         request_id, soulseek_username, filetype,
-                        beets_scenario, beets_detail, outcome,
+                        beets_distance, beets_scenario, beets_detail, outcome,
                         staged_path, error_message, validation_result
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
                         request_id,
                         soulseek_username,
                         filetype,
+                        beets_distance,
                         beets_scenario,
                         beets_detail,
                         outcome,
