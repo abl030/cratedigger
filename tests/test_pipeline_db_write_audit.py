@@ -142,8 +142,8 @@ ALLOWLIST: dict[str, str] = {
         "round-trip via raw SELECT on slskd_search_ledger + get_unswept "
         "exclusion; tested in TestSearchLedgerRoundTrip",
     "record_transfer_enqueue":
-        "round-trip via get_owned_transfers (the ledger's read surface, not "
-        "get_transfer_enqueue); tested in TestTransferLedgerRoundTrip::"
+        "round-trip via raw SELECT on slskd_transfer_ledger; tested in "
+        "TestTransferLedgerRoundTrip::"
         "test_record_transfer_enqueue_round_trip_preserves_every_field",
 }
 

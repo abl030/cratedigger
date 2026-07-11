@@ -1707,11 +1707,11 @@ class TestTransferLedgerThroughRealEnqueuePath(unittest.TestCase):
             )
 
         self.assertTrue(attempt.matched)
-        rows = db.get_owned_transfers(request_id=1)
+        rows = db.record_transfer_enqueue_calls
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["username"], "u00")
-        self.assertEqual(rows[0]["filename"], f"{file_dir}\\01.flac")
-        self.assertIsNotNone(rows[0]["attempt_fingerprint"])
+        self.assertEqual(rows[0].username, "u00")
+        self.assertEqual(rows[0].filename, f"{file_dir}\\01.flac")
+        self.assertIsNotNone(rows[0].attempt_fingerprint)
 
     def test_try_multi_enqueue_shares_one_attempt_fingerprint_across_discs(self):
         """The attempt fingerprint is computed ONCE from the whole
@@ -1782,11 +1782,11 @@ class TestTransferLedgerThroughRealEnqueuePath(unittest.TestCase):
             )
 
         self.assertTrue(attempt.matched)
-        rows = db.get_owned_transfers(request_id=1)
+        rows = db.record_transfer_enqueue_calls
         self.assertEqual(len(rows), 2)
         self.assertEqual(
-            {r["username"] for r in rows}, {"u00", "u01"})
-        fingerprints = {r["attempt_fingerprint"] for r in rows}
+            {r.username for r in rows}, {"u00", "u01"})
+        fingerprints = {r.attempt_fingerprint for r in rows}
         self.assertEqual(
             len(fingerprints), 1,
             f"expected one shared attempt_fingerprint across discs, got {fingerprints!r}")

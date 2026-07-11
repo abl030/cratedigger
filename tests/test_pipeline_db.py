@@ -8689,8 +8689,19 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             artist_name="Artist", album_title="Album",
             source="request", status=status)
 
-    def test_get_owned_transfers_empty_before_any_record(self):
-        self.assertEqual(self.db.get_owned_transfers(), [])
+    def _ledger_rows(self, request_id: int) -> list[dict[str, Any]]:
+        """Read table state directly for write/update seam assertions."""
+        cur = self.db._execute(
+            """
+            SELECT id, request_id, username, filename, transfer_id,
+                   attempt_fingerprint, enqueued_at, local_path, completed_at
+            FROM slskd_transfer_ledger
+            WHERE request_id = %s
+            ORDER BY enqueued_at ASC
+            """,
+            (request_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     def test_record_transfer_enqueue_round_trip_preserves_every_field(self):
         rid = self._seed_request()
@@ -8701,7 +8712,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 attempt_fingerprint="abcd1234"),
         ])
 
-        rows = self.db.get_owned_transfers(request_id=rid)
+        rows = self._ledger_rows(rid)
 
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -8721,7 +8732,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(
                 request_id=rid, username="peer0", filename="a.flac"),
         ])
-        row = self.db.get_owned_transfers(request_id=rid)[0]
+        row = self._ledger_rows(rid)[0]
         self.assertIsNone(row["attempt_fingerprint"])
 
     def test_record_transfer_enqueue_writes_one_row_per_file(self):
@@ -8731,11 +8742,11 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(request_id=rid, username="p0", filename="b.flac"),
             TransferLedgerRow(request_id=rid, username="p0", filename="c.flac"),
         ])
-        self.assertEqual(len(self.db.get_owned_transfers(request_id=rid)), 3)
+        self.assertEqual(len(self._ledger_rows(rid)), 3)
 
     def test_record_transfer_enqueue_empty_list_does_not_raise(self):
         self.db.record_transfer_enqueue([])
-        self.assertEqual(self.db.get_owned_transfers(), [])
+        self.assertEqual(self.db.get_owned_transfer_keys(), set())
 
     def test_get_owned_transfer_keys_empty_before_any_record(self):
         self.assertEqual(self.db.get_owned_transfer_keys(), set())
@@ -8769,7 +8780,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             "p0", "a.flac", "/downloads/complete/a.flac", completed_at)
 
         self.assertEqual(stamped, 1)
-        row = self.db.get_owned_transfers(request_id=rid)[0]
+        row = self._ledger_rows(rid)[0]
         self.assertEqual(row["local_path"], "/downloads/complete/a.flac")
         self.assertIsNotNone(row["completed_at"])
 
@@ -8795,7 +8806,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
 
         self.assertEqual(first, 1)
         self.assertEqual(second, 0)  # the row is no longer "open"
-        rows = self.db.get_owned_transfers(request_id=rid)
+        rows = self._ledger_rows(rid)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["local_path"], "/downloads/a.flac")
 
@@ -8807,7 +8818,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.record_transfer_enqueue([
             TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
         ])
-        old_row = self.db.get_owned_transfers(request_id=rid)[0]
+        old_row = self._ledger_rows(rid)[0]
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
             (datetime.now(timezone.utc) - timedelta(minutes=10), old_row["id"]))
@@ -8818,7 +8829,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/newest.flac", datetime.now(timezone.utc))
 
-        rows = self.db.get_owned_transfers(request_id=rid)
+        rows = self._ledger_rows(rid)
         stamped = [r for r in rows if r["completed_at"] is not None]
         self.assertEqual(len(stamped), 1)
         self.assertNotEqual(stamped[0]["id"], old_row["id"])
@@ -8835,7 +8846,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         stamped = self.db.stamp_transfer_id("p0", "a.flac", "tid-1")
 
         self.assertEqual(stamped, 1)
-        row = self.db.get_owned_transfers(request_id=rid)[0]
+        row = self._ledger_rows(rid)[0]
         self.assertEqual(row["transfer_id"], "tid-1")
 
     def test_stamp_transfer_id_unledgered_pair_returns_zero(self):
@@ -8851,7 +8862,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.record_transfer_enqueue([
             TransferLedgerRow(request_id=rid, username="p0", filename="a.flac"),
         ])
-        old_row = self.db.get_owned_transfers(request_id=rid)[0]
+        old_row = self._ledger_rows(rid)[0]
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = %s WHERE id = %s",
             (datetime.now(timezone.utc) - timedelta(minutes=10), old_row["id"]))
@@ -8861,7 +8872,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
 
         self.db.stamp_transfer_id("p0", "a.flac", "tid-newest")
 
-        rows = self.db.get_owned_transfers(request_id=rid)
+        rows = self._ledger_rows(rid)
         stamped = [r for r in rows if r["transfer_id"] is not None]
         self.assertEqual(len(stamped), 1)
         self.assertNotEqual(stamped[0]["id"], old_row["id"])
@@ -8880,7 +8891,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
             transfer_id="tid-from-event")
 
-        row = self.db.get_owned_transfers(request_id=rid)[0]
+        row = self._ledger_rows(rid)[0]
         self.assertEqual(row["transfer_id"], "tid-from-event")
 
     def test_stamp_transfer_completion_does_not_clobber_existing_transfer_id(self):
@@ -8896,7 +8907,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc),
             transfer_id="tid-from-event")
 
-        row = self.db.get_owned_transfers(request_id=rid)[0]
+        row = self._ledger_rows(rid)[0]
         self.assertEqual(row["transfer_id"], "tid-from-enqueue")
 
     def test_stamp_transfer_completion_with_no_transfer_id_leaves_it_null(self):
@@ -8911,7 +8922,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/a.flac", datetime.now(timezone.utc))
 
-        row = self.db.get_owned_transfers(request_id=rid)[0]
+        row = self._ledger_rows(rid)[0]
         self.assertIsNone(row["transfer_id"])
 
     def test_get_owned_transfer_id_sets_empty_before_any_record(self):
@@ -8966,7 +8977,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             older_than=datetime.now(timezone.utc) - timedelta(days=90))
 
         self.assertEqual(removed, 1)
-        self.assertEqual(self.db.get_owned_transfers(request_id=rid), [])
+        self.assertEqual(self._ledger_rows(rid), [])
 
     def test_prune_transfer_ledger_exact_boundary_row_survives(self):
         """The retention cutoff is strict-<: enqueued_at == older_than is
@@ -8985,7 +8996,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         removed = self.db.prune_transfer_ledger(older_than=boundary)
 
         self.assertEqual(removed, 0)
-        self.assertEqual(len(self.db.get_owned_transfers(request_id=rid)), 1)
+        self.assertEqual(len(self._ledger_rows(rid)), 1)
 
     def test_prune_transfer_ledger_keeps_active_request_rows_regardless_of_age(self):
         rid = self._seed_request(status="downloading")
@@ -8998,7 +9009,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             older_than=datetime.now(timezone.utc) - timedelta(days=90))
 
         self.assertEqual(removed, 0)
-        self.assertEqual(len(self.db.get_owned_transfers(request_id=rid)), 1)
+        self.assertEqual(len(self._ledger_rows(rid)), 1)
 
     def test_prune_transfer_ledger_keeps_rows_inside_retention(self):
         rid = self._seed_request(status="imported")
@@ -9021,26 +9032,6 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             older_than=datetime.now(timezone.utc) - timedelta(days=90))
 
         self.assertEqual(removed, 1)
-
-    def test_fake_parity_on_identical_state(self):
-        from tests.fakes import FakePipelineDB
-
-        fake = FakePipelineDB()
-        rid = self._seed_request()
-        fake.seed_request({"id": rid, "status": "wanted"})
-        for db in (self.db, fake):
-            db.record_transfer_enqueue([
-                TransferLedgerRow(
-                    request_id=rid, username="p0", filename="a.flac",
-                    attempt_fingerprint="fp1"),
-            ])
-        real_rows = self.db.get_owned_transfers(request_id=rid)
-        fake_rows = fake.get_owned_transfers(request_id=rid)
-        strip = lambda rows: [
-            {k: v for k, v in r.items() if k not in ("id", "enqueued_at")}
-            for r in rows
-        ]
-        self.assertEqual(strip(real_rows), strip(fake_rows))
 
     def test_get_owned_local_paths_fake_parity(self):
         """#546 W1 read-projection parity for get_owned_local_paths (a

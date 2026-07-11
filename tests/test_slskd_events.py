@@ -488,10 +488,10 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
         result = self.ingest()
 
         self.assertEqual(result.transfers_stamped, 1)
-        rows = self.db.get_owned_transfers(request_id=1)
+        rows = list(self.db._transfer_ledger.values())
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["local_path"], "/dl/Album/01 track.flac")
-        self.assertIsNotNone(rows[0]["completed_at"])
+        self.assertEqual(rows[0].local_path, "/dl/Album/01 track.flac")
+        self.assertIsNotNone(rows[0].completed_at)
         # Same pass, same key -- active_download_state is ALSO stamped.
         self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
 
@@ -511,7 +511,7 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
         result = self.ingest()
 
         self.assertEqual(result.transfers_stamped, 0)
-        self.assertEqual(self.db.get_owned_transfers(), [])
+        self.assertEqual(self.db._transfer_ledger, {})
         # A foreign/unledgered pair doesn't block active_download_state
         # stamping — the two writes are independent.
         self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
@@ -544,9 +544,9 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
 
         self.assertEqual(second.outcome, "no_new_events")
         self.assertEqual(second.transfers_stamped, 0)
-        rows = self.db.get_owned_transfers(request_id=1)
+        rows = list(self.db._transfer_ledger.values())
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["local_path"], "/dl/Album/01 track.flac")
+        self.assertEqual(rows[0].local_path, "/dl/Album/01 track.flac")
 
     def test_completion_event_transfer_id_fills_a_missing_ledger_id(self):
         """T2 fallback (issue #571 PR 5): when T1.5's enqueue-response
@@ -575,8 +575,8 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
 
         self.ingest()
 
-        row = self.db.get_owned_transfers(request_id=1)[0]
-        self.assertEqual(row["transfer_id"], "tid-from-event")
+        row = next(iter(self.db._transfer_ledger.values()))
+        self.assertEqual(row.transfer_id, "tid-from-event")
 
     def test_completion_event_never_clobbers_an_already_captured_transfer_id(self):
         """T1.5 already won the race (enqueue-response reconciliation
@@ -606,8 +606,8 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
 
         self.ingest()
 
-        row = self.db.get_owned_transfers(request_id=1)[0]
-        self.assertEqual(row["transfer_id"], "tid-from-enqueue")
+        row = next(iter(self.db._transfer_ledger.values()))
+        self.assertEqual(row.transfer_id, "tid-from-enqueue")
 
 
 if __name__ == "__main__":

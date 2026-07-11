@@ -3,6 +3,12 @@
 - All code deploys via Nix flake: push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → commit (SSH-signed) + push nixosconfig to **Forgejo** → `ssh doc2 'sudo fleet-update'`.
 - **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo (`git.ablz.au`), NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
 - The Forgejo push needs a token header (gh's credential helper is github.com-only): `TOKEN=$(cat /run/secrets/forgejo/nixbot-token) && git -c "http.extraHeader=Authorization: token ${TOKEN}" push origin master`. Never echo the token.
+- Check each push's exit status directly. Never pipe `git push` output through
+  `tail` (or any other command) inside an `&&` chain unless `pipefail` is
+  explicitly active: the downstream command's success can mask a failed push.
+  After a successful push, verify the expected remote ref resolves to the
+  pushed commit before any dependent action such as `gh pr merge` or
+  `fleet-update`.
 - `fleet-update` verifies every commit in range is SSH-signed by a key in hosts.nix, then builds from its own root-owned clone at `/var/lib/fleet-update/repo`. Break-glass only: `sudo fleet-update --dry-run` (fetch + verify + checkout) followed by `sudo nixos-rebuild switch --flake /var/lib/fleet-update/repo#doc2 --no-write-lock-file --option accept-flake-config true`.
 - The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports it via `inputs.cratedigger-src.nixosModules.default`.
 - Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
