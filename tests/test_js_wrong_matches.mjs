@@ -650,6 +650,72 @@ console.log('formatEntryEvidence() formats spectral and lossless-source V0 cells
   assertEqual(cells.v0, '—', 'missing keys render as dash');
 }
 
+console.log('renderQualityBadges() labels current average and retained floor fallbacks');
+{
+  let html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: null,
+    format: null,
+    avg_bitrate: 288,
+    min_bitrate: 194,
+  });
+  assert(html.includes('avg 288k · min 194k'),
+    'missing-format fallback leads with the current average and labels the floor');
+  assert(!html.includes('>194k<'), 'minimum bitrate is never rendered as a bare current tier');
+
+  html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: null,
+    format: null,
+    avg_bitrate: null,
+    min_bitrate: 194,
+  });
+  assert(html.includes('min 194k'), 'missing-average fallback labels minimum as floor data');
+  assert(!html.includes('>194k<'), 'missing average never revives a bare min-derived tier');
+
+  html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: null,
+    format: null,
+    avg_bitrate: 288,
+    min_bitrate: null,
+  });
+  assert(html.includes('avg 288k'), 'average-only fallback remains visible current data');
+
+  html = __test__.renderQualityBadges({
+    in_library: true,
+    quality_label: 'MP3 V0',
+    format: 'MP3',
+    avg_bitrate: 288,
+    min_bitrate: 194,
+  });
+  assert(html.includes('MP3 V0'), 'explicit backend quality label remains authoritative');
+  assert(!html.includes('avg 288k'), 'fallback summary is omitted with an explicit label');
+
+  assertEqual(
+    __test__.renderQualityBadges({
+      in_library: false,
+      quality_label: null,
+      format: null,
+      avg_bitrate: 0,
+      min_bitrate: 0,
+    }),
+    '<span class="badge" style="background:#3a2a2a;color:#f88;">nothing on disk</span>',
+    'zero bitrate placeholders are treated as absent off disk',
+  );
+  assertEqual(
+    __test__.renderQualityBadges({
+      in_library: true,
+      quality_label: null,
+      format: null,
+      avg_bitrate: null,
+      min_bitrate: null,
+    }),
+    '',
+    'partial in-library rows with null quality data remain defensively empty',
+  );
+}
+
 console.log('renderEntry() embeds evidence cells without preview hooks');
 {
   installStorage();
