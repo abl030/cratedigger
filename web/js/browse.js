@@ -65,7 +65,7 @@ export async function setBrowseSource(src) {
   // Invalidate the current artist page BEFORE the cross-source lookup
   // awaits. Otherwise an old-source fast-pair failure can paint Retry
   // while the new source is already selected but its artist ID is pending.
-  artistPageToken++;
+  const sourceSwitchToken = ++artistPageToken;
   // Explicit user source-toggle clears any active search-by-ID ring.
   // The source-guard in applySearchTargetAfterDiscography would mask
   // the immediate symptom, but a paste→toggle-twice sequence (away
@@ -80,6 +80,7 @@ export async function setBrowseSource(src) {
   if (state.browseArtist) {
     const prevName = state.browseArtist.name;
     const match = await findArtistOnSource(prevName, src);
+    if (sourceSwitchToken !== artistPageToken || state.browseSource !== src) return;
     if (match) {
       state.browseArtist = { id: String(match.id), name: match.name };
       document.getElementById('browse-artist-name').textContent = match.name;

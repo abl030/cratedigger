@@ -281,4 +281,114 @@ for (const [oldSource, newSource] of [['mb', 'discogs'], ['discogs', 'mb']]) {
   }
 }
 
+// Double-toggle ownership pin: lookups can resolve out of order. The newest
+// MB toggle must keep its MB artist/id/endpoint even if the older Discogs
+// lookup returns last with a valid but wrong-source match.
+resetWorld();
+{
+  const discogsLookup = deferred();
+  const mbLookup = deferred();
+  const requests = [];
+  state.browseSource = 'mb';
+  state.browseArtist = { id: 'starting-mb-id', name: 'Toggle Artist' };
+  globalThis.fetch = (url) => {
+    requests.push(url);
+    if (url.includes('/api/discogs/search?')) return discogsLookup.promise;
+    if (url.includes('/api/search?')) return mbLookup.promise;
+    if (url.includes('/api/artist/newest-mb-id?')) {
+      return Promise.resolve(response(200, { release_groups: [] }));
+    }
+    if (url.includes('mbid=newest-mb-id')) {
+      return Promise.resolve(response(200, { albums: [] }));
+    }
+    if (url.includes('/api/artist/compare?') || url.includes('/disambiguate')) {
+      return Promise.resolve(response(503, { error: 'decoration unavailable' }));
+    }
+    if (url.includes('stale-discogs-id')) {
+      return Promise.resolve(response(503, { error: 'stale lookup drove a load' }));
+    }
+    throw new Error(`unexpected double-toggle request: ${url}`);
+  };
+
+  const olderToggle = setBrowseSource('discogs');
+  const newestToggle = setBrowseSource('mb');
+  mbLookup.resolve(response(200, {
+    artists: [{ id: 'newest-mb-id', name: 'Toggle Artist' }],
+  }));
+  await newestToggle;
+  await new Promise(resolve => setImmediate(resolve));
+  const newestHtml = artistBody.innerHTML;
+  assert.equal(state.browseSource, 'mb');
+  assert.deepEqual(state.browseArtist, { id: 'newest-mb-id', name: 'Toggle Artist' });
+  assert(requests.some(url => url.includes('/api/artist/newest-mb-id?')));
+  assert.doesNotMatch(newestHtml, />Retry</);
+
+  discogsLookup.resolve(response(200, {
+    artists: [{ id: 'stale-discogs-id', name: 'Toggle Artist' }],
+  }));
+  await olderToggle;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.browseSource, 'mb');
+  assert.deepEqual(
+    state.browseArtist,
+    { id: 'newest-mb-id', name: 'Toggle Artist' },
+    'older lookup must not overwrite the newest source artist',
+  );
+  assert(!requests.some(url => url.includes('stale-discogs-id')));
+  assert.equal(artistBody.innerHTML, newestHtml, 'older lookup must not repaint the newest page');
+}
+
+// Generated/property sweep for both directions. The newest lookup may own a
+// Retry state, but resolving the older valid match cannot change its artist,
+// endpoint family, or rendered content.
+for (const newestSource of ['mb', 'discogs']) {
+  resetWorld();
+  const olderSource = newestSource === 'mb' ? 'discogs' : 'mb';
+  const lookups = { mb: deferred(), discogs: deferred() };
+  const newestId = `newest-${newestSource}-id`;
+  const staleId = `stale-${olderSource}-id`;
+  const requests = [];
+  state.browseSource = newestSource;
+  state.browseArtist = { id: `starting-${newestSource}-id`, name: 'Generated Toggle' };
+  globalThis.fetch = (url) => {
+    requests.push(url);
+    if (url.includes('/api/discogs/search?')) return lookups.discogs.promise;
+    if (url.includes('/api/search?')) return lookups.mb.promise;
+    if (url.includes(newestId)) {
+      return Promise.resolve(response(503, { error: 'newest source unavailable' }));
+    }
+    if (url.includes('/api/library/artist?')) {
+      return Promise.resolve(response(200, { albums: [] }));
+    }
+    if (url.includes(staleId)) {
+      return Promise.resolve(response(503, { error: 'stale source load' }));
+    }
+    throw new Error(`unexpected generated double-toggle request: ${url}`);
+  };
+
+  const olderToggle = setBrowseSource(olderSource);
+  const newestToggle = setBrowseSource(newestSource);
+  lookups[newestSource].resolve(response(200, {
+    artists: [{ id: newestId, name: 'Generated Toggle' }],
+  }));
+  await newestToggle;
+  await new Promise(resolve => setImmediate(resolve));
+  const newestHtml = artistBody.innerHTML;
+  assert.match(newestHtml, />Retry</);
+
+  lookups[olderSource].resolve(response(200, {
+    artists: [{ id: staleId, name: 'Generated Toggle' }],
+  }));
+  await olderToggle;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.browseSource, newestSource);
+  assert.deepEqual(state.browseArtist, { id: newestId, name: 'Generated Toggle' });
+  const expectedEndpoint = newestSource === 'discogs'
+    ? `/api/discogs/artist/${newestId}?`
+    : `/api/artist/${newestId}?`;
+  assert(requests.some(url => url.includes(expectedEndpoint)));
+  assert(!requests.some(url => url.includes(staleId)));
+  assert.equal(artistBody.innerHTML, newestHtml);
+}
+
 console.log('JS browse fast-pair failure tests passed');
