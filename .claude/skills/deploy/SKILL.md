@@ -1,47 +1,230 @@
 ---
 name: deploy
-description: Deploy a verified Cratedigger revision through GitHub, the nixosconfig Forgejo pin, and doc2 fleet-update.
+description: Deploy a verified Cratedigger revision through GitHub, the nixosconfig Forgejo pin, and doc1's locked-sibling fleet trigger.
 ---
 
 # Deploy to doc2
 
-Push code, update flake input on doc1, push nixosconfig to Forgejo, run fleet-update on doc2 (which auto-runs migrations), verify.
+Push code, update the flake input on doc1, push nixosconfig to Forgejo, trigger
+doc2 through doc1's locked-sibling deployment boundary, then verify the exact
+revision, migrations, services, and source.
 
 **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from FORGEJO (`git.ablz.au`), never `github:abl030/nixosconfig` — GitHub is a frozen fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
+
+**Run this workflow on doc1 (`hostname` = `proxmox-vm`).** Stop if that is not
+the current host. doc1 alone has both the Forgejo push token/signing key and the
+private locked-sibling trigger key.
 
 ## Steps
 
 1. Commit and push cratedigger (GitHub, unchanged):
 ```bash
+set -euo pipefail
 git add <files> && git commit -m "<message>" && git push
 ```
 
-2. Update flake input on doc1, commit (must be SSH-signed — `commit.gpgsign` is already on in ~/nixosconfig), and push to Forgejo. The push needs the Forgejo token as an auth header (the gh credential helper only covers github.com):
+2. Update nixosconfig in a throwaway worktree from freshly fetched
+`origin/master`; never make the deploy pin in whatever state the primary
+checkout happens to have. Create and verify an SSH-signed commit:
 ```bash
-ssh doc1 'cd ~/nixosconfig && git pull && nix flake update cratedigger-src && git add flake.lock && git commit -m "cratedigger: <description>" && TOKEN=$(cat /run/secrets/forgejo/nixbot-token) && git -c "http.extraHeader=Authorization: token ${TOKEN}" push origin master'
-# NOTE: If already on doc1 (hostname = proxmox-vm), run the inner command directly without ssh.
-# NEVER echo the token. If ~/nixosconfig is dirty/on a feature branch, do the bump in a
-# throwaway worktree off origin/master instead.
+set -euo pipefail
+test "$(hostname)" = proxmox-vm
+NIXOSCONFIG_REPO=$HOME/nixosconfig
+NIXOSCONFIG_CALLER_DIR=$PWD
+NIXOSCONFIG_TMP=$(mktemp -d "${TMPDIR:-/tmp}/nixosconfig-deploy.XXXXXX")
+NIXOSCONFIG_WORKTREE=$NIXOSCONFIG_TMP/worktree
+cleanup_nixosconfig_worktree() {
+  cd "$HOME"
+  git -C "$NIXOSCONFIG_REPO" worktree remove --force "$NIXOSCONFIG_WORKTREE" \
+    >/dev/null 2>&1 || rm -rf "$NIXOSCONFIG_WORKTREE"
+  rm -rf "$NIXOSCONFIG_TMP"
+}
+cleanup_nixosconfig_on_exit() {
+  local status=$?
+  trap - EXIT
+  cleanup_nixosconfig_worktree || true
+  exit "$status"
+}
+trap cleanup_nixosconfig_on_exit EXIT
+git -C "$NIXOSCONFIG_REPO" fetch origin \
+  '+refs/heads/master:refs/remotes/origin/master'
+git -C "$NIXOSCONFIG_REPO" worktree add --detach "$NIXOSCONFIG_WORKTREE" origin/master
+cd "$NIXOSCONFIG_WORKTREE"
+nix flake update cratedigger-src
+git add flake.lock
+git commit -m "cratedigger: <description>"
+test "$(git log -1 --format=%G?)" = G
+NIXOSCONFIG_REV=$(git rev-parse HEAD)
+
+# Keep the token in a fail-fast subshell: its environment disappears on both
+# success and failure, while the subshell status remains authoritative.
+(
+  set -euo pipefail
+  TOKEN=$(cat /run/secrets/forgejo/nixbot-token)
+  test -n "$TOKEN"
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="http.https://git.ablz.au.extraHeader"
+  export GIT_CONFIG_VALUE_0="Authorization: token $TOKEN"
+  unset TOKEN
+  git push origin HEAD:master
+  REMOTE_REV=$(git ls-remote origin refs/heads/master | cut -f1)
+  test "$REMOTE_REV" = "$NIXOSCONFIG_REV"
+)
+printf 'signed nixosconfig revision: %s\n' "$NIXOSCONFIG_REV"
+cd "$NIXOSCONFIG_CALLER_DIR"
+cleanup_nixosconfig_worktree
+trap - EXIT
 ```
 
-3. Deploy doc2 via the verified path (fetches Forgejo, verifies every commit is signed by a key in hosts.nix, builds from its own root-owned clone; also runs `cratedigger-db-migrate.service` automatically):
-```bash
-ssh doc2 'sudo fleet-update'
-```
-Do NOT use `nixos-rebuild switch --flake github:...` — GitHub is stale. Break-glass only: `ssh doc2 'sudo nixos-rebuild switch --flake /var/lib/fleet-update/repo#doc2 --no-write-lock-file --option accept-flake-config true'` after a `sudo fleet-update --dry-run` has fetched + verified the tip into the clone.
+The token must never appear in an argv value, command-line `-c` assignment, or
+remote URL.
 
-4. Verify deployed code has the change:
+3. Capture the current systemd invocation, deploy doc2 through the
+forced-command locked-sibling trigger, then wait up to 30 minutes for a **new,
+nonempty** `InvocationID`. Capturing before the trigger prevents an old green
+unit result from being mistaken for this deployment. Poll that
+same invocation to a terminal state. This also handles a same-revision retry:
+the anchor may already equal the target, but a fresh invocation must still run.
+Success means `ActiveState=inactive`, `SubState=dead`, and `Result=success` for
+the new invocation; any failed, unexpected, replaced, or timed-out state is a
+deploy failure:
 ```bash
-ssh doc2 'grep "<something unique>" /nix/store/*/lib/quality/*.py 2>/dev/null | head -1'
+set -euo pipefail
+before_state=$(ssh doc2 'systemctl show nixos-upgrade.service \
+  --property=InvocationID')
+PREVIOUS_INVOCATION=$(sed -n 's/^InvocationID=//p' <<<"$before_state")
+fleet-deploy doc2
+deadline=$((SECONDS + 1800))
+triggered_invocation=""
+deploy_complete=0
+while ((SECONDS < deadline)); do
+  if ! upgrade_state=$(ssh doc2 'systemctl show nixos-upgrade.service \
+    --property=InvocationID --property=ActiveState \
+    --property=SubState --property=Result'); then
+    echo 'could not read doc2 nixos-upgrade state' >&2
+    exit 1
+  fi
+  invocation=$(sed -n 's/^InvocationID=//p' <<<"$upgrade_state")
+  active=$(sed -n 's/^ActiveState=//p' <<<"$upgrade_state")
+  sub=$(sed -n 's/^SubState=//p' <<<"$upgrade_state")
+  result=$(sed -n 's/^Result=//p' <<<"$upgrade_state")
+  printf 'nixos-upgrade: InvocationID=%s ActiveState=%s SubState=%s Result=%s\n' \
+    "$invocation" "$active" "$sub" "$result"
+  if [[ -z "$invocation" ]]; then
+    if [[ -n "$triggered_invocation" ]]; then
+      echo 'triggered nixos-upgrade InvocationID disappeared' >&2
+      exit 1
+    fi
+    sleep 5
+    continue
+  fi
+  if [[ "$invocation" == "$PREVIOUS_INVOCATION" ]]; then
+    sleep 5
+    continue
+  fi
+  if [[ -z "$triggered_invocation" ]]; then
+    triggered_invocation=$invocation
+  elif [[ "$invocation" != "$triggered_invocation" ]]; then
+    echo "nixos-upgrade invocation changed during deploy: $upgrade_state" >&2
+    exit 1
+  fi
+  if [[ "$active" == inactive && "$sub" == dead && "$result" == success ]]; then
+    deploy_complete=1
+    break
+  fi
+  if [[ "$active" == failed || "$active" == inactive ]]; then
+    ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
+    exit 1
+  fi
+  if [[ "$active" != activating && "$active" != active \
+    && "$active" != reloading && "$active" != deactivating ]]; then
+    echo "unexpected nixos-upgrade state: $upgrade_state" >&2
+    exit 1
+  fi
+  sleep 5
+done
+if [[ "$deploy_complete" != 1 ]]; then
+  echo 'timed out waiting for the triggered nixos-upgrade invocation' >&2
+  ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
+  exit 1
+fi
 ```
 
-5. Verify the migration unit succeeded (especially when `migrations/` changed):
+`fleet-deploy` is asynchronous. It starts doc2's verified
+`nixos-upgrade.service`, which fetches Forgejo, verifies every new commit
+against `hosts.nix`, builds from its root-owned clone, switches, and runs
+`cratedigger-db-migrate.service`. Direct `ssh doc2 'sudo fleet-update'` is not
+the normal path and bypasses the locked-sibling trigger boundary. Do not use
+`nixos-rebuild switch --flake github:...`; GitHub is stale.
+
+4. Verify the fleet trust anchor equals the exact signed Forgejo commit printed
+in step 2. A green unit with a stale anchor is not a successful deployment:
 ```bash
-ssh doc2 'sudo systemctl status cratedigger-db-migrate.service --no-pager | head -10'
-ssh doc2 'pipeline-cli query "SELECT version, name, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 5"'
+set -euo pipefail
+EXPECTED_NIXOSCONFIG_REV=<full signed SHA printed by step 2>
+DEPLOYED_REV=$(ssh doc2 'sudo cat /var/lib/fleet-update/last-verified-rev')
+test "$DEPLOYED_REV" = "$EXPECTED_NIXOSCONFIG_REV"
 ```
 
-6. After live verification + tag of a non-trivial series: run the **post-ship reflection** (`.claude/rules/deploy.md` § "Post-ship reflection") — mine your own session context for the debt this work surfaced (deferred review findings, things fixed twice, duplication the series introduced, audits that could catch review findings for free), de-dupe against open issues, and file ONE covering issue (pattern: #573, #590) or state that nothing clears the bar.
+5. Verify migration state and the services affected by the change. The migrate
+oneshot uses `RemainAfterExit`, so it must report `ActiveState=active`,
+`SubState=exited`, and `Result=success`; verify long-running workers
+individually rather than assuming a successful switch made them healthy:
+```bash
+set -euo pipefail
+migration_state=$(ssh doc2 'systemctl show cratedigger-db-migrate.service \
+  --property=ActiveState --property=SubState --property=Result'
+)
+migration_active=$(sed -n 's/^ActiveState=//p' <<<"$migration_state")
+migration_sub=$(sed -n 's/^SubState=//p' <<<"$migration_state")
+migration_result=$(sed -n 's/^Result=//p' <<<"$migration_state")
+printf '%s\n' "$migration_state"
+test "$migration_active" = active
+test "$migration_sub" = exited
+test "$migration_result" = success
+migration_rows=$(ssh doc2 'set -euo pipefail; \
+  export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+    | grep "^PGPASSWORD=" | cut -d= -f2); \
+  test -n "$PGPASSWORD"; pipeline-cli query "$(cat)"' <<'SQL'
+SELECT version, name, applied_at
+FROM schema_migrations
+ORDER BY version DESC
+LIMIT 5;
+SQL
+)
+test -n "$migration_rows"
+printf '%s\n' "$migration_rows"
+service_states=$(ssh doc2 'set -euo pipefail
+  for unit in cratedigger-web.service cratedigger-importer.service \
+    cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service; do
+    state=$(systemctl is-active "$unit")
+    test "$state" = active
+    printf "%s=%s\n" "$unit" "$state"
+  done')
+printf '%s\n' "$service_states"
+```
+
+6. Derive the active wrapper from the service's `ExecStart`, then derive its
+exact source store from the wrapper and verify the deployed change there
+(choose a unique string in a production file). Do not glob every historical
+store path: an old generation could produce a false positive. Inspect the
+rendered unit/config when the NixOS module changed:
+```bash
+set -euo pipefail
+CRATEDIGGER_BIN=$(ssh doc2 "systemctl show cratedigger.service \
+  --property=ExecStart --value | grep -o '/nix/store/[^ ;]*/bin/cratedigger' \
+  | head -1")
+test -n "$CRATEDIGGER_BIN"
+CRATEDIGGER_SOURCE=$(ssh doc2 "grep -o '/nix/store/[^ ]*-source/cratedigger.py' \
+  '$CRATEDIGGER_BIN' | head -1 | sed 's#/cratedigger.py##'")
+test -n "$CRATEDIGGER_SOURCE"
+ssh doc2 "grep '<something unique>' '$CRATEDIGGER_SOURCE/<changed-file>.py'"
+# For nix/module.nix changes:
+ssh doc2 'systemctl cat cratedigger.service'
+ssh doc2 'grep "<rendered setting>" /var/lib/cratedigger/config.ini'
+```
+
+7. After live verification + tag of a non-trivial series: run the **post-ship reflection** (`.claude/rules/deploy.md` § "Post-ship reflection") — mine your own session context for the debt this work surfaced (deferred review findings, things fixed twice, duplication the series introduced, audits that could catch review findings for free), de-dupe against open issues, and file ONE covering issue (pattern: #573, #590) or state that nothing clears the bar.
 
 ## Database migrations
 

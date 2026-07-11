@@ -145,7 +145,7 @@ Wire-boundary types (harness, JSONB, subprocess stdout) are `msgspec.Struct`, no
 
 ## Deploying changes
 
-Push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → signed commit + push nixosconfig to **Forgejo** (`git.ablz.au` — GitHub nixosconfig is a frozen fallback, never deploy from it) → `ssh doc2 'sudo fleet-update'`. `cratedigger.service` has `restartIfChanged = false` (the back-to-back timer picks up new code on the next cycle); web/migrate restart on switch. Before `nix/module.nix` changes, run `nix build .#checks.x86_64-linux.moduleVm`. Full sequence + verification in `.claude/rules/deploy.md`; the `deploy` skill runs it end-to-end.
+Push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → signed commit + push nixosconfig to **Forgejo** (`git.ablz.au` — GitHub nixosconfig is a frozen fallback, never deploy from it) → from doc1 run `fleet-deploy doc2` through the locked-sibling trigger, then poll and verify the exact fleet anchor. `cratedigger.service` has `restartIfChanged = false` (the back-to-back timer picks up new code on the next cycle); web/migrate restart on switch. Before `nix/module.nix` changes, run `nix build .#checks.x86_64-linux.moduleVm`. Full sequence + verification in `.claude/rules/deploy.md`; the `deploy` skill runs it end-to-end.
 
 **PR merges: use GitHub "Create a merge commit"** — never rebase- or squash-merge.
 
@@ -172,7 +172,7 @@ nix-shell --run "python3 -m unittest tests.test_X -v"
 ### Hooks
 
 - Pre-commit (`ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`): pyright on staged `.py`.
-- Pre-push (`ln -sf ../../scripts/pre-push .git/hooks/pre-push`): randomized generated-test burst (push profile, fresh entropy each push — `docs/generated-testing.md`), then `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
+- Pre-push (`git config core.hooksPath scripts`, once per clone): the relative tracked hooks path makes every linked worktree invoke its own `scripts/pre-push`; it runs the randomized generated-test burst (push profile, fresh entropy each push — `docs/generated-testing.md`), then `nix flake check` (VM boot gate + eval guards + CLI bundle). Escape hatch: `git push --no-verify`.
 - **Tag convention:** `vYYYY.MM.DD` (suffix `-N`) cut AFTER live verification on doc2.
 
 ## Shared AI surfaces

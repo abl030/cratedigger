@@ -281,7 +281,7 @@ Unit index:
 - **Requirements:** R9
 - **Dependencies:** U8
 - **Files:** `scripts/pre-push` (new), CLAUDE.md § pre-commit hook, `.claude/rules/deploy.md`.
-- **Approach:** `scripts/pre-push` runs `nix flake check` (moduleVm + package build; cached evaluations make repeat runs cheap — note the first-run cost in the script header). Install: `ln -sf ../../scripts/pre-push .git/hooks/pre-push`, documented next to the existing pre-commit line. Tag convention: `vYYYY.MM.DD` (date of deploy-worthy state; suffix `-N` for same-day). Tagging happens after live verification, so the hook gates the push, the tag records the verified state.
+- **Approach:** `scripts/pre-push` runs `nix flake check` (moduleVm + package build; cached evaluations make repeat runs cheap — note the first-run cost in the script header). Install once per clone with `git config core.hooksPath scripts`; the relative tracked path makes linked worktrees invoke their own hook version. Tag convention: `vYYYY.MM.DD` (date of deploy-worthy state; suffix `-N` for same-day). Tagging happens after live verification, so the hook gates the push, the tag records the verified state.
 - **Test scenarios:** Test expectation: none — hook + convention docs; the hook's behavior is `nix flake check` itself, covered by U8/U10's checks.
 - **Verification:** A push with a deliberately broken module fails at the hook.
 
