@@ -16,6 +16,7 @@ was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 """
 
 import logging
+from typing import cast
 
 import msgspec
 
@@ -62,46 +63,16 @@ def get_pipeline_log(h, params: dict[str, list[str]]) -> None:
         classified_row = classify_download_log_row(e)
         entry = classified_row.entry
         classified = classified_row.classified
-        item = entry.to_json_dict()
+        item = {
+            **entry.to_json_dict(),
+            **cast(dict[str, object], msgspec.to_builtins(classified)),
+        }
         mbid = entry.mb_release_id
         bi = beets_info.get(mbid) if mbid else None
         item["in_beets"] = bi is not None
         if bi:
             item["beets_format"] = bi.get("beets_format")
             item["beets_bitrate"] = bi.get("beets_bitrate")
-        item["badge"] = classified.badge
-        item["badge_class"] = classified.badge_class
-        item["border_color"] = classified.border_color
-        item["verdict"] = classified.verdict
-        item["summary"] = classified.summary
-        # The evidence strip's codec prefix ("IN MP3 320 …") — a
-        # ClassifiedEntry-only field the raw LogEntry columns don't carry.
-        item["downloaded_label"] = classified.downloaded_label
-        # On-disk codec at download time (import_result JSONB) for the
-        # strip's HAVE side and the Bitrate (was X) suffix.
-        item["existing_format"] = classified.existing_format
-        # The persisted QualityComparisonBasis (plain dict, null on legacy
-        # rows) — the strip renders the decision's own comparison from it.
-        item["comparison_basis"] = classified.comparison_basis
-        # Issue #130: surface post-import `beet move` failures so the
-        # Recents tab can render a warning chip without forcing the
-        # operator to query JSONB manually. Null on clean rows.
-        item["disambiguation_failure"] = classified.disambiguation_failure
-        item["disambiguation_detail"] = classified.disambiguation_detail
-        item["bad_extensions"] = classified.bad_extensions
-        item["wrong_match_triage_action"] = classified.wrong_match_triage_action
-        item["wrong_match_triage_summary"] = classified.wrong_match_triage_summary
-        item["wrong_match_triage_reason"] = classified.wrong_match_triage_reason
-        item["wrong_match_triage_preview_verdict"] = (
-            classified.wrong_match_triage_preview_verdict
-        )
-        item["wrong_match_triage_preview_decision"] = (
-            classified.wrong_match_triage_preview_decision
-        )
-        item["wrong_match_triage_stage_chain"] = (
-            classified.wrong_match_triage_stage_chain
-        )
-        item["wrong_match_triage_detail"] = classified.wrong_match_triage_detail
         result.append(item)
     # Count recents filters plus found-search enqueue rates (single query).
     counts = _server()._db().get_download_log_counts()

@@ -148,7 +148,6 @@ class _DownloadLogMixin(_PipelineDBBase):
                      original_filetype: str | None = None,
                      # Spectral quality verification fields
                      slskd_filetype: str | None = None,
-                     slskd_bitrate: int | None = None,
                      actual_filetype: str | None = None,
                      actual_min_bitrate: int | None = None,
                      spectral_grade: str | None = None,
@@ -186,7 +185,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 outcome, staged_path, error_message,
                 bitrate, sample_rate, bit_depth, is_vbr,
                 was_converted, original_filetype,
-                slskd_filetype, slskd_bitrate,
+                slskd_filetype,
                 actual_filetype, actual_min_bitrate,
                 spectral_grade, spectral_bitrate,
                 existing_min_bitrate, existing_spectral_bitrate,
@@ -197,7 +196,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
                 transfer_detail
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
@@ -206,7 +205,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             outcome, staged_path, error_message,
             bitrate, sample_rate, bit_depth, is_vbr,
             was_converted, original_filetype,
-            slskd_filetype, slskd_bitrate,
+            slskd_filetype,
             actual_filetype, actual_min_bitrate,
             spectral_grade, spectral_bitrate,
             existing_min_bitrate, existing_spectral_bitrate,

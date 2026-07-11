@@ -624,8 +624,7 @@ class DownloadInfo:
     was_converted: bool = False
     original_filetype: Optional[str] = None
     # Quality verification
-    slskd_filetype: Optional[str] = None    # what slskd reported
-    slskd_bitrate: Optional[int] = None
+    slskd_filetype: Optional[str] = None    # captured source filetype
     actual_filetype: Optional[str] = None   # after conversion
     actual_min_bitrate: Optional[int] = None
     # Spectral analysis

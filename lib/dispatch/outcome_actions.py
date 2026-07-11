@@ -239,7 +239,6 @@ def _do_mark_done(
         was_converted=dl_info.was_converted,
         original_filetype=dl_info.original_filetype,
         slskd_filetype=dl_info.slskd_filetype,
-        slskd_bitrate=dl_info.slskd_bitrate,
         actual_filetype=dl_info.actual_filetype,
         actual_min_bitrate=dl_info.actual_min_bitrate,
         spectral_grade=dl_info.download_spectral.grade if dl_info.download_spectral else None,
@@ -399,7 +398,6 @@ def _record_rejection_and_maybe_requeue(
         "was_converted": dl_info.was_converted,
         "original_filetype": dl_info.original_filetype,
         "slskd_filetype": dl_info.slskd_filetype,
-        "slskd_bitrate": dl_info.slskd_bitrate,
         "actual_filetype": dl_info.actual_filetype,
         "actual_min_bitrate": dl_info.actual_min_bitrate,
         "spectral_grade": (dl_info.download_spectral.grade
