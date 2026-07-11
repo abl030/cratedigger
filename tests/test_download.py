@@ -334,11 +334,15 @@ class TestDownloadRejectionExtraction(unittest.TestCase):
             "_reject_request_auto_import",
             "_handle_rejected_result",
         }
+        shared_names = {"source_dirs_for_album"}
         processing_tree = ast.parse(
             Path("lib/download_processing.py").read_text(encoding="utf-8")
         )
         rejection_tree = ast.parse(
             Path("lib/download_rejection.py").read_text(encoding="utf-8")
+        )
+        paths_tree = ast.parse(
+            Path("lib/processing_paths.py").read_text(encoding="utf-8")
         )
         processing_defs = {
             node.name for node in ast.walk(processing_tree)
@@ -348,8 +352,33 @@ class TestDownloadRejectionExtraction(unittest.TestCase):
             node.name for node in ast.walk(rejection_tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
+        paths_defs = {
+            node.name for node in ast.walk(paths_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
         self.assertTrue(rejection_names.isdisjoint(processing_defs))
         self.assertTrue(rejection_names.issubset(rejection_defs))
+        self.assertTrue(shared_names.isdisjoint(processing_defs | rejection_defs))
+        self.assertTrue(shared_names.issubset(paths_defs))
+
+    def test_processing_imports_only_rejection_handoffs(self):
+        import ast
+        from pathlib import Path
+
+        processing_tree = ast.parse(
+            Path("lib/download_processing.py").read_text(encoding="utf-8")
+        )
+        imported = {
+            alias.name
+            for node in ast.walk(processing_tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "lib.download_rejection"
+            for alias in node.names
+        }
+        self.assertEqual(
+            imported,
+            {"_handle_rejected_result", "_reject_request_auto_import"},
+        )
 
 
 ## TestGatherSpectralContext and TestCheckQualityGateDecision removed:

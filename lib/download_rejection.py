@@ -15,7 +15,7 @@ from lib.import_manifest import (
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
 )
-from lib.processing_paths import normalize_source_dirs
+from lib.processing_paths import source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
@@ -30,12 +30,6 @@ AUTO_TRIAGE_EXCLUDED_REJECTION_SCENARIOS: frozenset[str] = frozenset({
     "audio_corrupt",
     "spectral_reject",
 })
-
-
-def _source_dirs_for_album(album_data: GrabListEntry) -> list[str]:
-    return normalize_source_dirs(
-        [file.file_dir for file in album_data.files if file.file_dir],
-    )
 
 
 def _run_post_rejection_wrong_match_cleanup(
@@ -131,7 +125,7 @@ def _reject_request_auto_import(
     ctx: CratediggerContext,
     *,
     detail: str,
-    scenario: str,
+    scenario: str | None,
     error: str,
 ) -> DispatchOutcome:
     """Reject a request auto-import when ownership can be proven safely."""
@@ -156,7 +150,7 @@ def _reject_request_auto_import(
         detail=detail,
         error=error,
     )
-    failed_result.source_dirs = _source_dirs_for_album(album_data)
+    failed_result.source_dirs = source_dirs_for_album(album_data)
     failed_result.failed_path = move_failed_import_curated(
         staged_album.current_path,
         allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
@@ -203,7 +197,7 @@ def _handle_rejected_result(
     import_job_id: int | None = None,
 ) -> DispatchOutcome:
     """Handle a rejected beets validation result."""
-    bv_result.source_dirs = _source_dirs_for_album(album_data)
+    bv_result.source_dirs = source_dirs_for_album(album_data)
     bv_result.failed_path = move_failed_import_curated(
         staged_album.current_path,
         allowed_audio=tracked_audio_paths_for_downloads(album_data.files),

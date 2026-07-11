@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 
@@ -109,16 +109,16 @@ def derive_validation_log_columns(
     Rejecting both inputs avoids a compatibility precedence rule that could
     hide writer drift.
     """
+    envelope = decode_validation_envelope(raw)
     if raw is None or raw == "" or raw == b"":
         raw_object: dict[str, Any] = {}
     else:
-        raw_object = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
-        if not isinstance(raw_object, dict):
-            # Keep the typed envelope's established exception contract.
-            decode_validation_envelope(raw_object)
-            raise AssertionError("unreachable after non-object envelope decode")
+        parsed = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        # ``decode_validation_envelope`` above has already proved this is a
+        # JSON object and raised its established msgspec.ValidationError for
+        # every non-object shape. The cast only records that fact for pyright.
+        raw_object = cast(dict[str, Any], parsed)
 
-    envelope = decode_validation_envelope(raw_object)
     if DISTANCE_KEY in raw_object:
         if not isinstance(beets_distance, ValidationProjectionUnset):
             raise ValueError(

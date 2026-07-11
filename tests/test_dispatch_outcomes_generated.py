@@ -44,7 +44,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -92,6 +92,7 @@ _KNOWN_DECISIONS = tuple(sorted(
 _REJECTION_WRITERS = (
     "atomic_abandon",
     "database_source",
+    "evidence_decision",
     "dispatch_rejection",
     "request_auto_import",
 )
@@ -252,7 +253,7 @@ def _run_rejection_writer(
     *,
     writer: str,
     distance: float | None,
-    scenario: str,
+    scenario: str | None,
     real_filesystem: bool = False,
 ) -> FakePipelineDB:
     """Drive every production rejection writer with one ValidationResult."""
@@ -278,6 +279,31 @@ def _run_rejection_writer(
         detail="generated reject",
         error="generated reject",
     )
+
+    if writer == "evidence_decision":
+        from lib.dispatch import _reject_import_from_evidence_decision
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                dl_info=DownloadInfo(username="generated-user"),
+                import_result=make_import_result(
+                    decision="downgrade",
+                    new_min_bitrate=128,
+                ),
+                distance=distance,
+                decision="downgrade",
+                detail="generated reject",
+                requeue_on_failure=True,
+                validation_result=validation_result.to_json(),
+                staged_path="/tmp/generated-staged",
+                scenario=scenario or "generated_reject",
+                files=None,
+                source_path_cleanup_scenario="downgrade",
+                cooled_down_users=None,
+            )
+        return db
 
     if writer == "dispatch_rejection":
         from lib.dispatch import _record_rejection_and_maybe_requeue
@@ -384,11 +410,7 @@ def _run_rejection_writer(
         with patch(
             "lib.download_rejection.move_failed_import_curated",
             return_value="/tmp/generated-failed-import",
-        ), patch(
-            "lib.download_rejection.log_validation_result",
-        ), patch(
-            "lib.download_rejection._run_post_rejection_wrong_match_cleanup",
-        ):
+        ), patch("builtins.open", mock_open()):
             _reject_request_auto_import(
                 album,
                 validation_result,
@@ -652,6 +674,28 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
         )
         assert_validation_projection_matches_payload(db)
 
+    def test_every_rejection_writer_preserves_explicit_nulls(self):
+        for writer in _REJECTION_WRITERS:
+            with self.subTest(writer=writer):
+                db = _run_rejection_writer(
+                    writer=writer,
+                    distance=None,
+                    scenario=None,
+                )
+                assert_validation_projection_matches_payload(db)
+                self.assertIsNone(db.download_logs[-1].beets_distance)
+                self.assertIsNone(db.download_logs[-1].beets_scenario)
+                if writer == "request_auto_import":
+                    payload = json.loads(
+                        db.download_logs[-1].validation_result or "{}"
+                    )
+                    self.assertIn(
+                        "wrong_match_triage",
+                        payload,
+                        "request-auto-import matrix case must run the real "
+                        "post-rejection cleanup orchestration",
+                    )
+
     @given(
         writer=st.sampled_from(_REJECTION_WRITERS),
         distance=st.one_of(
@@ -663,11 +707,10 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
                 allow_infinity=False,
             ),
         ),
-        scenario=st.sampled_from((
-            "high_distance",
-            "missing_mbid",
-            "untracked_audio",
-        )),
+        scenario=st.one_of(
+            st.none(),
+            st.text(min_size=0, max_size=40),
+        ),
     )
     def test_every_rejection_writer_projects_validation_once(
         self,

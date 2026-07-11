@@ -39,6 +39,20 @@ class CanonicalFolderRow(Protocol):
     def files(self) -> Sequence[CanonicalFolderFile]: ...
 
 
+class SourceDirectoryFile(Protocol):
+    """Remote directory field required by validation audit projection."""
+
+    @property
+    def file_dir(self) -> str: ...
+
+
+class SourceDirectoryAlbum(Protocol):
+    """Album-shaped value whose files carry remote source directories."""
+
+    @property
+    def files(self) -> Sequence[SourceDirectoryFile]: ...
+
+
 def sanitize_processing_folder_name(folder_name: str) -> str:
     """Sanitize a filesystem path component for local processing paths."""
     return re.sub(r'[<>:."/\\|?*]', "", folder_name).strip()
@@ -57,6 +71,13 @@ def normalize_source_dirs(values: Sequence[object]) -> list[str]:
         seen.add(text)
         normalized.append(text)
     return normalized
+
+
+def source_dirs_for_album(album: SourceDirectoryAlbum) -> list[str]:
+    """Project one album's unique remote directories for audit evidence."""
+    return normalize_source_dirs(
+        [file.file_dir for file in album.files if file.file_dir],
+    )
 
 
 def normalize_processing_path(path: str) -> str:

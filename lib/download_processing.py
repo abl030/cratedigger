@@ -28,7 +28,6 @@ from lib.dispatch import (DispatchOutcome, QualityGateFn,
 from lib.download_rejection import (
     _handle_rejected_result,
     _reject_request_auto_import,
-    _source_dirs_for_album,
 )
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
@@ -45,6 +44,7 @@ from lib.processing_paths import (
     canonical_folder_for_row,
     normalize_processing_path,
     path_is_within_root,
+    source_dirs_for_album,
     stage_to_ai_path,
     stage_to_ai_root,
 )
@@ -930,7 +930,7 @@ def _process_beets_validation(
     usernames_pre = set(f.username for f in album_data.files if f.username)
     bv_result.soulseek_username = ", ".join(sorted(usernames_pre)) if usernames_pre else None
     bv_result.download_folder = current_path
-    bv_result.source_dirs = _source_dirs_for_album(album_data)
+    bv_result.source_dirs = source_dirs_for_album(album_data)
     if bv_result.valid:
         db = ctx.pipeline_db_source._get_db()
         candidate_result = ensure_candidate_evidence_for_action(
@@ -1167,7 +1167,7 @@ def _handle_valid_result(
                 cfg=ctx.cfg,
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
-                source_dirs=_source_dirs_for_album(album_data),
+                source_dirs=source_dirs_for_album(album_data),
                 candidate_import_job_id=import_job_id,
                 prevalidated_candidate_result=prevalidated_candidate_result,
             )
