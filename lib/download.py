@@ -152,7 +152,6 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         current_path: str,
         soulseek_username: str | None,
         filetype: str | None,
-        beets_scenario: str,
         beets_detail: str,
         outcome: str,
         staged_path: str,

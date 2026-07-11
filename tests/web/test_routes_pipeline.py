@@ -218,10 +218,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_log_surfaces_wrong_match_triage_audit(self):
         self.db.log_download(
-            100, outcome="rejected", beets_scenario="high_distance",
-            beets_distance=0.190, soulseek_username="moundsofass",
+            100, outcome="rejected", soulseek_username="moundsofass",
             validation_result={
-                "scenario": "wrong_match",
+                "scenario": "high_distance",
+                "distance": 0.190,
                 "wrong_match_triage": {
                     "action": "deleted_reject",
                     "reason": "requeue_upgrade",

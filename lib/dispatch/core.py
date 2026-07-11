@@ -393,8 +393,6 @@ def dispatch_import_core(
                     logger.error(f"  {line}")
                 _record_rejection_and_maybe_requeue(
                     db, request_id, dl_info,
-                    distance=distance,
-                    scenario="no_json_result",
                     detail=f"import_one.py rc={run.returncode}, no JSON",
                     error=f"rc={run.returncode}",
                     requeue=requeue_on_failure,
@@ -649,8 +647,6 @@ def dispatch_import_core(
 
                     _record_rejection_and_maybe_requeue(
                         db, request_id, dl_info,
-                        distance=distance,
-                        scenario=fail_scenario,
                         detail=fail_detail,
                         error=fail_error,
                         requeue=requeue_on_failure,
@@ -785,7 +781,6 @@ def dispatch_import_core(
             logger.error(f"{mode} TIMEOUT: {label}")
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
-                distance=distance, scenario="timeout",
                 detail="import_one.py timed out", error="timeout",
                 requeue=requeue_on_failure, outcome_label="failed",
                 validation_result=ValidationResult(
@@ -801,7 +796,6 @@ def dispatch_import_core(
             logger.exception(f"{mode} ERROR: {label}")
             _record_rejection_and_maybe_requeue(
                 db, request_id, dl_info,
-                distance=distance, scenario="exception",
                 detail="unhandled exception in auto-import", error="exception",
                 requeue=requeue_on_failure, outcome_label="failed",
                 validation_result=ValidationResult(

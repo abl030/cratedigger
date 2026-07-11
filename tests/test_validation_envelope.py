@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 import msgspec
@@ -14,6 +15,7 @@ from lib.validation_envelope import (
     ValidationResultEnvelope,
     WrongMatchTriageAudit,
     decode_validation_envelope,
+    derive_validation_log_columns,
 )
 
 
@@ -105,6 +107,28 @@ class TestDecodeValidationEnvelope(unittest.TestCase):
     def test_non_object_json_raises(self) -> None:
         with self.assertRaises(msgspec.ValidationError):
             decode_validation_envelope('["not", "an", "object"]')
+
+    def test_projection_preserves_non_object_validation_errors(self) -> None:
+        for raw in ('null', '"not an object"', '[]', b'null'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(msgspec.ValidationError):
+                    derive_validation_log_columns(raw)
+
+    def test_projection_preserves_malformed_json_error_parity(self) -> None:
+        for raw in ('{', b'{"distance":', b'\xff'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(Exception) as decode_error:
+                    decode_validation_envelope(raw)
+                with self.assertRaises(Exception) as projection_error:
+                    derive_validation_log_columns(raw)
+                self.assertIs(
+                    type(projection_error.exception),
+                    type(decode_error.exception),
+                )
+                self.assertIn(
+                    type(decode_error.exception),
+                    (json.JSONDecodeError, UnicodeDecodeError),
+                )
 
 
 class TestEnvelopeContract(unittest.TestCase):

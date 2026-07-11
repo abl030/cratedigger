@@ -37,12 +37,14 @@ Full usage guide: docs/generated-testing.md.
 """
 
 import os
+import json
 import shutil
 import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import MagicMock, mock_open, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -62,6 +64,8 @@ from lib.quality import (
 )
 from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.helpers import (
+    make_download_file,
+    make_grab_list_entry,
     make_import_result,
     make_request_row,
     noop_quality_gate,
@@ -85,6 +89,13 @@ _KNOWN_DECISIONS = tuple(sorted(
     | {"spectral_reject", "duplicate_remove_guard_failed",
        "totally_unmapped_decision"}
 ))
+_REJECTION_WRITERS = (
+    "atomic_abandon",
+    "database_source",
+    "evidence_decision",
+    "dispatch_rejection",
+    "request_auto_import",
+)
 
 
 def _bitrates(min_value: int = 1, max_value: int = 3000) -> st.SearchStrategy[int]:
@@ -238,6 +249,185 @@ def _reject_via_evidence_decision(
     return db
 
 
+def _run_rejection_writer(
+    *,
+    writer: str,
+    distance: float | None,
+    scenario: str | None,
+    real_filesystem: bool = False,
+) -> FakePipelineDB:
+    """Drive every production rejection writer with one ValidationResult."""
+    from album_source import DatabaseSource
+    from lib.download_rejection import _reject_request_auto_import
+    from lib.quality import ValidationResult
+    from lib.staged_album import StagedAlbum
+    from tests.helpers import make_ctx_with_fake_db
+
+    db = FakePipelineDB()
+    db.seed_request(make_request_row(
+        id=42,
+        status="downloading",
+        artist_name="Generated Artist",
+        album_title="Generated Album",
+        year=2026,
+        mb_release_id="generated-mbid",
+    ))
+    validation_result = ValidationResult(
+        valid=False,
+        distance=distance,
+        scenario=scenario,
+        detail="generated reject",
+        error="generated reject",
+    )
+
+    if writer == "evidence_decision":
+        from lib.dispatch import _reject_import_from_evidence_decision
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                db=db,  # type: ignore[arg-type]
+                request_id=42,
+                dl_info=DownloadInfo(username="generated-user"),
+                import_result=make_import_result(
+                    decision="downgrade",
+                    new_min_bitrate=128,
+                ),
+                distance=distance,
+                decision="downgrade",
+                detail="generated reject",
+                requeue_on_failure=True,
+                validation_result=validation_result.to_json(),
+                staged_path="/tmp/generated-staged",
+                scenario=scenario or "generated_reject",
+                files=None,
+                source_path_cleanup_scenario="downgrade",
+                cooled_down_users=None,
+            )
+        return db
+
+    if writer == "dispatch_rejection":
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        _record_rejection_and_maybe_requeue(
+            db=db,  # type: ignore[arg-type]
+            request_id=42,
+            dl_info=DownloadInfo(username="generated-user"),
+            detail=validation_result.detail,
+            error=validation_result.error,
+            validation_result=validation_result.to_json(),
+            requeue=True,
+        )
+        return db
+
+    if writer == "database_source":
+        source = DatabaseSource("unused-generated-dsn")
+        cast(Any, source)._db = db
+        album = make_grab_list_entry(
+            artist="Generated Artist",
+            title="Generated Album",
+            year="2026",
+            mb_release_id="generated-mbid",
+            db_request_id=42,
+            db_source="request",
+        )
+        source.reject_and_requeue(
+            album,
+            validation_result,
+            download_info=DownloadInfo(
+                username="generated-user",
+                validation_result=validation_result.to_json(),
+            ),
+        )
+        return db
+
+    if writer == "atomic_abandon":
+        db.request(42)["active_download_state"] = {
+            "current_path": "/tmp/generated-staged",
+            "import_subprocess_started_at": "2026-07-11T00:00:00+00:00",
+        }
+        db.abandon_auto_import_request(
+            request_id=42,
+            current_path="/tmp/generated-staged",
+            soulseek_username="generated-user",
+            filetype="flac",
+            beets_detail="generated reject",
+            outcome="failed",
+            staged_path="/tmp/generated-staged",
+            error_message="generated reject",
+            validation_result=validation_result.to_json(),
+        )
+        return db
+
+    if writer == "request_auto_import":
+        album = make_grab_list_entry(
+            artist="Generated Artist",
+            title="Generated Album",
+            year="2026",
+            mb_release_id="generated-mbid",
+            db_request_id=42,
+            db_source="request",
+            files=[make_download_file(
+                username="generated-user",
+                filename="Generated Album\\01 - Generated.mp3",
+                file_dir="Generated Album",
+            )],
+        )
+        if real_filesystem:
+            # The deterministic pin below owns the full quarantine move and
+            # tracking-file integration. Repeating those filesystem effects
+            # for every push/fuzz example makes the property impractical
+            # without adding projection coverage.
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = CratediggerConfig(
+                    beets_harness_path=_HARNESS,
+                    beets_tracking_file=os.path.join(tmpdir, "validation.jsonl"),
+                    pipeline_db_enabled=True,
+                )
+                source_path = os.path.join(tmpdir, "Generated Album")
+                os.makedirs(source_path)
+                with open(
+                    os.path.join(source_path, "01 - Generated.mp3"),
+                    "wb",
+                ) as audio_file:
+                    audio_file.write(b"generated audio")
+                ctx = make_ctx_with_fake_db(db, cfg=cfg)
+                _reject_request_auto_import(
+                    album,
+                    validation_result,
+                    StagedAlbum(current_path=source_path, request_id=42),
+                    ctx,
+                    detail="generated reject",
+                    scenario=scenario,
+                    error="generated reject",
+                )
+            return db
+
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
+        with patch(
+            "lib.download_rejection.move_failed_import_curated",
+            return_value="/tmp/generated-failed-import",
+        ), patch("builtins.open", mock_open()):
+            _reject_request_auto_import(
+                album,
+                validation_result,
+                StagedAlbum(
+                    current_path="/tmp/generated-staged",
+                    request_id=42,
+                ),
+                ctx,
+                detail="generated reject",
+                scenario=scenario,
+                error="generated reject",
+            )
+        return db
+
+    raise AssertionError(f"unknown rejection writer {writer!r}")
+
+
 # ===========================================================================
 # Invariant checkers — module functions so the known-bad self-tests below
 # can prove each one trips on a violating outcome.
@@ -356,6 +546,29 @@ def assert_beets_distance_round_trips(
             "it was actually given")
 
 
+def assert_validation_projection_matches_payload(db: FakePipelineDB) -> None:
+    """Envelope distance/scenario keys must equal their query columns."""
+    from lib.validation_envelope import decode_validation_envelope
+
+    assert_download_log_row_created(db)
+    last = db.download_logs[-1]
+    raw = last.validation_result
+    raw_object = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    if not isinstance(raw_object, dict):
+        raise AssertionError("rejection writer did not persist an object envelope")
+    envelope = decode_validation_envelope(raw_object)
+    if "distance" in raw_object and last.beets_distance != envelope.distance:
+        raise AssertionError(
+            f"validation distance={envelope.distance!r} drifted from "
+            f"beets_distance={last.beets_distance!r}"
+        )
+    if "scenario" in raw_object and last.beets_scenario != envelope.scenario:
+        raise AssertionError(
+            f"validation scenario={envelope.scenario!r} drifted from "
+            f"beets_scenario={last.beets_scenario!r}"
+        )
+
+
 def assert_quality_side_reject_honors_caller_flag(
     decision: str, requeue_on_failure: bool, db: FakePipelineDB,
 ) -> None:
@@ -449,6 +662,70 @@ class TestGeneratedDistanceNeverFabricated(unittest.TestCase):
         assert_beets_distance_round_trips(db, distance)
 
 
+class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
+    """One property patrols every rejection writer through the shared sink."""
+
+    def test_request_auto_import_writer_pin(self):
+        db = _run_rejection_writer(
+            writer="request_auto_import",
+            distance=0.0,
+            scenario="untracked_audio",
+            real_filesystem=True,
+        )
+        assert_validation_projection_matches_payload(db)
+
+    def test_every_rejection_writer_preserves_explicit_nulls(self):
+        for writer in _REJECTION_WRITERS:
+            with self.subTest(writer=writer):
+                db = _run_rejection_writer(
+                    writer=writer,
+                    distance=None,
+                    scenario=None,
+                )
+                assert_validation_projection_matches_payload(db)
+                self.assertIsNone(db.download_logs[-1].beets_distance)
+                self.assertIsNone(db.download_logs[-1].beets_scenario)
+                if writer == "request_auto_import":
+                    payload = json.loads(
+                        db.download_logs[-1].validation_result or "{}"
+                    )
+                    self.assertIn(
+                        "wrong_match_triage",
+                        payload,
+                        "request-auto-import matrix case must run the real "
+                        "post-rejection cleanup orchestration",
+                    )
+
+    @given(
+        writer=st.sampled_from(_REJECTION_WRITERS),
+        distance=st.one_of(
+            st.none(),
+            st.floats(
+                min_value=0.0,
+                max_value=1.0,
+                allow_nan=False,
+                allow_infinity=False,
+            ),
+        ),
+        scenario=st.one_of(
+            st.none(),
+            st.text(min_size=0, max_size=40),
+        ),
+    )
+    def test_every_rejection_writer_projects_validation_once(
+        self,
+        writer,
+        distance,
+        scenario,
+    ):
+        db = _run_rejection_writer(
+            writer=writer,
+            distance=distance,
+            scenario=scenario,
+        )
+        assert_validation_projection_matches_payload(db)
+
+
 # ===========================================================================
 # Harness self-tests (RED/GREEN of the fuzzer itself) — each invariant
 # checker must trip on a planted violation, and a planted-bad router must
@@ -535,6 +812,23 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db.log_download(request_id=42, outcome="rejected", beets_distance=None)
         with self.assertRaises(AssertionError):
             assert_beets_distance_round_trips(db, 0.07)
+
+    def test_validation_projection_checker_trips_on_dual_sink_drift(self):
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.download_logs.append(DownloadLogRow(
+            request_id=42,
+            outcome="rejected",
+            beets_distance=0.99,
+            beets_scenario="wrong_scenario",
+            validation_result=ValidationResult(
+                distance=0.07,
+                scenario="high_distance",
+            ).to_json(),
+        ))
+        with self.assertRaises(AssertionError):
+            assert_validation_projection_matches_payload(db)
 
     def test_hypothesis_harness_detects_planted_bad_router(self):
         """End-to-end RED proof: strategies + checker + Hypothesis catch a

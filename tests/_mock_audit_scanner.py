@@ -20,6 +20,10 @@ The heuristic flags two anti-patterns:
    third-party libs we don't own (``music_tag``, ``redis``), and a small
    set of one-way notifier helpers in ``lib.util``.
 
+Patch calls split across physical lines are parsed through the AST. Existing
+multiline debt is held to an exact target-count baseline; new occurrences fail
+and removals must shrink the baseline.
+
 The scanner returns a dict ``{relpath: {finding_key: count}}``.
 """
 
@@ -27,7 +31,8 @@ from __future__ import annotations
 
 import os
 import re
-from collections import defaultdict
+import ast
+from collections import Counter, defaultdict
 from typing import Dict
 
 
@@ -118,6 +123,10 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"lib\.util\.(sp|urllib|os|shutil)\."),
     re.compile(r"lib\.util\.repair_mp3_headers$"),
     re.compile(r"\.trigger_(meelo|plex|jellyfin)_scan$"),
+    # Curated quarantine mover: the function is a filesystem leaf whose
+    # contract is covered separately; generated writer properties patch the
+    # move while exercising the real rejection and cleanup orchestration.
+    re.compile(r"^lib\.download_rejection\.move_failed_import_curated$"),
     # builtins / stdlib
     re.compile(r"^builtins\."),
     re.compile(r"\.print$"),
@@ -409,6 +418,55 @@ _LEAF_SEAM_PATTERNS = [
 ]
 
 
+# The original patch audit scanned one physical line at a time, so a
+# ``patch(\n    "lib.owned.function"\n)`` call evaded it entirely. Switching
+# the zero-tolerance audit to AST discovery in one step would surface this
+# pre-existing debt across the suite. This exact target-count ratchet closes
+# the evasion now: any new multiline owned-function patch fails, and every
+# removal must shrink this baseline. New code gets no allowance.
+MULTILINE_PATCH_BASELINE: dict[str, int] = {
+    'lib.beets_distance.compute_beets_distance': 3,
+    'lib.convergence.import_module': 1,
+    'lib.dispatch.dispatch_import_from_db': 14,
+    'lib.dispatch.entry_points.ensure_candidate_evidence_for_action': 3,
+    'lib.dispatch.evidence_gate.load_current_evidence_for_action': 2,
+    'lib.download._run_completed_processing': 3,
+    'lib.download_processing._handle_valid_result': 1,
+    'lib.download_processing._materialize_processing_dir': 2,
+    'lib.download_processing.process_completed_album': 8,
+    'lib.enqueue.check_for_match': 1,
+    'lib.import_evidence.ensure_current_evidence_for_action': 6,
+    'lib.import_evidence.load_or_backfill_current_evidence': 1,
+    'lib.import_preview.preview_import_from_download_log': 1,
+    'lib.matching._browse_directories': 1,
+    'lib.mbid_replace_service.delete_wrong_match_group': 9,
+    'lib.mbid_replace_service.remove_and_reset_release': 6,
+    'lib.quality.full_pipeline_decision_from_evidence': 1,
+    'lib.quarantine_triage_service.os.scandir': 1,
+    'lib.wrong_match_cleanup_service.classify_full_pipeline_decision': 1,
+    'lib.wrong_match_cleanup_service.cleanup_all_wrong_matches': 3,
+    'lib.wrong_match_cleanup_service.cleanup_wrong_match_source': 7,
+    'lib.wrong_match_cleanup_service.evidence_decision_name': 1,
+    'lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence': 8,
+    'lib.wrong_match_cleanup_service.load_current_evidence_for_action': 1,
+    'lib.wrong_match_delete_service.delete_wrong_match': 6,
+    'lib.wrong_match_delete_service.delete_wrong_match_group': 4,
+    'scripts.import_preview_worker.derive_canonical_import_folder': 1,
+    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 18,
+    'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
+    'scripts.pipeline_cli.youtube._build_youtube_client': 2,
+    'scripts.pipeline_cli.youtube.resolve_youtube_album': 2,
+    'scripts.repair.find_blocked_processing_path_issues': 1,
+    'web.routes.imports.cleanup_wrong_match': 1,
+    'web.routes.imports.delete_wrong_match': 1,
+    'web.routes.imports.delete_wrong_match_group': 1,
+    'web.routes.youtube._RedisYoutubeCache': 2,
+    'web.routes.youtube._build_youtube_client': 2,
+    'web.routes.youtube.resolve_youtube_album': 2,
+    'web.server.ThreadingHTTPServer': 1,
+}
+
+
 def _is_leaf_seam(target: str) -> bool:
     for pat in _LEAF_SEAM_PATTERNS:
         if pat.search(target):
@@ -424,6 +482,43 @@ def _is_repo_target(target: str) -> bool:
         or target.startswith("harness.")
         or target.startswith("cratedigger.")
     )
+
+
+def find_multiline_patch_targets(source: str) -> list[str]:
+    """Return dotted targets from bare ``patch`` calls spanning lines.
+
+    AST discovery makes physical-line formatting irrelevant. Dynamic targets
+    remain outside this heuristic just as they are outside ``_PATCH_RE``.
+    """
+    tree = ast.parse(source)
+    targets: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "patch":
+            continue
+        if node.end_lineno == node.lineno or not node.args:
+            continue
+        first_arg = node.args[0]
+        if not (
+            isinstance(first_arg, ast.Constant)
+            and isinstance(first_arg.value, str)
+        ):
+            continue
+        targets.append(first_arg.value)
+    return targets
+
+
+def scan_multiline_patch_targets() -> dict[str, int]:
+    """Count non-leaf repo patch targets that evade the line scanner."""
+    counts: Counter[str] = Counter()
+    for _rel, path in iter_scan_paths():
+        with open(path, encoding="utf-8") as source_file:
+            source = source_file.read()
+        for target in find_multiline_patch_targets(source):
+            if _is_repo_target(target) and not _is_leaf_seam(target):
+                counts[target] += 1
+    return dict(counts)
 
 
 def scan_file(path: str) -> Dict[str, int]:

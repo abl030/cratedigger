@@ -2,11 +2,12 @@
 
 See ``.claude/rules/code-quality.md`` § "Mocks: leaf-seam only".
 
-Zero-tolerance: any flagged usage anywhere under ``tests/`` fails the
-audit. New anti-pattern call sites are not allowed; if you genuinely
-need to mock something, either drive the real function with constructed
-inputs, use a typed fake from ``tests/fakes.py``, refactor the caller
-to take a kwarg-DI seam, or add the target to the leaf-seam allowlist
+Zero-tolerance: any new flagged usage anywhere under ``tests/`` fails the
+audit. Pre-existing multiline patch debt, previously invisible to the
+physical-line scanner, is pinned by an exact target-count ratchet. If you
+genuinely need to mock something, either drive the real function with
+constructed inputs, use a typed fake from ``tests/fakes.py``, refactor the
+caller to take a kwarg-DI seam, or add the target to the leaf-seam allowlist
 in ``_mock_audit_scanner.py`` with a one-line rationale.
 """
 
@@ -24,11 +25,14 @@ import unittest
 sys.path.insert(0, os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..")))
 from tests._mock_audit_scanner import (
+    MULTILINE_PATCH_BASELINE,
     WEB_BEETS_MOCK_BASELINE,
     WEB_HARNESS_MOCK_BASELINE,
     count_beets_mock_overrides,
     count_harness_overrides,
     iter_scan_paths,
+    find_multiline_patch_targets,
+    scan_multiline_patch_targets,
     scan_tree,
     scan_web_beets_overrides,
     scan_web_harness_overrides,
@@ -58,6 +62,30 @@ class TestStatefulMockAudit(unittest.TestCase):
             "Replace each flagged usage with a typed fake, kwarg-DI seam, "
             "or real-input call.\n\n"
             + "\n".join(lines)
+        )
+
+    def test_multiline_patch_scanner_catches_known_bad_shape(self) -> None:
+        source = '''
+from unittest.mock import patch
+
+with patch(
+    "lib.owned.orchestration",
+):
+    pass
+'''
+        self.assertEqual(
+            find_multiline_patch_targets(source),
+            ["lib.owned.orchestration"],
+        )
+
+    def test_multiline_patch_target_counts_match_baseline(self) -> None:
+        current = scan_multiline_patch_targets()
+        self.assertEqual(
+            current,
+            MULTILINE_PATCH_BASELINE,
+            "Multiline patch-target audit changed. New owned-function patches "
+            "are forbidden; when removing legacy patches, shrink "
+            "MULTILINE_PATCH_BASELINE in tests/_mock_audit_scanner.py.",
         )
 
 

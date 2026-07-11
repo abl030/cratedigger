@@ -8,7 +8,7 @@ call shapes.
 import unittest
 
 from lib.pipeline_db import DownloadLogOutcome
-from lib.quality import DownloadInfo, SpectralMeasurement
+from lib.quality import DownloadInfo, SpectralMeasurement, ValidationResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -117,12 +117,16 @@ class TestRecordRejectionAndMaybeRequeue(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
         if dl_info is None:
             dl_info = DownloadInfo(username="baduser")
+        if validation_result is None:
+            validation_result = ValidationResult(
+                distance=0.35,
+                scenario="quality_downgrade",
+                detail="new 128kbps <= existing 320kbps",
+            ).to_json()
         _record_rejection_and_maybe_requeue(
             db=db,  # type: ignore[arg-type]
             request_id=42,
             dl_info=dl_info,
-            distance=0.35,
-            scenario="quality_downgrade",
             detail="new 128kbps <= existing 320kbps",
             error=None,
             requeue=requeue,

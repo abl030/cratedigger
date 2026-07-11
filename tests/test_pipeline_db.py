@@ -1475,6 +1475,96 @@ class TestDownloadLog(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertIsNone(history[0]["beets_distance"])
 
+    def test_log_download_derives_validation_projection_round_trip(self):
+        """Rule A: JSONB evidence is the sole distance/scenario input."""
+        from lib.quality import ValidationResult
+
+        validation_result = ValidationResult(
+            valid=False,
+            distance=0.0,
+            scenario="untracked_audio",
+            detail="tracked manifest differs",
+        ).to_json()
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="projection-user",
+            outcome="rejected",
+            validation_result=validation_result,
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["validation_result"]["distance"], 0.0)
+        self.assertEqual(history[0]["validation_result"]["scenario"],
+                         "untracked_audio")
+        self.assertEqual(history[0]["beets_distance"], 0.0)
+        self.assertEqual(history[0]["beets_scenario"], "untracked_audio")
+
+    def test_log_download_derives_custom_envelope_scenario_round_trip(self):
+        """Curator audit blobs share the envelope without being full structs."""
+        validation_result = json.dumps({
+            "scenario": "curator_ban",
+            "hashes_recorded": 3,
+            "denylisted_username": "bad-peer",
+        })
+        self.db.log_download(
+            request_id=self.req_id,
+            outcome="curator_ban",
+            validation_result=validation_result,
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(history[0]["beets_scenario"], "curator_ban")
+        self.assertIsNone(history[0]["beets_distance"])
+        self.assertEqual(history[0]["validation_result"]["hashes_recorded"], 3)
+
+    def test_log_download_allows_explicit_metadata_only_when_envelope_omits_it(self):
+        """MeasurementFailure has no distance/scenario projection keys."""
+        from lib.quality import MeasurementFailure
+        import msgspec
+
+        payload = MeasurementFailure(
+            reason="measurement_crashed",
+            detail="ffmpeg failed",
+            source_path="/tmp/source",
+        )
+        self.db.log_download(
+            request_id=self.req_id,
+            outcome="measurement_failed",
+            beets_scenario="measurement_failed",
+            validation_result=msgspec.json.encode(payload).decode(),
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(history[0]["beets_scenario"], "measurement_failed")
+        self.assertIsNone(history[0]["beets_distance"])
+        self.assertEqual(history[0]["validation_result"]["reason"],
+                         "measurement_crashed")
+
+    def test_log_download_rejects_duplicate_validation_projection_inputs(self):
+        """There is no precedence rule between evidence and denormalized args."""
+        from lib.quality import ValidationResult
+
+        validation_result = ValidationResult(
+            distance=0.07,
+            scenario="high_distance",
+        ).to_json()
+        with self.assertRaisesRegex(ValueError, "beets_distance"):
+            self.db.log_download(
+                request_id=self.req_id,
+                outcome="rejected",
+                beets_distance=0.99,
+                validation_result=validation_result,
+            )
+        with self.assertRaisesRegex(ValueError, "beets_scenario"):
+            self.db.log_download(
+                request_id=self.req_id,
+                outcome="rejected",
+                beets_scenario="wrong_value",
+                validation_result=validation_result,
+            )
+        self.assertEqual(self.db.get_download_history(self.req_id), [])
+
     def test_multiple_downloads(self):
         self.db.log_download(self.req_id, "user1", "flac", "/tmp/1", outcome="rejected")
         self.db.log_download(self.req_id, "user2", "flac", "/tmp/2", outcome="success",
@@ -2767,7 +2857,6 @@ class TestResetToWanted(unittest.TestCase):
             current_path="/tmp/staged",
             soulseek_username="alice",
             filetype="flac",
-            beets_scenario="abandoned_auto_import",
             beets_detail="abandoned",
             outcome="failed",
             staged_path="/tmp/staged",
@@ -2791,7 +2880,6 @@ class TestResetToWanted(unittest.TestCase):
             current_path="/tmp/staged",
             soulseek_username="alice",
             filetype="flac",
-            beets_scenario="abandoned_auto_import",
             beets_detail="abandoned",
             outcome="failed",
             staged_path="/tmp/staged",
@@ -2800,6 +2888,46 @@ class TestResetToWanted(unittest.TestCase):
         )
         self.assertIsNone(second)
         self.assertEqual(len(self.db.get_download_history(req_id)), 1)
+
+    def test_abandon_auto_import_request_derives_validation_projection(self):
+        """Rule A: the atomic wrapper preserves JSONB and its query columns."""
+        from lib.quality import ValidationResult
+
+        req_id = self.db.add_request(
+            mb_release_id="abandon-projection",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        state = {
+            "current_path": "/tmp/projection-staged",
+            "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
+        }
+        self.assertTrue(self.db.set_downloading(req_id, json.dumps(state)))
+        validation_result = ValidationResult(
+            distance=0.12,
+            scenario="abandoned_auto_import",
+            failed_path="/tmp/failed",
+        ).to_json()
+
+        self.db.abandon_auto_import_request(
+            request_id=req_id,
+            current_path="/tmp/projection-staged",
+            soulseek_username="alice",
+            filetype="flac",
+            beets_detail="abandoned",
+            outcome="failed",
+            staged_path="/tmp/projection-staged",
+            error_message="abandoned",
+            validation_result=validation_result,
+        )
+
+        history = self.db.get_download_history(req_id)
+        self.assertEqual(history[0]["beets_distance"], 0.12)
+        self.assertEqual(history[0]["beets_scenario"],
+                         "abandoned_auto_import")
+        self.assertEqual(history[0]["validation_result"]["failed_path"],
+                         "/tmp/failed")
 
     def test_get_wanted_prioritizes_only_never_attempted_rows(self):
         fresh_ids = {
@@ -4389,7 +4517,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=request_id,
             soulseek_username=username,
             outcome="rejected",
-            beets_scenario=scenario,
             validation_result=json.dumps(vr),
         )
 
@@ -4554,7 +4681,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=self.req1,
             soulseek_username="alice",
             outcome="rejected",
-            beets_scenario="high_distance",
             spectral_grade="suspect",
             spectral_bitrate=320,
             v0_probe_kind="lossless_source_v0",
@@ -4594,7 +4720,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=self.req1,
             soulseek_username="alice-old",
             outcome="rejected",
-            beets_scenario="high_distance",
             spectral_grade="genuine",
             spectral_bitrate=900,
             validation_result=json.dumps({
@@ -4606,7 +4731,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=self.req1,
             soulseek_username="alice-new",
             outcome="rejected",
-            beets_scenario="high_distance",
             spectral_grade="suspect",
             spectral_bitrate=280,
             v0_probe_kind="lossless_source_v0",
@@ -4655,7 +4779,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=self.req1,
             soulseek_username="alice",
             outcome="rejected",
-            beets_scenario="high_distance",
             validation_result=json.dumps({
                 "scenario": "high_distance",
                 "failed_path": "/fi/evidence-only",
@@ -4751,7 +4874,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=self.req1,
             soulseek_username="alice",
             outcome="rejected",
-            beets_scenario="high_distance",
             validation_result=json.dumps({
                 "scenario": "high_distance",
                 "failed_path": "/fi/history-evidence-only",
@@ -4833,7 +4955,6 @@ class TestGetWrongMatches(unittest.TestCase):
             spectral_grade="genuine",
             spectral_bitrate=920,
             validation_result=json.dumps({
-                "scenario": "high_distance",
                 "failed_path": "/fi/historical",
             }),
         )
@@ -4896,7 +5017,6 @@ class TestGetWrongMatches(unittest.TestCase):
             request_id=fake_req1,
             soulseek_username="alice",
             outcome="rejected",
-            beets_scenario="high_distance",
             validation_result=json.dumps({
                 "scenario": "high_distance", "distance": 0.25,
                 "failed_path": "/fi/parity-a",

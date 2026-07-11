@@ -271,12 +271,12 @@ class DatabaseSource:
         )
         db.record_attempt(request_id, "validation")
 
+        validation_result = dl.validation_result or bv_result.to_json()
+
         download_log_id = db.log_download(
             request_id=request_id,
             soulseek_username=dl.username,
             filetype=dl.filetype,
-            beets_distance=bv_result.distance,
-            beets_scenario=bv_result.scenario,
             beets_detail=bv_result.detail,
             outcome="rejected",
             error_message=bv_result.error,
@@ -299,7 +299,7 @@ class DatabaseSource:
                 dl.current_spectral.bitrate_kbps if dl.current_spectral else None
             ),
             import_result=dl.import_result,
-            validation_result=dl.validation_result,
+            validation_result=validation_result,
         )
 
         # Denylist source users + check cooldown

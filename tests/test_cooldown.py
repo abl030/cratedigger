@@ -265,7 +265,7 @@ class TestCooldownTriggerOnRejection(unittest.TestCase):
 
     def test_rejection_triggers_cooldown_check(self):
         from album_source import DatabaseSource
-        from lib.quality import DownloadInfo
+        from lib.quality import DownloadInfo, ValidationResult
 
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(id=42, status="downloading"))
@@ -277,11 +277,12 @@ class TestCooldownTriggerOnRejection(unittest.TestCase):
         album_record = MagicMock()
         album_record.db_request_id = 42
 
-        bv_result = MagicMock()
-        bv_result.distance = 0.5
-        bv_result.scenario = "bad_match"
-        bv_result.detail = "too different"
-        bv_result.error = "distance too high"
+        bv_result = ValidationResult(
+            distance=0.5,
+            scenario="bad_match",
+            detail="too different",
+            error="distance too high",
+        )
 
         dl = DownloadInfo(username="baduser")
         cooled_down_users: set[str] = set()

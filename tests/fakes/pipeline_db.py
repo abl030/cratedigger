@@ -65,7 +65,12 @@ from lib.release_identity import (
     detect_release_source,
     normalize_release_id,
 )
-from lib.validation_envelope import WrongMatchTriageAudit
+from lib.validation_envelope import (
+    VALIDATION_PROJECTION_UNSET,
+    ValidationProjectionUnset,
+    WrongMatchTriageAudit,
+    derive_validation_log_columns,
+)
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
     classify_failure_class as _classify_failure_class,
@@ -1306,8 +1311,10 @@ class FakePipelineDB:
                      soulseek_username: str | None = None,
                      filetype: str | None = None,
                      download_path: str | None = None,
-                     beets_distance: float | None = None,
-                     beets_scenario: str | None = None,
+                     beets_distance: float | None | ValidationProjectionUnset = (
+                         VALIDATION_PROJECTION_UNSET),
+                     beets_scenario: str | None | ValidationProjectionUnset = (
+                         VALIDATION_PROJECTION_UNSET),
                      beets_detail: str | None = None,
                      valid: bool | None = None,
                      outcome: str | None = None,
@@ -1368,6 +1375,11 @@ class FakePipelineDB:
                 'new row for relation "download_log" violates check '
                 f'constraint "download_log_outcome_check" (outcome={outcome!r})'
             )
+        beets_distance_value, beets_scenario_value = derive_validation_log_columns(
+            validation_result,
+            beets_distance=beets_distance,
+            beets_scenario=beets_scenario,
+        )
         new_log_id = self._mint_download_log_id()
         auxiliary: dict[str, Any] = {
             "download_path": download_path,
@@ -1402,8 +1414,8 @@ class FakePipelineDB:
             outcome=outcome,
             soulseek_username=soulseek_username,
             filetype=filetype,
-            beets_distance=beets_distance,
-            beets_scenario=beets_scenario,
+            beets_distance=beets_distance_value,
+            beets_scenario=beets_scenario_value,
             beets_detail=beets_detail,
             staged_path=staged_path,
             error_message=error_message,
@@ -1578,7 +1590,6 @@ class FakePipelineDB:
         current_path: str,
         soulseek_username: str | None,
         filetype: str | None,
-        beets_scenario: str,
         beets_detail: str,
         outcome: str,
         staged_path: str,
@@ -1608,16 +1619,19 @@ class FakePipelineDB:
         row["updated_at"] = now
         self.status_history.append((request_id, "wanted"))
         self.record_attempt(request_id, "download")
+        log_kwargs: dict[str, Any] = {}
+        if validation_result is None:
+            log_kwargs["beets_scenario"] = "abandoned_auto_import"
         return self.log_download(
             request_id=request_id,
             soulseek_username=soulseek_username,
             filetype=filetype,
-            beets_scenario=beets_scenario,
             beets_detail=beets_detail,
             outcome=outcome,
             staged_path=staged_path,
             error_message=error_message,
             validation_result=validation_result,
+            **log_kwargs,
         )
 
     def add_denylist(self, request_id: int, username: str,

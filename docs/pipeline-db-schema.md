@@ -194,6 +194,13 @@ FROM download_log ORDER BY id DESC LIMIT 10;
 
 `beets_validate()` returns a `ValidationResult` with the full candidate list from the harness. Every validation (success or rejection) stores this. Contains: all beets candidates with distance breakdown per component (album, artist, tracks, media, source, year...), full track lists per candidate, the item→track mapping (which local file matched which MB track), local file list, beets recommendation level, soulseek username, download folder, failed_path, denylisted users, corrupt files.
 
+`validation_result.distance` and `validation_result.scenario` are the sole
+writer inputs for the denormalized `download_log.beets_distance` and
+`download_log.beets_scenario` query columns. `PipelineDB.log_download`
+projects them centrally; writers must not pass the same values separately.
+Payloads that genuinely omit those envelope keys, such as
+`MeasurementFailure`, may supply explicit top-level metadata.
+
 For `abandoned_auto_import` audit rows, `validation_result.failed_path`
 points at the prefixed failed-import folder when a leftover staged
 directory existed. A missing staged directory may produce the same audit
