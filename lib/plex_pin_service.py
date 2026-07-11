@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from lib.pipeline_db.pin_status import PlexTerminalPinStatus
 from lib.util import (
     PlexAlbumRef,
     plex_find_album_by_path,
@@ -62,7 +63,7 @@ class _PinDBProto(Protocol):
         limit: int = 100) -> list[dict[str, Any]]: ...
 
     def mark_plex_added_at_pin(
-        self, pin_id: int, *, status: str,
+        self, pin_id: int, *, status: PlexTerminalPinStatus,
         reconciled_at: datetime) -> None: ...
 
 # A pin is only reconciled once this long after capture, giving the Plex

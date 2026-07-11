@@ -5,6 +5,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from lib.pin_retention import PIN_RETENTION_DAYS, prune_terminal_pin_rows_cycle
+from lib.pipeline_db import (
+    JELLYFIN_PIN_STATUSES,
+    JELLYFIN_TERMINAL_PIN_STATUSES,
+    PLEX_PIN_STATUSES,
+    PLEX_TERMINAL_PIN_STATUSES,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_ctx_with_fake_db
 
@@ -33,6 +39,20 @@ class TestPruneTerminalPinRowsCycle(unittest.TestCase):
         self.assertEqual(removed, 2)
         self.assertEqual(db.plex_added_at_pins, [])
         self.assertEqual(db.jellyfin_date_created_pins, [])
+
+
+class TestPinStatusDomains(unittest.TestCase):
+    """Deterministic pin: every accepted status is live or prunable."""
+
+    def test_full_domains_partition_into_pending_and_terminal(self):
+        for backend, full, terminal in (
+            ("plex", PLEX_PIN_STATUSES, PLEX_TERMINAL_PIN_STATUSES),
+            ("jellyfin", JELLYFIN_PIN_STATUSES,
+             JELLYFIN_TERMINAL_PIN_STATUSES),
+        ):
+            with self.subTest(backend=backend):
+                self.assertTrue(terminal.isdisjoint({"pending"}))
+                self.assertEqual(full, frozenset({"pending"}) | terminal)
 
 
 if __name__ == "__main__":
