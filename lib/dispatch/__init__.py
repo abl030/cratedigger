@@ -13,6 +13,7 @@ from lib.dispatch.types import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DISPATCH_CODE_REQUEUE_FAILED,
+    DispatchCoreFn,
     DispatchOutcome,
     QualityGateFn,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "DISPATCH_CODE_QUALITY_PIPELINE_REJECTED",
     "DISPATCH_CODE_REQUEUED_FOR_PREVIEW",
     "DISPATCH_CODE_REQUEUE_FAILED",
+    "DispatchCoreFn",
     "DispatchOutcome",
     "QualityGateFn",
     "_build_download_info",

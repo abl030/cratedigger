@@ -21,8 +21,9 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from lib.download_recovery import ProcessingPathLocation, classify_processing_path
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.dispatch import (DispatchOutcome, QualityGateFn,
+from lib.dispatch import (DispatchCoreFn, DispatchOutcome, QualityGateFn,
                           _build_download_info,
+                          _check_quality_gate_core,
                           _requeue_import_job_to_preview,
                           dispatch_import_core)
 from lib.download_rejection import (
@@ -815,7 +816,7 @@ def process_completed_album(
     import_job_id: int,
     validate_fn: "Callable[..., DispatchOutcome | None] | None" = None,
     handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
-    dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
+    dispatch_fn: DispatchCoreFn | None = None,
 ) -> CompletionResult:
     """Process a fully-downloaded album: move files, tag, validate, stage/import.
 
@@ -877,7 +878,7 @@ def _process_beets_validation(
     *,
     import_job_id: int,
     handle_valid_fn: "Callable[..., DispatchOutcome | None] | None" = None,
-    dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
+    dispatch_fn: DispatchCoreFn | None = None,
 ) -> "DispatchOutcome | None":
     """Beets validation sub-path of process_completed_album.
 
@@ -982,7 +983,7 @@ def _handle_valid_result(
     import_job_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn | None = None,
-    dispatch_fn: "Callable[..., DispatchOutcome | None] | None" = None,
+    dispatch_fn: DispatchCoreFn | None = None,
 ) -> "DispatchOutcome | None":
     """Handle a valid beets validation result: stage and optionally auto-import.
 
@@ -1150,11 +1151,46 @@ def _handle_valid_result(
             except Exception:
                 logger.debug("DB lookup failed for override-min-bitrate")
 
-            core_kwargs: dict[str, Any] = dict(
+            resolved_quality_gate_fn = (
+                quality_gate_fn
+                if quality_gate_fn is not None
+                else _check_quality_gate_core
+            )
+            if dispatch_fn is not None:
+                # Test-only dependency injection seam. Its exact protocol is
+                # ``DispatchCoreFn``; production always takes the direct,
+                # pyright-checked call below.
+                return dispatch_fn(
+                    path=dest,
+                    mb_release_id=album_data.mb_release_id or "",
+                    request_id=request_id,
+                    label=f"{album_data.artist} - {album_data.title}",
+                    force=False,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=album_data.db_target_format,
+                    verified_lossless_target=ctx.cfg.verified_lossless_target,
+                    beets_harness_path=ctx.cfg.beets_harness_path,
+                    db=pdb,
+                    dl_info=dl_info,
+                    distance=bv_result.distance,
+                    scenario=bv_result.scenario or "auto_import",
+                    files=album_data.files,
+                    cfg=ctx.cfg,
+                    outcome_label="success",
+                    requeue_on_failure=True,
+                    cooled_down_users=ctx.cooled_down_users,
+                    source_dirs=source_dirs_for_album(album_data),
+                    candidate_import_job_id=import_job_id,
+                    candidate_download_log_id=None,
+                    prevalidated_candidate_result=prevalidated_candidate_result,
+                    quality_gate_fn=resolved_quality_gate_fn,
+                )
+            return dispatch_import_core(
                 path=dest,
                 mb_release_id=album_data.mb_release_id or "",
                 request_id=request_id,
                 label=f"{album_data.artist} - {album_data.title}",
+                force=False,
                 override_min_bitrate=override_min_bitrate,
                 target_format=album_data.db_target_format,
                 verified_lossless_target=ctx.cfg.verified_lossless_target,
@@ -1165,16 +1201,15 @@ def _handle_valid_result(
                 scenario=bv_result.scenario or "auto_import",
                 files=album_data.files,
                 cfg=ctx.cfg,
+                outcome_label="success",
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
                 source_dirs=source_dirs_for_album(album_data),
                 candidate_import_job_id=import_job_id,
+                candidate_download_log_id=None,
                 prevalidated_candidate_result=prevalidated_candidate_result,
+                quality_gate_fn=resolved_quality_gate_fn,
             )
-            if quality_gate_fn is not None:
-                core_kwargs["quality_gate_fn"] = quality_gate_fn
-            _dispatch = dispatch_fn if dispatch_fn is not None else dispatch_import_core
-            return _dispatch(**core_kwargs)
         ctx.pipeline_db_source.mark_done(
             album_data, bv_result, dest_path=dest, download_info=dl_info)
         return None

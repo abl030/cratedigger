@@ -531,6 +531,15 @@ force-mode rejects are deleted and cleared; would-import, uncertain, missing
 evidence, stale evidence, active-job, and missing-path rows stay actionable for
 manual review or converge.
 
+Wrong Matches is a candidate/pressing-identity review surface, not a general
+failed-import bucket. Folder/audio-integrity fact rejects (`audio_corrupt`,
+`bad_audio_hash`, `nested_layout`, `empty_fileset`, `mixed_source`) and the
+quality-only `spectral_reject` scenario are excluded from both the visible
+queue and its automatic cleanup. SQL, the test fake, and post-rejection
+cleanup all consume the neutral taxonomy in `lib/wrong_match_policy.py`; a new
+non-match rejection scenario must be classified there once rather than copied
+into each adapter.
+
 The quarantine lifecycle view surfaces folders that are protected from the
 disk reaper but no longer visible in Wrong Matches:
 

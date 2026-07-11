@@ -496,10 +496,13 @@ class _DownloadLogMixin(_PipelineDBBase):
         row per ``(request_id, failed_path)`` pair — each surviving row
         represents a distinct on-disk directory the user can act on.
 
-        Only wrong-match rejections survive — ``audio_corrupt`` /
-        ``spectral_reject`` scenarios have their own handling and stay out of
-        the manual-review queue.
+        Only candidate/pressing-match rejections survive. Folder/audio facts
+        and spectral-quality rejects have their own handling and stay out of
+        the manual-review queue; their taxonomy lives in
+        ``lib.wrong_match_policy``.
         """
+        from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
+
         # Pull the per-candidate quality measurement straight from the
         # canonical evidence row (FK on download_log.candidate_evidence_id).
         # The legacy denorm columns on download_log are NULL for every
@@ -536,9 +539,9 @@ class _DownloadLogMixin(_PipelineDBBase):
             WHERE dl.outcome = 'rejected'
               AND dl.validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
               AND (dl.validation_result->>'{SCENARIO_KEY}' IS NULL
-                   OR dl.validation_result->>'{SCENARIO_KEY}' NOT IN ('audio_corrupt', 'spectral_reject'))
+                   OR dl.validation_result->>'{SCENARIO_KEY}' <> ALL(%s))
             ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC
-        """)
+        """, (sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS),))
         rows = [dict(r) for r in cur.fetchall()]
         # DISTINCT ON sorts by path within a request; re-sort so the route
         # layer sees newest-first within each request, matching the frontend

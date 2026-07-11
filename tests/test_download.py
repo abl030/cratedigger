@@ -158,21 +158,24 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         )
         self.assertIs(result, cleanup.return_value)
 
-    def test_skips_bad_file_rejections(self):
+    def test_skips_every_non_match_rejection_scenario(self):
         from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
+        from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
 
         db = FakePipelineDB()
         ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
-            result = _run_post_rejection_wrong_match_cleanup(
-                ctx,
-                123,
-                scenario="spectral_reject",
-            )
+            for scenario in sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS):
+                with self.subTest(scenario=scenario):
+                    result = _run_post_rejection_wrong_match_cleanup(
+                        ctx,
+                        123,
+                        scenario=scenario,
+                    )
+                    self.assertIsNone(result)
 
         cleanup.assert_not_called()
-        self.assertIsNone(result)
 
     def test_rejected_download_handler_triggers_triage_after_logging(self):
         from lib.download_rejection import _handle_rejected_result

@@ -4573,10 +4573,19 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["soulseek_username"], "has-path")
 
-    def test_excludes_audio_corrupt_and_spectral_reject(self):
-        self._log_rejected(self.req1, "ok",      "/fi/keep",   scenario="high_distance")
-        self._log_rejected(self.req1, "corrupt", "/fi/drop-a", scenario="audio_corrupt")
-        self._log_rejected(self.req1, "transc",  "/fi/drop-b", scenario="spectral_reject")
+    def test_excludes_every_non_match_rejection_scenario(self):
+        from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
+
+        self._log_rejected(self.req1, "ok", "/fi/keep", scenario="high_distance")
+        for index, scenario in enumerate(
+            sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS)
+        ):
+            self._log_rejected(
+                self.req1,
+                scenario,
+                f"/fi/drop-{index}",
+                scenario=scenario,
+            )
 
         rows = self.db.get_wrong_matches()
         self.assertEqual(len(rows), 1)

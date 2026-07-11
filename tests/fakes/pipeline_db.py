@@ -3831,7 +3831,8 @@ class FakePipelineDB:
         collapse to newest per ``(request_id, failed_path)``, then sort
         newest-first within each request.
         """
-        skip_scenarios = {"audio_corrupt", "spectral_reject"}
+        from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
+
         collapsed: dict[tuple[int, str], DownloadLogRow] = {}
         for entry in self.download_logs:
             if entry.outcome != "rejected":
@@ -3840,7 +3841,10 @@ class FakePipelineDB:
             failed_path = vr.get("failed_path") if vr else None
             if not failed_path:
                 continue
-            if vr and vr.get("scenario") in skip_scenarios:
+            scenario = vr.get("scenario") if vr else None
+            if not rejection_scenario_is_wrong_match_candidate(
+                scenario if isinstance(scenario, str) else None
+            ):
                 continue
             key = (entry.request_id, str(failed_path))
             prev = collapsed.get(key)
