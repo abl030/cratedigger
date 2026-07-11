@@ -25,8 +25,6 @@ from lib.processing_paths import (
     canonical_folder_for_row,
     normalize_processing_path,
     path_is_within_root,
-    source_dirs_for_album,
-    stage_to_ai_path,
     stage_to_ai_root,
 )
 from lib.quality import ActiveDownloadState, ValidationResult
@@ -724,4 +722,3 @@ def _materialize_processing_dir(
     if persist_current_path:
         staged_album.persist_current_path(db)
     return Materialized()
-
