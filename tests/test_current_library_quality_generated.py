@@ -120,5 +120,26 @@ class TestCurrentLibraryQualityGenerated(unittest.TestCase):
         )
 
 
+class TestCurrentLibraryQualitySelection(unittest.TestCase):
+    def test_missing_average_does_not_fall_back_to_minimum_floor(self) -> None:
+        detail = {
+            "beets_format": "MP3",
+            "beets_bitrate": 194,
+        }
+
+        self.assertEqual(current_library_bitrate(detail), 0)
+        rank = band_from_detail(
+            "release",
+            {"release"},
+            {"release": detail},
+            QualityRankConfig.defaults(),
+        )
+        self.assertEqual(rank, "poor")
+        self.assertNotEqual(
+            rank,
+            compute_library_rank("MP3", 194, QualityRankConfig.defaults()),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

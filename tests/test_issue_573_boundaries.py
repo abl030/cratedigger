@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import importlib
 from pathlib import Path
-import re
 import unittest
 
 
@@ -19,21 +18,13 @@ EXPECTED_VULTURE_SOURCE_ROOTS = (
 )
 
 
-def _vulture_source_roots(source: str) -> tuple[str, ...]:
-    """Parse the simple shell SOURCES array, discarding comments/whitespace."""
-    match = re.search(
-        r"^[ \t]*SOURCES=\((.*?)^[ \t]*\)",
-        source,
-        flags=re.DOTALL | re.MULTILINE,
+def _production_source_roots(source: str) -> tuple[str, ...]:
+    """Parse the shared production-root file, discarding comments/blanks."""
+    return tuple(
+        line.strip()
+        for line in source.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     )
-    if match is None:
-        raise AssertionError("scripts/find_dead_code.sh has no SOURCES array")
-    roots: list[str] = []
-    for line in match.group(1).splitlines():
-        value = line.split("#", 1)[0].strip()
-        if value:
-            roots.extend(value.split())
-    return tuple(roots)
 
 
 def assert_vulture_production_roots(roots: tuple[str, ...]) -> None:
@@ -58,6 +49,7 @@ def assert_completion_orchestrator_responsibilities(source: str) -> None:
         "CompletionFailed",
         "CompletionDispatched",
         "CompletionDeferred",
+        "ProcessAlbumFn",
     }
     assert functions == {"process_completed_album"}
 
@@ -132,8 +124,10 @@ class TestDownloadCompletionOwnership(unittest.TestCase):
 class TestVultureProductionLivenessPolicy(unittest.TestCase):
     def test_dead_code_scan_does_not_treat_tests_as_production_callers(self) -> None:
         """Tests may exercise an API, but cannot by themselves keep it alive."""
-        source = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
-        assert_vulture_production_roots(_vulture_source_roots(source))
+        source = Path("tools/production_python_sources.txt").read_text(
+            encoding="utf-8"
+        )
+        assert_vulture_production_roots(_production_source_roots(source))
 
     def test_source_root_checker_rejects_a_dropped_production_root(self) -> None:
         for index, root in enumerate(EXPECTED_VULTURE_SOURCE_ROOTS):
@@ -143,17 +137,20 @@ class TestVultureProductionLivenessPolicy(unittest.TestCase):
                     + EXPECTED_VULTURE_SOURCE_ROOTS[index + 1:]
                 )
 
-    def test_source_parser_ignores_inline_and_whole_line_comments(self) -> None:
-        source = """SOURCES=(
-          # production roots only
-          lib # package
-          web
-          harness scripts
-          cratedigger.py
-          album_source.py
+    def test_source_parser_ignores_comments_and_blank_lines(self) -> None:
+        source = """# production roots only
+lib
+web
+
+harness
+scripts
+cratedigger.py
+album_source.py
+"""
+        self.assertEqual(
+            _production_source_roots(source),
+            EXPECTED_VULTURE_SOURCE_ROOTS,
         )
-        """
-        self.assertEqual(_vulture_source_roots(source), EXPECTED_VULTURE_SOURCE_ROOTS)
 
 
 if __name__ == "__main__":

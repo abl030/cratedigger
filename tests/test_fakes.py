@@ -26,14 +26,39 @@ from tests.fakes import (
     FakePipelineDB,
     FakeSlskdAPI,
     FakeYTMusic,
+    RecordingProcessAlbum,
 )
 from tests.helpers import (
     make_album_quality_evidence,
+    make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
     make_validation_result,
 )
+
+
+class TestRecordingProcessAlbum(unittest.TestCase):
+    def test_records_exact_call_and_returns_configured_result(self) -> None:
+        from lib.download_processing import CompletionDeferred
+
+        entry = make_grab_list_entry()
+        db = FakePipelineDB()
+        ctx = make_ctx_with_fake_db(db)
+        outcome = CompletionDeferred(detail="release_lock_contention")
+        recorder = RecordingProcessAlbum(outcome=outcome)
+
+        result = recorder(entry, ctx, import_job_id=73)
+
+        self.assertIs(result, outcome)
+        self.assertEqual(len(recorder.calls), 1)
+        call = recorder.calls[0]
+        self.assertIs(call.album_data, entry)
+        self.assertIs(call.ctx, ctx)
+        self.assertEqual(call.import_job_id, 73)
+        self.assertIsNone(call.validate_fn)
+        self.assertIsNone(call.handle_valid_fn)
+        self.assertIsNone(call.dispatch_fn)
 
 
 class TestFakePipelineDB(unittest.TestCase):

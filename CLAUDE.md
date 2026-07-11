@@ -161,7 +161,7 @@ grep "^FAIL\|^ERROR" /tmp/cratedigger-test-output.txt
 nix-shell --run "python3 -m unittest tests.test_X -v"
 ```
 
-**ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the output file. The suite gates: JS syntax + JS tests, the vulture dead-code sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand ships undocumented** (or a doc link goes dead); docs are part of "done". `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, the new-work checklist, and the docs-freshness rule.
+**ALWAYS `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`). **Never re-run the full suite just to grep differently** — read the output file. The suite gates: JS syntax + JS tests, Ruff's source-local `F401`/`F811` import check, the aggregate vulture sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand ships undocumented** (or a doc link goes dead); docs are part of "done". `.claude/rules/code-quality.md` covers the test taxonomy, shared fakes/builders, the new-work checklist, and the docs-freshness rule.
 
 **Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz` on those modules. Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. **New features start by writing their invariants down, and every invariant ships as a PAIR — deterministic pin + generated property — in the same PR, with known-bad self-tests** (`.claude/rules/code-quality.md` § Red/Green TDD). When in doubt that the harness constrains anything, qualify it by fault injection. `docs/generated-testing.md`.
 
@@ -231,7 +231,7 @@ For quality-decision bugs the simulator is the tool within the method: `pipeline
 
 ## Finding dead code
 
-`nix-shell --run "bash scripts/find_dead_code.sh"` (vulture vs `tools/vulture/whitelist.py`). After deleting, regenerate the whitelist and watch for **cascading orphans** (deleting one helper exposes its callees). Full workflow: `docs/dead-code.md`.
+`nix-shell --run "bash scripts/find_dead_code.sh"` (source-local Ruff `F401`/`F811`, then aggregate vulture vs `tools/vulture/whitelist.py`). After deleting, regenerate the vulture whitelist and watch for **cascading orphans** (deleting one helper exposes its callees). Full workflow: `docs/dead-code.md`.
 
 ## Critical rules
 

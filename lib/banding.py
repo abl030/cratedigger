@@ -57,8 +57,8 @@ def current_library_bitrate(detail: dict[str, object]) -> int:
 
     ``beets_bitrate`` is deliberately not a fallback: that field is the
     minimum-track floor retained for display and operator controls. A missing
-    average is unknown current rank data, not permission to revive the
-    min-derived VBR label bug.
+    average contributes no bitrate evidence, rather than reviving the
+    min-derived VBR label bug. Codec-only rules may still determine a rank.
     """
     raw = detail.get("beets_avg_bitrate")
     return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0

@@ -32,8 +32,6 @@ import argparse
 import json
 import logging
 import re
-import shutil
-import sqlite3
 import threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -238,7 +236,8 @@ def _db_available() -> bool:
     return bool(_db_dsn) or db is not None
 
 
-def _db_or_none() -> PipelineDB | None:  # noqa: same nominal type, server-owned
+# Same nominal type, but this adapter is owned by the server composition root.
+def _db_or_none() -> PipelineDB | None:
     """This thread's pipeline DB, or None when no DB is configured."""
     return _db() if _db_available() else None
 

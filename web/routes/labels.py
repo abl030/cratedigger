@@ -16,7 +16,6 @@ import msgspec
 from web import discogs as discogs_api
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import RouteRegistration, pattern_route, route
-from web.routes._server_access import _server
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler

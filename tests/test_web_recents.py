@@ -14,7 +14,8 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from web.classify import (classify_log_entry, legacy_floor_quality_label, LogEntry,
+from web.classify import (average_quality_label, classify_log_entry,
+                          legacy_floor_quality_label, LogEntry,
                           ClassifiedEntry, _parse_import_result)
 from lib.quality import (
     DuplicateRemoveCandidate,
@@ -386,6 +387,10 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
 # ============================================================================
 
 class TestQualityLabel(unittest.TestCase):
+
+    def test_current_average_and_legacy_floor_use_distinct_request_6039_inputs(self):
+        self.assertEqual(average_quality_label("mp3", 288), "MP3 V0")
+        self.assertEqual(legacy_floor_quality_label("mp3", 194), "MP3 V2")
 
     def test_flac(self):
         self.assertEqual(legacy_floor_quality_label("flac", 0), "FLAC")

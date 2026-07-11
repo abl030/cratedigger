@@ -26,6 +26,7 @@ from lib.download_processing import (
     CompletionDispatched,
     CompletionFailed,
     CompletionResult,
+    ProcessAlbumFn,
 )
 from lib.download_materialization import (
     Materialized,
@@ -473,7 +474,7 @@ def _run_completed_processing(
     ctx: CratediggerContext,
     *,
     import_job_id: int,
-    process_album_fn: "Callable[..., CompletionResult] | None" = None,
+    process_album_fn: ProcessAlbumFn | None = None,
 ) -> CompletionResult:
     """Run or resume local post-download processing for a completed album.
 

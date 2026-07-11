@@ -33,7 +33,6 @@ import socket
 import threading
 import time
 import urllib.error
-import urllib.request
 from typing import Any, Callable, Literal, Protocol
 
 import msgspec
