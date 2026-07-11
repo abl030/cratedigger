@@ -109,8 +109,15 @@ def _apply_rg_pipeline_overlay(rows: list[dict], by_rg: dict, by_release: dict) 
 
 def get_artist(h: BaseHTTPRequestHandler, params: dict[str, list[str]], artist_id: str) -> None:
     srv = _server()
-    rgs = srv.mb_api.get_artist_release_groups(artist_id)
-    official_rg_ids = srv.mb_api.get_official_release_group_ids(artist_id)
+    try:
+        rgs = srv.mb_api.get_artist_release_groups(artist_id)
+        official_rg_ids = srv.mb_api.get_official_release_group_ids(artist_id)
+    except urllib.error.URLError:
+        h._json({  # type: ignore[attr-defined]
+            "error": "MusicBrainz fallback unavailable, retry",
+            "retryable": True,
+        }, status=503)
+        return
     for rg in rgs:
         rg["has_official"] = rg["id"] in official_rg_ids
     # Row-level in-library badge: requires the artist's library albums.
